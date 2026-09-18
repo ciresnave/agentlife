@@ -52,17 +52,29 @@ pub fn resolve_role(cwd: &str, lane_role_env: Option<&str>) -> String {
 #[derive(Debug)]
 pub enum PidError {
     ParentNotFound,
-    ParentIsNotClaude(String),
+    /// A non-shell, non-`claude` image appeared before `claude` was found -
+    /// refused rather than skipped, unlike a shell hop.
+    UnexpectedAncestor(String),
+    /// Walked `MAX_HOPS` shell layers without finding `claude` - refused
+    /// rather than walking forever.
+    HopLimitExceeded,
 }
 
 impl std::fmt::Display for PidError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PidError::ParentNotFound => write!(f, "could not find this hook's parent process"),
-            PidError::ParentIsNotClaude(name) => {
+            PidError::UnexpectedAncestor(name) => {
                 write!(
                     f,
-                    "parent process is {name:?}, not claude - refusing to record a wrong pid"
+                    "ancestor process is {name:?} - neither claude nor a known shell, \
+                     refusing to record a wrong pid"
+                )
+            }
+            PidError::HopLimitExceeded => {
+                write!(
+                    f,
+                    "no claude process found within {MAX_ANCESTRY_HOPS} shell hops"
                 )
             }
         }
@@ -70,23 +82,52 @@ impl std::fmt::Display for PidError {
 }
 
 /// The `claude` process's own pid, from the CURRENTLY RUNNING HOOK's
-/// parent - hooks.md's common input fields do NOT include one directly
+/// ancestry - hooks.md's common input fields do NOT include one directly
 /// (RESTART-TOOL-DESIGN.md §10.1), so this derives it instead of trusting
 /// anything the hook input claims.
 pub trait ParentProcess {
-    /// `(parent_pid, parent_image_name)` of the process identified by
-    /// `my_pid` (this hook's own pid).
-    fn parent_of(&self, my_pid: u32) -> Option<(u32, String)>;
+    /// `(parent_pid, parent_image_name)` of the process identified by `pid`.
+    fn parent_of(&self, pid: u32) -> Option<(u32, String)>;
 }
 
+/// Image names (lowercased, no `.exe`) a hop is allowed to pass through
+/// without stopping. PM finding, 2026-09-18, from a REAL interactive
+/// session: Claude Code ran a shell-form hook command through Git Bash,
+/// two layers deep (`hook <- bash <- bash <- claude.exe`) - the DIRECT
+/// parent was `bash.exe`, not `claude.exe`, so the single-hop check this
+/// module shipped with (verified only against a headless `claude -p`
+/// session, §10.3) refused every real interactive write.
+const SHELL_ANCESTOR_NAMES: &[&str] = &["bash", "sh", "cmd", "powershell", "pwsh"];
+
+/// How many shell layers this walk tolerates before giving up -
+/// RESTART-TOOL-DESIGN.md §11.1's real chain needed 2; this leaves margin
+/// without walking indefinitely.
+const MAX_ANCESTRY_HOPS: u32 = 4;
+
+fn image_base(name: &str) -> String {
+    let lower = name.to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+/// Walks up from `my_pid`, skipping ONLY known shell images, and returns
+/// the pid of the first `claude` found. Refuses (never skips past) any
+/// ancestor that is neither a known shell nor `claude` - a stranger
+/// appearing before `claude` is exactly what this check exists to catch,
+/// not something to tolerate the way a shell hop is tolerated.
 pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32, PidError> {
-    let (parent_pid, name) = lookup.parent_of(my_pid).ok_or(PidError::ParentNotFound)?;
-    let base = name.to_lowercase();
-    let base = base.strip_suffix(".exe").unwrap_or(&base);
-    if base != "claude" {
-        return Err(PidError::ParentIsNotClaude(name));
+    let mut current = my_pid;
+    for _ in 0..MAX_ANCESTRY_HOPS {
+        let (parent_pid, name) = lookup.parent_of(current).ok_or(PidError::ParentNotFound)?;
+        let base = image_base(&name);
+        if base == "claude" {
+            return Ok(parent_pid);
+        }
+        if !SHELL_ANCESTOR_NAMES.contains(&base.as_str()) {
+            return Err(PidError::UnexpectedAncestor(name));
+        }
+        current = parent_pid;
     }
-    Ok(parent_pid)
+    Err(PidError::HopLimitExceeded)
 }
 
 /// Computes the next `LaneState` for `event`, given whatever state already
@@ -182,7 +223,15 @@ impl StateLock {
                 .open(&lock_path)
             {
                 Ok(_) => return Ok(Self { path: lock_path }),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // ⚠️ WINDOWS: a `create_new` racing a concurrent `remove_file` (another
+                // holder's `Drop`, running right now) can surface as `PermissionDenied`
+                // instead of `AlreadyExists` while the file is mid-deletion - found live
+                // in CI, not assumed. Both mean the same thing here: someone else has
+                // this lock busy right now, retry.
+                Err(e)
+                    if e.kind() == ErrorKind::AlreadyExists
+                        || e.kind() == ErrorKind::PermissionDenied =>
+                {
                     if let Ok(meta) = std::fs::metadata(&lock_path) {
                         if let Ok(age) = SystemTime::now()
                             .duration_since(meta.modified().unwrap_or(SystemTime::now()))
@@ -319,39 +368,93 @@ mod tests {
         assert_eq!(resolve_role("C:/Projects", Some("pm")), "pm");
     }
 
-    // -- claude_parent_pid --------------------------------------------------- //
+    // -- claude_parent_pid ----------------------------------------------------- //
+    // PM finding, 2026-09-18, from a REAL interactive session: the direct parent
+    // was `bash.exe`, not `claude.exe` - `hook <- bash <- bash <- claude.exe`.
+    // Every case here uses a pid-keyed chain so a fake can express that shape,
+    // not just a single hop.
 
-    struct FakeParent(Option<(u32, String)>);
-    impl ParentProcess for FakeParent {
-        fn parent_of(&self, _my_pid: u32) -> Option<(u32, String)> {
-            self.0.clone()
+    struct FakeAncestry(std::collections::HashMap<u32, (u32, String)>);
+    impl FakeAncestry {
+        fn chain(links: &[(u32, u32, &str)]) -> Self {
+            let mut map = std::collections::HashMap::new();
+            for (pid, parent_pid, parent_name) in links {
+                map.insert(*pid, (*parent_pid, parent_name.to_string()));
+            }
+            Self(map)
+        }
+    }
+    impl ParentProcess for FakeAncestry {
+        fn parent_of(&self, pid: u32) -> Option<(u32, String)> {
+            self.0.get(&pid).cloned()
         }
     }
 
     #[test]
-    fn accepts_a_parent_named_claude() {
-        let lookup = FakeParent(Some((99, "claude".to_string())));
+    fn accepts_a_direct_claude_parent() {
+        let lookup = FakeAncestry::chain(&[(1, 99, "claude")]);
         assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
     }
 
     #[test]
     fn accepts_claude_exe_case_insensitively() {
-        let lookup = FakeParent(Some((99, "Claude.EXE".to_string())));
+        let lookup = FakeAncestry::chain(&[(1, 99, "Claude.EXE")]);
         assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
     }
 
     #[test]
-    fn refuses_a_parent_that_is_not_claude() {
-        let lookup = FakeParent(Some((99, "powershell".to_string())));
+    fn walks_past_shell_layers_to_find_claude() {
+        // The PM's own observed chain, exactly: hook(1) <- bash(10) <- bash(20) <- claude(99).
+        let lookup =
+            FakeAncestry::chain(&[(1, 10, "bash"), (10, 20, "bash"), (20, 99, "claude.exe")]);
+        assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+    }
+
+    #[test]
+    fn walks_past_a_single_powershell_layer_too() {
+        let lookup = FakeAncestry::chain(&[(1, 10, "powershell.exe"), (10, 99, "claude")]);
+        assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+    }
+
+    #[test]
+    fn refuses_a_non_shell_non_claude_ancestor() {
+        // The PM's own example: a stranger appearing before claude is found
+        // must refuse, never be walked past the way a shell hop is.
+        let lookup = FakeAncestry::chain(&[(1, 99, "node")]);
         assert!(matches!(
             claude_parent_pid(1, &lookup),
-            Err(PidError::ParentIsNotClaude(_))
+            Err(PidError::UnexpectedAncestor(_))
+        ));
+    }
+
+    #[test]
+    fn refuses_a_non_shell_ancestor_even_behind_a_real_shell_hop() {
+        let lookup = FakeAncestry::chain(&[(1, 10, "bash"), (10, 99, "node")]);
+        assert!(matches!(
+            claude_parent_pid(1, &lookup),
+            Err(PidError::UnexpectedAncestor(_))
+        ));
+    }
+
+    #[test]
+    fn refuses_when_the_hop_limit_is_exceeded() {
+        // All shells, never reaching claude within MAX_ANCESTRY_HOPS.
+        let lookup = FakeAncestry::chain(&[
+            (1, 10, "bash"),
+            (10, 20, "bash"),
+            (20, 30, "bash"),
+            (30, 40, "bash"),
+            (40, 50, "bash"),
+        ]);
+        assert!(matches!(
+            claude_parent_pid(1, &lookup),
+            Err(PidError::HopLimitExceeded)
         ));
     }
 
     #[test]
     fn refuses_when_the_parent_cannot_be_found_at_all() {
-        let lookup = FakeParent(None);
+        let lookup = FakeAncestry::chain(&[]);
         assert!(matches!(
             claude_parent_pid(1, &lookup),
             Err(PidError::ParentNotFound)

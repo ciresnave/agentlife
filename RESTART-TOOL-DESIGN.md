@@ -307,19 +307,22 @@ comes on stdin, exactly as `hooks.md` documents.
   the PM's override).
 - **PID**: this hook process's own parent, looked up via `sysinfo` (the same crate `facts.rs`
   already depends on) - refused, not guessed, if that parent isn't named `claude`/`claude.exe`.
-  ⚠️ **Empirically verified, not assumed (PM request, 2026-09-18):** the worry was that Claude Code
-  might invoke a hook command through an intermediate shell on Windows (Git Bash or `cmd.exe`), making
-  the DIRECT parent `bash.exe`/`cmd.exe` instead and failing this check on every real lane. Tested
-  live with a throwaway hook and an ephemeral `claude -p --settings <scratch file>` session (nothing
-  installed, nothing persisted) that logged its own process's parent chain, in both hook forms:
-  - **Shell form** (`"shell": "powershell"`, no `args`): `pwsh.exe <- claude.exe <- ...`
-  - **Exec form** (`"command": "pwsh.exe", "args": [...]`) - the form this proposal actually uses:
-    `pwsh.exe <- claude.exe <- ...`
-  Both runs: the hook process's direct parent is `claude.exe`, no shell layer in between, regardless
-  of what shells sit further up the ancestry (this test itself ran inside several `bash.exe` layers,
-  which appear ABOVE `claude.exe` in the chain - irrelevant, since only the DIRECT parent is checked).
-  **The assumption holds on this box.** Re-verify if a lane is ever launched by a materially different
-  mechanism (a service, a different terminal host) before trusting this on that path too.
+  ⚠️ **SUPERSEDED (PM finding, 2026-09-18, from a REAL interactive session) - the headless result
+  below does NOT hold for a real lane.** A first pass verified this against an ephemeral, headless
+  `claude -p --settings <scratch file>` session and found the hook's DIRECT parent was `claude.exe`
+  in both hook forms, no shell in between. **That result doesn't generalise.** Running the same
+  diagnostic in a real interactive session (`claude --remote-control`, cwd `OverMind`, per §11.1's
+  own plan) found: `powershell.exe(hook) <- bash.exe <- bash.exe <- claude.exe <- pwsh.exe <-
+  WindowsTerminal.exe`. Claude Code ran the hook through Git Bash, two layers deep - the direct
+  parent was `bash.exe`, not `claude.exe`. A single-hop check refuses every real interactive write.
+  **Fixed:** `claude_parent_pid` now walks up the ancestry, skipping ONLY known shell images (`bash`,
+  `sh`, `cmd`, `powershell`, `pwsh`; capped at 4 hops) and returns the first `claude` found - refusing
+  outright if a non-shell, non-`claude` image appears first, or if the hop limit is hit. Unit-tested
+  against the exact observed chain (`bash <- bash <- claude`), a single-shell chain, a refused
+  stranger (`node <- claude`, and a stranger behind a real shell hop), and the hop-limit case; all
+  mutation-verified. **Still needs:** the interactive diagnostic re-run with the EXACT command string
+  §10.4 installs (exec form), to confirm this fix actually resolves the real case, not just the
+  chain shape recorded from it - held per §11.1 until that's done.
 - **Concurrency**: a create-new-file lock (`<role>.lock`, atomic at the OS level) held for the whole
   read-modify-write cycle; a lock older than 5s is treated as abandoned and reclaimed rather than
   wedging every future hook forever.
@@ -344,13 +347,27 @@ settings separately, for no benefit this design needs. Still CireSnave's call.
 The binary itself needs to exist at one fixed, absolute path every lane can reach (built once, not
 per-project) - proposed as `C:/Projects/.claude-hooks/lane-restart.exe`, a sibling of `.lane-state/`
 for the same reason: portfolio-wide runtime tooling, kept out of every git repo. Exec form (`args`)
-is used throughout, so no shell ever parses anything:
+is used throughout, so no shell ever parses anything.
+
+⚠️ **REVISED (PM finding, 2026-09-18): `~/.claude/settings.json` already has a `hooks` key.**
+Confirmed by reading the file directly, not assumed: it holds a `SessionStart` entry running
+`run_wrap_hidden.vbs` - CireSnave's own, unrelated to this proposal. **This MERGES into that file,
+appending to each event's array - it never replaces the `hooks` key, and `SessionStart`'s existing
+entry stays exactly where it is.** The block below shows the merged result for the one event that
+already had something (`SessionStart`) and the new entries alone for the rest:
 
 ```json
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "SessionStart"] }] }],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "wscript.exe \"C:\\Users\\cires\\.claude\\scripts\\run_wrap_hidden.vbs\"" }
+        ]
+      },
+      { "hooks": [{ "type": "command",
+        "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "SessionStart"] }] }
+    ],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
       "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "UserPromptSubmit"] }] }],
     "PreToolUse": [{ "hooks": [{ "type": "command",
@@ -368,6 +385,9 @@ is used throughout, so no shell ever parses anything:
   }
 }
 ```
+
+Every OTHER top-level key in that file (`env`, `permissions`, `model`, `deniedMcpServers`, `worktree`,
+`enabledPlugins`, ...) is untouched by this - only `hooks` is merged into, and only by appending.
 
 `LANE_ROLE` (§10.2) is set once per lane, wherever that lane's own launch environment is configured -
 not part of this settings.json block, which is identical across every lane.
@@ -387,21 +407,32 @@ at every step.
 
 ### 11.1 Step 1 (before anything else): verify interactively, not just headless
 
-§10.3's parent-process check was verified live, but only against a **headless** `claude -p` session
-(PM finding, 2026-09-18). Every real lane runs **interactive**, several reached over **Remote
-Control** - a materially different launch path that hasn't been checked. Before hooks go on any real
-lane:
+**RESULT (PM, 2026-09-18): done once, and it found a real bug, now fixed - re-run needed before
+this step is complete.** §10.3's parent-process check was first verified only against a **headless**
+`claude -p` session; every real lane runs **interactive**, several reached over **Remote Control** -
+a materially different launch path. The PM ran this step for real, on OverMind's own lane
+(`claude --remote-control`, `SessionStart`), and found the headless result does NOT hold: the direct
+parent was `bash.exe`, not `claude.exe` - Claude Code ran the hook through Git Bash, two layers deep.
+Per this section's own step 4, the install was stopped and the diagnostic hook removed before going
+any further.
+
+**Fixed in §10.3**: `claude_parent_pid` now walks past known shell layers instead of requiring a
+single direct hop. **Still open**: the interactive diagnostic needs re-running with the exact command
+string §10.4 installs (exec form) to confirm the fix, not just the recorded chain shape, is right -
+this step isn't complete until that re-run passes.
 
 1. Pick the first lane to receive the hooks (recommend: whichever of OverMind/Synapse/the PM is
    least busy at the time).
 2. Install *only* the diagnostic parent-chain check (§10.3's verification script, not the real
    `lane-restart state` hooks yet) on that ONE lane's own settings, for a single event
-   (`SessionStart` is enough).
+   (`SessionStart` is enough) - using the same exec-form command shape §10.4 installs, not a
+   shell-form stand-in, since the two may not behave identically.
 3. Restart that lane normally (however it's normally started/reconnected, Remote Control included)
-   and confirm the logged parent chain still shows the hook's direct parent as `claude`/`claude.exe`
-   - not a shell, not something Remote Control's own supervisor interposes.
-4. Remove the diagnostic hook. Only if step 3 confirms the same result as the headless test does step
-   11.2 proceed on that lane.
+   and confirm `claude_parent_pid`'s fixed logic (walk-past-shells, refuse-on-stranger) actually
+   resolves to the real `claude.exe` pid for this exact chain, not just that the chain matches what
+   was recorded from the earlier run.
+4. Remove the diagnostic hook. Only if step 3 confirms the fix works for real does step 11.2 proceed
+   on that lane.
 
 ### 11.2 Building and placing the binary
 
@@ -437,11 +468,16 @@ repeated here to avoid two copies drifting.
 
 ### 11.5 Rollback
 
-**Remove the `hooks` key (or just its eight event entries) from `settings.json`.** Hooks simply stop
-firing; `.lane-state/*.json` files stop updating and, per §2's four-part identification, quickly read
-as stale and get refused by `lane-restart` rather than trusted - the tool fails closed on its own, not
-because rollback does anything special. No lane-side change is needed to roll back; the binary and
-`.lane-state/` directory can be left in place inert, or deleted, either is safe.
+**REVISED (PM finding, 2026-09-18): `~/.claude/settings.json` already has a `hooks` key** - a
+`SessionStart` entry running `run_wrap_hidden.vbs`, CireSnave's own, unrelated to this proposal.
+Confirmed directly by reading the file, not assumed. Removing the whole `hooks` key would delete
+that too. **Rollback is: remove only the entries whose `command` is `lane-restart.exe`, from each
+event's array, leaving every other hook (including that one) untouched.** Once removed, hooks simply
+stop firing; `.lane-state/*.json` files stop updating and, per §2's four-part identification, quickly
+read as stale and get refused by `lane-restart` rather than trusted - the tool fails closed on its
+own, not because rollback does anything special beyond removing its own entries. No lane-side change
+is needed; the binary and `.lane-state/` directory can be left in place inert, or deleted, either is
+safe.
 
 ### 11.6 Sequencing
 
