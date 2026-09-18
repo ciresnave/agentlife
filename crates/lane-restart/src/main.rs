@@ -8,6 +8,7 @@
 
 use lane_restart::authorize::{self, Target};
 use lane_restart::facts::SysinfoFacts;
+use lane_restart::lane_state_writer::{self, RealParentProcess};
 use lane_restart::log;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -89,8 +90,37 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, ArgError>
     })
 }
 
+/// `lane-restart state <event>` - the hook command. Handled separately from
+/// `parse_args` because its shape (a positional subcommand, then a single
+/// positional event name) doesn't fit the restart CLI's own flags at all,
+/// and mixing the two would make either grammar harder to read.
+fn run_state_hook(event: &str) -> ExitCode {
+    let my_pid = std::process::id();
+    let lane_role_env = std::env::var("LANE_ROLE").ok();
+    let mut stdin = std::io::stdin();
+    match lane_state_writer::run(
+        &state_dir(),
+        event,
+        my_pid,
+        &RealParentProcess,
+        lane_role_env.as_deref(),
+        &mut stdin,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("lane-restart state {event}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let [cmd, event] = argv.as_slice() {
+        if cmd == "state" {
+            return run_state_hook(event);
+        }
+    }
     let args = match parse_args(argv) {
         Ok(a) => a,
         Err(e) => {
@@ -129,13 +159,17 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         Ok(plan) if !plan.will_act => {
+            let model_flag = match &plan.state.model {
+                Some(m) => format!(" --model {m}"),
+                None => String::new(),
+            };
             println!(
                 "lane-restart: DRY RUN - would kill pid {} and relaunch a FRESH session: \
-                 `claude --name {} --model {} --permission-mode {}{} \"read {} HANDOFF and \
+                 `claude --name {}{} --permission-mode {}{} \"read {} HANDOFF and \
                  continue\"` in {}",
                 plan.state.pid,
                 plan.state.name.as_deref().unwrap_or(&plan.state.role),
-                plan.state.model,
+                model_flag,
                 plan.state.permission_mode,
                 if plan.state.remote_control {
                     " --remote-control"
@@ -274,7 +308,9 @@ mod relaunch {
         let prompt = format!("read {} HANDOFF and continue", state.role);
         let mut cmd = std::process::Command::new("claude");
         cmd.args(["--name", name]);
-        cmd.args(["--model", &state.model]);
+        if let Some(model) = &state.model {
+            cmd.args(["--model", model]);
+        }
         cmd.args(["--permission-mode", &state.permission_mode]);
         if state.remote_control {
             cmd.arg("--remote-control");
@@ -375,7 +411,7 @@ mod relaunch {
                 pid: 1,
                 cwd: "C:/x".to_string(),
                 name: None,
-                model: "claude-sonnet-5".to_string(),
+                model: Some("claude-sonnet-5".to_string()),
                 permission_mode: "prompting".to_string(),
                 remote_control: false,
                 busy: false,

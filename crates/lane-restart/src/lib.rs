@@ -11,5 +11,6 @@
 
 pub mod authorize;
 pub mod facts;
+pub mod lane_state_writer;
 pub mod log;
 pub mod state;

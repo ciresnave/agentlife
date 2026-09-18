@@ -19,7 +19,12 @@ pub struct LaneState {
     pub pid: u32,
     pub cwd: String,
     pub name: Option<String>,
-    pub model: String,
+    /// `None` until `PostModelSwitch` fires at least once - hooks.md's
+    /// common input fields don't include a model name at `SessionStart`,
+    /// so a session that never switches models never learns it here
+    /// (RESTART-TOOL-DESIGN.md §10.1). A relaunch omits `--model` entirely
+    /// when this is `None`, rather than guessing.
+    pub model: Option<String>,
     pub permission_mode: String,
     pub remote_control: bool,
     pub busy: bool,
