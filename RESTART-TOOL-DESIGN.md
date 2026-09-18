@@ -90,6 +90,20 @@ portfolio's own "no absence without a positive control" discipline: the claim al
 and the process walk alone could miss a shell spawned through something that doesn't appear as a
 direct child (a detached process, a service) - together they cover more than either does alone.
 
+⚠️ **REVISED (PM finding, 2026-09-18, first real restart attempt): "written into HANDOFF by the lane
+itself" above was never actually implemented as a command - no production code path ever wrote
+`no_background_shells: Some(true)`.** Every real restart of another lane refused, and 79 passing tests
+didn't catch it because every existing test's fixture hard-coded the field already set. **Fixed:
+`lane-restart assert-idle [--role <name>]`** - a command the lane runs itself, from its own shell,
+right after writing HANDOFF (not a Claude Code hook; nothing invokes this on the lane's behalf, since
+no hook can honestly know whether a background shell is still running). It sets
+`no_background_shells: Some(true)` on that lane's own state file. **A later `UserPromptSubmit` or
+`PreToolUse` event clears it back to `None`**, so an assertion made once can't go on authorizing a
+restart after the lane has done more work that could have started a new background shell - the claim
+is about THIS moment, not a durable fact. An end-to-end test (hook JSON on stdin → a real state file on
+disk → `authorize::decide()` reading that same file, no hand-built `LaneState` fixture anywhere in it)
+now exists specifically so "never set in production" can't hide behind a fixture again.
+
 ## 2. Process identification — "never kill by name alone"
 
 Verified: Claude Code does not document a PID-reuse guard, and `pid` alone is not sufficient (OS PIDs
@@ -314,6 +328,23 @@ turn, so it's kept - and moving to a native binary is what makes keeping it chea
   But the state file itself doesn't prove which is true. **Also fixed in the same gate read: the
   equals form (`--permission-mode=value`) wasn't being parsed at all** - only the space-separated
   form was; both now parse identically.
+- ⚠️ **ROOT CAUSE FOUND (PM finding, 2026-09-18, first real restart attempt): `remote_control` reading
+  `false` on a real `--remote-control` session, and `cwd_of` failing with "could not read the cwd of
+  pid ..." on every real identity check, were the SAME bug.** `System::refresh_processes` (no
+  `_specifics`) uses sysinfo 0.39.6's own default `ProcessRefreshKind`, which leaves `cwd` and `cmd` at
+  `UpdateKind::Never` - confirmed by reading sysinfo's own source, not by guessing. `exe` happened to
+  still work by luck (the same default explicitly overrides it to `OnlyIfNotSet`, which fetches it on
+  a fresh, never-yet-set `System` - the pattern every call site here already used). `cwd` and `cmd`
+  have no such override, so `cwd_of` (§2's identity check) and `cmdline_of` (`ClaudeCliFlags`
+  derivation, above) were both reading an always-empty field in production, on every real invocation,
+  while every existing unit test used `FakeFacts`/`FakeAncestry` and so never touched the real sysinfo
+  default at all. **Fixed** in both `facts.rs` and `lane_state_writer.rs`: `refresh_processes_specifics`
+  with an explicit `ProcessRefreshKind` that sets `cwd`, `cmd`, and `exe` to `UpdateKind::Always`,
+  so none of the three depend on an unstated default again. Proven with two new REAL-child-process
+  integration tests (`cwd_of_reads_a_real_spawned_childs_actual_working_directory`,
+  `real_parent_process_cmdline_of_reads_a_real_spawned_childs_actual_argv`) that spawn a genuine child
+  with a known cwd/argv and read it back through the real `SysinfoFacts`/`RealParentProcess` - the one
+  category of test this crate's existing fakes structurally cannot catch.
 
 ### 10.2 Role: `LANE_ROLE` override, falling back to the `cwd` leaf
 

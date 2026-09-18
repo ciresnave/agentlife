@@ -114,11 +114,143 @@ fn run_state_hook(event: &str) -> ExitCode {
     }
 }
 
+/// `lane-restart assert-idle [--role <name>]` - run by a lane itself, right
+/// after writing HANDOFF. Separate from `parse_args` for the same reason
+/// `state` is: a positional subcommand, not the restart CLI's own flags.
+fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
+    let my_pid = std::process::id();
+    let lane_role_env = role_override.or_else(|| std::env::var("LANE_ROLE").ok());
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            eprintln!("lane-restart assert-idle: could not read the current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match lane_state_writer::run_assert_idle(
+        &state_dir(),
+        my_pid,
+        &RealParentProcess,
+        lane_role_env.as_deref(),
+        &cwd,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("lane-restart assert-idle: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
+    let mut role = None;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            other => return Err(ArgError::Unknown(other.to_string())),
+        }
+    }
+    Ok(role)
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn assert_idle_with_no_args_has_no_role_override() {
+        assert_eq!(parse_assert_idle_args(&[]), Ok(None));
+    }
+
+    #[test]
+    fn assert_idle_role_flag_is_extracted() {
+        assert_eq!(
+            parse_assert_idle_args(&strs(&["--role", "pm"])),
+            Ok(Some("pm".to_string()))
+        );
+    }
+
+    #[test]
+    fn assert_idle_role_flag_with_no_value_is_an_error() {
+        assert_eq!(
+            parse_assert_idle_args(&strs(&["--role"])),
+            Err(ArgError::MissingRole)
+        );
+    }
+
+    #[test]
+    fn assert_idle_rejects_an_unknown_flag() {
+        assert_eq!(
+            parse_assert_idle_args(&strs(&["--bogus"])),
+            Err(ArgError::Unknown("--bogus".to_string()))
+        );
+    }
+
+    /// ⚠️ PM finding, 2026-09-18: `--help` printed "unrecognised argument:
+    /// --help" because `parse_args` treats every unknown token as an error
+    /// with no earlier check. `main()` now intercepts `--help`/`-h` before
+    /// any subcommand dispatch - this asserts the usage text actually
+    /// documents the command this fix itself adds, so the two can't drift
+    /// apart silently.
+    #[test]
+    fn usage_text_documents_assert_idle() {
+        assert!(USAGE.contains("assert-idle"));
+        assert!(USAGE.contains("--help"));
+    }
+}
+
+const USAGE: &str = "\
+lane-restart - a bulletproof session-restart tool. RESTART-TOOL-DESIGN.md.
+
+USAGE:
+    lane-restart --role <name> [--self] [--dry-run] [--yes]
+        Restart a lane. --self restarts the CALLING lane (no idle check);
+        omitting it targets a DIFFERENT lane, which must be independently
+        idle and requires --yes to act for real - otherwise it prints a dry
+        run and does nothing.
+
+    lane-restart state <event>
+        The hook subcommand: reads a hook's JSON input on stdin and updates
+        .lane-state/<role>.json. Wired into settings.json; never run this by
+        hand.
+
+    lane-restart assert-idle [--role <name>]
+        Run by a lane ITSELF, from its own shell, right after writing
+        HANDOFF: asserts that no background shell it started is still
+        running. Required before any restart of that lane can be
+        authorized - RESTART-TOOL-DESIGN.md §1a. Role defaults to
+        LANE_ROLE, then falls back to the current directory's leaf name,
+        the same as the state hook.
+
+    lane-restart --help
+        Print this message.
+";
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     if let [cmd, event] = argv.as_slice() {
         if cmd == "state" {
             return run_state_hook(event);
+        }
+    }
+    if let Some((first, rest)) = argv.split_first() {
+        if first == "assert-idle" {
+            return match parse_assert_idle_args(rest) {
+                Ok(role_override) => run_assert_idle_cmd(role_override),
+                Err(e) => {
+                    eprintln!("lane-restart assert-idle: {e}");
+                    ExitCode::FAILURE
+                }
+            };
         }
     }
     let args = match parse_args(argv) {

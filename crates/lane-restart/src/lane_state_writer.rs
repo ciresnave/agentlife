@@ -277,10 +277,25 @@ pub fn apply_event(
     state.updated_at = now;
     state.updated_by_event = event.to_string();
     match event {
-        "UserPromptSubmit" | "PreToolUse" => state.busy = true,
+        "UserPromptSubmit" | "PreToolUse" => {
+            state.busy = true;
+            // ⚠️ PM finding, 2026-09-18: a stale `AssertIdle` must not
+            // authorize a LATER restart once the lane has done more work
+            // that could have started a background shell since asserting -
+            // the assertion is a claim about THIS moment, not a durable
+            // fact. Cleared here, not just left to the state file's own
+            // staleness window, which only bounds how OLD an assertion may
+            // be, not whether real work happened after it.
+            state.no_background_shells = None;
+        }
         "Stop" => state.busy = false,
         "SubagentStart" => state.subagents_running += 1,
         "SubagentStop" => state.subagents_running = state.subagents_running.saturating_sub(1),
+        // §1a: the lane's own assertion, made by running `lane-restart
+        // assert-idle` itself right after writing HANDOFF - never inferred
+        // from any hook event, since no hook can honestly know whether a
+        // background shell is still running.
+        "AssertIdle" => state.no_background_shells = Some(true),
         "PostModelSwitch" => {
             if let Some(m) = &input.model {
                 state.model = Some(m.clone().into_string());
@@ -426,6 +441,76 @@ pub fn run(
     result
 }
 
+/// `lane-restart assert-idle` - run by the lane ITSELF, from its own shell,
+/// right after writing HANDOFF. Not a hook: nothing invokes this on the
+/// lane's behalf, and no hook payload backs it, because no hook can
+/// honestly know whether a background shell the lane started is still
+/// running (RESTART-TOOL-DESIGN.md §1a) - only the lane asserting it about
+/// itself can. ⚠️ PM finding, 2026-09-18: without this command, no
+/// production path ever wrote `no_background_shells: Some(true)` at all -
+/// every real restart refused, and 79 passing tests didn't catch it because
+/// every fixture hard-coded the field.
+///
+/// Requires a state file to already exist (a `SessionStart` this session) -
+/// asserting idleness for a session `lane-restart` has never recorded makes
+/// no sense, and is refused rather than silently creating one.
+pub fn run_assert_idle(
+    state_dir: &Path,
+    my_pid: u32,
+    parent_lookup: &dyn ParentProcess,
+    lane_role_env: Option<&str>,
+    cwd: &str,
+) -> Result<(), String> {
+    let role = resolve_role(cwd, lane_role_env);
+    std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
+    let path = state_dir.join(format!("{role}.json"));
+    let lock = StateLock::acquire(
+        state_dir.join(format!("{role}.lock")),
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let existing = crate::state::load(state_dir, &role).ok();
+    if existing.is_none() {
+        drop(lock);
+        return Err(format!(
+            "{role}: no state file - assert-idle requires a session that \
+             has already recorded SessionStart"
+        ));
+    }
+    let pid = claude_parent_pid(my_pid, parent_lookup).map_err(|e| e.to_string())?;
+    let cli_flags = parent_lookup
+        .cmdline_of(pid)
+        .map(|cmd| parse_claude_cli_flags(&cmd))
+        .unwrap_or_default();
+    // `AssertIdle`'s own `apply_event` branch reads only `existing` and
+    // `cli_flags` - this placeholder carries no real session_id/model, both
+    // of which only the `SessionStart` branch (never reached here) uses.
+    let placeholder_input = HookInput {
+        hook_event_name: "AssertIdle".to_string(),
+        session_id: String::new(),
+        cwd: cwd.to_string(),
+        permission_mode: None,
+        model: None,
+    };
+    let next = apply_event(
+        existing,
+        "AssertIdle",
+        &placeholder_input,
+        &role,
+        pid,
+        &cli_flags,
+        Utc::now(),
+    );
+    let result = match next {
+        Some(state) => write_atomic(&path, &state).map_err(|e| e.to_string()),
+        None => Err(format!("{role}: assert-idle produced no state to write")),
+    };
+    drop(lock);
+    result
+}
+
 /// Real parent-process lookup, via the same `sysinfo` crate `facts.rs` uses.
 /// ⚠️ Not unit tested here - `SysinfoFacts`'s own docs explain why: it needs
 /// a real process, which this crate must never spin up just to test itself.
@@ -448,9 +533,20 @@ impl ParentProcess for RealParentProcess {
     }
 
     fn cmdline_of(&self, pid: u32) -> Option<Vec<String>> {
-        use sysinfo::{Pid, System};
+        use sysinfo::{Pid, ProcessRefreshKind, System, UpdateKind};
+        // ⚠️ PM finding, 2026-09-18 (first real restart attempt): plain
+        // `refresh_processes` leaves `cmd` at `UpdateKind::Never` by default
+        // (confirmed by reading sysinfo 0.39.6's own default impl) - this
+        // was reading an always-empty command line, not a genuinely absent
+        // one, which is why `remote_control` read `false` even on a session
+        // launched with `--remote-control` on its real command line. Same
+        // root cause, and the same fix, as `facts.rs`'s `cwd_of`.
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
         let process = sys.process(Pid::from_u32(pid))?;
         Some(
             process
@@ -1196,6 +1292,242 @@ mod tests {
         }
     }
 
+    // -- AssertIdle ------------------------------------------------------- //
+    // RESTART-TOOL-DESIGN.md §1a. PM finding, 2026-09-18: no production path
+    // ever wrote `no_background_shells: Some(true)` before this event
+    // existed - every real restart refused, and every existing test's
+    // fixture hard-coded the field, so nothing caught it.
+
+    #[test]
+    fn assert_idle_sets_no_background_shells_true() {
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "AssertIdle",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.no_background_shells, Some(true));
+    }
+
+    #[test]
+    fn a_later_user_prompt_submit_clears_a_stale_assert_idle() {
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "AssertIdle",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        assert_eq!(s.as_ref().unwrap().no_background_shells, Some(true));
+
+        let s = apply_event(
+            s,
+            "UserPromptSubmit",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.no_background_shells, None,
+            "a stale assertion must not survive the lane doing more work"
+        );
+    }
+
+    #[test]
+    fn a_later_pre_tool_use_clears_a_stale_assert_idle_too() {
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "AssertIdle",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "PreToolUse",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.no_background_shells, None);
+    }
+
+    #[test]
+    fn assert_idle_with_no_prior_session_start_does_nothing() {
+        let s = apply_event(
+            None,
+            "AssertIdle",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        assert_eq!(s, None);
+    }
+
+    #[test]
+    fn run_assert_idle_refuses_when_no_session_start_was_ever_recorded() {
+        let dir = tempdir().unwrap();
+        let lookup = FakeAncestry::chain(&[(4242, 99, "claude.exe")]);
+        let err = run_assert_idle(dir.path(), 4242, &lookup, Some("overmind"), "C:/x")
+            .expect_err("assert-idle with no prior SessionStart must be refused, not silent");
+        assert!(
+            err.contains("no state file"),
+            "refusal message must say why - got {err:?}"
+        );
+    }
+
+    /// ⚠️ THE END-TO-END TEST THE PM ASKED FOR: hook JSON on stdin -> a real
+    /// state file on disk -> `authorize::decide()` reading that SAME file -
+    /// no hand-built `LaneState` fixture anywhere in this test, so
+    /// "no production path ever sets this field" can't hide behind a
+    /// fixture that assumes the field is already set, the way every other
+    /// `decide()` test up to now has.
+    #[test]
+    fn a_real_assert_idle_run_produces_a_state_file_that_decide_actually_accepts() {
+        use crate::authorize::{self, Request, Target};
+        use crate::facts::SystemFacts;
+
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path();
+        let role = "overmind";
+        let my_pid = 4242u32;
+
+        // hook JSON -> state file (SessionStart), exactly as a real hook
+        // invocation would produce it.
+        let session_start_json =
+            r#"{"hook_event_name":"SessionStart","session_id":"e2e-session","cwd":"C:/Projects/OverMind"}"#
+                .to_string();
+        let mut stdin = session_start_json.as_bytes();
+        run(
+            state_dir,
+            "SessionStart",
+            my_pid,
+            &FakeAncestry::chain(&[(my_pid, 99, "claude.exe")]),
+            Some(role),
+            &mut stdin,
+        )
+        .unwrap();
+
+        // The lane asserting idleness about ITSELF, the real command a
+        // lane runs from its own shell - not a hook, no stdin JSON.
+        run_assert_idle(
+            state_dir,
+            my_pid,
+            &FakeAncestry::chain(&[(my_pid, 99, "claude.exe")]),
+            Some(role),
+            "C:/Projects/OverMind",
+        )
+        .unwrap();
+
+        // authorize::decide() reads the SAME file this test never touched
+        // directly.
+        struct RealPidAlive;
+        impl SystemFacts for RealPidAlive {
+            fn is_alive_claude_process(&self, pid: u32) -> bool {
+                // The state file's pid is claude_parent_pid's RESULT (the
+                // fake claude.exe pid, 99), not this hook process's own
+                // pid (my_pid, 4242) - run() derives them separately.
+                pid == 99
+            }
+            fn cwd_of(&self, _pid: u32) -> Option<std::path::PathBuf> {
+                Some(std::path::PathBuf::from("C:/Projects/OverMind"))
+            }
+            fn has_live_shell_descendant(
+                &self,
+                _pid: u32,
+            ) -> Result<bool, crate::facts::ShellCheckError> {
+                Ok(false)
+            }
+            fn transcript_is_recent(
+                &self,
+                _cwd: &str,
+                _session_id: &str,
+                _max_age: std::time::Duration,
+            ) -> bool {
+                true
+            }
+            fn now(&self) -> chrono::DateTime<Utc> {
+                Utc::now()
+            }
+            fn process_identity(&self, pid: u32) -> Option<crate::facts::ProcessIdentity> {
+                (pid == 99).then_some(crate::facts::ProcessIdentity {
+                    start_time_secs: 0,
+                    exe: None,
+                })
+            }
+            fn kill_verified(
+                &self,
+                _pid: u32,
+                _expected: &crate::facts::ProcessIdentity,
+            ) -> Result<(), crate::facts::KillError> {
+                unreachable!("this test never kills anything")
+            }
+        }
+
+        // Target::Other, not Myself: the no_background_shells check
+        // (idle_and_shell_free) only runs for a DIFFERENT lane restarting
+        // this one - RESTART-TOOL-DESIGN.md §3. Myself skips it entirely,
+        // which would make this test pass for the wrong reason.
+        let plan = authorize::decide(
+            &Request {
+                target: Target::Other {
+                    role: role.to_string(),
+                },
+                confirmed: false,
+                dry_run: true,
+            },
+            &RealPidAlive,
+            state_dir,
+        )
+        .expect(
+            "a state file written by run() then run_assert_idle() must be accepted by decide()",
+        );
+        assert_eq!(plan.state.no_background_shells, Some(true));
+    }
+
     // -- StateLock: the concurrency-safety property itself ------------------ //
 
     #[test]
@@ -1324,6 +1656,44 @@ mod tests {
         assert_eq!(
             final_state.subagents_running, n as u32,
             "every concurrent SubagentStart must be counted, none lost"
+        );
+    }
+
+    // -- RealParentProcess::cmdline_of ----------------------------------- //
+    // PM finding, 2026-09-18 (first real restart attempt): a real session
+    // launched with `--remote-control` still recorded `remote_control:
+    // false`, because plain `refresh_processes` never populates `cmd` -
+    // `FakeAncestry`'s stub `cmdline_of` (always `None`) couldn't see that
+    // gap. This spawns a REAL child with a KNOWN argv and reads it back
+    // through `RealParentProcess` itself.
+
+    #[test]
+    fn real_parent_process_cmdline_of_reads_a_real_spawned_childs_actual_argv() {
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("could not spawn a throwaway child process for this test");
+        #[cfg(not(windows))]
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("could not spawn a throwaway child process for this test");
+        let pid = child.id();
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let lookup = RealParentProcess;
+        let observed = lookup
+            .cmdline_of(pid)
+            .expect("a real spawned child's argv must be readable, not None");
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            observed.iter().any(|a| a == "-n" || a == "30"),
+            "cmdline_of must read the child's REAL argv, not an empty one - got {observed:?}"
         );
     }
 }

@@ -13,7 +13,23 @@
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::time::Duration;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, System, UpdateKind};
+
+/// ⚠️ PM finding, 2026-09-18 (first real restart attempt): `System::refresh_processes` (no
+/// `_specifics`) uses a DEFAULT `ProcessRefreshKind` that leaves `cwd` and `cmd` at
+/// `UpdateKind::Never` - confirmed by reading sysinfo 0.39.6's own default impl. Every `cwd_of`
+/// call in this module was reading an always-empty field, not a genuinely missing one; a real
+/// restart's identity check failed closed ("could not read the cwd of pid ...") on every attempt,
+/// for a reason that had nothing to do with the pid itself. `exe` happened to still work by luck
+/// (the default explicitly sets it to `OnlyIfNotSet`, which fetches it on a fresh, never-yet-set
+/// `System`) - `cmd` and `cwd` have no such override and stayed empty. This refresh kind is
+/// explicit about all three so none of them depend on an unstated default again.
+fn full_process_refresh() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cwd(UpdateKind::Always)
+        .with_cmd(UpdateKind::Always)
+        .with_exe(UpdateKind::Always)
+}
 
 /// Image names (lowercased, no extension) counted as "a live shell" when
 /// found as a descendant of the target PID — RESTART-TOOL-DESIGN.md §1a.
@@ -121,7 +137,11 @@ impl SysinfoFacts {
 impl SystemFacts for SysinfoFacts {
     fn is_alive_claude_process(&self, pid: u32) -> bool {
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            full_process_refresh(),
+        );
         match sys.process(Pid::from_u32(pid)) {
             Some(p) => {
                 let name = p.name().to_string_lossy().to_lowercase();
@@ -133,7 +153,11 @@ impl SystemFacts for SysinfoFacts {
 
     fn cwd_of(&self, pid: u32) -> Option<PathBuf> {
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            full_process_refresh(),
+        );
         sys.process(Pid::from_u32(pid))
             .and_then(|p| p.cwd())
             .map(|p| p.to_path_buf())
@@ -141,7 +165,11 @@ impl SystemFacts for SysinfoFacts {
 
     fn has_live_shell_descendant(&self, pid: u32) -> Result<bool, ShellCheckError> {
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            full_process_refresh(),
+        );
         let target = Pid::from_u32(pid);
         let mut stack = vec![target];
         let mut seen = std::collections::HashSet::new();
@@ -189,7 +217,11 @@ impl SystemFacts for SysinfoFacts {
 
     fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            full_process_refresh(),
+        );
         sys.process(Pid::from_u32(pid)).map(|p| ProcessIdentity {
             start_time_secs: p.start_time(),
             exe: p.exe().map(|e| e.to_path_buf()),
@@ -201,7 +233,11 @@ impl SystemFacts for SysinfoFacts {
         // time has passed since `expected` was recorded; a fresh read is
         // what makes this a check rather than a formality.
         let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            full_process_refresh(),
+        );
         let process = sys
             .process(Pid::from_u32(pid))
             .ok_or(KillError::NoLongerRunning)?;
@@ -293,6 +329,53 @@ mod tests {
             facts.kill_verified(pid, &identity),
             Err(KillError::NoLongerRunning)
         );
+    }
+
+    /// ⚠️ THE TEST THAT WOULD HAVE CAUGHT THE MISSING-FIELDS BUG. PM finding,
+    /// 2026-09-18 (first real restart attempt): `cwd_of` always returned
+    /// `None` in production because plain `refresh_processes` never
+    /// populates `cwd` - but every existing test used `FakeFacts`, which
+    /// can't see that. This spawns a REAL child with a KNOWN cwd and reads
+    /// it back through `SysinfoFacts` itself, so "never set in production"
+    /// can't hide behind a fake again.
+    #[test]
+    fn cwd_of_reads_a_real_spawned_childs_actual_working_directory() {
+        let known_dir = std::env::temp_dir()
+            .canonicalize()
+            .expect("temp dir must be readable");
+        let mut child = spawn_sleep_child_in(&known_dir);
+        let pid = child.id();
+        let facts = SysinfoFacts::new(std::env::temp_dir());
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let observed = facts
+            .cwd_of(pid)
+            .expect("a real spawned child's cwd must be readable, not None");
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            observed.canonicalize().expect("observed cwd must exist"),
+            known_dir,
+            "cwd_of must read the child's REAL working directory, not an \
+             empty/default one"
+        );
+    }
+
+    fn spawn_sleep_child_in(dir: &std::path::Path) -> std::process::Child {
+        #[cfg(windows)]
+        let child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .spawn();
+        #[cfg(not(windows))]
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(dir)
+            .spawn();
+        child.expect("could not spawn a throwaway child process for this test")
     }
 
     fn spawn_sleep_child() -> std::process::Child {
