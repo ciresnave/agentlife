@@ -7,3 +7,10 @@ repository.workspace = true
 description = "Restarts an idle Claude Code lane session with the same identity - self, or PM-of-idle-lane only. See RESTART-TOOL-DESIGN.md."
 
 [dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sysinfo = "0.39.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"

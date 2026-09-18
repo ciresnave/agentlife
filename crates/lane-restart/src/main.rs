@@ -1,35 +1,54 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Restarts a Claude Code lane session with the same identity.
-//!
-//! Design: `RESTART-TOOL-DESIGN.md` at the repo root. Settled, not yet
-//! implemented — this is the crate skeleton (workspace, CI, arg shape) built
-//! ahead of the kill/launch logic, which needs the design's four decisions
-//! folded in first (done) and its own review before it touches a live
-//! process. Nothing here sends a signal to anything yet.
+//! CLI entry point. All the actual decision logic lives in the library
+//! (`authorize.rs`, `facts.rs`, `state.rs`, `log.rs`) so it can be unit
+//! tested without a real process. This file only: parses argv, wires the
+//! real `SystemFacts`, calls `authorize::decide`, and - only if it comes
+//! back `Ok` with `will_act: true` - performs the kill and the relaunch.
 
+use lane_restart::authorize::{self, Target};
+use lane_restart::facts::SysinfoFacts;
+use lane_restart::log;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-#[derive(Debug, PartialEq, Eq)]
-enum Target {
-    /// Restart the lane invoking this tool - the process's own parent,
-    /// identified from this process's own environment, not from an argument
-    /// a caller could spoof.
-    Myself,
-    /// Restart a different, named lane. Only ever eligible when that lane's
-    /// own state file says idle - see RESTART-TOOL-DESIGN.md §3.
-    Role(String),
+/// `C:/Projects/.lane-state` - RESTART-TOOL-DESIGN.md §7. Not configurable
+/// via CLI on purpose: a caller-supplied state directory would defeat the
+/// whole point of a fixed, portfolio-wide location every lane and the PM
+/// agree on.
+fn state_dir() -> PathBuf {
+    PathBuf::from("C:/Projects/.lane-state")
 }
 
-#[derive(Debug, PartialEq, Eq)]
+fn log_path() -> PathBuf {
+    state_dir().join("restart.log")
+}
+
+fn claude_config_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs_home().map(|h| h.join(".claude")))
+        .expect("could not resolve the Claude Code config directory")
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+#[derive(Debug)]
 struct Args {
-    target: Target,
+    role: String,
+    target_self: bool,
     dry_run: bool,
+    confirmed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum ArgError {
     MissingRole,
+    RoleRequired,
     Unknown(String),
 }
 
@@ -37,91 +56,359 @@ impl std::fmt::Display for ArgError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ArgError::MissingRole => write!(f, "--role requires a value"),
+            ArgError::RoleRequired => write!(f, "--role <name> is required"),
             ArgError::Unknown(a) => write!(f, "unrecognised argument: {a}"),
         }
     }
 }
 
-/// Parses argv (excluding the program name). ⚠️ `--yes` is accepted here as
-/// a flag shape only - RESTART-TOOL-DESIGN.md §6.2 makes clear it does not,
-/// by itself, authorize anything: a restart of another lane still refuses
-/// unless that lane's own state file says idle, checked fresh at kill time.
+/// ⚠️ `--self` DEFAULTS TO FALSE. Omitting it means "restart a different
+/// lane" - the SAFER default is the one that requires `--yes` to act for
+/// real, not the one that acts unconditionally. A caller who wants to
+/// restart their own session must say so explicitly.
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, ArgError> {
-    let mut target = Target::Myself;
+    let mut role: Option<String> = None;
+    let mut target_self = false;
     let mut dry_run = false;
+    let mut confirmed = false;
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?),
+            "--self" => target_self = true,
             "--dry-run" => dry_run = true,
-            "--yes" => {} // accepted; authorization still comes from the idle check, not this flag
-            "--role" => {
-                let role = iter.next().ok_or(ArgError::MissingRole)?;
-                target = Target::Role(role);
-            }
+            "--yes" => confirmed = true,
             other => return Err(ArgError::Unknown(other.to_string())),
         }
     }
-    Ok(Args { target, dry_run })
+    Ok(Args {
+        role: role.ok_or(ArgError::RoleRequired)?,
+        target_self,
+        dry_run,
+        confirmed,
+    })
 }
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    match parse_args(argv) {
-        Ok(args) => {
-            eprintln!(
-                "lane-restart: not yet implemented (target={:?}, dry_run={}). \
-                 See RESTART-TOOL-DESIGN.md.",
-                args.target, args.dry_run
+    let args = match parse_args(argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("lane-restart: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let target = if args.target_self {
+        Target::Myself {
+            role: args.role.clone(),
+        }
+    } else {
+        Target::Other {
+            role: args.role.clone(),
+        }
+    };
+    let requested_by = if args.target_self { "self" } else { "pm" };
+
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let req = authorize::Request {
+        target,
+        confirmed: args.confirmed,
+        dry_run: args.dry_run,
+    };
+
+    match authorize::decide(&req, &facts, &state_dir()) {
+        Err(refusal) => {
+            eprintln!("lane-restart: refused - {refusal}");
+            log_outcome(
+                requested_by,
+                &args.role,
+                &format!("refused: {refusal}"),
+                false,
             );
             ExitCode::FAILURE
         }
-        Err(e) => {
-            eprintln!("lane-restart: {e}");
-            ExitCode::FAILURE
+        Ok(plan) if !plan.will_act => {
+            println!(
+                "lane-restart: DRY RUN - would kill pid {} and relaunch a FRESH session: \
+                 `claude --name {} --model {} --permission-mode {}{} \"read {} HANDOFF and \
+                 continue\"` in {}",
+                plan.state.pid,
+                plan.state.name.as_deref().unwrap_or(&plan.state.role),
+                plan.state.model,
+                plan.state.permission_mode,
+                if plan.state.remote_control {
+                    " --remote-control"
+                } else {
+                    ""
+                },
+                plan.state.role,
+                plan.state.cwd
+            );
+            log_outcome(requested_by, &args.role, "dry run - no action taken", false);
+            ExitCode::SUCCESS
+        }
+        Ok(plan) => {
+            eprintln!(
+                "lane-restart: killing pid {} and relaunching a fresh session...",
+                plan.state.pid
+            );
+            match relaunch::kill_and_relaunch(&facts, &plan.state, &plan.identity) {
+                Ok(()) => {
+                    log_outcome(
+                        requested_by,
+                        &args.role,
+                        &format!(
+                            "killed pid {} and relaunched a fresh session (continuity via HANDOFF only)",
+                            plan.state.pid
+                        ),
+                        true,
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("lane-restart: {e}");
+                    log_outcome(
+                        requested_by,
+                        &args.role,
+                        &format!("action failed: {e}"),
+                        false,
+                    );
+                    ExitCode::FAILURE
+                }
+            }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn log_outcome(requested_by: &str, role: &str, outcome: &str, acted: bool) {
+    let entry = log::Entry {
+        timestamp: chrono::Utc::now(),
+        requested_by,
+        role,
+        outcome: outcome.to_string(),
+        acted,
+    };
+    if let Err(e) = log::append(&log_path(), &entry) {
+        eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");
+    }
+}
 
-    fn args(s: &[&str]) -> Vec<String> {
-        s.iter().map(|s| s.to_string()).collect()
+/// The only place a real kill signal or a real process spawn happens.
+/// Deliberately NOT covered by `authorize.rs`'s tests (which never touch a
+/// real process) - `valid_identifier` and the argv SHAPE are unit tested
+/// here; the actual OS calls are exercised by `--dry-run` against real
+/// lanes before `--yes` is ever used for real.
+mod relaunch {
+    use lane_restart::facts::{KillError, ProcessIdentity, SystemFacts};
+    use lane_restart::state::LaneState;
+
+    /// PM finding, 2026-09-18: `role` and `name` come from a file the
+    /// TARGET LANE wrote about itself, and reached a `cmd.exe /C start`
+    /// command line - which parses metacharacters (`& | ^ % < >`) that
+    /// Rust's own argv-passing quoting does not protect against, because
+    /// it's cmd.exe doing a SECOND round of parsing on already-quoted
+    /// arguments. Two independent fixes, not one: this validator refuses
+    /// anything that isn't a plain identifier, AND (below) the launch no
+    /// longer goes through cmd.exe at all - `CREATE_NEW_CONSOLE` spawns
+    /// `claude.exe` directly with a real argv array, which Windows'
+    /// `CreateProcess` never hands to a shell for re-parsing. Either fix
+    /// alone would have closed this; both together don't depend on staying
+    /// right about which one actually mattered.
+    pub fn valid_identifier(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     }
 
-    #[test]
-    fn defaults_to_restarting_self_not_dry_run() {
-        let parsed = parse_args(args(&[])).unwrap();
-        assert_eq!(parsed.target, Target::Myself);
-        assert!(!parsed.dry_run);
+    #[derive(Debug)]
+    pub enum RelaunchError {
+        InvalidIdentifier(String),
+        Kill(KillError),
+        Spawn(String),
     }
 
-    #[test]
-    fn role_selects_a_named_lane() {
-        let parsed = parse_args(args(&["--role", "synapse"])).unwrap();
-        assert_eq!(parsed.target, Target::Role("synapse".to_string()));
+    impl std::fmt::Display for RelaunchError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                RelaunchError::InvalidIdentifier(what) => {
+                    write!(f, "refusing to launch - not a plain identifier: {what}")
+                }
+                RelaunchError::Kill(e) => write!(f, "kill refused: {e}"),
+                RelaunchError::Spawn(e) => write!(f, "could not launch the relaunch command: {e}"),
+            }
+        }
     }
 
-    #[test]
-    fn dry_run_is_recognised() {
-        let parsed = parse_args(args(&["--dry-run"])).unwrap();
-        assert!(parsed.dry_run);
+    /// ⚠️ NEVER `--resume`. PM finding, 2026-09-18: resuming reloads the
+    /// whole prior transcript, carrying the full context back in - exactly
+    /// the per-turn cost a restart exists to cut. This launches a FRESH
+    /// session; the only continuity is the lane's own HANDOFF file, read
+    /// by the first prompt. `state.session_id` is used only by
+    /// `authorize::decide`'s identity check (RESTART-TOOL-DESIGN.md §2),
+    /// never here.
+    pub fn kill_and_relaunch(
+        facts: &dyn SystemFacts,
+        state: &LaneState,
+        identity: &ProcessIdentity,
+    ) -> Result<(), RelaunchError> {
+        let name = state.name.as_deref().unwrap_or(&state.role);
+        if !valid_identifier(&state.role) {
+            return Err(RelaunchError::InvalidIdentifier(format!(
+                "role {:?}",
+                state.role
+            )));
+        }
+        if !valid_identifier(name) {
+            return Err(RelaunchError::InvalidIdentifier(format!("name {name:?}")));
+        }
+
+        facts
+            .kill_verified(state.pid, identity)
+            .map_err(RelaunchError::Kill)?;
+        // Give the OS a moment to finish tearing the process down before a
+        // new `claude` process claims the same working directory's lock.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let prompt = format!("read {} HANDOFF and continue", state.role);
+        let mut cmd = std::process::Command::new("claude");
+        cmd.args(["--name", name]);
+        cmd.args(["--model", &state.model]);
+        cmd.args(["--permission-mode", &state.permission_mode]);
+        if state.remote_control {
+            cmd.arg("--remote-control");
+        }
+        cmd.arg(&prompt);
+        cmd.current_dir(&state.cwd);
+
+        // ⚠️ NO SHELL. `claude.exe` is spawned directly with a real argv
+        // array; `CREATE_NEW_CONSOLE` gives it the visible window
+        // RESTART-TOOL-DESIGN.md §5 asks for without cmd.exe ever parsing
+        // anything a lane wrote about itself.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+            cmd.creation_flags(CREATE_NEW_CONSOLE);
+        }
+
+        cmd.spawn()
+            .map_err(|e| RelaunchError::Spawn(e.to_string()))?;
+        Ok(())
     }
 
-    #[test]
-    fn role_without_a_value_is_a_clear_error() {
-        assert_eq!(
-            parse_args(args(&["--role"])).unwrap_err(),
-            ArgError::MissingRole
-        );
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-    #[test]
-    fn an_unknown_flag_is_refused_not_ignored() {
-        assert_eq!(
-            parse_args(args(&["--frobnicate"])).unwrap_err(),
-            ArgError::Unknown("--frobnicate".to_string())
-        );
+        #[test]
+        fn a_plain_role_name_is_valid() {
+            assert!(valid_identifier("overmind"));
+            assert!(valid_identifier("pm-2"));
+            assert!(valid_identifier("lane_42"));
+        }
+
+        #[test]
+        fn shell_metacharacters_are_refused() {
+            assert!(!valid_identifier("a&calc"));
+            assert!(!valid_identifier("a|calc"));
+            assert!(!valid_identifier("a^calc"));
+            assert!(!valid_identifier("a%PATH%"));
+            assert!(!valid_identifier("a<calc"));
+            assert!(!valid_identifier("a>calc"));
+            assert!(!valid_identifier("a;calc"));
+            assert!(!valid_identifier("a calc"));
+        }
+
+        #[test]
+        fn empty_and_oversized_are_refused() {
+            assert!(!valid_identifier(""));
+            assert!(!valid_identifier(&"x".repeat(65)));
+            assert!(valid_identifier(&"x".repeat(64)));
+        }
+
+        #[test]
+        fn dots_and_slashes_are_refused_too() {
+            // Not shell metacharacters, but still not a plain identifier -
+            // a role/name is never expected to need them.
+            assert!(!valid_identifier("a.b"));
+            assert!(!valid_identifier("a/b"));
+            assert!(!valid_identifier("../etc"));
+        }
+
+        struct NeverCalled;
+        impl SystemFacts for NeverCalled {
+            fn is_alive_claude_process(&self, _: u32) -> bool {
+                panic!("must not be reached")
+            }
+            fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
+                panic!("must not be reached")
+            }
+            fn has_live_shell_descendant(
+                &self,
+                _: u32,
+            ) -> Result<bool, lane_restart::facts::ShellCheckError> {
+                panic!("must not be reached")
+            }
+            fn transcript_is_recent(&self, _: &str, _: &str, _: std::time::Duration) -> bool {
+                panic!("must not be reached")
+            }
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                panic!("must not be reached")
+            }
+            fn process_identity(&self, _: u32) -> Option<ProcessIdentity> {
+                panic!("must not be reached")
+            }
+            fn kill_verified(&self, _: u32, _: &ProcessIdentity) -> Result<(), KillError> {
+                panic!(
+                    "kill_and_relaunch must refuse an invalid role/name BEFORE ever \
+                     attempting to kill anything"
+                )
+            }
+        }
+
+        fn state_with_role(role: &str) -> LaneState {
+            LaneState {
+                role: role.to_string(),
+                session_id: "s".to_string(),
+                pid: 1,
+                cwd: "C:/x".to_string(),
+                name: None,
+                model: "claude-sonnet-5".to_string(),
+                permission_mode: "prompting".to_string(),
+                remote_control: false,
+                busy: false,
+                subagents_running: 0,
+                no_background_shells: Some(true),
+                updated_at: chrono::Utc::now(),
+                updated_by_event: "Stop".to_string(),
+            }
+        }
+
+        fn dummy_identity() -> ProcessIdentity {
+            ProcessIdentity {
+                start_time_secs: 0,
+                exe: None,
+            }
+        }
+
+        #[test]
+        fn kill_and_relaunch_refuses_an_invalid_role_before_touching_the_process() {
+            // ⚠️ THE MUTATION THIS TEST EXISTS TO CATCH: it is not enough
+            // for `valid_identifier` to be correct in isolation if
+            // `kill_and_relaunch` doesn't actually call it as a gate.
+            let state = state_with_role("a&calc");
+            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            assert!(matches!(result, Err(RelaunchError::InvalidIdentifier(_))));
+        }
+
+        #[test]
+        fn kill_and_relaunch_refuses_an_invalid_name_before_touching_the_process() {
+            let mut state = state_with_role("overmind");
+            state.name = Some("a|calc".to_string());
+            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            assert!(matches!(result, Err(RelaunchError::InvalidIdentifier(_))));
+        }
     }
 }

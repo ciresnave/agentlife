@@ -157,35 +157,51 @@ role for now.
 
 ## 5. Relaunch mechanics
 
-Verified against `sessions.md`:
+**REVISED (PM finding, 2026-09-18): NEVER `--resume`.** The first draft of this section proposed
+`claude --resume <session_id>`, verified against `sessions.md` as automatically restoring the model
+and permission mode. That's true, but it restores something else along with them: the WHOLE prior
+transcript, reloaded into context. That is exactly the per-turn cost a restart tool exists to cut -
+the whole point of restarting is a small, fresh context, not the old one reloaded under a new PID.
 
-- **Session ID, model, and permission mode are automatically restored** by `claude --resume
-  <session-id>` from a terminal, with documented exceptions (a retired/disallowed model; explicit
-  override flags) - the tool passes no flags for these unless the recorded state contradicts what a
-  bare resume would restore.
-- **`--mcp-config`, `--settings`, `--plugin-dir`, `--fallback-model`, and `--add-dir` are NOT
-  auto-restored.** If a lane's original launch used any of these, the state file must record them
-  (extending the schema in §1), and the tool re-passes them explicitly.
-- **Remote Control reconnects automatically on resume**, per `remote-control.md`: *"When you resume a
-  conversation with `claude --resume` or `claude --continue`, Claude Code reconnects to the Remote
-  Control session recorded in that conversation."* One documented failure mode: *"Another Claude Code
-  on this machine still has the session... Run `/remote-control` there to move it"* - the tool cannot
-  resolve that itself; it launches, and if RC didn't come back, that surfaces the same way it would
-  to a human doing this manually.
-- **The launch command:** `claude --resume <session_id> --name <name> "read <role> HANDOFF and
-  continue"`, run in the recorded `cwd`, in a new visible terminal window (platform-specific: this
-  needs a real terminal-launch mechanism per OS - Windows first, since that's this machine).
-- **No `--continue`**: the task specifies restarting a *specific* lane by its recorded session, not
-  "whatever was most recent in this directory" - `--resume <session_id>` is the correct, unambiguous
-  form.
+**The actual design: a genuinely fresh session, with continuity through HANDOFF alone.**
+
+- **`state.session_id` is used ONLY by `authorize::decide`'s identity check (§2)** - proving the pid
+  being killed really is the recorded lane, via a matching, recent transcript. It plays no part in
+  the relaunch command at all.
+- **Model and permission mode are NOT auto-restored on a fresh session** (that restoration is a
+  property of `--resume`/`--continue`, which this design no longer uses) - so the tool passes them
+  explicitly: `--model <state.model> --permission-mode <state.permission_mode>`, both recorded in the
+  state file by the lane's own hooks (§1).
+- **Remote Control does not "reconnect" either** - a fresh session has no prior RC record to
+  reconnect to; `remote-control.md`'s auto-reconnect-on-resume behaviour doesn't apply here, since
+  there is no resume. Instead: `--remote-control` is passed at launch when `state.remote_control` was
+  true, which starts a NEW RC session (documented as a real launch flag) - the property "RC was on"
+  carries over; the specific prior RC session's identity does not, and cannot, for a fresh session.
+- **`--mcp-config`, `--settings`, `--plugin-dir`, `--fallback-model`, `--add-dir`** are not carried
+  over by this tool at all (still not recorded in §1's schema) - documented here as NOT carried over,
+  rather than silently dropped without saying so, per this file's own §0 discipline.
+- **The launch command:** `claude --name <name> --model <state.model> --permission-mode
+  <state.permission_mode> [--remote-control] "read <role> HANDOFF and continue"`, run in the recorded
+  `cwd`. **No shell in the loop** - PM finding, 2026-09-18: an earlier draft's `cmd /C start "" claude
+  ...` put `role`/`name` (state-file content, not this host's own choice) through cmd.exe's own
+  parser, which a Rust `Command`'s argv-quoting does not protect against. Fixed two ways, not one:
+  `role` and `name` are validated against `^[A-Za-z0-9_-]{1,64}$` and refused otherwise (confirmed
+  live: `a&calc` as a name reaches `cmd.exe` and would execute `calc`), AND the launch now spawns
+  `claude.exe` directly with `CREATE_NEW_CONSOLE` (Windows) - a real argv array Windows'
+  `CreateProcess` never hands to a shell for re-parsing, giving the same visible new window without
+  cmd.exe touching any of it.
 
 ## 6. Bulletproof requirements (from the task, restated as testable properties)
 
 1. **Positive identification** — §2's four-part check, every time, no exceptions, including for
    self-restart (a lane still shouldn't be able to accidentally target a different process's PID
-   through a bug in its own state file).
+   through a bug in its own state file). **Extended (PM finding, 2026-09-18):** identification at
+   `decide()` time is not enough on its own - the pid could be recycled in the window between
+   deciding and the actual kill. The process's start time (and exe path, when both sides have one)
+   is recorded at `decide()` time and RE-READ, fresh, immediately before the real kill signal;
+   any mismatch refuses rather than kills.
 2. **Dry-run mode** — `--dry-run` performs every check, prints exactly what it would do (kill PID X,
-   wait, launch `claude --resume ...` in cwd Y), and does neither. **DECIDED (PM, 2026-09-18):**
+   wait, launch a fresh session in cwd Y), and does neither. **DECIDED (PM, 2026-09-18):**
    self-restart is real by default (the agent chose that boundary itself, restarting only its own
    process). Restarting a DIFFERENT lane is dry-run unless `--yes` is passed - and even with `--yes`,
    it still refuses unless that lane is idle (§1a's two-signal check) and its state file is fresh
