@@ -22,11 +22,21 @@ use std::time::{Duration, Instant, SystemTime};
 /// reads. Unknown fields are ignored by `serde_json`'s default behaviour -
 /// no `deny_unknown_fields` here, since a future Claude Code version adding
 /// fields must not break this parse.
+///
+/// ⚠️ REVISED (PM finding, 2026-09-18, third interactive retest): a real
+/// `SessionStart` payload does NOT include `permission_mode` - parsing
+/// failed with "missing field `permission_mode`" against live input, not a
+/// hypothetical. "Documented common field" is not the same claim as
+/// "present on every event, always" - hooks.md's own table never promised
+/// that. Only `hook_event_name`, `session_id`, and `cwd` are still required;
+/// everything else this struct reads is `Option<T>`, absent rather than
+/// guessed when an event's real payload doesn't include it.
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
+    pub hook_event_name: String,
     pub session_id: String,
     pub cwd: String,
-    pub permission_mode: String,
+    pub permission_mode: Option<String>,
     /// PM finding, 2026-09-18: not in the documented common-fields table for
     /// `PostModelSwitch` specifically, so this is read defensively as
     /// optional rather than assumed to exist under this exact name.
@@ -149,7 +159,14 @@ pub fn apply_event(
             cwd: input.cwd.clone(),
             name: existing.as_ref().and_then(|s| s.name.clone()),
             model: existing.as_ref().and_then(|s| s.model.clone()),
-            permission_mode: input.permission_mode.clone(),
+            // ⚠️ Prefer THIS event's own value; fall back to what a prior
+            // SessionStart already learned rather than losing it, but never
+            // invent one when neither source has it (PM: "don't invent a
+            // value" - RESTART-TOOL-DESIGN.md §10.4).
+            permission_mode: input
+                .permission_mode
+                .clone()
+                .or_else(|| existing.as_ref().and_then(|s| s.permission_mode.clone())),
             remote_control: existing.as_ref().map(|s| s.remote_control).unwrap_or(false),
             busy: false,
             subagents_running: 0,
@@ -337,10 +354,18 @@ mod tests {
 
     fn input(cwd: &str) -> HookInput {
         HookInput {
+            hook_event_name: "Test".to_string(),
             session_id: "s-123".to_string(),
             cwd: cwd.to_string(),
-            permission_mode: "prompting".to_string(),
+            permission_mode: Some("prompting".to_string()),
             model: None,
+        }
+    }
+
+    fn input_without_permission_mode(cwd: &str) -> HookInput {
+        HookInput {
+            permission_mode: None,
+            ..input(cwd)
         }
     }
 
@@ -483,6 +508,62 @@ mod tests {
         assert!(!state.busy);
         assert_eq!(state.subagents_running, 0);
         assert_eq!(state.no_background_shells, None);
+    }
+
+    #[test]
+    fn session_start_with_no_permission_mode_does_not_invent_one() {
+        // The exact real-world case, PM finding 2026-09-18: a live
+        // SessionStart payload had no permission_mode field at all.
+        let state = apply_event(
+            None,
+            "SessionStart",
+            &input_without_permission_mode("C:/Projects/OverMind"),
+            "overmind",
+            42,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            state.permission_mode, None,
+            "must be None, never a guessed default"
+        );
+    }
+
+    #[test]
+    fn session_start_preserves_a_previously_learned_permission_mode_across_a_resume() {
+        let mut prior =
+            apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now()).unwrap();
+        prior.permission_mode = Some("bypassPermissions".to_string());
+        let restarted = apply_event(
+            Some(prior),
+            "SessionStart",
+            &input_without_permission_mode("C:/x"),
+            "overmind",
+            2,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            restarted.permission_mode,
+            Some("bypassPermissions".to_string()),
+            "a later SessionStart missing the field must not erase what was already known"
+        );
+    }
+
+    /// ⚠️ THE REAL-WORLD FAILURE, REPRODUCED AS A PARSE, NOT JUST A STRUCT
+    /// LITERAL: a struct built by hand in Rust can't prove the JSON parser
+    /// itself tolerates a missing field the way the code above assumes.
+    #[test]
+    fn a_real_session_start_payload_missing_permission_mode_parses_cleanly() {
+        let json = r#"{
+            "hook_event_name": "SessionStart",
+            "session_id": "abc-123",
+            "cwd": "C:/Projects/OverMind"
+        }"#;
+        let parsed: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.permission_mode, None);
+        assert_eq!(parsed.model, None);
+        assert_eq!(parsed.hook_event_name, "SessionStart");
     }
 
     #[test]

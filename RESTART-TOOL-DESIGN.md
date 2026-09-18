@@ -41,8 +41,8 @@ snapshot fetched from outside.
   "pid": 48213,
   "cwd": "C:/Projects/OverMind",
   "name": "overmind",                    // session name, if set (--name / /rename)
-  "model": "claude-sonnet-5",
-  "permission_mode": "prompting",
+  "model": "claude-sonnet-5",            // absent (null) until a hook payload actually carries it - §10.3
+  "permission_mode": "prompting",        // absent (null) until a hook payload actually carries it - §10.3
   "remote_control": true,
   "busy": false,                         // see the event mapping below
   "subagents_running": 0,                // incremented on SubagentStart, decremented on SubagentStop
@@ -300,8 +300,27 @@ name already IS its role - which is most of them, so most lanes need no new sett
 ### 10.3 The hook command: `lane-restart state <event>`
 
 A subcommand of this same crate (`crates/lane-restart/src/lane_state_writer.rs`), not a separate
-script. Exec form (`args`, no shell): the event name is a literal argument, common hook input JSON
-comes on stdin, exactly as `hooks.md` documents.
+script. Common hook input JSON comes on stdin, exactly as `hooks.md` documents; the event name is
+passed on the command line (§10.4 - as a shell-form string, not `args`, per that section's own
+finding).
+
+⚠️ **REVISED (PM finding, 2026-09-18, third interactive retest): only `hook_event_name`,
+`session_id`, and `cwd` are required from that JSON - everything else is `Option<T>`, absent rather
+than guessed when missing.** A real `SessionStart` payload does not include `permission_mode` -
+parsing it as required failed against live input, not a hypothetical (`missing field
+'permission_mode'`). "In the documented common-fields table" was never the same claim as "present on
+every event, always"; `hooks.md`'s own table doesn't promise that, and this design's first draft
+read it as if it did. `permission_mode` now follows the same rule `model` already did: `None` until a
+real payload carries it, preserved across a later `SessionStart` that doesn't repeat it, never
+invented. The relaunch command (§5) omits `--permission-mode` when it's `None`, the same way it
+already omits `--model`.
+
+⚠️ **REVISED (PM finding, 2026-09-18): the acceptance check for this whole design is a real state
+WRITE, not just the parent-chain diagnostic.** §11.1's first retest confirmed the parent chain
+matched what was recorded, and only THEN discovered that no `.lane-state/*.json` file existed at
+all - the diagnostic checked the ancestry, never checked that the intended side effect actually
+happened. Any future retest of this hook (this one, or a different one) must confirm the state file
+is written and updated correctly, not stop at confirming the process ancestry looks right.
 
 - **Role**: `LANE_ROLE` env var if set, else `cwd`'s lowercased leaf directory name (§10.2, now with
   the PM's override).
@@ -346,8 +365,21 @@ settings separately, for no benefit this design needs. Still CireSnave's call.
 
 The binary itself needs to exist at one fixed, absolute path every lane can reach (built once, not
 per-project) - proposed as `C:/Projects/.claude-hooks/lane-restart.exe`, a sibling of `.lane-state/`
-for the same reason: portfolio-wide runtime tooling, kept out of every git repo. Exec form (`args`)
-is used throughout, so no shell ever parses anything.
+for the same reason: portfolio-wide runtime tooling, kept out of every git repo.
+
+⚠️ **REVISED (PM finding, 2026-09-18): exec form's `args` are not passed - confirmed live, not
+assumed.** The exec-form block below (previously `"args": ["state", "SessionStart"]`) wrote NO state
+file in the real interactive retest. Reproduced directly: running `lane-restart.exe` with zero
+arguments gives the identical failure - it falls into the restart-CLI path, prints `--role <name> is
+required`, exits 1 - matching exactly what the hook produced. **Conclusion: Claude Code does not
+deliver `args` to this hook's command process.** A non-zero hook exit is non-blocking, so this failed
+completely silently; no state file, no error visible anywhere short of checking for the file's
+existence. **Fixed: use SHELL form - one command string, no `args` key** - the shell splits it into
+argv itself, which is what actually reaches the binary. This is safe here specifically because
+nothing lane-controlled ever goes into this string: every token is a literal this design authored,
+never data from a hook's own JSON input or a lane's state file - the metacharacter-injection risk
+`main.rs`'s relaunch command guards against (§5) doesn't apply to a string with no runtime content at
+all.
 
 ⚠️ **REVISED (PM finding, 2026-09-18): `~/.claude/settings.json` already has a `hooks` key.**
 Confirmed by reading the file directly, not assumed: it holds a `SessionStart` entry running
@@ -366,22 +398,22 @@ already had something (`SessionStart`) and the new entries alone for the rest:
         ]
       },
       { "hooks": [{ "type": "command",
-        "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "SessionStart"] }] }
+        "command": "C:/Projects/.claude-hooks/lane-restart.exe state SessionStart" }] }
     ],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "UserPromptSubmit"] }] }],
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state UserPromptSubmit" }] }],
     "PreToolUse": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "PreToolUse"] }] }],
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state PreToolUse" }] }],
     "Stop": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "Stop"] }] }],
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state Stop" }] }],
     "SubagentStart": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "SubagentStart"] }] }],
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state SubagentStart" }] }],
     "SubagentStop": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "SubagentStop"] }] }],
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state SubagentStop" }] }],
     "PostModelSwitch": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "PostModelSwitch"] }] }],
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state PostModelSwitch" }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command",
-      "command": "C:/Projects/.claude-hooks/lane-restart.exe", "args": ["state", "SessionEnd"] }] }]
+      "command": "C:/Projects/.claude-hooks/lane-restart.exe state SessionEnd" }] }]
   }
 }
 ```
@@ -417,22 +449,27 @@ Per this section's own step 4, the install was stopped and the diagnostic hook r
 any further.
 
 **Fixed in §10.3**: `claude_parent_pid` now walks past known shell layers instead of requiring a
-single direct hop. **Still open**: the interactive diagnostic needs re-running with the exact command
-string §10.4 installs (exec form) to confirm the fix, not just the recorded chain shape, is right -
-this step isn't complete until that re-run passes.
+single direct hop.
+
+**REVISED again (PM finding, 2026-09-18, second retest): the exec-form command §10.4 originally
+proposed doesn't work at all** - Claude Code does not deliver `args` to a command hook, confirmed
+live (the exec-form hook wrote no state file; running the binary with zero arguments reproduces the
+identical failure). §10.4 now uses shell form (one command string, no `args`) instead. **Also found
+by this same retest**: the earlier "pass" only checked the parent chain, never checked that a state
+file actually got written - §10.3 now records that the real acceptance check is a state WRITE, not
+the diagnostic alone. Both fixes need their own re-run before this step is complete.
 
 1. Pick the first lane to receive the hooks (recommend: whichever of OverMind/Synapse/the PM is
    least busy at the time).
 2. Install *only* the diagnostic parent-chain check (§10.3's verification script, not the real
    `lane-restart state` hooks yet) on that ONE lane's own settings, for a single event
-   (`SessionStart` is enough) - using the same exec-form command shape §10.4 installs, not a
-   shell-form stand-in, since the two may not behave identically.
+   (`SessionStart` is enough) - using the same SHELL-form command string §10.4 now installs (not the
+   exec-form array that was already shown not to work).
 3. Restart that lane normally (however it's normally started/reconnected, Remote Control included)
-   and confirm `claude_parent_pid`'s fixed logic (walk-past-shells, refuse-on-stranger) actually
-   resolves to the real `claude.exe` pid for this exact chain, not just that the chain matches what
-   was recorded from the earlier run.
-4. Remove the diagnostic hook. Only if step 3 confirms the fix works for real does step 11.2 proceed
-   on that lane.
+   and confirm BOTH: `claude_parent_pid`'s fixed logic (walk-past-shells, refuse-on-stranger)
+   resolves to the real `claude.exe` pid, AND a real `.lane-state/<role>.json` file is actually
+   written with that pid in it - the chain alone is not sufficient evidence, per §10.3.
+4. Remove the diagnostic hook. Only if step 3 confirms both does step 11.2 proceed on that lane.
 
 ### 11.2 Building and placing the binary
 

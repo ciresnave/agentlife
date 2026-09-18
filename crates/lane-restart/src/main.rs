@@ -163,14 +163,18 @@ fn main() -> ExitCode {
                 Some(m) => format!(" --model {m}"),
                 None => String::new(),
             };
+            let permission_mode_flag = match &plan.state.permission_mode {
+                Some(m) => format!(" --permission-mode {m}"),
+                None => String::new(),
+            };
             println!(
                 "lane-restart: DRY RUN - would kill pid {} and relaunch a FRESH session: \
-                 `claude --name {}{} --permission-mode {}{} \"read {} HANDOFF and \
+                 `claude --name {}{}{}{} \"read {} HANDOFF and \
                  continue\"` in {}",
                 plan.state.pid,
                 plan.state.name.as_deref().unwrap_or(&plan.state.role),
                 model_flag,
-                plan.state.permission_mode,
+                permission_mode_flag,
                 if plan.state.remote_control {
                     " --remote-control"
                 } else {
@@ -311,7 +315,9 @@ mod relaunch {
         if let Some(model) = &state.model {
             cmd.args(["--model", model]);
         }
-        cmd.args(["--permission-mode", &state.permission_mode]);
+        if let Some(permission_mode) = &state.permission_mode {
+            cmd.args(["--permission-mode", permission_mode]);
+        }
         if state.remote_control {
             cmd.arg("--remote-control");
         }
@@ -412,7 +418,7 @@ mod relaunch {
                 cwd: "C:/x".to_string(),
                 name: None,
                 model: Some("claude-sonnet-5".to_string()),
-                permission_mode: "prompting".to_string(),
+                permission_mode: Some("prompting".to_string()),
                 remote_control: false,
                 busy: false,
                 subagents_running: 0,

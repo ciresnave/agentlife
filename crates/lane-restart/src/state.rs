@@ -25,7 +25,13 @@ pub struct LaneState {
     /// (RESTART-TOOL-DESIGN.md §10.1). A relaunch omits `--model` entirely
     /// when this is `None`, rather than guessing.
     pub model: Option<String>,
-    pub permission_mode: String,
+    /// `None` until a hook payload that actually carries it arrives -
+    /// PM finding, 2026-09-18: a real `SessionStart` payload does NOT
+    /// include `permission_mode` (parsing on it as required failed against
+    /// live input). A relaunch omits `--permission-mode` entirely when this
+    /// is `None`, the same way `model` is omitted - the new session gets
+    /// Claude Code's own default rather than a guessed value.
+    pub permission_mode: Option<String>,
     pub remote_control: bool,
     pub busy: bool,
     pub subagents_running: u32,
