@@ -307,6 +307,19 @@ comes on stdin, exactly as `hooks.md` documents.
   the PM's override).
 - **PID**: this hook process's own parent, looked up via `sysinfo` (the same crate `facts.rs`
   already depends on) - refused, not guessed, if that parent isn't named `claude`/`claude.exe`.
+  ⚠️ **Empirically verified, not assumed (PM request, 2026-09-18):** the worry was that Claude Code
+  might invoke a hook command through an intermediate shell on Windows (Git Bash or `cmd.exe`), making
+  the DIRECT parent `bash.exe`/`cmd.exe` instead and failing this check on every real lane. Tested
+  live with a throwaway hook and an ephemeral `claude -p --settings <scratch file>` session (nothing
+  installed, nothing persisted) that logged its own process's parent chain, in both hook forms:
+  - **Shell form** (`"shell": "powershell"`, no `args`): `pwsh.exe <- claude.exe <- ...`
+  - **Exec form** (`"command": "pwsh.exe", "args": [...]`) - the form this proposal actually uses:
+    `pwsh.exe <- claude.exe <- ...`
+  Both runs: the hook process's direct parent is `claude.exe`, no shell layer in between, regardless
+  of what shells sit further up the ancestry (this test itself ran inside several `bash.exe` layers,
+  which appear ABOVE `claude.exe` in the chain - irrelevant, since only the DIRECT parent is checked).
+  **The assumption holds on this box.** Re-verify if a lane is ever launched by a materially different
+  mechanism (a service, a different terminal host) before trusting this on that path too.
 - **Concurrency**: a create-new-file lock (`<role>.lock`, atomic at the OS level) held for the whole
   read-modify-write cycle; a lock older than 5s is treated as abandoned and reclaimed rather than
   wedging every future hook forever.
