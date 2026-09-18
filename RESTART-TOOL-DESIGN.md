@@ -378,3 +378,75 @@ not part of this settings.json block, which is identical across every lane.
   exactly how.
 - A fix for the two gaps in §10.1 - they're recorded as known, current limits of what a hook can
   report, not solved by guessing at data hooks don't document providing.
+
+## 11. Install proposal, for CireSnave
+
+**Still nothing installed.** This is the concrete plan the PM asked for, to put on his board -
+sequenced so nothing acts on a real lane before that lane's own behaviour is checked, and reversible
+at every step.
+
+### 11.1 Step 1 (before anything else): verify interactively, not just headless
+
+§10.3's parent-process check was verified live, but only against a **headless** `claude -p` session
+(PM finding, 2026-09-18). Every real lane runs **interactive**, several reached over **Remote
+Control** - a materially different launch path that hasn't been checked. Before hooks go on any real
+lane:
+
+1. Pick the first lane to receive the hooks (recommend: whichever of OverMind/Synapse/the PM is
+   least busy at the time).
+2. Install *only* the diagnostic parent-chain check (§10.3's verification script, not the real
+   `lane-restart state` hooks yet) on that ONE lane's own settings, for a single event
+   (`SessionStart` is enough).
+3. Restart that lane normally (however it's normally started/reconnected, Remote Control included)
+   and confirm the logged parent chain still shows the hook's direct parent as `claude`/`claude.exe`
+   - not a shell, not something Remote Control's own supervisor interposes.
+4. Remove the diagnostic hook. Only if step 3 confirms the same result as the headless test does step
+   11.2 proceed on that lane.
+
+### 11.2 Building and placing the binary
+
+```
+cd C:/Projects/OverMind
+cargo build --release -p lane-restart
+```
+
+Copy `target/release/lane-restart.exe` to `C:/Projects/.claude-hooks/lane-restart.exe` - **the
+release binary, not `target/debug`** (PM finding, 2026-09-18: debug builds are slower and not what a
+latency-sensitive hook, firing on every tool call, should run). Re-run this copy step after any
+future change to the crate; nothing here auto-updates it.
+
+### 11.3 `LANE_ROLE` per lane
+
+Set once, wherever each lane's own launch environment already lives (its own shortcut, launch script,
+or terminal profile - not part of the shared `settings.json` block, which stays identical across
+every lane):
+
+| Lane | `cwd` | `LANE_ROLE` needed? | Value |
+|---|---|---|---|
+| OverMind | `C:/Projects/OverMind` | No - cwd leaf already gives `overmind` | (unset is fine) |
+| Synapse | `C:/Projects/synapse` | No - cwd leaf already gives `synapse` | (unset is fine) |
+| the PM | `C:/Projects` | **Yes** - cwd leaf gives `projects`, the bug this override exists for | `pm` |
+
+Any future lane whose `cwd` doesn't already match its intended role name needs the same explicit
+override; every lane whose directory name already IS its role needs nothing.
+
+### 11.4 The `settings.json` block
+
+Exactly §10.4's block, user-level (`~/.claude/settings.json`), unchanged from that section - not
+repeated here to avoid two copies drifting.
+
+### 11.5 Rollback
+
+**Remove the `hooks` key (or just its eight event entries) from `settings.json`.** Hooks simply stop
+firing; `.lane-state/*.json` files stop updating and, per §2's four-part identification, quickly read
+as stale and get refused by `lane-restart` rather than trusted - the tool fails closed on its own, not
+because rollback does anything special. No lane-side change is needed to roll back; the binary and
+`.lane-state/` directory can be left in place inert, or deleted, either is safe.
+
+### 11.6 Sequencing
+
+§11.1 (one lane, diagnostic only) → §11.2 (build once) → §11.3 (`LANE_ROLE` for that one lane, if it
+needs one) → §11.4 (install the real hooks for that one lane only, e.g. via that lane's own
+project-level settings first if a narrower rollout than user-level is wanted) → observe `.lane-state`
+populate correctly across a few real turns → only then widen to every lane, and only then does anyone
+attempt a real `--self` or PM-initiated restart for the first time.
