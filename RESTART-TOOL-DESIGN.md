@@ -300,11 +300,20 @@ turn, so it's kept - and moving to a native binary is what makes keeping it chea
   original design. Fixed by deriving it (and, as a fallback source, `permission_mode`) from the
   `claude` process's own launch command line, read via `sysinfo::Process::cmd()` against the pid
   `claude_parent_pid` already verified (§10.3) - never against an unverified process. The pure parser
-  (`parse_claude_cli_flags`) recognizes `--remote-control`, `--permission-mode <value>`, and
-  `--dangerously-skip-permissions` (mapped to `bypassPermissions`, `sessions.md`'s own name for that
-  mode). Unlike `model`/`permission_mode`, `remote_control` is **never preserved from a prior
-  session's state** - it is read fresh from every launch's own command line, since a stale carried-
-  forward value would be exactly as wrong as inventing one.
+  (`parse_claude_cli_flags`) recognizes `--remote-control`, `--permission-mode <value>` and
+  `--permission-mode=<value>` both, and `--dangerously-skip-permissions` (mapped to
+  `bypassPermissions`, `sessions.md`'s own name for that mode). Unlike `model`/`permission_mode`,
+  `remote_control` is **never preserved from a prior session's state** - it is read fresh from every
+  launch's own command line, since a stale carried-forward value would be exactly as wrong as
+  inventing one.
+- ⚠️ **KNOWN LIMIT, low priority (PM finding, 2026-09-18, post-merge gate read of PR #61):**
+  CireSnave's own `settings.json` carries `remoteControlAtStartup: true`, so a lane can have Remote
+  Control with no `--remote-control` flag on its launch command line at all - this field then reads
+  `remote_control: false` even though the session genuinely has it. Not wrong *in practice*: a
+  relaunch picks Remote Control back up from that same setting regardless of what this field says.
+  But the state file itself doesn't prove which is true. **Also fixed in the same gate read: the
+  equals form (`--permission-mode=value`) wasn't being parsed at all** - only the space-separated
+  form was; both now parse identically.
 
 ### 10.2 Role: `LANE_ROLE` override, falling back to the `cwd` leaf
 

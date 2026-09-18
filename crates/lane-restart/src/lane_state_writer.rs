@@ -133,6 +133,15 @@ pub trait ParentProcess {
 /// because no `hooks.md` field reports it at all. Read from the pid
 /// `claude_parent_pid` already verified, not guessed and not left as
 /// another "unknown, treated as safe" gap.
+///
+/// ⚠️ KNOWN LIMIT (PM finding, 2026-09-18, post-merge gate read): CireSnave's
+/// own settings carry `remoteControlAtStartup: true`, so a lane can get
+/// Remote Control with no `--remote-control` flag on its command line at
+/// all - `remote_control` then reads `false` here even though the session
+/// genuinely has it. Not wrong *in practice*: a relaunch picks Remote
+/// Control back up from that same setting regardless of what this field
+/// says. But the state file itself doesn't prove it either way. Low
+/// priority - RESTART-TOOL-DESIGN.md §10.1.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaudeCliFlags {
     pub remote_control: bool,
@@ -142,11 +151,17 @@ pub struct ClaudeCliFlags {
 /// Pure - given a command line, no I/O. `--dangerously-skip-permissions`
 /// maps to Claude Code's own name for that mode (`bypassPermissions`,
 /// confirmed in `sessions.md`'s permission-mode table), not a guessed
-/// string.
+/// string. Accepts `--permission-mode value` and `--permission-mode=value`
+/// both (PM finding, 2026-09-18, post-merge gate read: the equals form
+/// wasn't parsed).
 pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
     let mut flags = ClaudeCliFlags::default();
     let mut iter = cmdline.iter();
     while let Some(arg) = iter.next() {
+        if let Some(v) = arg.strip_prefix("--permission-mode=") {
+            flags.permission_mode = Some(v.to_string());
+            continue;
+        }
         match arg.as_str() {
             "--remote-control" => flags.remote_control = true,
             "--dangerously-skip-permissions" => {
@@ -619,6 +634,18 @@ mod tests {
                 remote_control: false,
                 permission_mode: Some("prompting".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn permission_mode_equals_value_form_is_extracted_too() {
+        // PM finding, 2026-09-18 (post-merge, PR #61's own gate read): the
+        // space-separated form isn't the only one Claude Code's own CLI
+        // accepts - `--permission-mode=value` must parse the same way.
+        let cmdline = strs(&["claude.exe", "--permission-mode=bypassPermissions"]);
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline).permission_mode,
+            Some("bypassPermissions".to_string())
         );
     }
 
