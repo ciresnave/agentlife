@@ -287,6 +287,24 @@ turn, so it's kept - and moving to a native binary is what makes keeping it chea
   state file starts **unset** for a session that never explicitly switches models, until proven
   otherwise. **Flagged, not worked around** - a wrong guess here would feed a wrong `--model` into a
   future relaunch.
+- ⚠️ **REVISED (PM finding, 2026-09-18, fourth interactive retest): `model` IS present in a real
+  `SessionStart` payload after all** - the key list logged from a live interactive Remote Control
+  session was `[cwd, hook_event_name, model, scratchpad_dir, session_id, source, transcript_path]`,
+  with `permission_mode` absent (consistent with §10.3's third-retest finding) but `model` present.
+  Recorded here exactly as measured, at `C:/Projects/.lane-state/diag-parent.log`,
+  18:28:21Z. **Only the key names were logged, not the value's shape** - `lane_state_writer.rs`'s
+  `ModelField` enum accepts either a plain string or `{id: string}` defensively, marked NOT CONFIRMED
+  in its own doc comment until a real capture pins the shape down.
+- ⚠️ **Same retest: no hook field carries `remote_control` at all**, at `SessionStart` or any other
+  event - a session launched with `--remote-control` still recorded `remote_control: false` under the
+  original design. Fixed by deriving it (and, as a fallback source, `permission_mode`) from the
+  `claude` process's own launch command line, read via `sysinfo::Process::cmd()` against the pid
+  `claude_parent_pid` already verified (§10.3) - never against an unverified process. The pure parser
+  (`parse_claude_cli_flags`) recognizes `--remote-control`, `--permission-mode <value>`, and
+  `--dangerously-skip-permissions` (mapped to `bypassPermissions`, `sessions.md`'s own name for that
+  mode). Unlike `model`/`permission_mode`, `remote_control` is **never preserved from a prior
+  session's state** - it is read fresh from every launch's own command line, since a stale carried-
+  forward value would be exactly as wrong as inventing one.
 
 ### 10.2 Role: `LANE_ROLE` override, falling back to the `cwd` leaf
 

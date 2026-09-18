@@ -18,6 +18,31 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+/// PM finding, 2026-09-18 (fourth interactive retest): `model` IS present in
+/// a real `SessionStart` payload's key list - but only the key names were
+/// logged, not the value's shape. ⚠️ NOT CONFIRMED: this crate's own headless
+/// probe (an ephemeral `claude -p` session) doesn't include `model` in
+/// `SessionStart` at all, the same headless/interactive gap §10.3 already
+/// found once - so the shape below is a defensive guess, not a verified
+/// fact, until a real interactive capture confirms it. Accepts either a
+/// plain string or an object carrying an `id` field, so a future confirmed
+/// shape doesn't need a schema-breaking follow-up either way.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ModelField {
+    Plain(String),
+    WithId { id: String },
+}
+
+impl ModelField {
+    fn into_string(self) -> String {
+        match self {
+            ModelField::Plain(s) => s,
+            ModelField::WithId { id } => id,
+        }
+    }
+}
+
 /// The subset of hooks.md's documented common input fields this command
 /// reads. Unknown fields are ignored by `serde_json`'s default behaviour -
 /// no `deny_unknown_fields` here, since a future Claude Code version adding
@@ -37,10 +62,7 @@ pub struct HookInput {
     pub session_id: String,
     pub cwd: String,
     pub permission_mode: Option<String>,
-    /// PM finding, 2026-09-18: not in the documented common-fields table for
-    /// `PostModelSwitch` specifically, so this is read defensively as
-    /// optional rather than assumed to exist under this exact name.
-    pub model: Option<String>,
+    pub model: Option<ModelField>,
 }
 
 /// RESTART-TOOL-DESIGN.md §10.2, PM finding 2026-09-18: the cwd-leaf default
@@ -98,6 +120,47 @@ impl std::fmt::Display for PidError {
 pub trait ParentProcess {
     /// `(parent_pid, parent_image_name)` of the process identified by `pid`.
     fn parent_of(&self, pid: u32) -> Option<(u32, String)>;
+
+    /// The full argv of the process identified by `pid`, if it could be
+    /// read. Used only against the `claude` pid `claude_parent_pid` already
+    /// found - never against an unverified process.
+    fn cmdline_of(&self, pid: u32) -> Option<Vec<String>>;
+}
+
+/// What `claude`'s own launch command line says, that no hook field
+/// carries. PM finding, 2026-09-18 (fourth interactive retest): a session
+/// launched with `--remote-control` still recorded `remote_control: false`,
+/// because no `hooks.md` field reports it at all. Read from the pid
+/// `claude_parent_pid` already verified, not guessed and not left as
+/// another "unknown, treated as safe" gap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaudeCliFlags {
+    pub remote_control: bool,
+    pub permission_mode: Option<String>,
+}
+
+/// Pure - given a command line, no I/O. `--dangerously-skip-permissions`
+/// maps to Claude Code's own name for that mode (`bypassPermissions`,
+/// confirmed in `sessions.md`'s permission-mode table), not a guessed
+/// string.
+pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
+    let mut flags = ClaudeCliFlags::default();
+    let mut iter = cmdline.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--remote-control" => flags.remote_control = true,
+            "--dangerously-skip-permissions" => {
+                flags.permission_mode = Some("bypassPermissions".to_string())
+            }
+            "--permission-mode" => {
+                if let Some(v) = iter.next() {
+                    flags.permission_mode = Some(v.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    flags
 }
 
 /// Image names (lowercased, no `.exe`) a hop is allowed to pass through
@@ -149,6 +212,7 @@ pub fn apply_event(
     input: &HookInput,
     role: &str,
     pid: u32,
+    cli_flags: &ClaudeCliFlags,
     now: chrono::DateTime<Utc>,
 ) -> Option<LaneState> {
     if event == "SessionStart" {
@@ -158,16 +222,31 @@ pub fn apply_event(
             pid,
             cwd: input.cwd.clone(),
             name: existing.as_ref().and_then(|s| s.name.clone()),
-            model: existing.as_ref().and_then(|s| s.model.clone()),
-            // ⚠️ Prefer THIS event's own value; fall back to what a prior
-            // SessionStart already learned rather than losing it, but never
-            // invent one when neither source has it (PM: "don't invent a
-            // value" - RESTART-TOOL-DESIGN.md §10.4).
+            // ⚠️ Prefer THIS event's own value (PM finding, 2026-09-18: a
+            // real SessionStart DOES carry `model`); fall back to what a
+            // prior SessionStart already learned, never invent one when
+            // neither source has it.
+            model: input
+                .model
+                .clone()
+                .map(ModelField::into_string)
+                .or_else(|| existing.as_ref().and_then(|s| s.model.clone())),
+            // Prefer the JSON field if a future Claude Code version ever
+            // sends one; then the launch command line's own flag; then
+            // whatever an earlier SessionStart already learned. Never
+            // invent one when none of the three has it (PM: "don't invent
+            // a value" - RESTART-TOOL-DESIGN.md §10.4).
             permission_mode: input
                 .permission_mode
                 .clone()
+                .or_else(|| cli_flags.permission_mode.clone())
                 .or_else(|| existing.as_ref().and_then(|s| s.permission_mode.clone())),
-            remote_control: existing.as_ref().map(|s| s.remote_control).unwrap_or(false),
+            // ⚠️ Always the CLI flags read fresh from THIS launch's own
+            // command line, never preserved from a prior state - PM
+            // finding, 2026-09-18: no hook field carries this at all, and a
+            // stale carried-forward value would be exactly as wrong as
+            // inventing one if this launch's real flags disagree with it.
+            remote_control: cli_flags.remote_control,
             busy: false,
             subagents_running: 0,
             no_background_shells: None,
@@ -189,7 +268,7 @@ pub fn apply_event(
         "SubagentStop" => state.subagents_running = state.subagents_running.saturating_sub(1),
         "PostModelSwitch" => {
             if let Some(m) = &input.model {
-                state.model = Some(m.clone());
+                state.model = Some(m.clone().into_string());
             }
         }
         _ => {}
@@ -312,7 +391,14 @@ pub fn run(
 
     let existing = crate::state::load(state_dir, &role).ok();
     let pid = claude_parent_pid(my_pid, parent_lookup).map_err(|e| e.to_string())?;
-    let next = apply_event(existing, event, &input, &role, pid, Utc::now());
+    // ⚠️ Only ever read against the pid `claude_parent_pid` already
+    // verified - never an unvetted process. Missing/unreadable cmdline is
+    // "nothing detected", not a hard failure of the whole hook.
+    let cli_flags = parent_lookup
+        .cmdline_of(pid)
+        .map(|cmd| parse_claude_cli_flags(&cmd))
+        .unwrap_or_default();
+    let next = apply_event(existing, event, &input, &role, pid, &cli_flags, Utc::now());
 
     let result = match next {
         Some(state) => write_atomic(&path, &state).map_err(|e| e.to_string()),
@@ -344,6 +430,20 @@ impl ParentProcess for RealParentProcess {
             parent_pid.as_u32(),
             parent.name().to_string_lossy().to_string(),
         ))
+    }
+
+    fn cmdline_of(&self, pid: u32) -> Option<Vec<String>> {
+        use sysinfo::{Pid, System};
+        let mut sys = System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let process = sys.process(Pid::from_u32(pid))?;
+        Some(
+            process
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect(),
+        )
     }
 }
 
@@ -412,6 +512,9 @@ mod tests {
     impl ParentProcess for FakeAncestry {
         fn parent_of(&self, pid: u32) -> Option<(u32, String)> {
             self.0.get(&pid).cloned()
+        }
+        fn cmdline_of(&self, _pid: u32) -> Option<Vec<String>> {
+            None
         }
     }
 
@@ -486,6 +589,77 @@ mod tests {
         ));
     }
 
+    // -- parse_claude_cli_flags ------------------------------------------------ //
+    // PM finding, 2026-09-18 (fourth interactive retest): no hook field
+    // carries `remote_control`, and `permission_mode` isn't reliably present
+    // either - both are read from the launch command line instead.
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn remote_control_flag_is_detected() {
+        let cmdline = strs(&["claude.exe", "--remote-control"]);
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline),
+            ClaudeCliFlags {
+                remote_control: true,
+                permission_mode: None,
+            }
+        );
+    }
+
+    #[test]
+    fn permission_mode_value_is_extracted() {
+        let cmdline = strs(&["claude.exe", "--permission-mode", "prompting"]);
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline),
+            ClaudeCliFlags {
+                remote_control: false,
+                permission_mode: Some("prompting".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn dangerously_skip_permissions_maps_to_bypass_permissions() {
+        let cmdline = strs(&["claude.exe", "--dangerously-skip-permissions"]);
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline).permission_mode,
+            Some("bypassPermissions".to_string())
+        );
+    }
+
+    #[test]
+    fn no_relevant_flags_leaves_both_fields_at_their_defaults() {
+        let cmdline = strs(&["claude.exe", "--name", "overmind"]);
+        assert_eq!(parse_claude_cli_flags(&cmdline), ClaudeCliFlags::default());
+    }
+
+    #[test]
+    fn flags_combine() {
+        let cmdline = strs(&[
+            "claude.exe",
+            "--remote-control",
+            "--permission-mode",
+            "bypassPermissions",
+        ]);
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline),
+            ClaudeCliFlags {
+                remote_control: true,
+                permission_mode: Some("bypassPermissions".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_trailing_permission_mode_flag_with_no_value_is_ignored_not_a_panic() {
+        let cmdline = strs(&["claude.exe", "--permission-mode"]);
+        assert_eq!(parse_claude_cli_flags(&cmdline), ClaudeCliFlags::default());
+    }
+
     // -- apply_event ---------------------------------------------------------- //
 
     fn now() -> chrono::DateTime<Utc> {
@@ -500,6 +674,7 @@ mod tests {
             &input("C:/Projects/OverMind"),
             "overmind",
             42,
+            &ClaudeCliFlags::default(),
             now(),
         )
         .unwrap();
@@ -520,6 +695,7 @@ mod tests {
             &input_without_permission_mode("C:/Projects/OverMind"),
             "overmind",
             42,
+            &ClaudeCliFlags::default(),
             now(),
         )
         .unwrap();
@@ -531,8 +707,16 @@ mod tests {
 
     #[test]
     fn session_start_preserves_a_previously_learned_permission_mode_across_a_resume() {
-        let mut prior =
-            apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now()).unwrap();
+        let mut prior = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         prior.permission_mode = Some("bypassPermissions".to_string());
         let restarted = apply_event(
             Some(prior),
@@ -540,6 +724,7 @@ mod tests {
             &input_without_permission_mode("C:/x"),
             "overmind",
             2,
+            &ClaudeCliFlags::default(),
             now(),
         )
         .unwrap();
@@ -568,8 +753,16 @@ mod tests {
 
     #[test]
     fn session_start_preserves_a_previously_learned_model_across_a_resume() {
-        let prior =
-            apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now()).unwrap();
+        let prior = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         let mut prior = prior;
         prior.model = Some("claude-opus-5".to_string());
         let restarted = apply_event(
@@ -578,6 +771,7 @@ mod tests {
             &input("C:/x"),
             "overmind",
             2,
+            &ClaudeCliFlags::default(),
             now(),
         )
         .unwrap();
@@ -585,10 +779,163 @@ mod tests {
     }
 
     #[test]
-    fn session_end_deletes_the_state_by_returning_none() {
-        let existing = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
+    fn session_start_reads_model_from_a_plain_string_input_field() {
+        let mut with_model = input("C:/x");
+        with_model.model = Some(ModelField::Plain("claude-sonnet-5".to_string()));
+        let state = apply_event(
+            None,
+            "SessionStart",
+            &with_model,
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(state.model, Some("claude-sonnet-5".to_string()));
+    }
+
+    #[test]
+    fn session_start_reads_model_from_an_object_with_id_input_field() {
+        // ⚠️ NOT CONFIRMED (see ModelField's own doc comment): the real shape
+        // is still unverified, so both plausible shapes must parse.
+        let mut with_model = input("C:/x");
+        with_model.model = Some(ModelField::WithId {
+            id: "claude-sonnet-5".to_string(),
+        });
+        let state = apply_event(
+            None,
+            "SessionStart",
+            &with_model,
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(state.model, Some("claude-sonnet-5".to_string()));
+    }
+
+    #[test]
+    fn session_start_falls_back_to_cli_permission_mode_when_the_field_is_absent() {
+        let cli_flags = ClaudeCliFlags {
+            remote_control: false,
+            permission_mode: Some("bypassPermissions".to_string()),
+        };
+        let state = apply_event(
+            None,
+            "SessionStart",
+            &input_without_permission_mode("C:/x"),
+            "overmind",
+            1,
+            &cli_flags,
+            now(),
+        )
+        .unwrap();
         assert_eq!(
-            apply_event(existing, "SessionEnd", &input("C:/x"), "overmind", 1, now()),
+            state.permission_mode,
+            Some("bypassPermissions".to_string()),
+            "the launch command line is the fallback source, not just a JSON field"
+        );
+    }
+
+    #[test]
+    fn session_start_prefers_the_input_field_over_the_cli_flag_when_both_are_present() {
+        let cli_flags = ClaudeCliFlags {
+            remote_control: false,
+            permission_mode: Some("bypassPermissions".to_string()),
+        };
+        // `input()` carries permission_mode: Some("prompting").
+        let state = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &cli_flags,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(state.permission_mode, Some("prompting".to_string()));
+    }
+
+    #[test]
+    fn session_start_sets_remote_control_fresh_from_this_launchs_own_cli_flags() {
+        let cli_flags = ClaudeCliFlags {
+            remote_control: true,
+            permission_mode: None,
+        };
+        let state = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &cli_flags,
+            now(),
+        )
+        .unwrap();
+        assert!(state.remote_control);
+    }
+
+    #[test]
+    fn session_start_never_preserves_remote_control_from_a_prior_launch() {
+        // ⚠️ Unlike model/permission_mode, remote_control must NOT carry
+        // forward - a stale true from a prior launch would be exactly as
+        // wrong as a stale false, since no hook field confirms either way.
+        let with_remote_control = ClaudeCliFlags {
+            remote_control: true,
+            permission_mode: None,
+        };
+        let prior = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &with_remote_control,
+            now(),
+        )
+        .unwrap();
+        assert!(prior.remote_control);
+
+        let restarted = apply_event(
+            Some(prior),
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            2,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            !restarted.remote_control,
+            "this launch's own (default, false) cli_flags must win, not the prior state"
+        );
+    }
+
+    #[test]
+    fn session_end_deletes_the_state_by_returning_none() {
+        let existing = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        assert_eq!(
+            apply_event(
+                existing,
+                "SessionEnd",
+                &input("C:/x"),
+                "overmind",
+                1,
+                &ClaudeCliFlags::default(),
+                now()
+            ),
             None
         );
     }
@@ -596,7 +943,15 @@ mod tests {
     #[test]
     fn an_event_with_no_prior_session_start_does_nothing() {
         assert_eq!(
-            apply_event(None, "Stop", &input("C:/x"), "overmind", 1, now()),
+            apply_event(
+                None,
+                "Stop",
+                &input("C:/x"),
+                "overmind",
+                1,
+                &ClaudeCliFlags::default(),
+                now()
+            ),
             None
         );
     }
@@ -604,25 +959,92 @@ mod tests {
     #[test]
     fn user_prompt_submit_and_pre_tool_use_both_set_busy() {
         for event in ["UserPromptSubmit", "PreToolUse"] {
-            let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
-            let s = apply_event(s, event, &input("C:/x"), "overmind", 1, now()).unwrap();
+            let s = apply_event(
+                None,
+                "SessionStart",
+                &input("C:/x"),
+                "overmind",
+                1,
+                &ClaudeCliFlags::default(),
+                now(),
+            );
+            let s = apply_event(
+                s,
+                event,
+                &input("C:/x"),
+                "overmind",
+                1,
+                &ClaudeCliFlags::default(),
+                now(),
+            )
+            .unwrap();
             assert!(s.busy, "{event} must set busy");
         }
     }
 
     #[test]
     fn stop_clears_busy() {
-        let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
-        let s = apply_event(s, "PreToolUse", &input("C:/x"), "overmind", 1, now());
-        let s = apply_event(s, "Stop", &input("C:/x"), "overmind", 1, now()).unwrap();
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "PreToolUse",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "Stop",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         assert!(!s.busy);
     }
 
     #[test]
     fn subagent_start_increments_and_stop_decrements() {
-        let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
-        let s = apply_event(s, "SubagentStart", &input("C:/x"), "overmind", 1, now());
-        let s = apply_event(s, "SubagentStart", &input("C:/x"), "overmind", 1, now()).unwrap();
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "SubagentStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "SubagentStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         assert_eq!(s.subagents_running, 2);
         let s = apply_event(
             Some(s),
@@ -630,6 +1052,7 @@ mod tests {
             &input("C:/x"),
             "overmind",
             1,
+            &ClaudeCliFlags::default(),
             now(),
         )
         .unwrap();
@@ -638,24 +1061,75 @@ mod tests {
 
     #[test]
     fn subagent_stop_never_goes_below_zero() {
-        let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
-        let s = apply_event(s, "SubagentStop", &input("C:/x"), "overmind", 1, now()).unwrap();
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "SubagentStop",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         assert_eq!(s.subagents_running, 0);
     }
 
     #[test]
     fn post_model_switch_updates_the_model() {
-        let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
         let mut with_model = input("C:/x");
-        with_model.model = Some("claude-opus-5".to_string());
-        let s = apply_event(s, "PostModelSwitch", &with_model, "overmind", 1, now()).unwrap();
+        with_model.model = Some(ModelField::Plain("claude-opus-5".to_string()));
+        let s = apply_event(
+            s,
+            "PostModelSwitch",
+            &with_model,
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         assert_eq!(s.model, Some("claude-opus-5".to_string()));
     }
 
     #[test]
     fn post_model_switch_with_no_model_field_leaves_it_unchanged() {
-        let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
-        let s = apply_event(s, "PostModelSwitch", &input("C:/x"), "overmind", 1, now()).unwrap();
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
+        let s = apply_event(
+            s,
+            "PostModelSwitch",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
         assert_eq!(s.model, None);
     }
 
@@ -664,7 +1138,15 @@ mod tests {
         // RESTART-TOOL-DESIGN.md §1a: that claim is the lane's own manual
         // assertion when writing HANDOFF, never something a lifecycle
         // hook can honestly assert on the lane's behalf.
-        let s = apply_event(None, "SessionStart", &input("C:/x"), "overmind", 1, now());
+        let s = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        );
         for event in [
             "UserPromptSubmit",
             "PreToolUse",
@@ -673,7 +1155,16 @@ mod tests {
             "SubagentStop",
             "PostModelSwitch",
         ] {
-            let s2 = apply_event(s.clone(), event, &input("C:/x"), "overmind", 1, now()).unwrap();
+            let s2 = apply_event(
+                s.clone(),
+                event,
+                &input("C:/x"),
+                "overmind",
+                1,
+                &ClaudeCliFlags::default(),
+                now(),
+            )
+            .unwrap();
             assert_ne!(s2.no_background_shells, Some(true));
         }
     }
@@ -765,6 +1256,7 @@ mod tests {
             &input("C:/Projects/OverMind"),
             role,
             1,
+            &ClaudeCliFlags::default(),
             now(),
         )
         .unwrap();
@@ -788,6 +1280,7 @@ mod tests {
                         &input("C:/Projects/OverMind"),
                         role,
                         1,
+                        &ClaudeCliFlags::default(),
                         now(),
                     )
                     .unwrap();
