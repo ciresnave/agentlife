@@ -1,0 +1,9 @@
+[package]
+name = "lane-restart"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Restarts an idle Claude Code lane session with the same identity - self, or PM-of-idle-lane only. See RESTART-TOOL-DESIGN.md."
+
+[dependencies]
