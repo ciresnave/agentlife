@@ -123,6 +123,21 @@ signal:
 
 Any mismatch on any of the four: refuse, log why, do not kill.
 
+⚠️ **REVISED (PM finding, 2026-09-18, real restart attempt, second retest): #2's `cwd` compare was a
+raw string `==`, and refused on formatting, not on identity.** A real Windows process's own `cwd`
+carries a trailing separator (`C:\Projects\.restart-test\`); the hook's recorded `cwd` never does
+(`C:\Projects\.restart-test`) - the dry run correctly failed closed, but for a reason that had nothing
+to do with the pid's actual identity. **Fixed:** a new `paths.rs` module's `paths_match` normalises
+both sides before comparing - unifies `/`/`\`, strips one trailing separator (except a bare drive
+root, where it is significant), and compares case-insensitively on Windows, where the filesystem
+itself is - and is used for BOTH the `cwd` compare here and the `exe`-path compare in
+`facts::kill_verified` (`§2`'s process-identity re-check), which had the identical gap. **Never a
+prefix match**: `C:\a` and `C:\ab` stay distinct, so a state file for one lane can never pass the
+identity check for a lane whose path happens to start the same. Unit-tested directly (separator,
+trailing-separator, case, and the prefix-must-not-match property), plus a real-child-process test that
+reads a genuine Windows `cwd` (trailing separator and all) and confirms it matches the same path
+without one.
+
 ## 3. Authorization: who may restart whom
 
 - **A lane may request its own restart at any time it chooses** (it just wrote its own HANDOFF, so it

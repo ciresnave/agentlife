@@ -134,6 +134,17 @@ impl SysinfoFacts {
     }
 }
 
+/// `kill_verified`'s exe-path check, pulled out as a pure function so it is
+/// unit-testable without a real process (unlike the rest of this module -
+/// see its own doc comment). Absence on either side is not itself a
+/// mismatch; only two PRESENT paths that fail to normalise-match are.
+fn exe_matches(current: &Option<PathBuf>, expected: &Option<PathBuf>) -> bool {
+    match (current, expected) {
+        (Some(a), Some(b)) => crate::paths::paths_match(&a.to_string_lossy(), &b.to_string_lossy()),
+        _ => true,
+    }
+}
+
 impl SystemFacts for SysinfoFacts {
     fn is_alive_claude_process(&self, pid: u32) -> bool {
         let mut sys = System::new();
@@ -248,10 +259,13 @@ impl SystemFacts for SysinfoFacts {
         if current.start_time_secs != expected.start_time_secs {
             return Err(KillError::IdentityChanged);
         }
-        if let (Some(a), Some(b)) = (&current.exe, &expected.exe) {
-            if a != b {
-                return Err(KillError::IdentityChanged);
-            }
+        // ⚠️ PM finding, 2026-09-18: the same separator/trailing/case gap
+        // `authorize::identify`'s cwd compare had applies here too - a raw
+        // `!=` on two `PathBuf`s re-read from sysinfo at different moments
+        // could refuse a genuinely matching exe path over formatting, not a
+        // real identity change.
+        if !exe_matches(&current.exe, &expected.exe) {
+            return Err(KillError::IdentityChanged);
         }
         if process.kill() {
             Ok(())
@@ -275,6 +289,47 @@ mod tests {
             SysinfoFacts::project_dir_name("C:/Projects/OverMind"),
             "C--Projects-OverMind"
         );
+    }
+
+    // -- exe_matches -------------------------------------------------------- //
+    // PM finding, 2026-09-18: kill_verified's exe compare needs the same
+    // separator/case normalisation authorize::identify's cwd compare does -
+    // pulled into its own pure function so this is testable without a real
+    // process, unlike kill_verified itself.
+
+    #[test]
+    fn exe_matches_paths_that_differ_only_by_separator() {
+        let a = Some(PathBuf::from(r"C:\claude.exe"));
+        let b = Some(PathBuf::from("C:/claude.exe"));
+        assert!(exe_matches(&a, &b));
+    }
+
+    /// ⚠️ `PathBuf`'s OWN `PartialEq` already normalises `/` vs `\` on
+    /// Windows - the separator test above would pass even on a raw `a ==
+    /// b`, and would NOT have caught a regression back to it. Case is the
+    /// part `PathBuf` equality does NOT normalise, so this is the one that
+    /// actually proves `exe_matches` goes through `paths::paths_match`
+    /// rather than plain `PathBuf` equality.
+    #[cfg(windows)]
+    #[test]
+    fn exe_matches_paths_that_differ_only_by_case_on_windows() {
+        let a = Some(PathBuf::from(r"C:\Claude.exe"));
+        let b = Some(PathBuf::from(r"C:\claude.exe"));
+        assert!(exe_matches(&a, &b));
+    }
+
+    #[test]
+    fn exe_matches_rejects_a_genuinely_different_path() {
+        let a = Some(PathBuf::from(r"C:\claude.exe"));
+        let b = Some(PathBuf::from(r"C:\other.exe"));
+        assert!(!exe_matches(&a, &b));
+    }
+
+    #[test]
+    fn exe_matches_when_either_side_is_absent() {
+        assert!(exe_matches(&None, &Some(PathBuf::from(r"C:\claude.exe"))));
+        assert!(exe_matches(&Some(PathBuf::from(r"C:\claude.exe")), &None));
+        assert!(exe_matches(&None, &None));
     }
 
     /// ⚠️ THE ONE REAL-PROCESS TEST IN THIS MODULE. Safe because it only
@@ -360,6 +415,39 @@ mod tests {
             known_dir,
             "cwd_of must read the child's REAL working directory, not an \
              empty/default one"
+        );
+    }
+
+    /// ⚠️ THE REAL-WORLD CASE, REPRODUCED FOR REAL: PM finding, 2026-09-18 -
+    /// a real Windows process's own `cwd` carries a trailing separator; the
+    /// hook's recorded `cwd` (this test's stand-in: the same path with the
+    /// separator stripped, the way a hook payload's `cwd` field arrives)
+    /// never does. `cwd_of`'s raw string is read from a REAL spawned child
+    /// here, not constructed by hand, so this can't pass for a reason
+    /// unrelated to what `paths_match` actually has to reconcile.
+    #[test]
+    fn cwd_of_a_real_child_matches_the_same_path_without_a_trailing_separator() {
+        let known_dir = std::env::temp_dir()
+            .canonicalize()
+            .expect("temp dir must be readable");
+        let mut child = spawn_sleep_child_in(&known_dir);
+        let pid = child.id();
+        let facts = SysinfoFacts::new(std::env::temp_dir());
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let observed = facts
+            .cwd_of(pid)
+            .expect("a real spawned child's cwd must be readable, not None");
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let observed_str = observed.to_string_lossy().to_string();
+        let without_trailing_sep = observed_str.trim_end_matches(['\\', '/']).to_string();
+        assert!(
+            crate::paths::paths_match(&observed_str, &without_trailing_sep),
+            "a real process's own cwd ({observed_str:?}) must match the same \
+             path with its trailing separator stripped ({without_trailing_sep:?})"
         );
     }
 

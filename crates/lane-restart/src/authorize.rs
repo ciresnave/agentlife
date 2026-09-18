@@ -135,7 +135,12 @@ fn identify(state: &LaneState, facts: &dyn SystemFacts) -> Result<ProcessIdentit
     }
 
     match facts.cwd_of(state.pid) {
-        Some(cwd) if cwd.to_string_lossy() == state.cwd => {}
+        // ⚠️ PM finding, 2026-09-18 (real restart attempt): a real Windows
+        // process's own cwd carries a trailing separator the hook's
+        // recorded cwd never has - `crate::paths::paths_match` normalises
+        // both sides (separators, a trailing one, case) rather than a raw
+        // `==`, without ever treating one path as a PREFIX of another.
+        Some(cwd) if crate::paths::paths_match(&cwd.to_string_lossy(), &state.cwd) => {}
         Some(cwd) => {
             return Err(Refusal::ProcessNotIdentified(format!(
                 "{}: pid {} is in {cwd:?}, state file says {:?}",
@@ -441,6 +446,32 @@ mod tests {
             decide(&req, &facts, dir.path()),
             Err(Refusal::ProcessNotIdentified(_))
         ));
+    }
+
+    /// ⚠️ PM finding, 2026-09-18 (real restart attempt, second retest): a
+    /// real Windows process's own cwd carries a trailing separator the
+    /// hook's recorded cwd never has - the identity check must accept that,
+    /// not refuse over formatting. `state.cwd` here (`CWD`, no trailing
+    /// separator, the form a real hook payload arrives in) is exactly what
+    /// the state file carries; only the FACT the real process reports has
+    /// the trailing separator, the same shape a live Windows `cwd_of` read
+    /// actually produces.
+    #[test]
+    fn accepts_a_cwd_with_a_trailing_separator_the_state_file_does_not_have() {
+        let dir = tempdir().unwrap();
+        write_state(dir.path(), "overmind", |_| {});
+        let facts = FakeFacts::new()
+            .alive(PID)
+            .cwd(PID, "C:/Projects/OverMind/")
+            .no_shell(PID);
+        let req = Request {
+            target: Target::Myself {
+                role: "overmind".into(),
+            },
+            confirmed: false,
+            dry_run: false,
+        };
+        assert!(decide(&req, &facts, dir.path()).is_ok());
     }
 
     #[test]
