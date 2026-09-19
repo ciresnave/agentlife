@@ -324,8 +324,28 @@ fn main() -> ExitCode {
                 "lane-restart: killing pid {} and relaunching a fresh session...",
                 plan.state.pid
             );
-            match relaunch::kill_and_relaunch(&facts, &plan.state, &plan.identity) {
-                Ok(()) => {
+            let state_dir_path = state_dir();
+            let state_reader = relaunch::RealStateReader {
+                state_dir: &state_dir_path,
+            };
+            let role_for_notice = plan.state.role.clone();
+            let mut on_awaiting = || {
+                // PM finding, 2026-09-18 (fifth real-restart retest):
+                // printed immediately, the moment this is first detected -
+                // never only at the end of the (up to ~15 minute) wait -
+                // so whatever reads this stream (the PM lane, today) can
+                // notify CireSnave promptly that the dev-channels dialog
+                // needs a human.
+                print_status_json("awaiting_confirmation", &role_for_notice);
+            };
+            match relaunch::kill_and_relaunch(
+                &facts,
+                &state_reader,
+                &plan.state,
+                &plan.identity,
+                &mut on_awaiting,
+            ) {
+                Ok(relaunch::RelaunchOutcome::Relaunched) => {
                     log_outcome(
                         requested_by,
                         &args.role,
@@ -333,6 +353,15 @@ fn main() -> ExitCode {
                             "killed pid {} and relaunched a fresh session (continuity via HANDOFF only)",
                             plan.state.pid
                         ),
+                        true,
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(relaunch::RelaunchOutcome::AwaitingConfirmation) => {
+                    log_outcome(
+                        requested_by,
+                        &args.role,
+                        "awaiting human confirmation at the dev-channels dialog",
                         true,
                     );
                     ExitCode::SUCCESS
@@ -350,6 +379,21 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// A machine-readable status line - PM finding, 2026-09-18 (fifth real-
+/// restart retest): so the PM lane (or anything else watching this
+/// process's stdout) can act on `awaiting_confirmation` promptly, e.g. by
+/// sending CireSnave a phone notification that a relaunched lane needs a
+/// human to confirm the dev-channels dialog.
+fn print_status_json(outcome: &str, role: &str) {
+    let line = serde_json::json!({
+        "event": "lane-restart-status",
+        "role": role,
+        "outcome": outcome,
+        "at": chrono::Utc::now().to_rfc3339(),
+    });
+    println!("{line}");
 }
 
 fn log_outcome(requested_by: &str, role: &str, outcome: &str, acted: bool) {
@@ -405,17 +449,37 @@ mod relaunch {
         UnsafeArgument(String),
         Kill(KillError),
         Spawn(String),
-        /// PM finding, 2026-09-18: never seen a live `claude`/`claude.exe`
-        /// in the target cwd within the liveness-check timeout.
-        NotObservedAlive,
-        /// PM finding, 2026-09-18: a `claude.exe` WAS seen in the target
-        /// cwd, but was gone by the follow-up check - the graceful-exit
-        /// case this whole check exists to catch (Rust's `Command`
-        /// inherits the parent's std handles even under
-        /// `CREATE_NEW_CONSOLE`, so a non-TTY stdin plus a prompt argument
-        /// made `claude` behave like one-shot print mode: it read HANDOFF,
-        /// replied, and exited).
-        DiedShortlyAfterLaunch,
+        /// PM finding, 2026-09-18 (fifth real-restart retest, revised
+        /// spec): the process died, or never came up at all, within
+        /// `TOTAL_TIMEOUT` - not the "awaiting a human's confirmation at a
+        /// known dialog" case, which is `RelaunchOutcome::AwaitingConfirmation`
+        /// instead (a real, expected outcome, never an error).
+        SessionNeverProcessedPrompt,
+    }
+
+    /// What `kill_and_relaunch` actually achieved - `Relaunched` is the
+    /// only fully-done outcome; `AwaitingConfirmation` is real, ACTED work
+    /// (the kill and the relaunch both happened) that isn't finished
+    /// because a human still needs to act, never an error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RelaunchOutcome {
+        /// The new session's own state file showed a `UserPromptSubmit` (or
+        /// later) event under its OWN fresh `session_id` - it's genuinely
+        /// working, not just alive.
+        Relaunched,
+        /// PM finding, 2026-09-18 (fifth real-restart retest, CireSnave via
+        /// the PM): `--dangerously-load-development-channels` shows a
+        /// security confirmation dialog on EVERY start (never auto-
+        /// answered - it's a security prompt). A relaunched lane that
+        /// carries this flag (kept in the allowlist - it's the only way
+        /// non-Claude agents reach a lane at all, per `channels-reference`'s
+        /// own "no bypass during the research preview") can be stuck at
+        /// exactly that dialog: alive, genuinely running, doing nothing
+        /// until a human confirms. The OLD (process-alive-only) check
+        /// would have logged this as success; this is why liveness now
+        /// requires the state file to show real progress, not just a live
+        /// process.
+        AwaitingConfirmation,
     }
 
     impl std::fmt::Display for RelaunchError {
@@ -432,16 +496,9 @@ mod relaunch {
                 }
                 RelaunchError::Kill(e) => write!(f, "kill refused: {e}"),
                 RelaunchError::Spawn(e) => write!(f, "could not launch the relaunch command: {e}"),
-                RelaunchError::NotObservedAlive => write!(
-                    f,
-                    "relaunch FAILED - no live claude process was ever observed in the \
-                     target directory"
-                ),
-                RelaunchError::DiedShortlyAfterLaunch => write!(
-                    f,
-                    "relaunch FAILED - a claude process came up but exited again shortly \
-                     after (likely a non-interactive launch, not a real interactive session)"
-                ),
+                RelaunchError::SessionNeverProcessedPrompt => {
+                    write!(f, "relaunch FAILED: session never processed its prompt")
+                }
             }
         }
     }
@@ -477,12 +534,19 @@ mod relaunch {
     /// permissions`, which is already represented there as
     /// `permission_mode: Some("bypassPermissions")`, so re-emitting the
     /// original flag literally here would just be a redundant restatement
-    /// of the same fact). PM finding, 2026-09-18 (CireSnave, via the PM):
-    /// CireSnave launches every lane with
-    /// `--dangerously-load-development-channels server:claude-peers`, the
-    /// flag that makes `claude-peers` PUSH incoming messages into a
-    /// session - a relaunch that silently drops it can still SEND but
-    /// never RECEIVE notifications.
+    /// of the same fact).
+    ///
+    /// ⚠️ `--dangerously-load-development-channels` KEPT here (CireSnave,
+    /// via the PM, 2026-09-18, correcting a same-day retraction): it's the
+    /// only way non-Claude agents (Synapse, FAM, `claude-peers`) can reach
+    /// a lane at all - `channels-reference`'s own docs confirm there is NO
+    /// bypass during the research preview, and `--channels` only accepts
+    /// Anthropic-allowlisted plugins, so it's not a substitute for a local
+    /// MCP server like `claude-peers`. **It DOES show a security
+    /// confirmation dialog on every start, never auto-answered** - that's
+    /// what `wait_for_relaunch_liveness`'s `AwaitingConfirmation` outcome
+    /// exists to detect and report, not something this allowlist should
+    /// paper over by dropping the flag.
     const ALLOWED_LAUNCH_ARG_FLAGS: &[(&str, FlagArity)] = &[
         (
             "--dangerously-load-development-channels",
@@ -531,6 +595,44 @@ mod relaunch {
     /// over - an ALLOWLIST, never a blind pass-through - plus the names of
     /// every unrecognised flag it dropped, so the caller can log them
     /// rather than silently discard them.
+    /// Advances `iter` past the value(s) belonging to a flag of the given
+    /// `arity`, pushing each consumed value onto `sink` (an empty no-op
+    /// sink drops them instead of carrying them over).
+    fn consume_flag_values<'a, I>(
+        arity: FlagArity,
+        iter: &mut std::iter::Peekable<I>,
+        sink: &mut Vec<String>,
+    ) where
+        I: Iterator<Item = &'a String>,
+    {
+        match arity {
+            FlagArity::None => {}
+            FlagArity::One => {
+                if let Some(v) = iter.next() {
+                    sink.push(v.clone());
+                }
+            }
+            FlagArity::OptionalOne => {
+                if iter.peek().is_some_and(|v| !is_flag_token(v)) {
+                    sink.push(iter.next().unwrap().clone());
+                }
+            }
+            FlagArity::Variadic => {
+                while let Some(v) = iter.peek() {
+                    if is_flag_token(v) {
+                        break;
+                    }
+                    sink.push(iter.next().unwrap().clone());
+                }
+            }
+        }
+    }
+
+    /// Reparses `launch_args` (the ORIGINAL launch's real argv, program
+    /// name included) into the extra argv elements a relaunch should carry
+    /// over - an ALLOWLIST, never a blind pass-through - plus the names of
+    /// every unrecognised flag it dropped, so the caller can log them
+    /// rather than silently discard them.
     fn extra_launch_args(launch_args: &[String]) -> (Vec<String>, Vec<String>) {
         let mut allowed = Vec::new();
         let mut dropped_unknown = Vec::new();
@@ -546,44 +648,12 @@ mod relaunch {
             }
             if let Some((_, arity)) = ALLOWED_LAUNCH_ARG_FLAGS.iter().find(|(f, _)| f == token) {
                 allowed.push(token.clone());
-                match arity {
-                    FlagArity::None => {}
-                    FlagArity::One | FlagArity::OptionalOne => {
-                        if let Some(v) = iter.next() {
-                            allowed.push(v.clone());
-                        }
-                    }
-                    FlagArity::Variadic => {
-                        while let Some(v) = iter.peek() {
-                            if is_flag_token(v) {
-                                break;
-                            }
-                            allowed.push(iter.next().unwrap().clone());
-                        }
-                    }
-                }
+                consume_flag_values(*arity, &mut iter, &mut allowed);
                 continue;
             }
             if let Some((_, arity)) = DROPPED_LAUNCH_ARG_FLAGS.iter().find(|(f, _)| f == token) {
-                match arity {
-                    FlagArity::None => {}
-                    FlagArity::One => {
-                        iter.next();
-                    }
-                    FlagArity::OptionalOne => {
-                        if iter.peek().is_some_and(|v| !is_flag_token(v)) {
-                            iter.next();
-                        }
-                    }
-                    FlagArity::Variadic => {
-                        while let Some(v) = iter.peek() {
-                            if is_flag_token(v) {
-                                break;
-                            }
-                            iter.next();
-                        }
-                    }
-                }
+                let mut discard = Vec::new();
+                consume_flag_values(*arity, &mut iter, &mut discard);
                 continue;
             }
             if is_flag_token(token) {
@@ -597,6 +667,18 @@ mod relaunch {
             // dropped - a relaunch always supplies its own fresh prompt.
         }
         (allowed, dropped_unknown)
+    }
+
+    /// Whether `launch_args` (the ORIGINAL launch's real argv) carried
+    /// `--dangerously-load-development-channels` - the one flag known to
+    /// show a security confirmation dialog on every start. Used only to
+    /// decide whether a stuck-at-20s process is plausibly AWAITING a human
+    /// confirmation, never to decide whether to carry the flag over (that
+    /// decision is `ALLOWED_LAUNCH_ARG_FLAGS`'s alone).
+    fn has_dev_channels_flag(launch_args: &[String]) -> bool {
+        launch_args
+            .iter()
+            .any(|a| a == "--dangerously-load-development-channels")
     }
 
     fn claude_argv(name: &str, state: &LaneState, prompt: &str) -> Vec<String> {
@@ -712,48 +794,120 @@ mod relaunch {
             .map_err(|e| RelaunchError::Spawn(e.to_string()))
     }
 
-    /// PM finding, 2026-09-18: logging "relaunched" from `spawn()`
-    /// returning `Ok` alone was dishonest - the child can start, print its
-    /// reply, and exit again before anyone re-checks. This polls for a
-    /// live `claude` process in `cwd` with a start_time at or after
-    /// `killed_at_secs` (never an older, unrelated process), then confirms
-    /// it is STILL alive a follow-up interval later. `sleep` is injected so
-    /// this whole polling protocol is testable without a real ~40s wait.
+    /// Reads the target role's OWN current state file - injected so the
+    /// liveness check is testable without real file I/O, the same way
+    /// `facts: &dyn SystemFacts` makes process facts testable without a
+    /// real process.
+    pub trait StateReader {
+        fn read(&self, role: &str) -> Option<LaneState>;
+    }
+
+    pub struct RealStateReader<'a> {
+        pub state_dir: &'a std::path::Path,
+    }
+
+    impl StateReader for RealStateReader<'_> {
+        fn read(&self, role: &str) -> Option<LaneState> {
+            lane_restart::state::load(self.state_dir, role).ok()
+        }
+    }
+
+    /// PM finding, 2026-09-18 (fourth AND fifth real-restart retests): a
+    /// live process is not a WORKING session -
+    /// `--dangerously-load-development-channels` shows a security
+    /// confirmation dialog on every start that a relaunched lane can sit
+    /// at, alive and doing nothing, until a human confirms it - never
+    /// auto-answered, since it's a security prompt. **Three outcomes, not
+    /// two:**
+    ///
+    /// - **`Relaunched`**: the target role's OWN state file shows a
+    ///   `session_id` that differs from `old_session_id` (this IS the
+    ///   fresh session) whose `updated_by_event` is something AFTER
+    ///   `SessionStart` - real progress, not just existence (a session
+    ///   stuck at the dialog still fires `SessionStart`, then never gets
+    ///   past it).
+    /// - **`AwaitingConfirmation`**: no progress within `PROGRESS_TIMEOUT`
+    ///   (~20s), but the process IS alive AND its own launch carried the
+    ///   dev-channels flag - exactly the dialog shape. `on_awaiting` fires
+    ///   ONCE, immediately, the moment this is first detected (never at the
+    ///   very end) - real callers use it to notify a human promptly, since
+    ///   confirming the dialog is the only way forward. Polling then
+    ///   CONTINUES up to `TOTAL_TIMEOUT` (~15 min): a human confirming
+    ///   flips the outcome to `Relaunched`; reaching the full timeout still
+    ///   stuck returns `AwaitingConfirmation` as the FINAL outcome (real,
+    ///   acted work - the kill and relaunch both genuinely happened - not
+    ///   an error).
+    /// - **`Err(SessionNeverProcessedPrompt)`**: the process died, or never
+    ///   came up, before `PROGRESS_TIMEOUT` with no dev-channels flag to
+    ///   explain the stall - or died at any point thereafter.
+    ///
+    /// `sleep` is injected so this whole polling protocol (including the
+    /// ~15 minute total) is testable without a real wait; `on_awaiting` is
+    /// injected so a test can assert it fired at most once, at the right
+    /// moment, without capturing real stdout.
+    #[allow(clippy::too_many_arguments)]
     fn wait_for_relaunch_liveness(
         facts: &dyn SystemFacts,
+        state_reader: &dyn StateReader,
         cwd: &str,
+        role: &str,
+        old_session_id: &str,
         killed_at_secs: u64,
+        carries_dev_channels_flag: bool,
         sleep: &mut dyn FnMut(std::time::Duration),
-    ) -> Result<u32, RelaunchError> {
-        const FIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        const FIND_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-        const CONFIRM_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+        on_awaiting: &mut dyn FnMut(),
+    ) -> Result<RelaunchOutcome, RelaunchError> {
+        const PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+        // ⚠️ "Configurable" per the PM's own spec - not yet a CLI flag;
+        // this constant is the one place to change it until it is.
+        const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
         let mut waited = std::time::Duration::ZERO;
-        let pid = loop {
-            if let Some(pid) = facts.find_claude_process_in(cwd, killed_at_secs) {
-                break pid;
+        let mut reported_awaiting = false;
+        loop {
+            if let Some(state) = state_reader.read(role) {
+                if state.session_id != old_session_id && state.updated_by_event != "SessionStart" {
+                    return Ok(RelaunchOutcome::Relaunched);
+                }
             }
-            if waited >= FIND_TIMEOUT {
-                return Err(RelaunchError::NotObservedAlive);
+            if waited >= PROGRESS_TIMEOUT {
+                let alive = facts.find_claude_process_in(cwd, killed_at_secs).is_some();
+                if !alive {
+                    return Err(RelaunchError::SessionNeverProcessedPrompt);
+                }
+                if !reported_awaiting {
+                    if !carries_dev_channels_flag {
+                        // Alive, no progress, and nothing known to explain
+                        // the stall - not the dialog case. Keep polling to
+                        // TOTAL_TIMEOUT anyway (a slow session is still a
+                        // real possibility), but never report a confirmation
+                        // that has no evidence behind it.
+                    } else {
+                        on_awaiting();
+                        reported_awaiting = true;
+                    }
+                }
             }
-            sleep(FIND_POLL_INTERVAL);
-            waited += FIND_POLL_INTERVAL;
-        };
-
-        sleep(CONFIRM_AFTER);
-        if facts.is_alive_claude_process(pid) {
-            Ok(pid)
-        } else {
-            Err(RelaunchError::DiedShortlyAfterLaunch)
+            if waited >= TOTAL_TIMEOUT {
+                return if reported_awaiting {
+                    Ok(RelaunchOutcome::AwaitingConfirmation)
+                } else {
+                    Err(RelaunchError::SessionNeverProcessedPrompt)
+                };
+            }
+            sleep(POLL_INTERVAL);
+            waited += POLL_INTERVAL;
         }
     }
 
     pub fn kill_and_relaunch(
         facts: &dyn SystemFacts,
+        state_reader: &dyn StateReader,
         state: &LaneState,
         identity: &ProcessIdentity,
-    ) -> Result<(), RelaunchError> {
+        on_awaiting: &mut dyn FnMut(),
+    ) -> Result<RelaunchOutcome, RelaunchError> {
         let name = state.name.as_deref().unwrap_or(&state.role);
         if !valid_identifier(&state.role) {
             return Err(RelaunchError::InvalidIdentifier(format!(
@@ -772,6 +926,10 @@ mod relaunch {
         ) {
             return Err(RelaunchError::UnsafeArgument(bad.to_string()));
         }
+        let carries_dev_channels_flag = state
+            .launch_args
+            .as_deref()
+            .is_some_and(has_dev_channels_flag);
 
         facts
             .kill_verified(state.pid, identity)
@@ -783,20 +941,24 @@ mod relaunch {
         // time, but `find_claude_process_in`'s `start_time` comes from the
         // OS (on Linux, ticks-since-boot converted to a Unix timestamp) -
         // two different clock sources that can disagree by a second or two
-        // without either being "wrong". Without slack, a genuinely fresh
-        // relaunch could be excluded as "too old" by a rounding difference
-        // between the two - confirmed live: this crate's own real-process
-        // liveness test failed on a CI runner for exactly this reason
-        // before the margin was added. §2's real identity check (pid, cwd,
-        // session transcript, exe) still does the actual verification;
-        // this threshold only needs to rule out a stale, unrelated process
-        // from BEFORE the kill, not pin the exact second.
+        // without either being "wrong" - confirmed live, this crate's own
+        // real-process liveness test failed on a CI runner for exactly this
+        // reason before the margin was added.
         let killed_at_secs = facts.now().timestamp().max(0).saturating_sub(5) as u64;
 
         spawn_relaunch(state, &argv)?;
 
-        wait_for_relaunch_liveness(facts, &state.cwd, killed_at_secs, &mut std::thread::sleep)
-            .map(|_pid| ())
+        wait_for_relaunch_liveness(
+            facts,
+            state_reader,
+            &state.cwd,
+            &state.role,
+            &state.session_id,
+            killed_at_secs,
+            carries_dev_channels_flag,
+            &mut std::thread::sleep,
+            on_awaiting,
+        )
     }
 
     #[cfg(test)]
@@ -876,6 +1038,13 @@ mod relaunch {
             }
         }
 
+        struct NeverCalledStateReader;
+        impl StateReader for NeverCalledStateReader {
+            fn read(&self, _role: &str) -> Option<LaneState> {
+                panic!("must not be reached")
+            }
+        }
+
         fn state_with_role(role: &str) -> LaneState {
             LaneState {
                 role: role.to_string(),
@@ -908,7 +1077,13 @@ mod relaunch {
             // for `valid_identifier` to be correct in isolation if
             // `kill_and_relaunch` doesn't actually call it as a gate.
             let state = state_with_role("a&calc");
-            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            let result = kill_and_relaunch(
+                &NeverCalled,
+                &NeverCalledStateReader,
+                &state,
+                &dummy_identity(),
+                &mut || {},
+            );
             assert!(matches!(result, Err(RelaunchError::InvalidIdentifier(_))));
         }
 
@@ -916,7 +1091,13 @@ mod relaunch {
         fn kill_and_relaunch_refuses_an_invalid_name_before_touching_the_process() {
             let mut state = state_with_role("overmind");
             state.name = Some("a|calc".to_string());
-            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            let result = kill_and_relaunch(
+                &NeverCalled,
+                &NeverCalledStateReader,
+                &state,
+                &dummy_identity(),
+                &mut || {},
+            );
             assert!(matches!(result, Err(RelaunchError::InvalidIdentifier(_))));
         }
 
@@ -987,12 +1168,17 @@ mod relaunch {
         }
 
         // -- launch_args carry-over / extra_launch_args --------------------- //
-        // PM finding, 2026-09-18 (CireSnave, via the PM): CireSnave launches
-        // every lane with `--dangerously-load-development-channels
-        // server:claude-peers --resume` - a relaunch that only rebuilds
-        // --model/--permission-mode/--remote-control silently drops the
-        // channels flag, so a relaunched lane can send but never RECEIVE
-        // claude-peers notifications.
+        // PM finding, 2026-09-18 (CireSnave, via the PM, fourth AND fifth
+        // real-restart retests): CireSnave launches every lane with
+        // `--dangerously-load-development-channels server:claude-peers
+        // --resume`. KEPT in the allowlist (a same-day retraction of an
+        // earlier "deny it" fix): it's the only way non-Claude agents
+        // (Synapse, FAM, claude-peers) reach a lane at all, and there is NO
+        // bypass during the research preview per Claude Code's own docs.
+        // It DOES show a security confirmation dialog on every start -
+        // that's what `wait_for_relaunch_liveness`'s `AwaitingConfirmation`
+        // outcome exists to detect, never something this allowlist itself
+        // should paper over.
 
         #[test]
         fn ciresnaves_exact_command_line_carries_the_channels_flag_and_drops_resume() {
@@ -1019,6 +1205,22 @@ mod relaunch {
                 ]),
                 "got {argv:?}"
             );
+        }
+
+        #[test]
+        fn has_dev_channels_flag_detects_it_present() {
+            let launch_args = strs(&[
+                "claude.exe",
+                "--dangerously-load-development-channels",
+                "server:claude-peers",
+            ]);
+            assert!(has_dev_channels_flag(&launch_args));
+        }
+
+        #[test]
+        fn has_dev_channels_flag_is_false_when_absent() {
+            let launch_args = strs(&["claude.exe", "--model", "claude-sonnet-5"]);
+            assert!(!has_dev_channels_flag(&launch_args));
         }
 
         #[test]
@@ -1158,7 +1360,13 @@ mod relaunch {
         fn kill_and_relaunch_refuses_a_cwd_containing_a_semicolon_before_touching_the_process() {
             let mut state = state_with_role("overmind");
             state.cwd = "C:/x;calc".to_string();
-            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            let result = kill_and_relaunch(
+                &NeverCalled,
+                &NeverCalledStateReader,
+                &state,
+                &dummy_identity(),
+                &mut || {},
+            );
             assert!(matches!(result, Err(RelaunchError::UnsafeArgument(_))));
         }
 
@@ -1166,7 +1374,13 @@ mod relaunch {
         fn kill_and_relaunch_refuses_a_model_containing_a_semicolon_before_touching_the_process() {
             let mut state = state_with_role("overmind");
             state.model = Some("claude;calc".to_string());
-            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            let result = kill_and_relaunch(
+                &NeverCalled,
+                &NeverCalledStateReader,
+                &state,
+                &dummy_identity(),
+                &mut || {},
+            );
             assert!(matches!(result, Err(RelaunchError::UnsafeArgument(_))));
         }
 
@@ -1174,7 +1388,13 @@ mod relaunch {
         fn kill_and_relaunch_refuses_a_permission_mode_containing_a_semicolon() {
             let mut state = state_with_role("overmind");
             state.permission_mode = Some("prompting;calc".to_string());
-            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            let result = kill_and_relaunch(
+                &NeverCalled,
+                &NeverCalledStateReader,
+                &state,
+                &dummy_identity(),
+                &mut || {},
+            );
             assert!(matches!(result, Err(RelaunchError::UnsafeArgument(_))));
         }
 
@@ -1183,37 +1403,76 @@ mod relaunch {
             // ⚠️ The ';' gate must cover the NEW launch_args-derived
             // elements too, not just the flags claude_argv already
             // hard-coded - it scans claude_argv's full OUTPUT, so this
-            // proves the two features actually compose.
+            // proves the two features actually compose. `--add-dir` stands
+            // in for any allowlisted flag.
             let mut state = state_with_role("overmind");
-            state.launch_args = Some(strs(&[
-                "claude.exe",
-                "--dangerously-load-development-channels",
-                "server:claude-peers;calc",
-            ]));
-            let result = kill_and_relaunch(&NeverCalled, &state, &dummy_identity());
+            state.launch_args = Some(strs(&["claude.exe", "--add-dir", "C:/a;calc"]));
+            let result = kill_and_relaunch(
+                &NeverCalled,
+                &NeverCalledStateReader,
+                &state,
+                &dummy_identity(),
+                &mut || {},
+            );
             assert!(matches!(result, Err(RelaunchError::UnsafeArgument(_))));
         }
 
         // -- wait_for_relaunch_liveness ------------------------------------ //
-        // PM finding, 2026-09-18: logging "relaunched" from spawn() = Ok
-        // alone was dishonest - the child can start, reply, and exit again
-        // before anyone re-checks. `sleep` is faked here (records calls,
-        // never actually blocks) so this whole polling protocol is tested
-        // without a real ~40s wait.
+        // PM finding, 2026-09-18 (fourth AND fifth real-restart retests): a
+        // live process is not the same claim as a WORKING session -
+        // --dangerously-load-development-channels shows a security
+        // confirmation dialog a relaunched lane can sit at, alive and doing
+        // nothing, until a human confirms it. Three outcomes: Relaunched
+        // (real progress), AwaitingConfirmation (alive, stuck, but the
+        // dev-channels flag explains why - reported ONCE, promptly, via
+        // `on_awaiting`, then polling continues), and
+        // Err(SessionNeverProcessedPrompt) (dead, or stuck with nothing to
+        // explain it). `sleep` is faked (records calls, never actually
+        // blocks) so this whole protocol - including the ~15 minute total -
+        // is tested without a real wait.
 
-        struct LivenessFacts {
-            /// Returns `Some(pid)` starting from the Nth call (0-indexed);
-            /// `None` on every call before that. `usize::MAX` = never found.
-            found_on_call: usize,
-            pid: u32,
-            /// Whether `is_alive_claude_process(pid)` answers true at the
-            /// follow-up check.
-            still_alive_at_confirm: bool,
-            find_calls: std::cell::RefCell<usize>,
+        struct FakeStateReader {
+            /// Returns the Nth state (0-indexed) from this list on the Nth
+            /// call; the LAST entry repeats once exhausted. `None` means
+            /// "no state file yet."
+            states: Vec<Option<LaneState>>,
+            calls: std::cell::RefCell<usize>,
         }
-        impl SystemFacts for LivenessFacts {
-            fn is_alive_claude_process(&self, pid: u32) -> bool {
-                pid == self.pid && self.still_alive_at_confirm
+        impl StateReader for FakeStateReader {
+            fn read(&self, _role: &str) -> Option<LaneState> {
+                let mut calls = self.calls.borrow_mut();
+                let idx = (*calls).min(self.states.len() - 1);
+                *calls += 1;
+                self.states[idx].clone()
+            }
+        }
+
+        fn state_with_session_and_event(session_id: &str, event: &str) -> LaneState {
+            let mut s = state_with_role("overmind");
+            s.session_id = session_id.to_string();
+            s.updated_by_event = event.to_string();
+            s
+        }
+
+        /// Controls `find_claude_process_in`'s answer across repeated
+        /// calls (the LAST entry repeats once exhausted) - every other
+        /// `SystemFacts` method panics, since liveness only ever needs
+        /// this one.
+        struct FakeAliveFacts {
+            alive_sequence: Vec<bool>,
+            calls: std::cell::RefCell<usize>,
+        }
+        impl FakeAliveFacts {
+            fn always(alive: bool) -> Self {
+                Self {
+                    alive_sequence: vec![alive],
+                    calls: std::cell::RefCell::new(0),
+                }
+            }
+        }
+        impl SystemFacts for FakeAliveFacts {
+            fn is_alive_claude_process(&self, _: u32) -> bool {
+                panic!("must not be reached")
             }
             fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
                 panic!("must not be reached")
@@ -1237,77 +1496,220 @@ mod relaunch {
                 panic!("must not be reached")
             }
             fn find_claude_process_in(&self, _cwd: &str, _after: u64) -> Option<u32> {
-                let mut calls = self.find_calls.borrow_mut();
-                let this_call = *calls;
+                let mut calls = self.calls.borrow_mut();
+                let idx = (*calls).min(self.alive_sequence.len() - 1);
                 *calls += 1;
-                if this_call >= self.found_on_call {
-                    Some(self.pid)
-                } else {
-                    None
-                }
+                self.alive_sequence[idx].then_some(1)
             }
         }
 
         #[test]
-        fn liveness_succeeds_when_found_immediately_and_still_alive_at_confirm() {
-            let facts = LivenessFacts {
-                found_on_call: 0,
-                pid: 42,
-                still_alive_at_confirm: true,
-                find_calls: std::cell::RefCell::new(0),
+        fn liveness_succeeds_immediately_when_the_fresh_session_already_processed_a_prompt() {
+            let reader = FakeStateReader {
+                states: vec![Some(state_with_session_and_event(
+                    "new-session",
+                    "UserPromptSubmit",
+                ))],
+                calls: std::cell::RefCell::new(0),
             };
             let mut slept = Vec::new();
-            let result = wait_for_relaunch_liveness(&facts, "C:/x", 0, &mut |d| slept.push(d));
-            assert_eq!(result.unwrap(), 42);
-            // Only the confirm-interval sleep, no find-polling sleep needed.
-            assert_eq!(slept.len(), 1);
+            let mut awaiting_calls = 0;
+            let result = wait_for_relaunch_liveness(
+                &NeverCalled,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                false,
+                &mut |d| slept.push(d),
+                &mut || awaiting_calls += 1,
+            );
+            assert_eq!(result.unwrap(), RelaunchOutcome::Relaunched);
+            assert!(slept.is_empty());
+            assert_eq!(awaiting_calls, 0);
         }
 
         #[test]
-        fn liveness_polls_until_found_then_confirms() {
-            let facts = LivenessFacts {
-                found_on_call: 3,
-                pid: 7,
-                still_alive_at_confirm: true,
-                find_calls: std::cell::RefCell::new(0),
+        fn liveness_polls_until_the_fresh_session_shows_progress() {
+            let reader = FakeStateReader {
+                states: vec![
+                    None,
+                    Some(state_with_session_and_event("old-session", "Stop")),
+                    Some(state_with_session_and_event("new-session", "SessionStart")),
+                    Some(state_with_session_and_event(
+                        "new-session",
+                        "UserPromptSubmit",
+                    )),
+                ],
+                calls: std::cell::RefCell::new(0),
             };
             let mut slept = Vec::new();
-            let result = wait_for_relaunch_liveness(&facts, "C:/x", 0, &mut |d| slept.push(d));
-            assert_eq!(result.unwrap(), 7);
-            // 3 find-poll sleeps (calls 0,1,2 returned None) + 1 confirm sleep.
-            assert_eq!(slept.len(), 4);
+            let result = wait_for_relaunch_liveness(
+                &NeverCalled,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                false,
+                &mut |d| slept.push(d),
+                &mut || {},
+            );
+            assert_eq!(result.unwrap(), RelaunchOutcome::Relaunched);
+            assert_eq!(slept.len(), 3);
         }
 
         #[test]
-        fn liveness_fails_not_observed_alive_when_never_found_within_the_timeout() {
-            let facts = LivenessFacts {
-                found_on_call: usize::MAX,
-                pid: 1,
-                still_alive_at_confirm: true,
-                find_calls: std::cell::RefCell::new(0),
+        fn liveness_fails_when_the_process_never_comes_up_and_nothing_explains_a_stall() {
+            let reader = FakeStateReader {
+                states: vec![None],
+                calls: std::cell::RefCell::new(0),
             };
+            let facts = FakeAliveFacts::always(false);
             let mut slept = Vec::new();
-            let result = wait_for_relaunch_liveness(&facts, "C:/x", 0, &mut |d| slept.push(d));
-            assert!(matches!(result, Err(RelaunchError::NotObservedAlive)));
-            // Never sleeps the confirm interval - it gave up first.
-            assert!(!slept.contains(&std::time::Duration::from_secs(10)));
+            let result = wait_for_relaunch_liveness(
+                &facts,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                false,
+                &mut |d| slept.push(d),
+                &mut || {},
+            );
+            assert!(matches!(
+                result,
+                Err(RelaunchError::SessionNeverProcessedPrompt)
+            ));
+            // Gives up at the 20s progress-check, not the full ~15 minutes.
+            assert_eq!(slept.len(), 20);
         }
 
         #[test]
-        fn liveness_fails_died_shortly_after_launch_when_gone_at_the_confirm_check() {
-            // ⚠️ THE EXACT REAL-WORLD FAILURE THIS CHECK EXISTS TO CATCH:
-            // found alive once, gone by the follow-up - a graceful exit,
-            // not a kill (the PM's real retest: replied, then exited 12s
-            // later with a clean SessionEnd).
-            let facts = LivenessFacts {
-                found_on_call: 0,
-                pid: 42,
-                still_alive_at_confirm: false,
-                find_calls: std::cell::RefCell::new(0),
+        fn liveness_fails_when_the_state_file_still_shows_the_old_session_and_process_died() {
+            // The old session's own Stop/SessionEnd chatter must never be
+            // mistaken for the NEW session doing real work.
+            let reader = FakeStateReader {
+                states: vec![Some(state_with_session_and_event("old-session", "Stop"))],
+                calls: std::cell::RefCell::new(0),
             };
-            let mut slept = Vec::new();
-            let result = wait_for_relaunch_liveness(&facts, "C:/x", 0, &mut |d| slept.push(d));
-            assert!(matches!(result, Err(RelaunchError::DiedShortlyAfterLaunch)));
+            let facts = FakeAliveFacts::always(false);
+            let result = wait_for_relaunch_liveness(
+                &facts,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                false,
+                &mut |_| {},
+                &mut || {},
+            );
+            assert!(matches!(
+                result,
+                Err(RelaunchError::SessionNeverProcessedPrompt)
+            ));
+        }
+
+        #[test]
+        fn liveness_reports_awaiting_confirmation_once_when_stuck_with_the_dev_channels_flag() {
+            // ⚠️ THE EXACT REAL-WORLD CASE THIS OUTCOME EXISTS TO CATCH: a
+            // session stuck at the dev-channels confirmation dialog fires
+            // SessionStart (a fresh session_id IS recorded) but never gets
+            // past it - alive the whole time, doing nothing.
+            let reader = FakeStateReader {
+                states: vec![Some(state_with_session_and_event(
+                    "new-session",
+                    "SessionStart",
+                ))],
+                calls: std::cell::RefCell::new(0),
+            };
+            let facts = FakeAliveFacts::always(true);
+            let mut awaiting_calls = 0;
+            let result = wait_for_relaunch_liveness(
+                &facts,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                true,
+                &mut |_| {},
+                &mut || awaiting_calls += 1,
+            );
+            assert_eq!(result.unwrap(), RelaunchOutcome::AwaitingConfirmation);
+            // Reported exactly ONCE, not once per poll for the remaining
+            // ~14.5 minutes - that's what makes a single prompt phone
+            // notification meaningful rather than spam.
+            assert_eq!(awaiting_calls, 1);
+        }
+
+        #[test]
+        fn liveness_never_reports_awaiting_confirmation_without_the_dev_channels_flag() {
+            // Alive and stuck is not, by itself, evidence of the dialog -
+            // only report a confirmation that has real evidence behind it.
+            let reader = FakeStateReader {
+                states: vec![Some(state_with_session_and_event(
+                    "new-session",
+                    "SessionStart",
+                ))],
+                calls: std::cell::RefCell::new(0),
+            };
+            let facts = FakeAliveFacts::always(true);
+            let mut awaiting_calls = 0;
+            let result = wait_for_relaunch_liveness(
+                &facts,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                false,
+                &mut |_| {},
+                &mut || awaiting_calls += 1,
+            );
+            assert!(matches!(
+                result,
+                Err(RelaunchError::SessionNeverProcessedPrompt)
+            ));
+            assert_eq!(awaiting_calls, 0);
+        }
+
+        #[test]
+        fn liveness_flips_to_relaunched_after_a_human_confirms_the_dialog() {
+            // The state file shows SessionStart for the first 25 polls (the
+            // dialog is up), then progresses - a human confirmed it.
+            let mut states: Vec<Option<LaneState>> = (0..25)
+                .map(|_| Some(state_with_session_and_event("new-session", "SessionStart")))
+                .collect();
+            states.push(Some(state_with_session_and_event(
+                "new-session",
+                "UserPromptSubmit",
+            )));
+            let reader = FakeStateReader {
+                states,
+                calls: std::cell::RefCell::new(0),
+            };
+            let facts = FakeAliveFacts::always(true);
+            let mut awaiting_calls = 0;
+            let result = wait_for_relaunch_liveness(
+                &facts,
+                &reader,
+                "C:/x",
+                "overmind",
+                "old-session",
+                0,
+                true,
+                &mut |_| {},
+                &mut || awaiting_calls += 1,
+            );
+            assert_eq!(result.unwrap(), RelaunchOutcome::Relaunched);
+            assert_eq!(
+                awaiting_calls, 1,
+                "must still have notified once, at the 20s mark, even though it later resolved"
+            );
         }
     }
 }

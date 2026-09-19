@@ -311,6 +311,43 @@ messages but never RECEIVE notifications. **Fixed, two parts:**
    too - proven by a test that injects a `;` into a `--dangerously-load-development-channels` value and
    confirms the whole relaunch is refused, the same as for `cwd`/`model`/`permission_mode`.
 
+⚠️ **REVISED TWICE, same day (PM findings, 2026-09-18, fourth then fifth real-restart retests) - the
+second revision corrects the first's own mistake, kept here rather than silently overwritten.**
+
+**Fourth retest**: a live `claude` process is not the same claim as a WORKING session -
+`--dangerously-load-development-channels` shows a security confirmation dialog on every start, and the
+liveness check up to that point (§5, "process alive, then still alive a follow-up interval later") would
+have logged a lane stuck at that dialog as a success. First fix: require the target role's OWN state file
+to show a `session_id` that differs from the one that was killed, whose `updated_by_event` is something
+AFTER `SessionStart` (a real `UserPromptSubmit` or later event) - `SessionStart` alone doesn't prove it,
+since a session stuck at the dialog still fires that event and then never gets past it.
+
+**⚠️ That first fix's OWN mistake, caught by CireSnave within the same day**: an earlier draft of THIS
+section (§5 above) had reasoned its way to also taking `--dangerously-load-development-channels` OUT of
+the carry-over allowlist entirely, on the theory that a flag which only produces a dialog is better
+dropped than carried. **That reasoning was wrong** - `channels-reference`'s own docs confirm there is NO
+bypass during the research preview, and `--channels` (the no-dialog alternative) only accepts plugins on
+Anthropic's own allowlist, so it can never substitute for a local MCP server like `claude-peers`. Dropping
+the flag would have silently cut every relaunched lane off from Synapse, FAM, and every other non-Claude
+agent - the exact fabric the flag exists to keep reachable. **Retracted the same day it was proposed,
+before ever merging**: the flag stays in `ALLOWED_LAUNCH_ARG_FLAGS`, carried over verbatim, exactly as the
+lane was originally launched.
+
+**Fifth retest, the actual fix**: liveness now has THREE outcomes, not a pass/fail pair -
+`RelaunchOutcome::Relaunched` (real progress, as the fourth retest established), `AwaitingConfirmation`
+(the process IS alive, past `PROGRESS_TIMEOUT` (~20s) with no progress, AND its own launch carried the
+dev-channels flag - exactly the dialog's shape), and `Err(SessionNeverProcessedPrompt)` (the process died,
+or never came up, or is stuck with nothing to explain why). `AwaitingConfirmation` is real, ACTED work -
+the kill and the relaunch both genuinely happened - never an error: `log_outcome` records `acted: true`
+with "awaiting human confirmation at the dev-channels dialog." The moment `AwaitingConfirmation` is FIRST
+detected (not only once the full ~15 minute total timeout elapses), a callback fires exactly once and
+`lane-restart` prints a machine-readable JSON status line
+(`{"event":"lane-restart-status","role":...,"outcome":"awaiting_confirmation","at":...}`) - so whatever is
+watching this process's stdout (the PM lane, today) can notify CireSnave promptly that a human needs to
+go confirm the dialog. Polling then CONTINUES (never re-notifying) up to the ~15 minute total: a human
+confirming flips the outcome to `Relaunched`; reaching the full timeout still stuck returns
+`AwaitingConfirmation` as the final outcome instead.
+
 ## 6. Bulletproof requirements (from the task, restated as testable properties)
 
 1. **Positive identification** — §2's four-part check, every time, no exceptions, including for
