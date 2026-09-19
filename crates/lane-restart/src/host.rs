@@ -39,6 +39,88 @@ use std::time::{Duration, Instant};
 /// actually times a stuck session out).
 pub const STARTUP_WINDOW: Duration = Duration::from_secs(60);
 
+/// ⚠️ ROOT CAUSE, PM finding 2026-09-19 (real-restart-3, raw I/O log): the
+/// CPR went out (`child->relay n=4 "\x1b[6n"`) and NOTHING ever came back
+/// on stdin - zero `outer_stdin->child` entries. Windows consoles start in
+/// COOKED mode: `ENABLE_LINE_INPUT` buffers input until Enter, and WT's
+/// CPR reply (`ESC[r;cR`) has no Enter, so a `ReadFile` on the host's own
+/// stdin never returns it; without `ENABLE_VIRTUAL_TERMINAL_INPUT` it may
+/// not even be delivered as VT bytes. This has nothing to do with the
+/// relay LOGIC (proven sound by this module's own output-driven-CPR test):
+/// it's the host's own CONSOLE MODE, set once at production startup
+/// (`run()`, never here - a test's fake pipes have no console mode to set)
+/// and always restored, including on panic (`Drop`).
+#[cfg(windows)]
+struct RawConsoleGuard {
+    stdin_handle: windows_sys::Win32::Foundation::HANDLE,
+    original_stdin_mode: Option<u32>,
+    stdout_handle: windows_sys::Win32::Foundation::HANDLE,
+    original_stdout_mode: Option<u32>,
+}
+
+#[cfg(windows)]
+impl RawConsoleGuard {
+    /// Only touches a handle whose `GetConsoleMode` succeeds - i.e. only a
+    /// REAL console, never a pipe or file (a test's fake stdin/stdout, or a
+    /// real launch whose std handles were redirected, are both left alone).
+    fn enable() -> Self {
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, GetStdHandle, SetConsoleMode, DISABLE_NEWLINE_AUTO_RETURN,
+            ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+            ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE,
+        };
+        unsafe {
+            let stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+            let mut stdin_mode: u32 = 0;
+            let original_stdin_mode = if GetConsoleMode(stdin_handle, &mut stdin_mode) != 0 {
+                let new_mode = (stdin_mode | ENABLE_VIRTUAL_TERMINAL_INPUT)
+                    & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+                SetConsoleMode(stdin_handle, new_mode);
+                Some(stdin_mode)
+            } else {
+                None
+            };
+
+            let stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut stdout_mode: u32 = 0;
+            let original_stdout_mode = if GetConsoleMode(stdout_handle, &mut stdout_mode) != 0 {
+                let new_mode =
+                    stdout_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+                SetConsoleMode(stdout_handle, new_mode);
+                Some(stdout_mode)
+            } else {
+                None
+            };
+
+            Self {
+                stdin_handle,
+                original_stdin_mode,
+                stdout_handle,
+                original_stdout_mode,
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RawConsoleGuard {
+    /// Restores BOTH original modes on every exit path - normal return, an
+    /// early `?`, or a panic unwind - never leaves the real console (which
+    /// outlives this process, since it's WT's own) in raw mode.
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleMode;
+        unsafe {
+            if let Some(mode) = self.original_stdin_mode {
+                SetConsoleMode(self.stdin_handle, mode);
+            }
+            if let Some(mode) = self.original_stdout_mode {
+                SetConsoleMode(self.stdout_handle, mode);
+            }
+        }
+    }
+}
+
 /// What an automatic answer gets logged with - `restart.log` (§12.4: "log
 /// the automatic answer... with the handler's id and the exact text that
 /// matched").
@@ -311,6 +393,7 @@ fn run_with_handlers_and_window(
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => {
                 relay_chunk(&chunk, &mut outer_output, &mut parser)?;
+                on_raw_io("relay->outer_stdout", &chunk);
                 if still_in_startup_window {
                     let text = screen_text(&parser);
                     if Some(text.as_str()) != last_logged_screen.as_deref() {
@@ -378,6 +461,11 @@ fn append_host_log(path: &std::path::Path, line: &str) {
 /// handlers (§12.3) and wires this process's OWN real stdin/stdout as the
 /// outer relay ends.
 pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
+    // ⚠️ Kept alive for `run`'s ENTIRE scope - restored on every exit path
+    // via `Drop`, including a panic unwind.
+    #[cfg(windows)]
+    let _raw_console_guard = RawConsoleGuard::enable();
+
     let (cols, rows) = current_console_size().unwrap_or((80, 25));
     let log_path = host_log_path(role);
     let log_path_for_answered = log_path.clone();
@@ -652,6 +740,21 @@ mod tests {
     // process. No REAL terminal exists on the outer side of a test, so
     // (matching what a real terminal like wt.exe would do) the fake outer
     // input answers the child's own CPR request itself.
+
+    // -- RawConsoleGuard: mode set/restore, never a real-console property --- //
+    // ⚠️ PM's own words: "A unit test can't reproduce a real console." This
+    // proves only what CAN be proven without one: `enable()`/`Drop` never
+    // panic or hang, and only ever touch a handle whose `GetConsoleMode`
+    // succeeds - safe to call regardless of whether the TEST process's own
+    // stdin/stdout happen to be a real console or (as under `cargo test`,
+    // usually) redirected.
+
+    #[cfg(windows)]
+    #[test]
+    fn raw_console_guard_enable_and_drop_never_panics() {
+        let guard = RawConsoleGuard::enable();
+        drop(guard);
+    }
 
     // -- output-driven CPR round trip: no pre-seeded knowledge -------------- //
     // ⚠️ PM finding, 2026-09-19 (real-restart-2, host-restarttest-34276.log):
