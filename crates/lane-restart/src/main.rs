@@ -430,31 +430,36 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         Ok(plan) if !plan.will_act => {
-            let model_flag = match &plan.state.model {
-                Some(m) => format!(" --model {m}"),
-                None => String::new(),
-            };
-            let permission_mode_flag = match &plan.state.permission_mode {
-                Some(m) => format!(" --permission-mode {m}"),
-                None => String::new(),
-            };
-            println!(
-                "lane-restart: DRY RUN - would kill pid {} and relaunch a FRESH session via \
-                 wt.exe (conhost.exe fallback): \
-                 `claude --name {}{}{}{} \"read {} HANDOFF and \
-                 continue\"` in {}",
-                plan.state.pid,
-                plan.state.name.as_deref().unwrap_or(&plan.state.role),
-                model_flag,
-                permission_mode_flag,
-                if plan.state.remote_control {
-                    " --remote-control"
-                } else {
-                    ""
-                },
-                plan.state.role,
-                plan.state.cwd
-            );
+            match relaunch::describe_dry_run(&plan.state) {
+                Ok(argv) => {
+                    let cmdline: Vec<String> = argv
+                        .iter()
+                        .map(|a| {
+                            if a.contains(' ') {
+                                format!("{a:?}")
+                            } else {
+                                a.clone()
+                            }
+                        })
+                        .collect();
+                    println!(
+                        "lane-restart: DRY RUN - would kill pid {} and relaunch a FRESH session \
+                         via wt.exe (conhost.exe fallback), hosted by \
+                         `lane-restart host --role {} -- {}`, in {}",
+                        plan.state.pid,
+                        plan.state.role,
+                        cmdline.join(" "),
+                        plan.state.cwd
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "lane-restart: DRY RUN - would kill pid {} but the relaunch command \
+                         itself would be refused: {e}",
+                        plan.state.pid
+                    );
+                }
+            }
             log_outcome(requested_by, &args.role, "dry run - no action taken", false);
             ExitCode::SUCCESS
         }
@@ -1065,6 +1070,27 @@ mod relaunch {
         }
     }
 
+    /// PM finding, 2026-09-19: the dry-run message used to rebuild its own
+    /// string by hand, separately from the argv the real launch actually
+    /// uses - and silently dropped the carried-over `launch_args` flags
+    /// (`--dangerously-load-development-channels` included) doing so. This
+    /// calls the EXACT SAME `claude_argv` the real launch calls, so the two
+    /// can never drift apart again.
+    pub fn describe_dry_run(state: &LaneState) -> Result<Vec<String>, RelaunchError> {
+        let name = state.name.as_deref().unwrap_or(&state.role);
+        if !valid_identifier(&state.role) {
+            return Err(RelaunchError::InvalidIdentifier(format!(
+                "role {:?}",
+                state.role
+            )));
+        }
+        if !valid_identifier(name) {
+            return Err(RelaunchError::InvalidIdentifier(format!("name {name:?}")));
+        }
+        let prompt = format!("read {} HANDOFF and continue", state.role);
+        Ok(claude_argv(name, state, &prompt))
+    }
+
     pub fn kill_and_relaunch(
         facts: &dyn SystemFacts,
         state_reader: &dyn StateReader,
@@ -1090,10 +1116,14 @@ mod relaunch {
         ) {
             return Err(RelaunchError::UnsafeArgument(bad.to_string()));
         }
-        let carries_dev_channels_flag = state
-            .launch_args
-            .as_deref()
-            .is_some_and(has_dev_channels_flag);
+        // ⚠️ PM finding, 2026-09-19 (real-restart test): must check the argv
+        // this call is ACTUALLY ABOUT TO LAUNCH, not re-derive a guess from
+        // old `state.launch_args` - `argv` is the single source of truth for
+        // what's really being carried over (it already went through
+        // `extra_launch_args`'s allowlist, which `state.launch_args` alone
+        // doesn't reflect), and checking it directly can never disagree with
+        // what actually gets launched two lines below.
+        let carries_dev_channels_flag = has_dev_channels_flag(&argv);
 
         facts
             .kill_verified(state.pid, identity)

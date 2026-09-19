@@ -153,6 +153,51 @@ pub fn find_matching_handler<'a>(
         .find(|h| is_active(h, role, now) && matches(h, screen_text))
 }
 
+/// Per-anchor, per-field detail behind a `matches()` verdict - PM finding,
+/// 2026-09-19: a real restart left NOTHING to explain why a handler that
+/// should have matched didn't, so this exists purely for `host.rs`'s own
+/// diagnostic log (`.lane-state/host-<role>-<pid>.log`), never for deciding
+/// whether to inject (that stays `matches`/`find_matching_handler` alone).
+pub struct MatchReport {
+    pub handler_id: String,
+    pub active: bool,
+    /// (anchor text, whether it was found verbatim)
+    pub anchors: Vec<(String, bool)>,
+    /// (field name, pinned value, whether it matched at a real boundary)
+    pub fields: Vec<(String, String, bool)>,
+    pub matched: bool,
+}
+
+pub fn match_report(
+    handler: &HandlerSpec,
+    role: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    screen_text: &str,
+) -> MatchReport {
+    let active = is_active(handler, role, now);
+    let anchors: Vec<(String, bool)> = handler
+        .match_spec
+        .text_anchors
+        .iter()
+        .map(|a| (a.clone(), screen_text.contains(a.as_str())))
+        .collect();
+    let fields: Vec<(String, String, bool)> = handler
+        .match_spec
+        .fields
+        .iter()
+        .map(|(n, v)| (n.clone(), v.clone(), field_matches(screen_text, n, v)))
+        .collect();
+    let matched =
+        active && anchors.iter().all(|(_, ok)| *ok) && fields.iter().all(|(_, _, ok)| *ok);
+    MatchReport {
+        handler_id: handler.id.clone(),
+        active,
+        anchors,
+        fields,
+        matched,
+    }
+}
+
 /// A short, stable hash of a handler's exact JSON content, for
 /// `lane-restart --version` (§12.9) — so anyone can see precisely what's
 /// active without reading source, and a diff between two `--version`
@@ -215,6 +260,35 @@ mod tests {
     #[test]
     fn refuses_malformed_json() {
         assert!(serde_json::from_str::<HandlerSpec>("{not json").is_err());
+    }
+
+    #[test]
+    fn match_report_pinpoints_which_anchor_and_field_failed() {
+        // PM finding, 2026-09-19: a real restart left no way to tell WHICH
+        // anchor or field caused a non-match - this is the diagnostic
+        // host.rs logs, so it must actually pinpoint the failure, not just
+        // restate the overall bool `matches()` already gives.
+        let h: HandlerSpec =
+            serde_json::from_str(&sample_json("t", Some("server:claude-peers"))).unwrap();
+        let screen = "  I am using this for local development\n  Channels: server:claude-peers\n";
+        let report = match_report(&h, "overmind", chrono::Utc::now(), screen);
+        assert!(!report.matched);
+        assert!(report.active);
+        assert_eq!(
+            report.anchors,
+            vec![
+                ("SECURITY CONFIRMATION".to_string(), false),
+                ("local development".to_string(), true),
+            ]
+        );
+        assert_eq!(
+            report.fields,
+            vec![(
+                "Channels".to_string(),
+                "server:claude-peers".to_string(),
+                true
+            )]
+        );
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub const STARTUP_WINDOW: Duration = Duration::from_secs(60);
 pub struct HandlerAnswered {
     pub handler_id: String,
     pub matched_screen_text: String,
+    /// The literal bytes just written to the child's stdin - PM finding,
+    /// 2026-09-19: "any injection with the bytes" needs the actual bytes on
+    /// the record, not just that an injection happened.
+    pub injected_action: String,
 }
 
 /// Relays one chunk of the CHILD's real output to `output_writer`
@@ -95,6 +99,7 @@ pub fn check_and_inject(
             on_answered(HandlerAnswered {
                 handler_id: handler.id.clone(),
                 matched_screen_text: screen_text.to_string(),
+                injected_action: handler.action.clone(),
             });
         }
     }
@@ -140,6 +145,7 @@ pub fn run_with_handlers(
         on_answered,
         on_unhandled,
         STARTUP_WINDOW,
+        |_, _| {},
     )
 }
 
@@ -158,6 +164,7 @@ fn run_with_handlers_and_window(
     on_answered: impl FnMut(HandlerAnswered) + Send + 'static,
     on_unhandled: impl FnOnce(String) + Send + 'static,
     startup_window: Duration,
+    mut on_match_attempt: impl FnMut(&str, &[handlers::MatchReport]) + Send + 'static,
 ) -> std::io::Result<HostOutcome> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -169,8 +176,23 @@ fn run_with_handlers_and_window(
         })
         .map_err(std::io::Error::other)?;
 
+    // ⚠️ ROOT CAUSE, PM finding 2026-09-19 (real-restart-04:39:56Z): with no
+    // explicit `.cwd()`, `portable_pty::CommandBuilder` falls back to
+    // `USERPROFILE`, NOT this process's own current directory - confirmed by
+    // reading `cmdbuilder.rs`'s own `current_directory()`. `claude.exe` was
+    // spawned in the WRONG directory entirely, which is why
+    // `find_claude_process_in`'s cwd match silently never found it (`alive`
+    // came back false at the 20s check, producing `SessionNeverProcessedPrompt`
+    // instead of `AwaitingConfirmation`, even though the process was genuinely
+    // alive). `lane-restart host` itself is always launched via
+    // `wt.exe -d <cwd> lane-restart host ...` (`spawn_relaunch`), so ITS OWN
+    // `current_dir()` IS the correct target directory - explicitly propagated
+    // here rather than trusted to any implicit inheritance.
     let mut cmd = CommandBuilder::new(&child_argv[0]);
     cmd.args(&child_argv[1..]);
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.cwd(cwd);
+    }
     let mut child = pair
         .slave
         .spawn_command(cmd)
@@ -260,6 +282,7 @@ fn run_with_handlers_and_window(
     let mut on_unhandled = Some(on_unhandled);
     let mut parser = vt100::Parser::new(rows, cols, 0);
     let mut matched_ids: HashSet<String> = HashSet::new();
+    let mut last_logged_screen: Option<String> = None;
     let started = Instant::now();
     loop {
         let still_in_startup_window = started.elapsed() < startup_window;
@@ -275,6 +298,14 @@ fn run_with_handlers_and_window(
                 relay_chunk(&chunk, &mut outer_output, &mut parser)?;
                 if still_in_startup_window {
                     let text = screen_text(&parser);
+                    if Some(text.as_str()) != last_logged_screen.as_deref() {
+                        let reports: Vec<handlers::MatchReport> = handler_list
+                            .iter()
+                            .map(|h| handlers::match_report(h, role, chrono::Utc::now(), &text))
+                            .collect();
+                        on_match_attempt(&text, &reports);
+                        last_logged_screen = Some(text.clone());
+                    }
                     let mut writer = pty_writer.lock().unwrap();
                     check_and_inject(
                         &handler_list,
@@ -302,12 +333,41 @@ fn run_with_handlers_and_window(
     })
 }
 
+/// `.lane-state/host-<role>-<pid>.log` - PM finding, 2026-09-19: a real
+/// restart left NOTHING to explain a handler that should have matched but
+/// didn't, so this diagnostic log exists purely to make the NEXT run
+/// explain itself: the screen text at each real change, the per-anchor and
+/// per-field match result for every embedded handler, and any injection
+/// with the exact bytes sent.
+fn host_log_path(role: &str) -> std::path::PathBuf {
+    std::path::Path::new("C:/Projects/.lane-state")
+        .join(format!("host-{role}-{}.log", std::process::id()))
+}
+
+/// Best-effort append - never fatal to the relay that's still running.
+fn append_host_log(path: &std::path::Path, line: &str) {
+    use std::io::Write as _;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Convenience entry point for real production use: loads the embedded
 /// handlers (§12.3) and wires this process's OWN real stdin/stdout as the
 /// outer relay ends.
 pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     let (cols, rows) = current_console_size().unwrap_or((80, 25));
-    run_with_handlers(
+    let log_path = host_log_path(role);
+    let log_path_for_answered = log_path.clone();
+    let log_path_for_attempts = log_path.clone();
+    run_with_handlers_and_window(
         role,
         child_argv,
         handlers::load_embedded_handlers(),
@@ -315,13 +375,43 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
         rows,
         std::io::stdin(),
         std::io::stdout(),
-        |answered| {
+        move |answered| {
             eprintln!(
                 "lane-restart host: answered dialog via handler {:?}",
                 answered.handler_id
             );
+            append_host_log(
+                &log_path_for_answered,
+                &format!(
+                    "[{}] INJECTED handler={} bytes={:?} screen={:?}",
+                    chrono::Utc::now().to_rfc3339(),
+                    answered.handler_id,
+                    answered.injected_action,
+                    answered.matched_screen_text
+                ),
+            );
         },
         capture_unhandled_prompt,
+        STARTUP_WINDOW,
+        move |screen, reports| {
+            append_host_log(
+                &log_path_for_attempts,
+                &format!(
+                    "[{}] SCREEN CHANGED {:?}",
+                    chrono::Utc::now().to_rfc3339(),
+                    screen
+                ),
+            );
+            for r in reports {
+                append_host_log(
+                    &log_path_for_attempts,
+                    &format!(
+                        "  handler={} active={} matched={} anchors={:?} fields={:?}",
+                        r.handler_id, r.active, r.matched, r.anchors, r.fields
+                    ),
+                );
+            }
+        },
     )
 }
 
@@ -578,6 +668,57 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn run_with_handlers_spawns_the_child_in_this_processs_own_current_directory() {
+        // ⚠️ THE ROOT CAUSE, PM finding 2026-09-19 (real-restart-04:39:56Z):
+        // `portable_pty::CommandBuilder` with no explicit `.cwd()` falls
+        // back to `USERPROFILE`, NOT this process's own cwd - `claude.exe`
+        // was silently spawned in the WRONG directory, which is why
+        // `find_claude_process_in`'s cwd match never found it. This proves
+        // the fix directly: the real child's own reported cwd (via `cmd /c
+        // cd`, which prints the process's actual working directory) must
+        // equal THIS test process's own `current_dir()` - never
+        // `USERPROFILE`, which would be a different, wrong answer whenever
+        // the two differ (as they do for a normal `cargo test` run).
+        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let child_argv = vec!["cmd.exe".to_string(), "/c".to_string(), "cd".to_string()];
+        run_with_handlers(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            outer_input,
+            SharedVecWriter(Arc::clone(&outer_output)),
+            |_| {},
+            |_| {},
+        )
+        .expect("run_with_handlers failed");
+
+        let captured = outer_output.lock().unwrap().clone();
+        let text = String::from_utf8_lossy(&captured);
+        let expected = std::env::current_dir().unwrap();
+        assert!(
+            text.contains(expected.to_string_lossy().as_ref()),
+            "the real child's own cwd must be this process's current_dir() \
+             ({expected:?}) - got screen text {text:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn run_with_handlers_matches_and_answers_a_real_dialog_from_a_real_child() {
         // A real child that prints something matching a test handler's
         // exact text, then BLOCKS on its own stdin (`set /p`) waiting for a
@@ -704,6 +845,7 @@ mod tests {
             // before `choice`'s own 2s auto-continue) to stay a fast unit
             // test rather than waiting out the real 60s STARTUP_WINDOW.
             Duration::from_millis(800),
+            |_, _| {},
         )
         .expect("run_with_handlers_and_window failed");
 
@@ -764,6 +906,7 @@ mod tests {
             |_| {},
             move |text| captured_for_cb.lock().unwrap().push(text),
             Duration::from_millis(1500),
+            |_, _| {},
         )
         .expect("run_with_handlers_and_window failed");
 
