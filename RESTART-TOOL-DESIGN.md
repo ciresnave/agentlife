@@ -725,7 +725,7 @@ project-level settings first if a narrower rollout than user-level is wanted) �
 populate correctly across a few real turns → only then widen to every lane, and only then does anyone
 attempt a real `--self` or PM-initiated restart for the first time.
 
-## 12. Declarative startup-prompt handlers — BUILT (crates/lane-restart/src/handlers.rs, host.rs)
+## 12. Declarative startup-prompt handlers — BUILT AND PROVEN END TO END (§12.11), real run 2026-09-19
 
 **CireSnave's idea, his words, 2026-09-18 (`CIRESNAVE-EXPECTATIONS.md` §5.1c):**
 
@@ -975,3 +975,50 @@ answering the `--dangerously-load-development-channels` security confirmation di
 - **Scope**: every current lane plus the disposable test lane -
   `["overmind", "synapse", "thinkersjournal-community", "pm", "restarttest"]`.
 - **Expiry**: `2027-03-19T00:00:00Z` - not indefinite; a future review has to re-confirm it.
+
+**PROVEN end to end, real run, 2026-09-19 ~05:43Z (`lane-restart@0.3.21`, PM):** a real restart of the
+disposable test lane, with the dev-channels flag carried over - kill of the old pid → `wt.exe` →
+`lane-restart host` → `claude` launched with the flag → the handler matched (both text anchors plus
+the exact `Channels` field) → injected `"1\r"` → the session actually started → it read its own
+`HANDOFF.md` and replied confirming a fresh session had processed it → the outer tool logged
+`Relaunched` and exited `0`. This is the mechanism's real acceptance test, not a unit test standing in
+for one - nine real rounds got here, and every failure along the way was safe (refused or stuck, never
+a wrong action).
+
+**Rollout (CireSnave delegated it to the PM):** the `.lane-state` hooks now live in USER-level
+`~/.claude/settings.json`, merged beside CireSnave's own `SessionStart` wrapper - the earlier
+per-project-level copies (§11.4) are removed, since they only carried `LANE_ROLE` and running both
+would double-fire the hooks. Every other lane starts recording state at its own next session start.
+
+**A real-world side effect worth knowing about, not a bug in this tool**: after enough test sessions
+were killed mid-startup during this investigation, Claude Code itself printed *"the fullscreen renderer
+has repeatedly failed to start on this machine, so it has been turned off here"* and fell back to its
+classic renderer. This is Claude Code's own self-protection against a renderer that keeps not finishing
+startup - an expected consequence of this crate's own real-restart testing discipline, not something
+`lane-restart` or its host caused directly. Fix, if the fullscreen renderer is wanted back: run `/tui
+fullscreen` in an affected session.
+
+## 13. How a lane restarts itself — a quick pointer
+
+No new code - this is a pointer into sections already above, for a lane that just wants to know the
+three real steps, in order:
+
+1. **Write your own `<role>/HANDOFF.md`**, in §4's format - the free-text summary of where things
+   stand, what's still open, and anything the next session must not have to re-derive from scratch.
+   Do this only once you're actually at a point you consider safe to leave.
+2. **Run `lane-restart assert-idle [--role <name>]`**, from your own shell, right after writing
+   HANDOFF (§1a). This is what actually lets a restart proceed at all - it asserts, on your own state
+   file, that no background shell you started is still running. A later `UserPromptSubmit` or
+   `PreToolUse` clears it again automatically, so do this as the LAST thing before restarting, not
+   earlier in the session.
+3. **Run `lane-restart --role <your-role> --self`** (§3: self-restart needs no idle/busy check beyond
+   step 2's assertion, since you're the same process making the request). This kills your own current
+   session and relaunches a genuinely fresh one in the same `cwd`, which will read your HANDOFF and
+   continue (§5) - carrying over your model, permission mode, Remote Control, and any allowlisted
+   launch flags automatically (§5, §12.11's `claude-peers-dev-channels` handler included, if your
+   launch carries `--dangerously-load-development-channels`).
+
+⚠️ Unlike restarting a DIFFERENT lane (which defaults to a dry run unless `--yes` is also passed),
+**`--self` acts for real immediately** - no confirmation flag needed, since you're the same process
+making the request (§3). Pass `--dry-run` explicitly first if you want to sanity-check the exact
+command before the first time you actually use it on yourself.
