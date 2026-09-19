@@ -865,8 +865,29 @@ mod relaunch {
             .any(|a| a == "--dangerously-load-development-channels")
     }
 
+    /// ⚠️ PM finding, 2026-09-19 (real-rerun, "must be tagged" error from
+    /// claude itself): `--dangerously-load-development-channels` is
+    /// VARIADIC - it consumes every following non-flag token, including a
+    /// trailing positional prompt, which is exactly what happened when the
+    /// prompt was appended LAST: `claude` parsed it as a second (invalid)
+    /// channel entry and exited before ever reaching the dialog. Fixed by
+    /// putting the prompt FIRST, immediately after `claude` - nothing can
+    /// ever directly follow ANY variadic flag's values again, since the
+    /// variadic flags (from `extra_launch_args`) are always the LAST
+    /// elements this function appends. **Verified against the real `claude`
+    /// CLI** (a real spawn under `portable-pty`, no visible window, killed
+    /// within a few seconds - matching this crate's real-process discipline
+    /// elsewhere): the old (prompt-last) shape reproduces the exact
+    /// "--dangerously-load-development-channels entries must be tagged"
+    /// error verbatim; prompt-first parses cleanly and reaches claude's own
+    /// first-run folder-trust dialog. See
+    /// `no_positional_ever_directly_follows_a_variadic_flags_values` for the
+    /// general property this now guarantees for every allowlisted variadic
+    /// flag, not just this one.
     fn claude_argv(name: &str, state: &LaneState, prompt: &str) -> Vec<String> {
-        let mut argv = vec!["claude".to_string(), "--name".to_string(), name.to_string()];
+        let mut argv = vec!["claude".to_string(), prompt.to_string()];
+        argv.push("--name".to_string());
+        argv.push(name.to_string());
         if let Some(model) = &state.model {
             argv.push("--model".to_string());
             argv.push(model.clone());
@@ -889,7 +910,6 @@ mod relaunch {
                 );
             }
         }
-        argv.push(prompt.to_string());
         argv
     }
 
@@ -1403,7 +1423,7 @@ mod relaunch {
             let argv = claude_argv("overmind", &state, "the prompt");
             assert_eq!(
                 argv,
-                vec!["claude", "--name", "overmind", "the prompt"]
+                vec!["claude", "the prompt", "--name", "overmind"]
                     .into_iter()
                     .map(String::from)
                     .collect::<Vec<_>>()
@@ -1457,11 +1477,11 @@ mod relaunch {
                 argv,
                 strs(&[
                     "claude",
+                    "the prompt",
                     "--name",
                     "overmind",
                     "--dangerously-load-development-channels",
                     "server:claude-peers",
-                    "the prompt",
                 ]),
                 "got {argv:?}"
             );
@@ -1568,9 +1588,9 @@ mod relaunch {
                 1,
                 "got {argv:?}"
             );
-            assert_eq!(argv[1], "--name");
+            assert_eq!(argv[2], "--name");
             assert_eq!(
-                argv[2], "overmind",
+                argv[3], "overmind",
                 "the FRESH name wins, not the stale one"
             );
         }
@@ -1587,15 +1607,86 @@ mod relaunch {
                 argv,
                 strs(&[
                     "claude",
+                    "p",
                     "--name",
                     "overmind",
                     "--model",
                     "claude-sonnet-5",
                     "--permission-mode",
                     "prompting",
-                    "p"
                 ])
             );
+        }
+
+        #[test]
+        fn no_positional_ever_directly_follows_a_variadic_flags_values() {
+            // ⚠️ PM finding, 2026-09-19 (real rerun, claude's own error):
+            // `--dangerously-load-development-channels` is VARIADIC and
+            // consumed the trailing prompt when the prompt was appended
+            // LAST - claude parsed it as an extra (invalid) channel entry
+            // and exited before the dialog ever rendered. Verified against
+            // the REAL claude CLI (a real spawn under portable-pty, no
+            // visible window, killed within a few seconds): the old
+            // (prompt-last) shape reproduces claude's exact "entries must
+            // be tagged" error; prompt-first parses cleanly.
+            //
+            // GENERAL property, not just this one flag: walking the argv
+            // from the first token after the fixed "claude <prompt> --name
+            // <name>" prefix, every token must be either a recognised flag
+            // or a value consumed by the immediately preceding flag's own
+            // declared arity - never a stray positional a variadic flag
+            // (`--dangerously-load-development-channels`, `--add-dir`)
+            // could swallow.
+            let known_arities: &[(&str, FlagArity)] = &[
+                ("--model", FlagArity::One),
+                ("--permission-mode", FlagArity::One),
+                ("--remote-control", FlagArity::None),
+            ];
+            let mut state = state_with_role("overmind");
+            state.launch_args = Some(strs(&[
+                "claude.exe",
+                "--dangerously-load-development-channels",
+                "server:claude-peers",
+                "server:extra",
+                "--add-dir",
+                "C:/a",
+                "C:/b",
+            ]));
+            let argv = claude_argv("overmind", &state, "the prompt");
+
+            assert_eq!(argv[0], "claude");
+            assert_eq!(argv[1], "the prompt", "the prompt must come FIRST");
+            assert_eq!(argv[2], "--name");
+            let mut iter = argv[4..].iter().peekable();
+            while let Some(token) = iter.next() {
+                assert!(
+                    is_flag_token(token),
+                    "expected a flag here, found a stray positional a variadic \
+                     flag could swallow: {token:?} in {argv:?}"
+                );
+                let arity = known_arities
+                    .iter()
+                    .chain(ALLOWED_LAUNCH_ARG_FLAGS.iter())
+                    .find(|(f, _)| f == token)
+                    .map(|(_, a)| *a)
+                    .unwrap_or_else(|| panic!("unrecognised flag in built argv: {token:?}"));
+                match arity {
+                    FlagArity::None => {}
+                    FlagArity::One => {
+                        iter.next().expect("flag missing its required value");
+                    }
+                    FlagArity::OptionalOne => {
+                        if iter.peek().is_some_and(|v| !is_flag_token(v)) {
+                            iter.next();
+                        }
+                    }
+                    FlagArity::Variadic => {
+                        while iter.peek().is_some_and(|v| !is_flag_token(v)) {
+                            iter.next();
+                        }
+                    }
+                }
+            }
         }
 
         // -- first_unsafe_argument / wt.exe ';'-rejection ----------------- //
