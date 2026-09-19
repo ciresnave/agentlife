@@ -146,6 +146,7 @@ pub fn run_with_handlers(
         on_unhandled,
         STARTUP_WINDOW,
         |_, _| {},
+        |_, _| {},
     )
 }
 
@@ -165,7 +166,9 @@ fn run_with_handlers_and_window(
     on_unhandled: impl FnOnce(String) + Send + 'static,
     startup_window: Duration,
     mut on_match_attempt: impl FnMut(&str, &[handlers::MatchReport]) + Send + 'static,
+    on_raw_io: impl Fn(&str, &[u8]) + Send + Sync + 'static,
 ) -> std::io::Result<HostOutcome> {
+    let on_raw_io = Arc::new(on_raw_io);
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -208,14 +211,22 @@ fn run_with_handlers_and_window(
     ));
 
     // outer input -> child, transparent, for the whole session's life.
+    // ⚠️ THIS is the thread that carries WT's own real-terminal CPR reply
+    // (and every other keystroke) into the child - PM finding, 2026-09-19
+    // (real-restart-2): if this thread isn't running, starts late, or
+    // never receives anything, the child can sit blocked on its own CPR
+    // forever with a blank screen. `on_raw_io` records every read here so
+    // a stuck run shows whether this thread ever received a single byte.
     {
         let pty_writer = Arc::clone(&pty_writer);
+        let on_raw_io = Arc::clone(&on_raw_io);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 match outer_input.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        on_raw_io("outer_stdin->child", &buf[..n]);
                         let mut w = pty_writer.lock().unwrap();
                         if w.write_all(&buf[..n]).is_err() {
                             break;
@@ -263,20 +274,24 @@ fn run_with_handlers_and_window(
     // still be stuck in `ReadFile` forever, and that's fine to leave
     // behind for the rest of the process's own life.
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match pty_reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
+    {
+        let on_raw_io = Arc::clone(&on_raw_io);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match pty_reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        on_raw_io("child->relay", &buf[..n]);
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
                     }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
-    });
+        });
+    }
 
     let mut on_answered = on_answered;
     let mut on_unhandled = Some(on_unhandled);
@@ -367,6 +382,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     let log_path = host_log_path(role);
     let log_path_for_answered = log_path.clone();
     let log_path_for_attempts = log_path.clone();
+    let log_path_for_raw_io = log_path.clone();
     run_with_handlers_and_window(
         role,
         child_argv,
@@ -412,7 +428,27 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                 );
             }
         },
+        move |direction, bytes| {
+            append_host_log(
+                &log_path_for_raw_io,
+                &format!(
+                    "[{}] {direction} n={} {}",
+                    chrono::Utc::now().to_rfc3339(),
+                    bytes.len(),
+                    escape_bytes(bytes)
+                ),
+            );
+        },
     )
+}
+
+/// PM finding, 2026-09-19 (real-restart-2): "first ~200 bytes escaped" -
+/// lossy UTF-8 plus Rust's own `Debug` escaping (`\n`, `\r`, `\u{1b}`, …) is
+/// what every other diagnostic string in this module already uses for
+/// screen text, kept consistent here for raw I/O too.
+fn escape_bytes(bytes: &[u8]) -> String {
+    let take = bytes.len().min(200);
+    format!("{:?}", String::from_utf8_lossy(&bytes[..take]))
 }
 
 /// RESTART-TOOL-DESIGN.md §12.6: writes the captured screen text verbatim
@@ -616,6 +652,131 @@ mod tests {
     // process. No REAL terminal exists on the outer side of a test, so
     // (matching what a real terminal like wt.exe would do) the fake outer
     // input answers the child's own CPR request itself.
+
+    // -- output-driven CPR round trip: no pre-seeded knowledge -------------- //
+    // ⚠️ PM finding, 2026-09-19 (real-restart-2, host-restarttest-34276.log):
+    // a real restart never got past a blank screen - the host log showed
+    // exactly one (blank) SCREEN CHANGED entry and nothing further. Every
+    // OTHER real-ConPTY test above PRE-SEEDS the CPR answer into the fake
+    // outer input, which never actually proves the host's own stdin-
+    // forwarding thread is what delivers it - a pre-seeded Cursor answers
+    // immediately regardless of whether that thread runs at all. THIS test
+    // has no such foreknowledge: a fake "terminal" thread only reacts to
+    // what it OBSERVES on the host's real stdout (exactly what WT itself
+    // does for any process it hosts), and its reply only reaches the child
+    // if the host's own stdin-forwarding thread is actually running and
+    // correctly wired.
+
+    /// A `Write` that hands each chunk to a channel - stands in for the
+    /// host's own real stdout, observed by the fake terminal thread below.
+    #[cfg(windows)]
+    struct ChanWriter(std::sync::mpsc::Sender<Vec<u8>>);
+    #[cfg(windows)]
+    impl Write for ChanWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .send(buf.to_vec())
+                .map_err(|_| std::io::Error::other("fake terminal gone"))?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A `Read` fed by a channel - stands in for the host's own real
+    /// stdin, written to only by the fake terminal thread below, only once
+    /// it has actually observed a CPR request.
+    #[cfg(windows)]
+    struct ChanReader {
+        rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        pending: Vec<u8>,
+        pos: usize,
+    }
+    #[cfg(windows)]
+    impl Read for ChanReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.pending.len() {
+                match self.rx.recv() {
+                    Ok(chunk) => {
+                        self.pending = chunk;
+                        self.pos = 0;
+                    }
+                    Err(_) => return Ok(0),
+                }
+            }
+            let n = (self.pending.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_with_handlers_completes_the_cpr_round_trip_driven_only_by_observing_output() {
+        // host's real stdout -> what the fake terminal "sees".
+        let (host_out_tx, host_out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        // the fake terminal's reply -> the host's real stdin.
+        let (term_reply_tx, term_reply_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+        let outer_output = ChanWriter(host_out_tx);
+        let outer_input = ChanReader {
+            rx: term_reply_rx,
+            pending: Vec::new(),
+            pos: 0,
+        };
+
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_thread = Arc::clone(&captured);
+
+        // The fake terminal: reacts ONLY to what it observes, exactly like
+        // a real terminal - no pre-seeded knowledge that a CPR is coming.
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut answered = false;
+            while let Ok(chunk) = host_out_rx.recv() {
+                captured_for_thread
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&chunk);
+                seen.extend_from_slice(&chunk);
+                if !answered && seen.windows(4).any(|w| w == b"\x1b[6n") {
+                    let _ = term_reply_tx.send(b"\x1b[1;1R".to_vec());
+                    answered = true;
+                }
+            }
+        });
+
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765".to_string(),
+        ];
+        let outcome = run_with_handlers(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            outer_input,
+            outer_output,
+            |_| {},
+            |_| {},
+        )
+        .expect("run_with_handlers failed");
+
+        // Give the fake-terminal thread a moment to drain the child's
+        // final chunk(s) after the process itself has already exited.
+        std::thread::sleep(Duration::from_millis(200));
+        let text = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        assert!(
+            text.contains("PROBE_MARKER_98765"),
+            "the real banner must reach the fake terminal purely via an \
+             output-driven CPR response, with no pre-seeded answer - got {text:?}"
+        );
+        assert!(outcome.child_exit_code.is_some());
+    }
 
     #[cfg(windows)]
     #[test]
@@ -846,6 +1007,7 @@ mod tests {
             // test rather than waiting out the real 60s STARTUP_WINDOW.
             Duration::from_millis(800),
             |_, _| {},
+            |_, _| {},
         )
         .expect("run_with_handlers_and_window failed");
 
@@ -906,6 +1068,7 @@ mod tests {
             |_| {},
             move |text| captured_for_cb.lock().unwrap().push(text),
             Duration::from_millis(1500),
+            |_, _| {},
             |_, _| {},
         )
         .expect("run_with_handlers_and_window failed");

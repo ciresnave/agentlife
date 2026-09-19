@@ -272,6 +272,29 @@ mod cli_tests {
         assert!(USAGE.contains("--version"));
     }
 
+    // -- relaunch_exit_code -------------------------------------------- //
+    // PM finding, 2026-09-19 (real-restart-2): exit 0 was indistinguishable
+    // from a genuine `Relaunched` for anything scripting against this tool.
+
+    #[test]
+    fn relaunched_exits_zero() {
+        assert_eq!(
+            relaunch_exit_code(relaunch::RelaunchOutcome::Relaunched),
+            ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn awaiting_confirmation_exits_two_not_zero() {
+        let code = relaunch_exit_code(relaunch::RelaunchOutcome::AwaitingConfirmation);
+        assert_ne!(
+            code,
+            ExitCode::SUCCESS,
+            "AwaitingConfirmation must be distinguishable from Relaunched"
+        );
+        assert_eq!(code, ExitCode::from(2));
+    }
+
     // -- parse_host_args ---------------------------------------------- //
 
     #[test]
@@ -326,6 +349,10 @@ USAGE:
         omitting it targets a DIFFERENT lane, which must be independently
         idle and requires --yes to act for real - otherwise it prints a dry
         run and does nothing.
+        Exit codes (PM finding, 2026-09-19: distinct codes so scripts can
+        tell these apart): 0 = relaunched with real progress confirmed;
+        2 = killed and relaunched, but awaiting a human at the dev-channels
+        confirmation dialog; 1 = refused, or the relaunch failed outright.
 
     lane-restart state <event>
         The hook subcommand: reads a hook's JSON input on stdin and updates
@@ -489,7 +516,7 @@ fn main() -> ExitCode {
                 &plan.identity,
                 &mut on_awaiting,
             ) {
-                Ok(relaunch::RelaunchOutcome::Relaunched) => {
+                Ok(outcome @ relaunch::RelaunchOutcome::Relaunched) => {
                     log_outcome(
                         requested_by,
                         &args.role,
@@ -499,16 +526,16 @@ fn main() -> ExitCode {
                         ),
                         true,
                     );
-                    ExitCode::SUCCESS
+                    relaunch_exit_code(outcome)
                 }
-                Ok(relaunch::RelaunchOutcome::AwaitingConfirmation) => {
+                Ok(outcome @ relaunch::RelaunchOutcome::AwaitingConfirmation) => {
                     log_outcome(
                         requested_by,
                         &args.role,
                         "awaiting human confirmation at the dev-channels dialog",
                         true,
                     );
-                    ExitCode::SUCCESS
+                    relaunch_exit_code(outcome)
                 }
                 Err(e) => {
                     eprintln!("lane-restart: {e}");
@@ -522,6 +549,19 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+/// PM finding, 2026-09-19 (real-restart-2): exit 0 is indistinguishable
+/// from `Relaunched` for anything scripting against this tool - a
+/// genuinely different, real outcome needs a genuinely different exit
+/// code. `AwaitingConfirmation` is real, ACTED work (§5) but not the same
+/// as confirmed progress, so it gets its own code rather than sharing
+/// `Relaunched`'s 0 or `Err`'s 1.
+fn relaunch_exit_code(outcome: relaunch::RelaunchOutcome) -> ExitCode {
+    match outcome {
+        relaunch::RelaunchOutcome::Relaunched => ExitCode::SUCCESS,
+        relaunch::RelaunchOutcome::AwaitingConfirmation => ExitCode::from(2),
     }
 }
 
