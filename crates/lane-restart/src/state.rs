@@ -40,6 +40,19 @@ pub struct LaneState {
     /// asserted" - treated as unsafe, the same as `Some(false)`, never as
     /// `Some(true)`.
     pub no_background_shells: Option<bool>,
+    /// The real, full argv `claude.exe` was launched with, read at
+    /// `SessionStart` from the OS process list - PM finding, 2026-09-18
+    /// (CireSnave, via the PM): CireSnave launches every lane with
+    /// `--dangerously-load-development-channels server:claude-peers`,
+    /// among other flags a relaunch must not silently drop. `None` when
+    /// the launch command line couldn't be read this session - never
+    /// preserved from a prior one, the same "always fresh, never
+    /// preserved" rule `remote_control` already follows: a stale argv
+    /// would be exactly as wrong as inventing one if THIS launch's real
+    /// command line disagrees with it. A relaunch rebuilds its own argv
+    /// from an ALLOWLIST of flags parsed out of this, never passed
+    /// through blindly - see `main.rs`'s `relaunch` module.
+    pub launch_args: Option<Vec<String>>,
     pub updated_at: DateTime<Utc>,
     pub updated_by_event: String,
 }

@@ -146,6 +146,16 @@ pub trait ParentProcess {
 pub struct ClaudeCliFlags {
     pub remote_control: bool,
     pub permission_mode: Option<String>,
+    /// The full argv this was parsed from, retained verbatim - PM finding,
+    /// 2026-09-18 (CireSnave, via the PM): a relaunch that only reconstructs
+    /// `--model`/`--permission-mode`/`--remote-control` silently drops
+    /// every other real launch flag (CireSnave's own lanes always carry
+    /// `--dangerously-load-development-channels server:claude-peers`,
+    /// without which a relaunched lane can send but never RECEIVE
+    /// `claude-peers` notifications). `main.rs`'s relaunch rebuilds its
+    /// own argv from an ALLOWLIST parsed out of this, never passed
+    /// through blindly.
+    pub launch_args: Option<Vec<String>>,
 }
 
 /// Pure - given a command line, no I/O. `--dangerously-skip-permissions`
@@ -155,7 +165,10 @@ pub struct ClaudeCliFlags {
 /// both (PM finding, 2026-09-18, post-merge gate read: the equals form
 /// wasn't parsed).
 pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
-    let mut flags = ClaudeCliFlags::default();
+    let mut flags = ClaudeCliFlags {
+        launch_args: Some(cmdline.to_vec()),
+        ..ClaudeCliFlags::default()
+    };
     let mut iter = cmdline.iter();
     while let Some(arg) = iter.next() {
         if let Some(v) = arg.strip_prefix("--permission-mode=") {
@@ -262,6 +275,11 @@ pub fn apply_event(
             // stale carried-forward value would be exactly as wrong as
             // inventing one if this launch's real flags disagree with it.
             remote_control: cli_flags.remote_control,
+            // Same "always fresh, never preserved" rule as `remote_control`
+            // above, for the same reason: a stale argv from a prior launch
+            // would be exactly as wrong as inventing one if this launch's
+            // real command line disagrees with it.
+            launch_args: cli_flags.launch_args.clone(),
             busy: false,
             subagents_running: 0,
             no_background_shells: None,
@@ -717,6 +735,7 @@ mod tests {
             ClaudeCliFlags {
                 remote_control: true,
                 permission_mode: None,
+                launch_args: Some(cmdline.clone()),
             }
         );
     }
@@ -729,6 +748,7 @@ mod tests {
             ClaudeCliFlags {
                 remote_control: false,
                 permission_mode: Some("prompting".to_string()),
+                launch_args: Some(cmdline.clone()),
             }
         );
     }
@@ -757,7 +777,13 @@ mod tests {
     #[test]
     fn no_relevant_flags_leaves_both_fields_at_their_defaults() {
         let cmdline = strs(&["claude.exe", "--name", "overmind"]);
-        assert_eq!(parse_claude_cli_flags(&cmdline), ClaudeCliFlags::default());
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline),
+            ClaudeCliFlags {
+                launch_args: Some(cmdline.clone()),
+                ..ClaudeCliFlags::default()
+            }
+        );
     }
 
     #[test]
@@ -773,6 +799,7 @@ mod tests {
             ClaudeCliFlags {
                 remote_control: true,
                 permission_mode: Some("bypassPermissions".to_string()),
+                launch_args: Some(cmdline.clone()),
             }
         );
     }
@@ -780,7 +807,13 @@ mod tests {
     #[test]
     fn a_trailing_permission_mode_flag_with_no_value_is_ignored_not_a_panic() {
         let cmdline = strs(&["claude.exe", "--permission-mode"]);
-        assert_eq!(parse_claude_cli_flags(&cmdline), ClaudeCliFlags::default());
+        assert_eq!(
+            parse_claude_cli_flags(&cmdline),
+            ClaudeCliFlags {
+                launch_args: Some(cmdline.clone()),
+                ..ClaudeCliFlags::default()
+            }
+        );
     }
 
     // -- apply_event ---------------------------------------------------------- //
@@ -944,6 +977,7 @@ mod tests {
         let cli_flags = ClaudeCliFlags {
             remote_control: false,
             permission_mode: Some("bypassPermissions".to_string()),
+            launch_args: None,
         };
         let state = apply_event(
             None,
@@ -967,6 +1001,7 @@ mod tests {
         let cli_flags = ClaudeCliFlags {
             remote_control: false,
             permission_mode: Some("bypassPermissions".to_string()),
+            launch_args: None,
         };
         // `input()` carries permission_mode: Some("prompting").
         let state = apply_event(
@@ -987,6 +1022,7 @@ mod tests {
         let cli_flags = ClaudeCliFlags {
             remote_control: true,
             permission_mode: None,
+            launch_args: None,
         };
         let state = apply_event(
             None,
@@ -1009,6 +1045,7 @@ mod tests {
         let with_remote_control = ClaudeCliFlags {
             remote_control: true,
             permission_mode: None,
+            launch_args: None,
         };
         let prior = apply_event(
             None,

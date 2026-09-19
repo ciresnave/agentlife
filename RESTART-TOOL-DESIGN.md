@@ -257,6 +257,60 @@ doesn't weaken the check meaningfully - a stale, truly unrelated process from be
 excluded - it only stops two clock sources' ordinary disagreement from being read as evidence of
 staleness.
 
+⚠️ **REVISED (PM finding, 2026-09-18, third real-restart retest): the mechanics are proven - kill,
+`wt.exe` launch with the exact planned argv, `--remote-control` live, liveness confirmed - but the new
+session came up believing it was a CHILD of the session that requested the restart.** `lane-restart`
+always runs from a lane's own Bash tool - i.e. from INSIDE a running Claude Code session - and `wt.exe`
+inherits that whole environment by default. The relaunched session showed "Transcript saving is off -
+inherited `CLAUDE_CODE_CHILD_SESSION` marker," had no transcript, and its positional prompt never
+auto-submitted. **Fixed:** `spawn_relaunch` strips the vars that actually NAME this session or its IPC
+channel before launching, via `Command::env_remove` on both the `wt.exe` and `conhost.exe` fallback -
+confirmed by dumping `env` from inside a real session first, not guessed:
+`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ID`,
+`CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_PID`. A user's own persistent config
+vars (`CLAUDE_EFFORT`, `CLAUDE_CODE_USE_POWERSHELL_TOOL`, `CLAUDE_CODE_EXECPATH`, anything unrelated
+like `CLOUDFLARE_*`) are deliberately left alone - this is a targeted strip of session identity, not a
+blanket environment wipe.
+
+**Also noted (PM finding, same retest, cosmetic - not fixed in code):** killing `claude` leaves its
+hosting terminal tab behind, in raw mouse-tracking mode (the shell's own escape codes never got
+cleaned up). Not worth a terminal-reset-sequence fix - the actual answer is that a lane's tab should
+close on its own once its `claude` process exits, which is already true when a lane is LAUNCHED the
+same way this tool relaunches it (`wt … claude …`, one `claude` per tab, no intermediate shell prompt
+sitting underneath it).
+
+⚠️ **REVISED (CireSnave, via the PM, 2026-09-18): a relaunch that only reconstructs `--name`/`--model`/
+`--permission-mode`/`--remote-control` silently drops every OTHER real launch flag.** CireSnave launches
+every lane with `--dangerously-load-development-channels server:claude-peers` - the flag that makes
+`claude-peers` PUSH incoming messages into a session. Without it, a relaunched lane can still SEND
+messages but never RECEIVE notifications. **Fixed, two parts:**
+
+1. **Record it.** `LaneState.launch_args` (via `ClaudeCliFlags.launch_args`, set inside
+   `parse_claude_cli_flags`) now carries the real, full argv `claude.exe` was launched with, read at
+   `SessionStart` from the same OS process-list lookup `remote_control`/`permission_mode` already use.
+   Same "always fresh, never preserved" rule `remote_control` follows, for the same reason: a stale
+   argv from a prior launch would be exactly as wrong as inventing one.
+2. **Rebuild from an ALLOWLIST, never a blind pass-through** (`main.rs`'s `extra_launch_args`).
+   Carried over verbatim: `--dangerously-load-development-channels <spec>…` and `--add-dir <dir>…`
+   (variadic - consumed until the next `-`-prefixed token), `--mcp-config <file>` and `--settings
+   <file>` (exactly one value each). `--model`/`--permission-mode`/`--remote-control`/
+   `--dangerously-skip-permissions` are recognised-and-intentionally-NOT-duplicated here - they're
+   already carried over by `claude_argv` itself, from their own dedicated state fields with proper
+   fallback rules richer than a blind re-parse would give (and `--dangerously-skip-permissions`
+   specifically is already represented as `permission_mode: Some("bypassPermissions")`, so re-emitting
+   the literal original flag would just restate the same fact). **Dropped, with their own value
+   correctly consumed so it's never misread as a stray positional or another flag's value:**
+   `--resume`/`-r` (optional value - CireSnave's own real command line has it bare, as the LAST token),
+   `--continue`/`-c`, `-p`/`--print`, `--session-id` (optional value), `--fork-session`, `--name`
+   (dropping the ORIGINAL is what keeps `claude_argv`'s own fresh `--name` from being emitted twice),
+   and any leftover positional (the original prompt, if one was captured). **Any other, unrecognised
+   flag is dropped and reported** (never passed through blindly) - its presumed arity is unknown, so
+   only the flag token itself is dropped, never a guessed value alongside it. The `;` gate (§5, `wt.exe`'s
+   own command separator) scans `claude_argv`'s full output, so it already covers these new elements
+   too - proven by a test that injects a `;` into a `--dangerously-load-development-channels` value and
+   confirms the whole relaunch is refused, the same as for `cwd`/`model`/`permission_mode`.
+
 ## 6. Bulletproof requirements (from the task, restated as testable properties)
 
 1. **Positive identification** — §2's four-part check, every time, no exceptions, including for
