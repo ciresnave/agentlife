@@ -215,10 +215,47 @@ the whole point of restarting is a small, fresh context, not the old one reloade
   ...` put `role`/`name` (state-file content, not this host's own choice) through cmd.exe's own
   parser, which a Rust `Command`'s argv-quoting does not protect against. Fixed two ways, not one:
   `role` and `name` are validated against `^[A-Za-z0-9_-]{1,64}$` and refused otherwise (confirmed
-  live: `a&calc` as a name reaches `cmd.exe` and would execute `calc`), AND the launch now spawns
-  `claude.exe` directly with `CREATE_NEW_CONSOLE` (Windows) - a real argv array Windows'
-  `CreateProcess` never hands to a shell for re-parsing, giving the same visible new window without
-  cmd.exe touching any of it.
+  live: `a&calc` as a name reaches `cmd.exe` and would execute `calc`).
+
+⚠️ **REVISED (PM finding, 2026-09-18, second real-restart retest): `CREATE_NEW_CONSOLE` alone was NOT
+enough - the first real end-to-end restart proved continuity via HANDOFF (a fresh session read it and
+replied correctly), then exited 12 seconds later.** Root cause: Rust's `Command` always sets
+`STARTF_USESTDHANDLES` and inherits the parent process's own std handles, even under
+`CREATE_NEW_CONSOLE` - a hook-invoked lane runs from its own Bash tool, so the child got PIPES, not a
+real console. Non-TTY stdin plus a prompt argument made `claude` behave like one-shot print mode: read
+HANDOFF, reply, exit. **Fixed:** launch through Windows Terminal instead, which gives the child a REAL
+ConPTY independent of this process's own handles - exactly how CireSnave's own lanes are launched
+(WindowsTerminal → pwsh → claude): `wt.exe -w new -d <cwd> claude --name <name> [--model ...]
+[--permission-mode ...] [--remote-control] "<prompt>"`, an explicit argv, no shell. Falls back to
+`conhost.exe claude ...` if `wt.exe` isn't on `PATH` (detected via a `NotFound` spawn error, not
+guessed). **`wt.exe` treats `;` as its OWN command separator** (`wt new-tab ; split-pane ...`), a
+parsing layer on top of the normal, already-safe argv passing every element goes through regardless -
+every argv element `wt.exe` receives (`cwd`, `model`, `permission_mode`, the prompt) is checked for
+`;` and the whole relaunch refused if found, before anything is killed.
+
+⚠️ **ALSO REVISED (PM finding, 2026-09-18, same retest): logging "relaunched a fresh session" from
+`spawn()` returning `Ok` alone was dishonest** - exactly the graceful-exit case above would have been
+logged as a success. **Fixed:** a post-launch liveness check polls (up to 30s, 1s intervals) for a
+live `claude`/`claude.exe` process whose (normalised) `cwd` matches the target and whose `start_time`
+is at or after the kill - the only way to observe "a new session actually came up" from outside it,
+since its own `SessionStart` hasn't fired yet to record anything. Once found, a follow-up check ~10s
+later confirms it is STILL alive before `acted: true`/"relaunched" is ever logged; otherwise the log
+says exactly why ("relaunch FAILED - no live claude process was ever observed..." or "...came up but
+exited again shortly after"). The polling protocol is unit-tested with an injectable `sleep` (no real
+~40s wait in the test suite); the underlying process-matching (`find_process_in`, parametrised on the
+image-name list so it can search for a stand-in like `ping` instead of `claude`) is proven against a
+REAL spawned child, per this section's own "not unit tested without a real process" discipline for
+anything that touches `sysinfo` directly.
+
+⚠️ **The `start_time`-at-or-after-the-kill threshold carries a small safety margin (5s), found live
+while adding this fix's own real-process CI coverage**: the kill timestamp is wall-clock time
+(`facts.now()`), but the OS-reported `start_time` a fresh relaunch gets compared against comes from a
+different clock source (on Linux, ticks-since-boot converted to a Unix timestamp) - the two can
+disagree by a second or two without either being wrong. Without slack, `ubuntu-latest`'s CI runner
+reproducibly excluded a genuinely fresh relaunch as "too old" by exactly this rounding gap. The margin
+doesn't weaken the check meaningfully - a stale, truly unrelated process from before the kill is still
+excluded - it only stops two clock sources' ordinary disagreement from being read as evidence of
+staleness.
 
 ## 6. Bulletproof requirements (from the task, restated as testable properties)
 

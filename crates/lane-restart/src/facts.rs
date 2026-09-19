@@ -113,6 +113,19 @@ pub trait SystemFacts {
     /// ever called after `authorize::decide` returns `Ok`, and only in
     /// non-dry-run mode.
     fn kill_verified(&self, pid: u32, expected: &ProcessIdentity) -> Result<(), KillError>;
+
+    /// §5's post-launch liveness check. PM finding, 2026-09-18 (first real
+    /// restart, second retest): logging "relaunched" from `spawn()`
+    /// returning `Ok` alone was dishonest - the child can start, print its
+    /// reply, and exit again before anyone re-checks. The pid a fresh
+    /// relaunch's own hooks will eventually record doesn't exist yet (its
+    /// own `SessionStart` hasn't fired), so the only way to observe "a new
+    /// session actually came up" from OUTSIDE it is to find a live
+    /// `claude`/`claude.exe` process whose (normalised) `cwd` matches
+    /// `cwd` and whose `start_time` is at or after `after_start_time_secs`
+    /// (the moment of the kill - never an older, unrelated process in the
+    /// same directory). `None` if no such process is currently enumerable.
+    fn find_claude_process_in(&self, cwd: &str, after_start_time_secs: u64) -> Option<u32>;
 }
 
 pub struct SysinfoFacts {
@@ -275,11 +288,47 @@ impl SystemFacts for SysinfoFacts {
             )))
         }
     }
+
+    fn find_claude_process_in(&self, cwd: &str, after_start_time_secs: u64) -> Option<u32> {
+        find_process_in(cwd, after_start_time_secs, &["claude"])
+    }
+}
+
+/// The real work behind `find_claude_process_in`, pulled out with an
+/// injectable image-name list so it is exercisable against a REAL spawned
+/// process in a test (§5 test harness the PM asked for) without needing to
+/// spawn an actual `claude.exe` - production always calls it with
+/// `&["claude"]`.
+fn find_process_in(cwd: &str, after_start_time_secs: u64, image_names: &[&str]) -> Option<u32> {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        full_process_refresh(),
+    );
+    for (pid, process) in sys.processes() {
+        let name = process.name().to_string_lossy().to_lowercase();
+        let base = name.strip_suffix(".exe").unwrap_or(&name);
+        if !image_names.contains(&base) {
+            continue;
+        }
+        if process.start_time() < after_start_time_secs {
+            continue;
+        }
+        let Some(p_cwd) = process.cwd() else {
+            continue;
+        };
+        if crate::paths::paths_match(&p_cwd.to_string_lossy(), cwd) {
+            return Some(pid.as_u32());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn project_dir_name_matches_the_documented_rule() {
@@ -450,6 +499,125 @@ mod tests {
              path with its trailing separator stripped ({without_trailing_sep:?})"
         );
     }
+
+    /// ⚠️ §5's REAL-PROCESS TEST, per the PM's own request: exercises
+    /// `find_process_in`'s matching logic (image name, cwd, start_time)
+    /// against a REAL spawned child, not a fake. `ping`/`ping.exe` stands
+    /// in for `claude`/`claude.exe` here - the same image-name-list
+    /// parametrisation `find_claude_process_in` calls with `&["claude"]`
+    /// in production - so this proves the matching logic itself, not just
+    /// that a hard-coded string equals another hard-coded string.
+    fn poll_for<T>(
+        timeout: std::time::Duration,
+        mut attempt: impl FnMut() -> Option<T>,
+    ) -> Option<T> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(v) = attempt() {
+                return Some(v);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn find_process_in_locates_a_real_child_by_name_cwd_and_start_time() {
+        // ⚠️ A UNIQUE directory, not the shared system temp root: cargo
+        // runs tests in parallel, and every test in this trio spawns a
+        // same-named "ping" process - matching by (name, cwd) against a
+        // SHARED temp_dir() would let one test's search find ANOTHER
+        // test's concurrently-running ping. Also NOT canonicalized: a real
+        // hook-provided cwd never carries the `\?\` verbatim prefix
+        // `canonicalize()` adds on Windows, and sysinfo's own `cwd()` read
+        // doesn't either.
+        let unique_dir = tempdir().unwrap();
+        let known_dir = unique_dir.path().to_path_buf();
+        let mut child = spawn_sleep_child_in(&known_dir);
+        let pid = child.id();
+
+        // ⚠️ Threshold 0, not "now": this test's OWN job is proving the
+        // name+cwd matching works against a real process - the start_time
+        // boundary itself is separately, dedicatedly tested below
+        // (`_ignores_..._before_the_threshold`). A tight "now"-based
+        // threshold here mixes two different clock sources (this
+        // process's wall clock vs the OS's boot-time-derived start_time)
+        // that can disagree by a second or two without either being
+        // wrong - confirmed live: this exact test failed on a CI runner
+        // for that reason before being loosened. Production code
+        // (`kill_and_relaunch`) carries its own small safety margin for
+        // the same reason - see its own comment.
+        //
+        // ⚠️ POLLED, not a single fixed-delay lookup: a loaded CI runner
+        // can be slower than a 200ms sleep accounts for.
+        let found = poll_for(std::time::Duration::from_secs(3), || {
+            find_process_in(&known_dir.to_string_lossy(), 0, &[SLEEP_CHILD_IMAGE_NAME])
+        });
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            found,
+            Some(pid),
+            "must find the real child by (name, cwd, start_time >= threshold)"
+        );
+    }
+
+    #[test]
+    fn find_process_in_ignores_a_real_child_whose_start_time_is_before_the_threshold() {
+        let unique_dir = tempdir().unwrap();
+        let known_dir = unique_dir.path().to_path_buf();
+        let mut child = spawn_sleep_child_in(&known_dir);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // A threshold far in the future: the real child's own start_time
+        // can never be at or after it.
+        let far_future_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let found = find_process_in(
+            &known_dir.to_string_lossy(),
+            far_future_secs,
+            &[SLEEP_CHILD_IMAGE_NAME],
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            found, None,
+            "a process that started BEFORE the threshold must never match - \
+             it would be a stale process, not the freshly relaunched one"
+        );
+    }
+
+    #[test]
+    fn find_process_in_ignores_a_real_child_with_a_non_matching_image_name() {
+        let unique_dir = tempdir().unwrap();
+        let known_dir = unique_dir.path().to_path_buf();
+        let mut child = spawn_sleep_child_in(&known_dir);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let found = find_process_in(&known_dir.to_string_lossy(), 0, &["not-ping-at-all"]);
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(found, None);
+    }
+
+    /// The image name `spawn_sleep_child_in` actually spawns, per platform -
+    /// kept in one place so the `find_process_in` tests below search for
+    /// whichever name is really running, not a Windows-only guess.
+    #[cfg(windows)]
+    const SLEEP_CHILD_IMAGE_NAME: &str = "ping";
+    #[cfg(not(windows))]
+    const SLEEP_CHILD_IMAGE_NAME: &str = "sleep";
 
     fn spawn_sleep_child_in(dir: &std::path::Path) -> std::process::Child {
         #[cfg(windows)]

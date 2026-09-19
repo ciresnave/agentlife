@@ -322,6 +322,9 @@ mod tests {
         ) -> Result<(), crate::facts::KillError> {
             panic!("decide() must never call kill_verified() - it only decides")
         }
+        fn find_claude_process_in(&self, _cwd: &str, _after_start_time_secs: u64) -> Option<u32> {
+            panic!("decide() must never call find_claude_process_in() - it only decides")
+        }
     }
 
     const PID: u32 = 4200;

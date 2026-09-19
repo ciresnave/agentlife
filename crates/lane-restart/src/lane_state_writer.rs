@@ -1505,6 +1505,13 @@ mod tests {
             ) -> Result<(), crate::facts::KillError> {
                 unreachable!("this test never kills anything")
             }
+            fn find_claude_process_in(
+                &self,
+                _cwd: &str,
+                _after_start_time_secs: u64,
+            ) -> Option<u32> {
+                unreachable!("this test never relaunches anything")
+            }
         }
 
         // Target::Other, not Myself: the no_background_shells check
