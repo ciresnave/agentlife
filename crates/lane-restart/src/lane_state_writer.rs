@@ -231,6 +231,48 @@ pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32,
     Err(PidError::HopLimitExceeded)
 }
 
+/// A fresh baseline state, built exactly the way `SessionStart` builds one -
+/// PM finding, 2026-09-19: lanes already running when the user-level hooks
+/// were installed (synapse; the PM, via `--resume`) have no state file at
+/// all, because every event before this fix was silently ignored without an
+/// existing `SessionStart`. `model` stays `None` here deliberately - it's
+/// genuinely unknown (no hook field reliably carries it outside
+/// `SessionStart`'s own payload, and nothing here guesses), so a relaunch
+/// built from this state omits `--model` and falls back to the user's own
+/// default (Sonnet), never a wrong invented one. ⚠️ IDENTITY SAFETY IS THE
+/// CALLER'S: `pid` here must already be `claude_parent_pid`'s verified
+/// result, never called speculatively - `run()`'s own ordering (walk the
+/// ancestry, THEN bootstrap) is what keeps that true, not anything in this
+/// function.
+fn bootstrap_state(
+    role: &str,
+    input: &HookInput,
+    pid: u32,
+    cli_flags: &ClaudeCliFlags,
+    event: &str,
+    now: chrono::DateTime<Utc>,
+) -> LaneState {
+    LaneState {
+        role: role.to_string(),
+        session_id: input.session_id.clone(),
+        pid,
+        cwd: input.cwd.clone(),
+        name: None,
+        model: input.model.clone().map(ModelField::into_string),
+        permission_mode: input
+            .permission_mode
+            .clone()
+            .or_else(|| cli_flags.permission_mode.clone()),
+        remote_control: cli_flags.remote_control,
+        launch_args: cli_flags.launch_args.clone(),
+        busy: false,
+        subagents_running: 0,
+        no_background_shells: None,
+        updated_at: now,
+        updated_by_event: event.to_string(),
+    }
+}
+
 /// Computes the next `LaneState` for `event`, given whatever state already
 /// existed (if any). Pure - no file I/O, so every branch is directly
 /// testable. `SessionEnd` returns `None`: the caller deletes the file.
@@ -291,7 +333,27 @@ pub fn apply_event(
         return None;
     }
 
-    let mut state = existing?;
+    // ⚠️ BOOTSTRAP, PM finding 2026-09-19: a lane already running when the
+    // hooks were installed has no state file, and every event before this
+    // was silently a no-op (`existing?` returned `None`) - blocking the
+    // first real use for exactly the lanes already mid-session. A session
+    // whose `session_id` no longer matches this event's own input is
+    // treated the same way (a genuinely new session under a state file this
+    // module never saw start) - not merged with stale busy/subagent counts
+    // from whatever session the old file was actually about.
+    let mut state = match existing {
+        Some(s) if s.session_id == input.session_id => s,
+        _ => bootstrap_state(role, input, pid, cli_flags, event, now),
+    };
+    // A state a real `SessionStart` created BEFORE this fix never recorded
+    // `launch_args` at all (the PM's own `pm.json`, via `--resume`) -
+    // opportunistically refreshed here, on any later event, rather than
+    // left permanently empty until the lane's next real `SessionStart`.
+    if state.launch_args.is_none() {
+        if let Some(launch_args) = &cli_flags.launch_args {
+            state.launch_args = Some(launch_args.clone());
+        }
+    }
     state.updated_at = now;
     state.updated_by_event = event.to_string();
     match event {
@@ -1100,19 +1162,200 @@ mod tests {
         );
     }
 
+    // -- Bootstrap: PM finding, 2026-09-19 -------------------------------- //
+    // Lanes already running when the user-level hooks were installed
+    // (synapse; the PM, via --resume) had no state file, because every
+    // event before this fix was silently ignored without a prior
+    // SessionStart - blocking the first real use for exactly the lanes
+    // already mid-session. ⚠️ THIS REPLACES the old "does nothing" property
+    // these two cases used to assert - that was the bug, not a property to
+    // keep.
+
     #[test]
-    fn an_event_with_no_prior_session_start_does_nothing() {
+    fn an_event_with_no_prior_state_now_bootstraps_a_fresh_state() {
+        let s = apply_event(
+            None,
+            "Stop",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .expect("must bootstrap, not stay None");
+        assert_eq!(s.role, "overmind");
+        assert_eq!(s.session_id, "s-123");
+        assert_eq!(s.pid, 1);
+        assert_eq!(s.cwd, "C:/x");
+        assert_eq!(s.model, None, "unknown - never invented, never guessed");
         assert_eq!(
-            apply_event(
-                None,
-                "Stop",
-                &input("C:/x"),
-                "overmind",
-                1,
-                &ClaudeCliFlags::default(),
-                now()
-            ),
-            None
+            s.updated_by_event, "Stop",
+            "the real event, not a placeholder"
+        );
+        assert!(
+            !s.busy,
+            "Stop's own effect still applies on top of the bootstrap"
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_with_no_state_bootstraps_a_correct_state() {
+        // PM's own wording: "a PreToolUse with no state creates a correct
+        // state." permission_mode/remote_control/launch_args come from the
+        // REAL launch's own command line, read via cli_flags - not invented,
+        // not left at a stale prior value (there is none).
+        let cli_flags = ClaudeCliFlags {
+            remote_control: true,
+            permission_mode: Some("bypassPermissions".to_string()),
+            launch_args: Some(vec![
+                "claude.exe".to_string(),
+                "--remote-control".to_string(),
+            ]),
+        };
+        let s = apply_event(
+            None,
+            "PreToolUse",
+            &input_without_permission_mode("C:/Projects/OverMind"),
+            "overmind",
+            42,
+            &cli_flags,
+            now(),
+        )
+        .expect("must bootstrap, not stay None");
+        assert_eq!(s.role, "overmind");
+        assert_eq!(s.pid, 42);
+        assert_eq!(s.cwd, "C:/Projects/OverMind");
+        assert_eq!(s.session_id, "s-123");
+        assert!(s.remote_control);
+        assert_eq!(s.permission_mode, Some("bypassPermissions".to_string()));
+        assert_eq!(s.launch_args, cli_flags.launch_args);
+        assert!(s.busy, "PreToolUse's own effect still applies");
+    }
+
+    #[test]
+    fn a_session_id_change_re_bootstraps_rather_than_merging_stale_counters() {
+        // PM's own wording: "a session_id change re-bootstraps." A state
+        // file for a DIFFERENT (old) session_id must never have its stale
+        // busy/subagent counters carried into a genuinely new session -
+        // treated the same as no state at all, not merged.
+        let mut stale = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        stale.session_id = "old-session".to_string();
+        stale.busy = true;
+        stale.subagents_running = 3;
+
+        let mut new_session_input = input("C:/x");
+        new_session_input.session_id = "new-session".to_string();
+        let s = apply_event(
+            Some(stale),
+            "Stop",
+            &new_session_input,
+            "overmind",
+            2,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.session_id, "new-session");
+        assert_eq!(s.pid, 2, "the NEW pid, not the stale session's own");
+        assert_eq!(
+            s.subagents_running, 0,
+            "a stale session's counters must never survive into a new one"
+        );
+        assert!(
+            !s.busy,
+            "Stop's own effect, not the stale session's leftover busy=true"
+        );
+    }
+
+    #[test]
+    fn a_session_start_created_state_missing_launch_args_is_refreshed_on_a_later_event() {
+        // PM's own case: "the PM's own pm.json has launch_args=None" - a
+        // state a real SessionStart created before this fix (or with an
+        // unreadable cmdline at the time) never recorded launch_args at all.
+        // Refreshed opportunistically here, on ANY later event for the SAME
+        // session, rather than left empty until the lane's next real
+        // SessionStart.
+        let mut existing_no_launch_args = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(existing_no_launch_args.launch_args, None);
+        existing_no_launch_args.session_id = "s-123".to_string();
+
+        let cli_flags = ClaudeCliFlags {
+            launch_args: Some(vec![
+                "claude.exe".to_string(),
+                "--dangerously-load-development-channels".to_string(),
+                "server:claude-peers".to_string(),
+            ]),
+            ..ClaudeCliFlags::default()
+        };
+        let s = apply_event(
+            Some(existing_no_launch_args),
+            "PreToolUse",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &cli_flags,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.launch_args, cli_flags.launch_args);
+    }
+
+    #[test]
+    fn an_existing_state_with_launch_args_already_set_is_left_alone() {
+        // The refresh must be additive (fills a gap), never overwrite a
+        // real, already-recorded value with a DIFFERENT later launch's
+        // command line - only None is ever replaced.
+        let mut existing = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &ClaudeCliFlags {
+                launch_args: Some(vec!["claude.exe".to_string(), "--original".to_string()]),
+                ..ClaudeCliFlags::default()
+            },
+            now(),
+        )
+        .unwrap();
+        existing.session_id = "s-123".to_string();
+
+        let cli_flags = ClaudeCliFlags {
+            launch_args: Some(vec!["claude.exe".to_string(), "--different".to_string()]),
+            ..ClaudeCliFlags::default()
+        };
+        let s = apply_event(
+            Some(existing),
+            "PreToolUse",
+            &input("C:/x"),
+            "overmind",
+            1,
+            &cli_flags,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.launch_args,
+            Some(vec!["claude.exe".to_string(), "--original".to_string()]),
+            "an already-recorded launch_args must never be overwritten"
         );
     }
 
@@ -1431,7 +1674,15 @@ mod tests {
     }
 
     #[test]
-    fn assert_idle_with_no_prior_session_start_does_nothing() {
+    fn apply_event_bootstraps_even_for_a_direct_assert_idle_call() {
+        // ⚠️ `apply_event` is a pure, generic function - it now bootstraps
+        // uniformly for ANY event with no matching existing state,
+        // `AssertIdle` included, when called directly. In PRODUCTION this
+        // path is never reached for `AssertIdle`: `run_assert_idle`'s own
+        // SEPARATE, STRICTER guard refuses before ever calling `apply_event`
+        // at all - see `run_assert_idle_refuses_when_no_session_start_was_
+        // ever_recorded`, unchanged by this fix, which is what actually
+        // proves "existing behaviour is unchanged" at the real entry point.
         let s = apply_event(
             None,
             "AssertIdle",
@@ -1440,8 +1691,9 @@ mod tests {
             1,
             &ClaudeCliFlags::default(),
             now(),
-        );
-        assert_eq!(s, None);
+        )
+        .expect("apply_event itself now bootstraps for any event, AssertIdle included");
+        assert_eq!(s.no_background_shells, Some(true));
     }
 
     #[test]
