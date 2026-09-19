@@ -725,7 +725,7 @@ project-level settings first if a narrower rollout than user-level is wanted) �
 populate correctly across a few real turns → only then widen to every lane, and only then does anyone
 attempt a real `--self` or PM-initiated restart for the first time.
 
-## 12. Declarative startup-prompt handlers — SPEC, APPROVED, not yet built
+## 12. Declarative startup-prompt handlers — BUILT (crates/lane-restart/src/handlers.rs, host.rs)
 
 **CireSnave's idea, his words, 2026-09-18 (`CIRESNAVE-EXPECTATIONS.md` §5.1c):**
 
@@ -831,22 +831,68 @@ it does not add a new one):
    through the SAME liveness check §5 already runs - pressing the button is not itself success; the
    state file still has to show it.
 
-### 12.5 Mechanism: attach, read, inject — ⚠️ NOT YET PROVEN
+### 12.5 Mechanism: `lane-restart host` owns its own ConPTY — PROVEN 2026-09-18
 
-The relaunched session already runs under Windows Terminal / a real ConPTY (§5's `wt.exe` launch, the
-fix for the earlier non-interactive relaunch problem). Reading its screen and injecting keystrokes
-means attaching to that same console. Candidate Windows APIs (exact choice settled during the build,
-this section revised once one is confirmed working, not left describing an assumption):
+⚠️ **REVISED - the `AttachConsole`-against-an-external-process approach this section originally
+described was tried live and does NOT work reliably.** Empirically, against a real `wt.exe`-launched
+process: `AttachConsole` returned `ERROR_INVALID_HANDLE` on one run, and on another the target's real
+output leaked straight into the ATTACHING process's own captured stdout instead of being read via the
+attach mechanism at all. Root cause (consistent with ConPTY's own architecture): a ConPTY-hosted
+console doesn't reliably expose the classic, externally-attachable screen buffer `AttachConsole` was
+built for. This is a design change, not a tuning fix - abandoned entirely, not patched.
 
-- Reading: `AttachConsole` against the relaunched process's console, then
-  `GetConsoleScreenBufferInfo`/`ReadConsoleOutputCharacter` to capture the visible screen text.
-- Injecting: `WriteConsoleInput` (or `SendInput` targeted at that console's window) to send the
-  literal keystrokes in `action`.
+**What's built instead: `lane-restart` relaunches through a small wrapper it owns both ends of.**
+`spawn_relaunch` (§5) no longer launches `claude` directly - it launches
+`wt.exe -w new -d <cwd> lane-restart host --role <r> -- claude <argv...>`. The NEW `lane-restart host`
+subcommand runs INSIDE that fresh tab (a real console/stdio from `wt.exe` itself, not nested inside
+this process's own), creates its own ConPTY via the `portable-pty` crate (see below), spawns `claude`
+inside it, and relays bytes bidirectionally - never attaching to a console it doesn't own itself. This
+sidesteps the `AttachConsole` problem architecturally, regardless of `wt.exe`'s own internals.
 
-**PM's own instruction, followed literally: this must be proven against a REAL `wt.exe`-launched
-process in a test before this mechanism is ever claimed to work** - the same "not unit tested without
-a real process" discipline this crate already applies to `sysinfo`-backed facts (`facts.rs`), extended
-to console attach/read/inject. No handler fires for real until that proof exists.
+**⚠️ Transparent from byte 0, always.** The host's own stdin/stdout ARE the real terminal (`wt.exe`,
+which is what actually launched it) - `wt` answers `claude`'s cursor-position-report (CPR, `ESC[6n`)
+queries and any other terminal queries itself, the same way any real terminal answers any real TUI.
+Every byte the child writes is forwarded to the host's own stdout UNCHANGED; every byte on the host's
+own stdin is forwarded to the child UNCHANGED, for the whole session's life. The host only OBSERVES a
+copy of the output stream, via a `vt100`-crate screen model, to check for a handler match - and only
+during a bounded 60s startup window (`host::STARTUP_WINDOW`); after that it's pure passthrough,
+indefinitely. **This module must never answer a CPR itself** - doing so would compete with the real
+terminal's own legitimate answer. (The one place `lane-restart host` DOES intentionally answer a CPR
+is its own scratch-probe-derived test helpers, standing in for what a real terminal does - never the
+production relay path; `host::relay_chunk`'s own tests assert byte-for-byte transparency, including
+through mouse-mode and alt-screen sequences, to keep this property from regressing silently.)
+
+**The CPR-blocking finding** (root-caused live, 2026-09-18, after three failed implementation attempts
+that all looked like "4 bytes then nothing"): ConPTY sends its own `ESC[6n` CPR query early in a
+hosted session's startup and BLOCKS all further output until something answers it on the input side. A
+production host never has to answer this itself (the real terminal does), but anything standing in for
+a terminal - the crate's own real-ConPTY integration tests included - must, or the child's output stalls
+forever right after that first 4-byte query.
+
+**The ConPTY-holds-its-pipe-open-past-exit finding**: a blocking read on the ConPTY's own output pipe
+can hang forever even after the hosted child has exited, since ConPTY itself can keep an internal
+reference to the pipe's write end alive. `host::run_with_handlers` (internally,
+`run_with_handlers_and_window`) never blocks the exit-detection loop on that read directly: the
+blocking read lives on its own thread, sending chunks over a channel; the main loop polls that channel
+with a short timeout and separately checks the child's own exit status, abandoning (never joining) the
+reader thread once the child is confirmed gone.
+
+**Dependency, approved verbatim (PM, 2026-09-18): "APPROVED: portable-pty as a dependency. Take the
+LATEST version (dependency rule), and record its licence (MIT) and origin (wezterm/wezterm) in the PR
+per the provenance rule."** `portable-pty` (the same crate WezTerm itself uses for its own ConPTY
+handling) - MIT licensed, from `github.com/wezterm/wezterm` - is what actually owns the ConPTY and the
+child process; `vt100` maintains the screen model used for matching; `windows-sys` is used only for the
+best-effort resize-forwarding thread's own console-size query on the host's OWN inherited console (no
+`AttachConsole` needed there either, since it's this process's own console, inherited normally from
+being launched by `wt.exe`).
+
+**Proven, not assumed**: `host::tests::run_with_handlers_hosts_a_real_child_and_relays_its_real_output`
+and `run_with_handlers_matches_and_answers_a_real_dialog_from_a_real_child` spawn a REAL `cmd.exe`
+inside a real ConPTY (no visible window - the test owns both pipe ends itself, the same way the host
+does in production) and assert the real child's real output arrives, and that a real handler match
+injects real keystrokes the real child actually receives on its own stdin - proving the full mechanism
+end to end, the same "prove it against something real" discipline this crate already applies to
+`sysinfo`-backed facts (`facts.rs`).
 
 ### 12.6 The LLM-proposal loop - drafts, never activation
 

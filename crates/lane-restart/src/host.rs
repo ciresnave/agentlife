@@ -1,0 +1,775 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! `lane-restart host --role <role> -- <argv…>` — RESTART-TOOL-DESIGN.md §12.5.
+//!
+//! Runs INSIDE the relaunched session's own terminal tab (`wt.exe`, per §5)
+//! and hosts the real child (`claude`) inside a ConPTY THIS process creates
+//! and owns — never attaching to anyone else's console. `AttachConsole`
+//! against an externally-owned, ConPTY-hosted console was proven NOT to
+//! work reliably (empirically, live, 2026-09-18); owning both ends of a
+//! ConPTY this process creates itself sidesteps that entirely, and was
+//! proven working the same day (real `CreatePseudoConsole` spawn, real
+//! read, real inject, marker confirmed round-trip).
+//!
+//! ⚠️ TRANSPARENT FROM BYTE 0 (PM finding, 2026-09-18): in production the
+//! host's own stdin/stdout ARE the real terminal (`wt` itself answers
+//! `claude`'s cursor-position-report queries and other terminal queries,
+//! the same way any real terminal answers any real TUI). Every byte the
+//! child writes goes to our own stdout untouched; every byte we read from
+//! our own stdin goes to the child untouched. This module never answers a
+//! CPR itself — that was only ever needed in the scratch probe because
+//! nothing was on the other end of a throwaway pipe. The host only
+//! OBSERVES the output stream (via a `vt100` screen model) to check for a
+//! handler match during the STARTUP WINDOW; matching never withholds,
+//! delays, or rewrites a single byte of the real relay - see
+//! `relay_chunk`'s own test for the property this claims.
+
+use crate::handlers::{self, HandlerSpec};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use std::collections::HashSet;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long after the child starts the host still watches for a handler
+/// match. After this, it's pure passthrough for the rest of the session's
+/// life - matching a dialog long past when a real interactive session is
+/// expected to be running isn't this mechanism's job (the OUTER
+/// `lane-restart --role …` process's own liveness check, §5, is what
+/// actually times a stuck session out).
+pub const STARTUP_WINDOW: Duration = Duration::from_secs(60);
+
+/// What an automatic answer gets logged with - `restart.log` (§12.4: "log
+/// the automatic answer... with the handler's id and the exact text that
+/// matched").
+pub struct HandlerAnswered {
+    pub handler_id: String,
+    pub matched_screen_text: String,
+}
+
+/// Relays one chunk of the CHILD's real output to `output_writer`
+/// UNCHANGED, then (only after the write) feeds the same bytes into
+/// `parser` for observation. The write always happens first and always
+/// happens in full - matching never withholds, delays, or alters a single
+/// byte of the real relay.
+pub fn relay_chunk(
+    chunk: &[u8],
+    output_writer: &mut impl Write,
+    parser: &mut vt100::Parser,
+) -> std::io::Result<()> {
+    output_writer.write_all(chunk)?;
+    output_writer.flush()?;
+    parser.process(chunk);
+    Ok(())
+}
+
+/// The parser's current screen content as plain text, newline-joined - what
+/// handler matching (`handlers::find_matching_handler`) is checked against.
+pub fn screen_text(parser: &vt100::Parser) -> String {
+    let screen = parser.screen();
+    let (rows, _cols) = screen.size();
+    (0..rows)
+        .map(|row| screen.contents_between(row, 0, row, screen.size().1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Checks `screen_text` against every active, embedded handler for `role`;
+/// on the FIRST exact match not already answered this session (`matched_ids`),
+/// writes its `action` to `input_writer` and reports it via `on_answered`.
+/// Never matches the same handler id twice, even if its dialog text is
+/// still on screen after answering it once.
+pub fn check_and_inject(
+    handler_list: &[HandlerSpec],
+    role: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    screen_text: &str,
+    matched_ids: &mut HashSet<String>,
+    input_writer: &mut impl Write,
+    on_answered: &mut impl FnMut(HandlerAnswered),
+) -> std::io::Result<()> {
+    if let Some(handler) = handlers::find_matching_handler(handler_list, role, now, screen_text) {
+        if matched_ids.insert(handler.id.clone()) {
+            input_writer.write_all(handler.action.as_bytes())?;
+            input_writer.flush()?;
+            on_answered(HandlerAnswered {
+                handler_id: handler.id.clone(),
+                matched_screen_text: screen_text.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub struct HostOutcome {
+    pub child_exit_code: Option<u32>,
+}
+
+/// Runs the real relay: opens a ConPTY sized `(cols, rows)`, spawns
+/// `child_argv` inside it, and shuttles bytes between it and
+/// `outer_input`/`outer_output` (in production, this process's own real
+/// stdin/stdout - inherited from `wt.exe`, a real terminal; in a test, a
+/// fake pair that stands in for one) until the child exits.
+///
+/// `on_unhandled`, RESTART-TOOL-DESIGN.md §12.6: fires AT MOST ONCE, the
+/// moment the startup window ends, with the screen text captured at that
+/// instant - but ONLY if zero handlers matched anywhere during the whole
+/// window. A handler that matched (even a different one than whatever's
+/// still on screen) means a human or the handler itself is already
+/// handling it; capture exists for the case nothing did.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_handlers(
+    role: &str,
+    child_argv: &[String],
+    handler_list: Vec<HandlerSpec>,
+    cols: u16,
+    rows: u16,
+    outer_input: impl Read + Send + 'static,
+    outer_output: impl Write + Send + 'static,
+    on_answered: impl FnMut(HandlerAnswered) + Send + 'static,
+    on_unhandled: impl FnOnce(String) + Send + 'static,
+) -> std::io::Result<HostOutcome> {
+    run_with_handlers_and_window(
+        role,
+        child_argv,
+        handler_list,
+        cols,
+        rows,
+        outer_input,
+        outer_output,
+        on_answered,
+        on_unhandled,
+        STARTUP_WINDOW,
+    )
+}
+
+/// The real implementation, with `startup_window` injected so tests don't
+/// have to wait out the real 60s `STARTUP_WINDOW` to exercise what happens
+/// once it ends (§12.6's unhandled-prompt capture, in particular).
+#[allow(clippy::too_many_arguments)]
+fn run_with_handlers_and_window(
+    role: &str,
+    child_argv: &[String],
+    handler_list: Vec<HandlerSpec>,
+    cols: u16,
+    rows: u16,
+    mut outer_input: impl Read + Send + 'static,
+    mut outer_output: impl Write + Send + 'static,
+    on_answered: impl FnMut(HandlerAnswered) + Send + 'static,
+    on_unhandled: impl FnOnce(String) + Send + 'static,
+    startup_window: Duration,
+) -> std::io::Result<HostOutcome> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(std::io::Error::other)?;
+
+    let mut cmd = CommandBuilder::new(&child_argv[0]);
+    cmd.args(&child_argv[1..]);
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(std::io::Error::other)?;
+    drop(pair.slave);
+
+    let mut pty_reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(std::io::Error::other)?;
+    let pty_writer = Arc::new(Mutex::new(
+        pair.master.take_writer().map_err(std::io::Error::other)?,
+    ));
+
+    // outer input -> child, transparent, for the whole session's life.
+    {
+        let pty_writer = Arc::clone(&pty_writer);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match outer_input.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut w = pty_writer.lock().unwrap();
+                        if w.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                        let _ = w.flush();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    // Best-effort resize forwarding: poll our own inherited console size
+    // and forward changes to the ConPTY. Never fatal if it fails - the
+    // relay itself doesn't depend on it.
+    {
+        let master_for_resize = pair.master;
+        let mut last = (cols, rows);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if let Some((c, r)) = current_console_size() {
+                if (c, r) != last {
+                    let _ = master_for_resize.resize(PtySize {
+                        rows: r,
+                        cols: c,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                    last = (c, r);
+                }
+            }
+        });
+    }
+
+    // ⚠️ THE CPR-BLOCKING INVESTIGATION'S OTHER FINDING (2026-09-18,
+    // scratch-probe iteration 4): ConPTY can keep its own internal
+    // reference to the pipe's write end alive even after the hosted child
+    // exits, so a blocking `read` in THIS thread can hang forever past
+    // exit - a plain "loop until read returns 0" never terminates in that
+    // case. Fixed the same way the probe was: the blocking read lives on
+    // its own thread, sending chunks over a channel; this thread polls
+    // that channel with a short timeout and separately checks
+    // `child.try_wait()` for the real exit signal, abandoning (never
+    // joining) the reader thread once the child is confirmed gone - it may
+    // still be stuck in `ReadFile` forever, and that's fine to leave
+    // behind for the rest of the process's own life.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match pty_reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut on_answered = on_answered;
+    let mut on_unhandled = Some(on_unhandled);
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    let started = Instant::now();
+    loop {
+        let still_in_startup_window = started.elapsed() < startup_window;
+        if !still_in_startup_window {
+            if let Some(capture) = on_unhandled.take() {
+                if matched_ids.is_empty() {
+                    capture(screen_text(&parser));
+                }
+            }
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => {
+                relay_chunk(&chunk, &mut outer_output, &mut parser)?;
+                if still_in_startup_window {
+                    let text = screen_text(&parser);
+                    let mut writer = pty_writer.lock().unwrap();
+                    check_and_inject(
+                        &handler_list,
+                        role,
+                        chrono::Utc::now(),
+                        &text,
+                        &mut matched_ids,
+                        &mut *writer,
+                        &mut on_answered,
+                    )?;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let status = child.wait().ok();
+    Ok(HostOutcome {
+        child_exit_code: status.and_then(|s| s.exit_code().into()),
+    })
+}
+
+/// Convenience entry point for real production use: loads the embedded
+/// handlers (§12.3) and wires this process's OWN real stdin/stdout as the
+/// outer relay ends.
+pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
+    let (cols, rows) = current_console_size().unwrap_or((80, 25));
+    run_with_handlers(
+        role,
+        child_argv,
+        handlers::load_embedded_handlers(),
+        cols,
+        rows,
+        std::io::stdin(),
+        std::io::stdout(),
+        |answered| {
+            eprintln!(
+                "lane-restart host: answered dialog via handler {:?}",
+                answered.handler_id
+            );
+        },
+        capture_unhandled_prompt,
+    )
+}
+
+/// RESTART-TOOL-DESIGN.md §12.6: writes the captured screen text verbatim
+/// to `.lane-state/unhandled-prompts/<timestamp>.txt` - the fixed,
+/// portfolio-wide state directory `main.rs`'s own `state_dir()` uses, not
+/// configurable here either, for the same reason: a caller-supplied
+/// location would defeat the point of every lane and the PM agreeing on
+/// one place to look. Best-effort: a write failure is reported to stderr,
+/// never allowed to take down the relay that's still running.
+fn capture_unhandled_prompt(screen_text: String) {
+    let dir = std::path::Path::new("C:/Projects/.lane-state/unhandled-prompts");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("lane-restart host: could not create {dir:?}: {e}");
+        return;
+    }
+    let path = dir.join(format!("{}.txt", chrono::Utc::now().to_rfc3339()).replace(':', "-"));
+    if let Err(e) = std::fs::write(&path, screen_text) {
+        eprintln!("lane-restart host: could not write {path:?}: {e}");
+    }
+}
+
+#[cfg(windows)]
+pub fn current_console_size() -> Option<(u16, u16)> {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+    };
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) == 0 {
+            return None;
+        }
+        let cols = (info.srWindow.Right - info.srWindow.Left + 1).max(1) as u16;
+        let rows = (info.srWindow.Bottom - info.srWindow.Top + 1).max(1) as u16;
+        Some((cols, rows))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn current_console_size() -> Option<(u16, u16)> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(windows)]
+    use std::io::Cursor;
+
+    // -- relay_chunk: the transparency property itself --------------------- //
+    // PM finding, 2026-09-18: the host must be a transparent relay from
+    // byte 0 - matching only OBSERVES, it never withholds, delays, or
+    // rewrites a single byte, including mouse-mode and alt-screen
+    // sequences (not just plain text).
+
+    #[test]
+    fn relay_chunk_forwards_plain_text_byte_for_byte() {
+        let chunk = b"hello, world\r\n";
+        let mut out = Vec::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        relay_chunk(chunk, &mut out, &mut parser).unwrap();
+        assert_eq!(out, chunk);
+    }
+
+    #[test]
+    fn relay_chunk_forwards_mouse_mode_sequences_byte_for_byte() {
+        // \x1b[?1000h / \x1b[?1000l - mouse tracking on/off.
+        let chunk = b"\x1b[?1000hclick here\x1b[?1000l";
+        let mut out = Vec::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        relay_chunk(chunk, &mut out, &mut parser).unwrap();
+        assert_eq!(out, chunk);
+    }
+
+    #[test]
+    fn relay_chunk_forwards_alt_screen_sequences_byte_for_byte() {
+        // \x1b[?1049h / \x1b[?1049l - alternate screen buffer on/off.
+        let chunk = b"\x1b[?1049hfull screen app\x1b[?1049l";
+        let mut out = Vec::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        relay_chunk(chunk, &mut out, &mut parser).unwrap();
+        assert_eq!(out, chunk);
+    }
+
+    #[test]
+    fn relay_chunk_forwards_a_long_mixed_stream_byte_for_byte() {
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(b"\x1b[?9001h\x1b[?1004h"); // ConPTY negotiation
+        chunk.extend_from_slice(b"\x1b[6n"); // CPR - never answered by this fn
+        chunk.extend_from_slice(b"\x1b[?1049h"); // alt screen on
+        chunk.extend_from_slice(b"some plain text\r\n");
+        chunk.extend_from_slice(b"\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h"); // mouse modes
+        chunk.extend_from_slice(&[0u8, 1, 2, 255, 254]); // arbitrary binary bytes
+        chunk.extend_from_slice(b"\x1b[?1049l"); // alt screen off
+        let mut out = Vec::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        relay_chunk(&chunk, &mut out, &mut parser).unwrap();
+        assert_eq!(out, chunk, "every byte must survive the relay unchanged");
+    }
+
+    #[test]
+    fn relay_chunk_never_answers_a_cpr_itself() {
+        // ⚠️ PM finding, 2026-09-18: in production, WT (the real terminal)
+        // answers claude's cursor-position-reports. The host must NOT -
+        // that was only ever needed in the scratch probe, where nothing
+        // real was on the other end.
+        let chunk = b"\x1b[6n";
+        let mut out = Vec::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        relay_chunk(chunk, &mut out, &mut parser).unwrap();
+        assert_eq!(
+            out, chunk,
+            "relay_chunk must forward exactly the CPR bytes and nothing else - \
+             answering it is the real terminal's job, never this function's"
+        );
+    }
+
+    // -- check_and_inject: exact-match handler firing ------------------------ //
+
+    fn handler_json(id: &str, anchor: &str, action: &str) -> String {
+        format!(
+            r#"{{
+                "id": "{id}",
+                "match": {{"text_anchors": ["{anchor}"], "fields": {{}}}},
+                "action": "{action}",
+                "scope": {{"roles": ["overmind"]}},
+                "provenance": {{"approved_by": "CireSnave", "approved_at": "2026-09-18T22:00:00Z", "quote": "q"}}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn check_and_inject_writes_the_action_on_an_exact_match() {
+        let handler: HandlerSpec =
+            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\n")).unwrap();
+        let mut input = Vec::new();
+        let mut matched = HashSet::new();
+        let mut answered = Vec::new();
+        check_and_inject(
+            &[handler],
+            "overmind",
+            chrono::Utc::now(),
+            "please CONFIRM DIALOG now",
+            &mut matched,
+            &mut input,
+            &mut |a| answered.push(a.handler_id),
+        )
+        .unwrap();
+        assert_eq!(input, b"y\n");
+        assert_eq!(answered, vec!["h1".to_string()]);
+    }
+
+    #[test]
+    fn check_and_inject_never_fires_the_same_handler_twice() {
+        let handler: HandlerSpec =
+            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\n")).unwrap();
+        let mut input = Vec::new();
+        let mut matched = HashSet::new();
+        let mut answered = Vec::new();
+        for _ in 0..3 {
+            check_and_inject(
+                std::slice::from_ref(&handler),
+                "overmind",
+                chrono::Utc::now(),
+                "please CONFIRM DIALOG now",
+                &mut matched,
+                &mut input,
+                &mut |a| answered.push(a.handler_id),
+            )
+            .unwrap();
+        }
+        assert_eq!(input, b"y\n", "the action must be written exactly once");
+        assert_eq!(answered.len(), 1);
+    }
+
+    #[test]
+    fn check_and_inject_does_nothing_when_no_handler_matches() {
+        let handler: HandlerSpec =
+            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\n")).unwrap();
+        let mut input = Vec::new();
+        let mut matched = HashSet::new();
+        let mut answered = Vec::new();
+        check_and_inject(
+            &[handler],
+            "overmind",
+            chrono::Utc::now(),
+            "totally unrelated screen text",
+            &mut matched,
+            &mut input,
+            &mut |a| answered.push(a.handler_id),
+        )
+        .unwrap();
+        assert!(input.is_empty());
+        assert!(answered.is_empty());
+    }
+
+    // -- run_with_handlers: real ConPTY, real child, full pipeline --------- //
+    // ⚠️ THE REAL-PROCESS TEST: proves the actual mechanism works, not just
+    // its pieces in isolation - the same discipline `facts.rs`/
+    // `lane_state_writer.rs` already apply to anything touching a real OS
+    // process. No REAL terminal exists on the outer side of a test, so
+    // (matching what a real terminal like wt.exe would do) the fake outer
+    // input answers the child's own CPR request itself.
+
+    #[cfg(windows)]
+    #[test]
+    fn run_with_handlers_hosts_a_real_child_and_relays_its_real_output() {
+        // The outer "terminal" (fake, since this test has no real one):
+        // answers the child's CPR the moment it would ask, exactly like a
+        // real terminal does - this is content the FAKE TERMINAL supplies,
+        // never something the host itself generates (see the transparency
+        // tests above).
+        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765".to_string(),
+        ];
+        let outcome = run_with_handlers(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            outer_input,
+            SharedVecWriter(Arc::clone(&outer_output)),
+            |_| {},
+            |_| {},
+        )
+        .expect("run_with_handlers failed");
+
+        let captured = outer_output.lock().unwrap().clone();
+        let text = String::from_utf8_lossy(&captured);
+        assert!(
+            text.contains("PROBE_MARKER_98765"),
+            "real child output must reach the outer side - got {text:?}"
+        );
+        assert!(outcome.child_exit_code.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_with_handlers_matches_and_answers_a_real_dialog_from_a_real_child() {
+        // A real child that prints something matching a test handler's
+        // exact text, then BLOCKS on its own stdin (`set /p`) waiting for a
+        // reply - proves the FULL loop (real ConPTY -> vt100 screen model ->
+        // exact match -> real injected keystroke fed back into the real
+        // child's real stdin) end to end, not simulated at any layer, and
+        // deterministically (no timing-dependent write into the middle of
+        // the fake outer input - the marker is the child's OWN first line
+        // of output, not something a test thread has to race to send).
+        // `/c` means the child exits on its own once the echo after the
+        // reply completes, so the read loop terminates without needing an
+        // external kill.
+        let handler: HandlerSpec = serde_json::from_str(&handler_json(
+            "echo-responder",
+            "PROBE_MARKER_98765",
+            "INJECTED_REPLY\\r\\n",
+        ))
+        .unwrap();
+
+        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // ⚠️ `%REPLY%` expands at PARSE time, before `set /p` ever runs, so
+        // it would stay the literal text `%REPLY%` regardless of what's
+        // typed - `/v:on` (delayed expansion, from the start of THIS
+        // invocation, unlike `setlocal enabledelayedexpansion` mid-line
+        // which is still too late inside one `&`-chained command line) plus
+        // `!REPLY!` is what makes this actually prove the injected text was
+        // received.
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/v:on".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765 & set /p REPLY=waiting: & echo GOT:!REPLY!".to_string(),
+        ];
+        let answered = Arc::new(Mutex::new(Vec::new()));
+        let answered_for_cb = Arc::clone(&answered);
+
+        let outcome = run_with_handlers(
+            "overmind",
+            &child_argv,
+            vec![handler],
+            80,
+            25,
+            outer_input,
+            SharedVecWriter(Arc::clone(&outer_output)),
+            move |a| answered_for_cb.lock().unwrap().push(a.handler_id),
+            |_| {},
+        )
+        .expect("run_with_handlers failed");
+
+        assert_eq!(
+            answered.lock().unwrap().as_slice(),
+            &["echo-responder".to_string()],
+            "the real child's real output must have driven a real match"
+        );
+        let captured = outer_output.lock().unwrap().clone();
+        let text = String::from_utf8_lossy(&captured);
+        assert!(
+            text.contains("GOT:INJECTED_REPLY"),
+            "the real child must have received the real injected keystrokes \
+             back on its own stdin - got {text:?}"
+        );
+        assert!(outcome.child_exit_code.is_some());
+    }
+
+    // -- on_unhandled: §12.6 unhandled-prompt capture --------------------- //
+    // A tiny `startup_window` (via `run_with_handlers_and_window`, not the
+    // real 60s `STARTUP_WINDOW`) is what makes these fast without waiting
+    // it out for real.
+
+    #[cfg(windows)]
+    #[test]
+    fn on_unhandled_fires_once_with_the_screen_text_when_nothing_ever_matched() {
+        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // No handler is embedded (`Vec::new()` below), so nothing will ever
+        // inject a reply - `choice` is used instead of `set /p` so the
+        // child still terminates ON ITS OWN (auto-selects after 2s)
+        // rather than blocking forever on input that will never arrive.
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul".to_string(),
+        ];
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_for_cb = Arc::clone(&captured);
+
+        let outcome = run_with_handlers_and_window(
+            "overmind",
+            &child_argv,
+            Vec::new(), // no handlers embedded - nothing can ever match
+            80,
+            25,
+            outer_input,
+            SharedVecWriter(outer_output),
+            |_| {},
+            move |text| captured_for_cb.lock().unwrap().push(text),
+            // Long enough for the real child to actually spawn and print
+            // its marker before the window ends, short enough (and well
+            // before `choice`'s own 2s auto-continue) to stay a fast unit
+            // test rather than waiting out the real 60s STARTUP_WINDOW.
+            Duration::from_millis(800),
+        )
+        .expect("run_with_handlers_and_window failed");
+
+        let captures = captured.lock().unwrap();
+        assert_eq!(
+            captures.len(),
+            1,
+            "must capture exactly once, not per poll - got {captures:?}"
+        );
+        assert!(
+            captures[0].contains("PROBE_MARKER_98765"),
+            "the captured text must be real screen content - got {:?}",
+            captures[0]
+        );
+        assert!(outcome.child_exit_code.is_none() || outcome.child_exit_code.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_unhandled_never_fires_when_a_handler_matched_during_the_window() {
+        let handler: HandlerSpec = serde_json::from_str(&handler_json(
+            "echo-responder",
+            "PROBE_MARKER_98765",
+            "REPLY\\r\\n",
+        ))
+        .unwrap();
+
+        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765 & set /p REPLY=waiting: & echo done".to_string(),
+        ];
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_for_cb = Arc::clone(&captured);
+
+        run_with_handlers_and_window(
+            "overmind",
+            &child_argv,
+            vec![handler],
+            80,
+            25,
+            outer_input,
+            SharedVecWriter(outer_output),
+            |_| {},
+            move |text| captured_for_cb.lock().unwrap().push(text),
+            Duration::from_millis(1500),
+        )
+        .expect("run_with_handlers_and_window failed");
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "a real match must suppress the unhandled-prompt capture entirely"
+        );
+    }
+}

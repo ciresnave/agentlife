@@ -51,6 +51,7 @@ enum ArgError {
     MissingRole,
     RoleRequired,
     Unknown(String),
+    MissingChildArgv,
 }
 
 impl std::fmt::Display for ArgError {
@@ -59,6 +60,9 @@ impl std::fmt::Display for ArgError {
             ArgError::MissingRole => write!(f, "--role requires a value"),
             ArgError::RoleRequired => write!(f, "--role <name> is required"),
             ArgError::Unknown(a) => write!(f, "unrecognised argument: {a}"),
+            ArgError::MissingChildArgv => {
+                write!(f, "expected `-- <child argv...>` after --role <name>")
+            }
         }
     }
 }
@@ -142,6 +146,65 @@ fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
     }
 }
 
+/// `lane-restart host --role <role> -- <child argv...>` - RESTART-TOOL-
+/// DESIGN.md §12.5. Runs INSIDE the relaunched session's own terminal tab
+/// (launched by `spawn_relaunch`, below) and hosts `claude` in a ConPTY
+/// this process owns.
+fn run_host_cmd(role: &str, child_argv: &[String]) -> ExitCode {
+    match lane_restart::host::run(role, child_argv) {
+        Ok(outcome) => match outcome.child_exit_code {
+            Some(0) | None => ExitCode::SUCCESS,
+            Some(_) => ExitCode::FAILURE,
+        },
+        Err(e) => {
+            eprintln!("lane-restart host: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Parses `--role <name> -- <child argv...>` for the `host` subcommand - a
+/// positional subcommand with its own `--` separator, not `parse_args`'s
+/// restart-CLI flag grammar.
+fn parse_host_args(rest: &[String]) -> Result<(String, Vec<String>), ArgError> {
+    let mut role: Option<String> = None;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            "--" => {
+                let child_argv: Vec<String> = iter.cloned().collect();
+                if child_argv.is_empty() {
+                    return Err(ArgError::MissingChildArgv);
+                }
+                return Ok((role.ok_or(ArgError::RoleRequired)?, child_argv));
+            }
+            other => return Err(ArgError::Unknown(other.to_string())),
+        }
+    }
+    Err(ArgError::MissingChildArgv)
+}
+
+/// `lane-restart --version` - RESTART-TOOL-DESIGN.md §12.9: the crate
+/// version, plus every embedded handler's `id` and a hash of its exact
+/// content, so anyone can see precisely what's active without reading
+/// source.
+fn print_version() {
+    println!("lane-restart {}", env!("CARGO_PKG_VERSION"));
+    if lane_restart::handlers::EMBEDDED_HANDLER_JSON.is_empty() {
+        println!("embedded handlers: none");
+        return;
+    }
+    println!("embedded handlers:");
+    for json in lane_restart::handlers::EMBEDDED_HANDLER_JSON {
+        let hash = lane_restart::handlers::handler_content_hash(json);
+        match serde_json::from_str::<lane_restart::handlers::HandlerSpec>(json) {
+            Ok(h) => println!("  {} {hash}", h.id),
+            Err(e) => println!("  <unparseable: {e}> {hash}"),
+        }
+    }
+}
+
 fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
     let mut role = None;
     let mut iter = rest.iter();
@@ -202,6 +265,56 @@ mod cli_tests {
         assert!(USAGE.contains("assert-idle"));
         assert!(USAGE.contains("--help"));
     }
+
+    #[test]
+    fn usage_text_documents_host_and_version() {
+        assert!(USAGE.contains(" host "));
+        assert!(USAGE.contains("--version"));
+    }
+
+    // -- parse_host_args ---------------------------------------------- //
+
+    #[test]
+    fn host_args_extracts_role_and_child_argv() {
+        assert_eq!(
+            parse_host_args(&strs(&[
+                "--role", "overmind", "--", "claude", "--name", "x"
+            ])),
+            Ok(("overmind".to_string(), strs(&["claude", "--name", "x"])))
+        );
+    }
+
+    #[test]
+    fn host_args_requires_a_separator() {
+        assert_eq!(
+            parse_host_args(&strs(&["--role", "overmind"])),
+            Err(ArgError::MissingChildArgv)
+        );
+    }
+
+    #[test]
+    fn host_args_requires_a_non_empty_child_argv_after_the_separator() {
+        assert_eq!(
+            parse_host_args(&strs(&["--role", "overmind", "--"])),
+            Err(ArgError::MissingChildArgv)
+        );
+    }
+
+    #[test]
+    fn host_args_requires_role() {
+        assert_eq!(
+            parse_host_args(&strs(&["--", "claude"])),
+            Err(ArgError::RoleRequired)
+        );
+    }
+
+    #[test]
+    fn host_args_rejects_an_unknown_flag_before_the_separator() {
+        assert_eq!(
+            parse_host_args(&strs(&["--bogus"])),
+            Err(ArgError::Unknown("--bogus".to_string()))
+        );
+    }
 }
 
 const USAGE: &str = "\
@@ -227,6 +340,19 @@ USAGE:
         LANE_ROLE, then falls back to the current directory's leaf name,
         the same as the state hook.
 
+    lane-restart host --role <name> -- <argv...>
+        Internal: runs inside the relaunched session's own terminal tab
+        (RESTART-TOOL-DESIGN.md §12.5). Owns a ConPTY, hosts <argv...>
+        (normally `claude ...`) inside it, relays every byte
+        transparently, and - only during the startup window - checks the
+        screen against every embedded startup-prompt handler
+        (RESTART-TOOL-DESIGN.md §12), injecting the matching one's action.
+        Wired automatically by a restart; never run this by hand.
+
+    lane-restart --version
+        Print the crate version plus every embedded handler's id and a
+        hash of its exact content (RESTART-TOOL-DESIGN.md §12.9).
+
     lane-restart --help
         Print this message.
 ";
@@ -235,6 +361,10 @@ fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.iter().any(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        print_version();
         return ExitCode::SUCCESS;
     }
     if let [cmd, event] = argv.as_slice() {
@@ -248,6 +378,15 @@ fn main() -> ExitCode {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "host" {
+            return match parse_host_args(rest) {
+                Ok((role, child_argv)) => run_host_cmd(&role, &child_argv),
+                Err(e) => {
+                    eprintln!("lane-restart host: {e}");
                     ExitCode::FAILURE
                 }
             };
@@ -771,10 +910,35 @@ mod relaunch {
         }
     }
 
+    /// RESTART-TOOL-DESIGN.md §12.5: the tab `wt.exe` opens must run
+    /// `lane-restart host`, never `claude` directly - the host is what
+    /// owns the real ConPTY `claude` runs inside, observes it for a
+    /// startup-prompt handler match during the startup window, and relays
+    /// every byte transparently the rest of the time. `current_exe()` is
+    /// used (rather than the bare name `lane-restart`) so the exact same
+    /// binary that decided to relaunch is the one that hosts it, without
+    /// depending on PATH resolving to the same install this process itself
+    /// runs from.
+    fn host_wrapped_argv(role: &str, claude_argv: &[String]) -> Vec<String> {
+        let exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "lane-restart".to_string());
+        let mut argv = vec![
+            exe,
+            "host".to_string(),
+            "--role".to_string(),
+            role.to_string(),
+            "--".to_string(),
+        ];
+        argv.extend_from_slice(claude_argv);
+        argv
+    }
+
     fn spawn_relaunch(state: &LaneState, argv: &[String]) -> Result<(), RelaunchError> {
+        let hosted_argv = host_wrapped_argv(&state.role, argv);
         let mut wt = std::process::Command::new("wt.exe");
         wt.args(["-w", "new", "-d", &state.cwd]);
-        wt.args(argv);
+        wt.args(&hosted_argv);
         strip_session_identity_env(&mut wt);
         match wt.spawn() {
             Ok(_) => return Ok(()),
@@ -785,7 +949,7 @@ mod relaunch {
         }
 
         let mut conhost = std::process::Command::new("conhost.exe");
-        conhost.args(argv);
+        conhost.args(&hosted_argv);
         conhost.current_dir(&state.cwd);
         strip_session_identity_env(&mut conhost);
         conhost
@@ -1131,6 +1295,32 @@ mod relaunch {
                 Some(&Some(std::ffi::OsStr::new("keep-me"))),
                 "an unrelated var must be left alone - this isn't a blanket env wipe"
             );
+        }
+
+        // -- host_wrapped_argv --------------------------------------------- //
+        // RESTART-TOOL-DESIGN.md §12.5: the tab wt.exe opens must run
+        // `lane-restart host --role <r> -- <claude argv...>`, never
+        // `claude` directly.
+
+        #[test]
+        fn host_wrapped_argv_puts_role_and_separator_before_the_claude_argv() {
+            let claude = strs(&["claude", "--name", "overmind", "the prompt"]);
+            let wrapped = host_wrapped_argv("overmind", &claude);
+            let sep = wrapped.iter().position(|a| a == "--").expect("no -- found");
+            assert_eq!(wrapped[sep + 1..], claude[..], "got {wrapped:?}");
+            assert_eq!(wrapped[sep - 2], "--role");
+            assert_eq!(wrapped[sep - 1], "overmind");
+            assert_eq!(
+                wrapped[0],
+                std::env::current_exe().unwrap().to_string_lossy(),
+                "the exe element must be THIS process's own current_exe(), not a bare name"
+            );
+        }
+
+        #[test]
+        fn host_wrapped_argv_contains_host_subcommand() {
+            let wrapped = host_wrapped_argv("overmind", &strs(&["claude"]));
+            assert_eq!(wrapped[1], "host");
         }
 
         // -- claude_argv ------------------------------------------------- //
