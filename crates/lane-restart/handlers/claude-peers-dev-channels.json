@@ -1,0 +1,28 @@
+{
+  "id": "claude-peers-dev-channels",
+  "match": {
+    "text_anchors": [
+      "WARNING: Loading development channels",
+      "I am using this for local development"
+    ],
+    "fields": {
+      "Channels": "server:claude-peers"
+    }
+  },
+  "action": "1\r",
+  "scope": {
+    "roles": [
+      "overmind",
+      "synapse",
+      "thinkersjournal-community",
+      "pm",
+      "restarttest"
+    ]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approved_at": "2026-09-19T04:00:00Z",
+    "quote": "I like that.  Proceed."
+  },
+  "expires_at": "2027-03-19T00:00:00Z"
+}

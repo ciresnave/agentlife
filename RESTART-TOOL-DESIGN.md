@@ -952,12 +952,26 @@ shipped," not building a security boundary against a hostile lane.
 
 ### 12.10 What this section does NOT authorize
 
-- **No handler is written yet**, including the `claude-peers` dev-channels one this section uses as
-  its own running example - CireSnave's own words above require its exact spec to be shown to him
-  separately before it exists.
 - **No change to how in-work permission prompts are handled** - this mechanism attaches only at the
   one point §5's `AwaitingConfirmation` already exists, never anywhere else.
 - **No default handlers, no bundled handlers, no "trusted" handler source** - every handler, with no
   exception, needs its own provenance record before it loads.
 - **No runtime directory, anywhere, ever activates a handler on its own** (§12.7) - only a merged PR
   does, regardless of what any file on disk claims about itself.
+
+### 12.11 `claude-peers-dev-channels` — the first embedded handler
+
+**CireSnave's own words, verbatim, approving this exact spec (`CIRESNAVE-EXPECTATIONS.md` §5.1c):**
+*"I like that. Proceed."* Embedded at `crates/lane-restart/handlers/claude-peers-dev-channels.json`,
+answering the `--dangerously-load-development-channels` security confirmation dialog §5's
+`AwaitingConfirmation` outcome was built to detect:
+
+- **Text anchors**: `"WARNING: Loading development channels"` and `"I am using this for local
+  development"` - both must appear verbatim, per the real dialog CireSnave's own screenshot showed.
+- **Pinned field**: `Channels` must equal EXACTLY `server:claude-peers` - any extra or different
+  channel means no match (§12.4's prefix-match trap, tested against this exact handler).
+- **Action**: `"1\r"` - selects option 1 ("I am using this for local development"), press Enter. No
+  trailing `\n` - CireSnave's own correction to an earlier draft.
+- **Scope**: every current lane plus the disposable test lane -
+  `["overmind", "synapse", "thinkersjournal-community", "pm", "restarttest"]`.
+- **Expiry**: `2027-03-19T00:00:00Z` - not indefinite; a future review has to re-confirm it.

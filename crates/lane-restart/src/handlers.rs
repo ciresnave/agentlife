@@ -61,16 +61,16 @@ pub struct Provenance {
 
 /// The ONLY handlers this binary can ever activate — embedded at build
 /// time, one `include_str!` per file under `crates/lane-restart/handlers/`.
-/// ⚠️ EMPTY BY DESIGN (PM instruction, 2026-09-18): "ship with ZERO handlers
-/// embedded." Adding an entry here, and the JSON file it reads, both go
-/// through this repo's own PR review (§12.7) — never a runtime edit.
+/// Adding an entry here, and the JSON file it reads, both went through this
+/// repo's own PR review (§12.7) — never a runtime edit.
 ///
-/// ```ignore
-/// const EMBEDDED_HANDLER_JSON: &[&str] = &[
-///     include_str!("../handlers/claude-peers-dev-channels.json"),
-/// ];
-/// ```
-pub const EMBEDDED_HANDLER_JSON: &[&str] = &[];
+/// `claude-peers-dev-channels`: CireSnave's own words, verbatim, approving
+/// this exact spec (`CIRESNAVE-EXPECTATIONS.md` §5.1c) — *"I like that.
+/// Proceed."* The PR that added this entry is the provenance record; the
+/// `provenance` field inside the JSON is a human-readable restatement of
+/// what that PR already shows (§12.7), not what makes the handler real.
+pub const EMBEDDED_HANDLER_JSON: &[&str] =
+    &[include_str!("../handlers/claude-peers-dev-channels.json")];
 
 /// Parses every embedded handler, refusing (and reporting, never silently
 /// dropping) any that fail to parse — malformed JSON, or missing a
@@ -280,16 +280,84 @@ mod tests {
     }
 
     #[test]
-    fn find_matching_handler_returns_none_when_zero_handlers_embedded() {
-        // ⚠️ THE SHIP-WITH-ZERO-HANDLERS PROPERTY: `load_embedded_handlers()`
-        // must produce an empty list today, and this must therefore never
-        // match anything - the mechanism is a no-op until a real handler
-        // is merged.
+    fn embedded_handlers_all_parse_and_include_claude_peers_dev_channels() {
+        // RESTART-TOOL-DESIGN.md §12: `claude-peers-dev-channels`, CireSnave's
+        // own approval (`CIRESNAVE-EXPECTATIONS.md` §5.1c) - "I like that.
+        // Proceed." Every embedded handler must still parse (a malformed one
+        // is silently dropped, never a panic), and this one specifically must
+        // be present.
         let handlers = load_embedded_handlers();
-        assert!(handlers.is_empty());
-        assert!(
-            find_matching_handler(&handlers, "overmind", chrono::Utc::now(), "anything").is_none()
+        assert_eq!(handlers.len(), EMBEDDED_HANDLER_JSON.len(), "none refused");
+        assert!(handlers.iter().any(|h| h.id == "claude-peers-dev-channels"));
+    }
+
+    fn claude_peers_handler() -> HandlerSpec {
+        load_embedded_handlers()
+            .into_iter()
+            .find(|h| h.id == "claude-peers-dev-channels")
+            .expect("claude-peers-dev-channels must be embedded")
+    }
+
+    /// The real dialog text, per CireSnave's own screenshot (relayed via the
+    /// PM): "WARNING: Loading development channels / ... / Channels:
+    /// server:claude-peers / 1. I am using this for local development /
+    /// 2. Exit".
+    const REAL_DIALOG_SCREEN: &str = "\
+WARNING: Loading development channels\n\
+This is a research preview feature.\n\
+Channels: server:claude-peers\n\
+1. I am using this for local development\n\
+2. Exit\n";
+
+    #[test]
+    fn claude_peers_handler_matches_the_real_dialog_and_selects_option_1() {
+        let h = claude_peers_handler();
+        assert!(matches(&h, REAL_DIALOG_SCREEN));
+        assert_eq!(
+            h.action, "1\r",
+            "no trailing \\n - CireSnave's own correction"
         );
+    }
+
+    #[test]
+    fn claude_peers_handler_does_not_match_an_extra_channel() {
+        // ⚠️ THE PREFIX-MATCH TRAP, against the REAL embedded handler, not
+        // just a synthetic fixture - an extra channel must still refuse.
+        let h = claude_peers_handler();
+        let screen = REAL_DIALOG_SCREEN.replace(
+            "Channels: server:claude-peers\n",
+            "Channels: server:claude-peers,server:extra\n",
+        );
+        assert!(!matches(&h, &screen));
+    }
+
+    #[test]
+    fn claude_peers_handler_is_scoped_to_exactly_the_approved_roles() {
+        let h = claude_peers_handler();
+        let now = chrono::Utc::now();
+        for role in [
+            "overmind",
+            "synapse",
+            "thinkersjournal-community",
+            "pm",
+            "restarttest",
+        ] {
+            assert!(is_active(&h, role, now), "{role} must be in scope");
+        }
+        // A role outside the approved list must be refused, not silently
+        // widened - CireSnave approved this exact list, nothing broader.
+        assert!(!is_active(&h, "some-other-lane", now));
+    }
+
+    #[test]
+    fn claude_peers_handler_is_not_active_past_its_approved_expiry() {
+        let h = claude_peers_handler();
+        let past_expiry = "2028-01-01T00:00:00Z".parse().unwrap();
+        assert!(!is_active(&h, "overmind", past_expiry));
+        // And still active well before it, to prove this isn't just always
+        // false - a positive control beside the negative one.
+        let before_expiry = "2026-09-19T04:00:00Z".parse().unwrap();
+        assert!(is_active(&h, "overmind", before_expiry));
     }
 
     #[test]
