@@ -401,6 +401,16 @@ impl std::fmt::Display for WriteError {
     }
 }
 
+/// ⚠️ PM finding, 2026-09-19 (install, `hook-errors.log`, two real "timed
+/// out waiting for the lane-state lock" errors around the install): the
+/// production call sites had `timeout=2s` SHORTER than `stale_after=5s` -
+/// if a holder dies (crashed or killed hook) mid-lock, every waiter gives
+/// up at 2s, before anyone is even ALLOWED to reclaim the abandoned lock at
+/// 5s, dropping the event outright. `timeout` must exceed `stale_after` so
+/// a waiter can actually live long enough to perform the reclaim.
+pub const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(7);
+pub const LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
+
 /// A lock a caller holds for the duration of one read-modify-write cycle.
 /// PM finding, 2026-09-18: concurrent tool calls fire concurrent hooks, and
 /// an unguarded read-modify-write on one JSON file loses updates - a lost
@@ -494,8 +504,8 @@ pub fn run(
     let path = state_dir.join(format!("{role}.json"));
     let lock = StateLock::acquire(
         state_dir.join(format!("{role}.lock")),
-        Duration::from_secs(2),
-        Duration::from_secs(5),
+        LOCK_ACQUIRE_TIMEOUT,
+        LOCK_STALE_AFTER,
     )
     .map_err(|e| e.to_string())?;
 
@@ -546,8 +556,8 @@ pub fn run_assert_idle(
     let path = state_dir.join(format!("{role}.json"));
     let lock = StateLock::acquire(
         state_dir.join(format!("{role}.lock")),
-        Duration::from_secs(2),
-        Duration::from_secs(5),
+        LOCK_ACQUIRE_TIMEOUT,
+        LOCK_STALE_AFTER,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1890,6 +1900,51 @@ mod tests {
         assert!(
             result.is_ok(),
             "a lock older than stale_after must be reclaimed"
+        );
+    }
+
+    // -- LOCK_ACQUIRE_TIMEOUT / LOCK_STALE_AFTER -------------------------- //
+    // ⚠️ PM finding, 2026-09-19 (install, hook-errors.log: two real "timed
+    // out waiting for the lane-state lock" errors): the production call
+    // sites had timeout (2s) SHORTER than stale_after (5s) - every waiter
+    // gave up before anyone was even ALLOWED to reclaim an abandoned lock,
+    // dropping the event. A lost SubagentStop leaves the count HIGH (the
+    // safe direction) but can block a legitimate restart until the next
+    // SessionStart.
+
+    #[test]
+    fn the_production_timeout_exceeds_the_production_stale_after() {
+        // ⚠️ THE EXACT PROPERTY THE BUG VIOLATED. A waiter must be able to
+        // survive long enough to actually perform the reclaim.
+        assert!(
+            LOCK_ACQUIRE_TIMEOUT > LOCK_STALE_AFTER,
+            "timeout ({LOCK_ACQUIRE_TIMEOUT:?}) must exceed stale_after \
+             ({LOCK_STALE_AFTER:?}), or every waiter gives up before an \
+             abandoned lock becomes reclaimable"
+        );
+    }
+
+    #[test]
+    fn a_waiter_reclaims_a_stale_lock_using_the_real_production_constants() {
+        // The bug, reproduced with the REAL constants (not a synthetic
+        // timeout/stale pair chosen to make the test pass): a lock backdated
+        // past LOCK_STALE_AFTER but well within LOCK_ACQUIRE_TIMEOUT must be
+        // reclaimed, not time out first.
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join("overmind.lock");
+        std::fs::write(&lock_path, "").unwrap();
+        let old = std::time::SystemTime::now() - LOCK_STALE_AFTER - Duration::from_secs(1);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        file.set_modified(old).unwrap();
+
+        let result = StateLock::acquire(lock_path, LOCK_ACQUIRE_TIMEOUT, LOCK_STALE_AFTER);
+        assert!(
+            result.is_ok(),
+            "with the real production constants, a stale lock must be \
+             reclaimed well before LOCK_ACQUIRE_TIMEOUT elapses"
         );
     }
 

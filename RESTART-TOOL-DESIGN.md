@@ -684,6 +684,23 @@ release binary, not `target/debug`** (PM finding, 2026-09-18: debug builds are s
 latency-sensitive hook, firing on every tool call, should run). Re-run this copy step after any
 future change to the crate; nothing here auto-updates it.
 
+**⚠️ A plain overwrite fails while the tool is installed: PM finding, 2026-09-19, the real install**
+(`.lane-state` bootstrap fix, §12.11.1's `0.3.21`) - `lane-restart.exe` is IN USE by every session's
+own hooks firing continuously (`PreToolUse` alone fires on every tool call), so a straight copy over
+the running file is refused by Windows. **The install is a rename, not a copy-over**:
+
+```
+copy target\release\lane-restart.exe C:\Projects\.claude-hooks\lane-restart.exe.new
+ren C:\Projects\.claude-hooks\lane-restart.exe lane-restart.exe.old
+ren C:\Projects\.claude-hooks\lane-restart.exe.new lane-restart.exe
+```
+
+A hook invocation already in flight keeps running against the OLD file (Windows lets an in-use file be
+renamed away out from under a process still holding it open); the NEXT hook invocation resolves the
+same path to the freshly-renamed-in binary. `lane-restart.exe.old` can be deleted once nothing is
+still running against it - safe to check via `handle.exe` or simply waiting past the longest-running
+hook this portfolio has.
+
 ### 11.3 `LANE_ROLE` per lane
 
 Set once, wherever each lane's own launch environment already lives (its own shortcut, launch script,
