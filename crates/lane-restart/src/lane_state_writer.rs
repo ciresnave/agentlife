@@ -574,12 +574,19 @@ pub fn run_assert_idle(
         .cmdline_of(pid)
         .map(|cmd| parse_claude_cli_flags(&cmd))
         .unwrap_or_default();
-    // `AssertIdle`'s own `apply_event` branch reads only `existing` and
-    // `cli_flags` - this placeholder carries no real session_id/model, both
-    // of which only the `SessionStart` branch (never reached here) uses.
+    // ⚠️ The placeholder MUST carry the existing state's own session_id
+    // (found 2026-09-27, live): `apply_event` treats any other session_id
+    // as a new session and bootstraps a fresh state - an empty one here
+    // rewrote the file with `session_id: ""`, so the restart that follows
+    // in the same shell failed its transcript identity check every time.
+    // The assertion is about the session already on record, never a new one.
+    let existing_session_id = existing
+        .as_ref()
+        .map(|s| s.session_id.clone())
+        .unwrap_or_default();
     let placeholder_input = HookInput {
         hook_event_name: "AssertIdle".to_string(),
-        session_id: String::new(),
+        session_id: existing_session_id,
         cwd: cwd.to_string(),
         permission_mode: None,
         model: None,
@@ -1783,10 +1790,13 @@ mod tests {
             fn transcript_is_recent(
                 &self,
                 _cwd: &str,
-                _session_id: &str,
+                session_id: &str,
                 _max_age: std::time::Duration,
             ) -> bool {
-                true
+                // Only the real session's transcript exists - an
+                // assert-idle that loses the session_id must fail here,
+                // exactly as it did live on 2026-09-27.
+                session_id == "e2e-session"
             }
             fn now(&self) -> chrono::DateTime<Utc> {
                 Utc::now()
@@ -1832,6 +1842,7 @@ mod tests {
             "a state file written by run() then run_assert_idle() must be accepted by decide()",
         );
         assert_eq!(plan.state.no_background_shells, Some(true));
+        assert_eq!(plan.state.session_id, "e2e-session");
     }
 
     // -- StateLock: the concurrency-safety property itself ------------------ //
