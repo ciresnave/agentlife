@@ -325,6 +325,9 @@ mod tests {
         fn find_claude_process_in(&self, _cwd: &str, _after_start_time_secs: u64) -> Option<u32> {
             panic!("decide() must never call find_claude_process_in() - it only decides")
         }
+        fn process_table(&self) -> Result<Vec<crate::facts::ProcEntry>, ShellCheckError> {
+            panic!("decide() must never call process_table() - it only decides")
+        }
     }
 
     const PID: u32 = 4200;

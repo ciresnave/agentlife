@@ -10,6 +10,7 @@ use lane_restart::authorize::{self, Target};
 use lane_restart::facts::SysinfoFacts;
 use lane_restart::lane_state_writer::{self, RealParentProcess};
 use lane_restart::log;
+use lane_restart::tab_close;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -538,6 +539,15 @@ fn main() -> ExitCode {
                     );
                 }
             }
+            match tab_close::capture(&facts, plan.state.pid, &plan.identity) {
+                Ok(shell) => println!(
+                    "lane-restart: DRY RUN - would then close the leftover tab by terminating \
+                     {shell}, if it has no other children by then"
+                ),
+                Err(why) => {
+                    println!("lane-restart: DRY RUN - would leave the tab's shell alone: {why}")
+                }
+            }
             log_outcome(requested_by, &args.role, "dry run - no action taken", false);
             ExitCode::SUCCESS
         }
@@ -560,13 +570,20 @@ fn main() -> ExitCode {
                 // needs a human.
                 print_status_json("awaiting_confirmation", &role_for_notice);
             };
-            match relaunch::kill_and_relaunch(
+            // Captured while claude is still alive, moments before `kill_and_relaunch` kills it:
+            // after the kill, claude's parent link is gone with it.
+            let leftover_shell = tab_close::capture(&facts, plan.state.pid, &plan.identity);
+            let relaunch_result = relaunch::kill_and_relaunch(
                 &facts,
                 &state_reader,
                 &plan.state,
                 &plan.identity,
                 &mut on_awaiting,
-            ) {
+            );
+            // The tab closes LAST: on `--self`, this process may share the tab's console and go
+            // with it, so everything else is already logged by then.
+            let relaunch_acted = relaunch_result.is_ok();
+            let exit = match relaunch_result {
                 Ok(outcome @ relaunch::RelaunchOutcome::Relaunched) => {
                     log_outcome(
                         requested_by,
@@ -598,8 +615,54 @@ fn main() -> ExitCode {
                     );
                     ExitCode::FAILURE
                 }
-            }
+            };
+            close_leftover_tab(
+                &facts,
+                requested_by,
+                &args.role,
+                leftover_shell,
+                relaunch_acted,
+                plan.state.pid,
+                &plan.identity,
+            );
+            exit
         }
+    }
+}
+
+/// RESTART-TOOL-DESIGN.md §5: closes the tab a hand-started lane's shell keeps open once its
+/// claude is killed (`tab_close.rs`). Only after a relaunch that acted - after a failed one the
+/// tab stays, so a human has a prompt to relaunch from. Every outcome is logged, and a closed
+/// shell is logged BEFORE the kill, in case closing the tab takes this process with it.
+fn close_leftover_tab(
+    facts: &SysinfoFacts,
+    requested_by: &str,
+    role: &str,
+    leftover_shell: Result<tab_close::ShellCandidate, tab_close::LeftAlone>,
+    relaunch_acted: bool,
+    killed_pid: u32,
+    killed_identity: &lane_restart::facts::ProcessIdentity,
+) {
+    let result = leftover_shell.and_then(|shell| {
+        if !relaunch_acted {
+            return Err(tab_close::LeftAlone::RelaunchFailed);
+        }
+        tab_close::close(facts, &shell, killed_pid, killed_identity, &mut |shell| {
+            log_outcome(
+                requested_by,
+                role,
+                &format!("closing the leftover tab: terminating shell {shell}"),
+                true,
+            );
+        })
+    });
+    if let Err(why) = result {
+        log_outcome(
+            requested_by,
+            role,
+            &format!("leftover tab's shell left alone: {why}"),
+            false,
+        );
     }
 }
 
@@ -1341,6 +1404,12 @@ mod relaunch {
             fn find_claude_process_in(&self, _: &str, _: u64) -> Option<u32> {
                 panic!("must not be reached")
             }
+            fn process_table(
+                &self,
+            ) -> Result<Vec<lane_restart::facts::ProcEntry>, lane_restart::facts::ShellCheckError>
+            {
+                panic!("must not be reached")
+            }
         }
 
         struct NeverCalledStateReader;
@@ -1902,6 +1971,12 @@ mod relaunch {
                 let idx = (*calls).min(self.alive_sequence.len() - 1);
                 *calls += 1;
                 self.alive_sequence[idx].then_some(1)
+            }
+            fn process_table(
+                &self,
+            ) -> Result<Vec<lane_restart::facts::ProcEntry>, lane_restart::facts::ShellCheckError>
+            {
+                unreachable!("the liveness wait never reads the process table")
             }
         }
 

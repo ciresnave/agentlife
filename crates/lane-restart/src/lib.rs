@@ -19,3 +19,4 @@ pub mod log;
 pub mod notify;
 pub mod paths;
 pub mod state;
+pub mod tab_close;

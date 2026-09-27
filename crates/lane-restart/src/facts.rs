@@ -55,6 +55,18 @@ pub struct ProcessIdentity {
     pub exe: Option<PathBuf>,
 }
 
+/// One row of the process table, for decisions that need parent links (`tab_close.rs`).
+/// `name` is the raw image name; `start_time_secs` is what makes a recorded `parent` trustworthy
+/// (a parent that started after its child is a reused pid - see `tab_close.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcEntry {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    pub name: String,
+    pub start_time_secs: u64,
+    pub exe: Option<PathBuf>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum KillError {
     /// The PID is no longer running at all.
@@ -126,6 +138,9 @@ pub trait SystemFacts {
     /// (the moment of the kill - never an older, unrelated process in the
     /// same directory). `None` if no such process is currently enumerable.
     fn find_claude_process_in(&self, cwd: &str, after_start_time_secs: u64) -> Option<u32>;
+
+    /// One snapshot of every enumerable process, with parent links and identities.
+    fn process_table(&self) -> Result<Vec<ProcEntry>, ShellCheckError>;
 }
 
 pub struct SysinfoFacts {
@@ -151,7 +166,7 @@ impl SysinfoFacts {
 /// unit-testable without a real process (unlike the rest of this module -
 /// see its own doc comment). Absence on either side is not itself a
 /// mismatch; only two PRESENT paths that fail to normalise-match are.
-fn exe_matches(current: &Option<PathBuf>, expected: &Option<PathBuf>) -> bool {
+pub(crate) fn exe_matches(current: &Option<PathBuf>, expected: &Option<PathBuf>) -> bool {
     match (current, expected) {
         (Some(a), Some(b)) => crate::paths::paths_match(&a.to_string_lossy(), &b.to_string_lossy()),
         _ => true,
@@ -291,6 +306,32 @@ impl SystemFacts for SysinfoFacts {
 
     fn find_claude_process_in(&self, cwd: &str, after_start_time_secs: u64) -> Option<u32> {
         find_process_in(cwd, after_start_time_secs, &["claude"])
+    }
+
+    fn process_table(&self) -> Result<Vec<ProcEntry>, ShellCheckError> {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+        );
+        let table: Vec<ProcEntry> = sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| ProcEntry {
+                pid: pid.as_u32(),
+                parent: p.parent().map(|pp| pp.as_u32()),
+                name: p.name().to_string_lossy().to_string(),
+                start_time_secs: p.start_time(),
+                exe: p.exe().map(|e| e.to_path_buf()),
+            })
+            .collect();
+        if table.is_empty() {
+            return Err(ShellCheckError::EnumerationFailed(
+                "the process table came back empty".into(),
+            ));
+        }
+        Ok(table)
     }
 }
 
@@ -609,6 +650,32 @@ mod tests {
         let _ = child.wait();
 
         assert_eq!(found, None);
+    }
+
+    /// `tab_close.rs` trusts `process_table`'s parent links and start times, so they are read
+    /// from a REAL child here: its parent must be this test process, and it cannot have started
+    /// before its parent did.
+    #[test]
+    fn process_table_links_a_real_child_to_this_process_as_its_parent() {
+        let mut child = spawn_sleep_child();
+        let pid = child.id();
+        let facts = SysinfoFacts::new(std::env::temp_dir());
+        let found = poll_for(std::time::Duration::from_secs(3), || {
+            let table = facts.process_table().ok()?;
+            let c = table.iter().find(|p| p.pid == pid)?.clone();
+            let me = table.iter().find(|p| p.pid == std::process::id())?.clone();
+            Some((c, me))
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let (c, me) = found.expect("the real child and this process must both be listed");
+        assert_eq!(c.parent, Some(me.pid));
+        assert!(c.start_time_secs >= me.start_time_secs);
+        assert_eq!(
+            c.name.to_lowercase().trim_end_matches(".exe"),
+            SLEEP_CHILD_IMAGE_NAME
+        );
     }
 
     /// The image name `spawn_sleep_child_in` actually spawns, per platform -

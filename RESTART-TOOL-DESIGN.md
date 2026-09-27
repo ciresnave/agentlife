@@ -273,12 +273,32 @@ vars (`CLAUDE_EFFORT`, `CLAUDE_CODE_USE_POWERSHELL_TOOL`, `CLAUDE_CODE_EXECPATH`
 like `CLOUDFLARE_*`) are deliberately left alone - this is a targeted strip of session identity, not a
 blanket environment wipe.
 
-**Also noted (PM finding, same retest, cosmetic - not fixed in code):** killing `claude` leaves its
-hosting terminal tab behind, in raw mouse-tracking mode (the shell's own escape codes never got
-cleaned up). Not worth a terminal-reset-sequence fix - the actual answer is that a lane's tab should
-close on its own once its `claude` process exits, which is already true when a lane is LAUNCHED the
-same way this tool relaunches it (`wt … claude …`, one `claude` per tab, no intermediate shell prompt
-sitting underneath it).
+**Leftover tabs - REVISED 2026-09-27, now fixed in code (`tab_close.rs`).** The 09-18 retest called
+this cosmetic: killing `claude` leaves its hosting tab behind, in raw mouse-tracking mode. CireSnave
+disagreed (via the PM, 2026-09-27): *"Our restart tool isn't closing the leftover terminal window
+from the old agents."* A tool-launched lane (`wt → lane-restart host → claude`) already closes on its
+own. A hand-started lane (`WindowsTerminal → pwsh → claude`) does not: `pwsh` survives the kill and
+the tab stays open at a prompt. Each restart of a hand-started lane added one more such tab.
+
+The rule, applied only after a relaunch that acted (`Relaunched` or `AwaitingConfirmation`):
+
+1. **Capture while claude is alive**, right before the kill. The candidate is claude's direct parent,
+   and it must be an interactive shell (`pwsh`/`powershell`/`cmd`) whose own parent is a terminal
+   (`WindowsTerminal`/`OpenConsole`). It is recorded with its full `ProcessIdentity`.
+2. **Never trust a parent pid by name (§2).** Windows never rewrites a recorded parent pid, so a
+   parent that started after its child is a reused pid and is refused. This holds for both
+   links, claude→shell and shell→terminal.
+3. **Re-verify after the relaunch.** The shell must still carry the captured identity and have no
+   children other than the killed claude. A process listed under the shell's pid that started
+   before the shell is a stale link, not a child. Then `kill_verified` re-checks the identity once
+   more before signalling.
+4. **Log every outcome** to `restart.log`. A closed shell is logged before the kill, because on
+   `--self` closing the tab can take the tool with it; for the same reason, the tab closes last.
+   Anything left alone is logged with its reason: a shell with other children, a non-terminal
+   parent, a parent already gone, a failed relaunch (the tab stays so a human can relaunch from it),
+   and so on.
+
+`--dry-run` prints which shell it would close, or why it would leave it alone.
 
 ⚠️ **REVISED (CireSnave, via the PM, 2026-09-18): a relaunch that only reconstructs `--name`/`--model`/
 `--permission-mode`/`--remote-control` silently drops every OTHER real launch flag.** CireSnave launches

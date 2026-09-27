@@ -1821,6 +1821,11 @@ mod tests {
             ) -> Option<u32> {
                 unreachable!("this test never relaunches anything")
             }
+            fn process_table(
+                &self,
+            ) -> Result<Vec<crate::facts::ProcEntry>, crate::facts::ShellCheckError> {
+                unreachable!("this test never relaunches anything")
+            }
         }
 
         // Target::Other, not Myself: the no_background_shells check
