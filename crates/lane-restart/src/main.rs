@@ -33,9 +33,7 @@ fn claude_config_dir() -> PathBuf {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
+    lane_restart::paths::home_dir()
 }
 
 #[derive(Debug)]
@@ -186,22 +184,59 @@ fn parse_host_args(rest: &[String]) -> Result<(String, Vec<String>), ArgError> {
 }
 
 /// `lane-restart --version` - RESTART-TOOL-DESIGN.md §12.9: the crate
-/// version, plus every embedded handler's `id` and a hash of its exact
-/// content, so anyone can see precisely what's active without reading
-/// source.
+/// version, that it embeds no approvals, and where it would fetch them
+/// from. No network: `lane-restart approvals` does the fetch.
 fn print_version() {
+    use lane_restart::approvals;
     println!("lane-restart {}", env!("CARGO_PKG_VERSION"));
-    if lane_restart::handlers::EMBEDDED_HANDLER_JSON.is_empty() {
-        println!("embedded handlers: none");
-        return;
+    println!("embedded approvals: none (by design - RESTART-TOOL-DESIGN.md §12.2)");
+    match dirs_home() {
+        Some(home) => match approvals::load_config(&approvals::config_path(&home)) {
+            Ok(c) => println!(
+                "approvals source: {}:{} (default branch), notify role: {}",
+                c.approvals.repo, c.approvals.path, c.notify_role
+            ),
+            Err(e) => println!("approvals source: {e}"),
+        },
+        None => println!("approvals source: no home directory"),
     }
-    println!("embedded handlers:");
-    for json in lane_restart::handlers::EMBEDDED_HANDLER_JSON {
-        let hash = lane_restart::handlers::handler_content_hash(json);
-        match serde_json::from_str::<lane_restart::handlers::HandlerSpec>(json) {
-            Ok(h) => println!("  {} {hash}", h.id),
-            Err(e) => println!("  <unparseable: {e}> {hash}"),
-        }
+}
+
+/// `lane-restart approvals [--role <name>]` - fetches the configured
+/// approvals exactly as `host` would and prints every active one (id,
+/// content hash, roles, expiry) and every refused one with its reason.
+/// With `--role`, marks which apply to that role right now. Exit 1 if
+/// nothing could be loaded at all.
+fn run_approvals_cmd(role: Option<String>) -> ExitCode {
+    use lane_restart::approvals;
+    let Some(home) = dirs_home() else {
+        eprintln!("lane-restart approvals: no home directory");
+        return ExitCode::FAILURE;
+    };
+    let (_, loaded) = approvals::load_configured(&home, &approvals::GhReader::default());
+    println!("approvals: {}", loaded.summary());
+    let now = chrono::Utc::now();
+    for (h, hash) in &loaded.handlers {
+        let applies = match &role {
+            Some(r) if lane_restart::handlers::is_active(h, r, now) => format!(" [applies to {r}]"),
+            Some(r) => format!(" [NOT active for {r}]"),
+            None => String::new(),
+        };
+        let expiry = h
+            .expires_at
+            .map_or_else(|| "never".to_string(), |e| e.to_rfc3339());
+        println!(
+            "  active {} {hash} roles={:?} expires={expiry}{applies}",
+            h.id, h.scope.roles
+        );
+    }
+    for (name, reason) in &loaded.refused {
+        println!("  REFUSED {name}: {reason}");
+    }
+    if loaded.error.is_some() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -270,6 +305,7 @@ mod cli_tests {
     fn usage_text_documents_host_and_version() {
         assert!(USAGE.contains(" host "));
         assert!(USAGE.contains("--version"));
+        assert!(USAGE.contains("lane-restart approvals"));
     }
 
     // -- relaunch_exit_code -------------------------------------------- //
@@ -369,16 +405,22 @@ USAGE:
 
     lane-restart host --role <name> -- <argv...>
         Internal: runs inside the relaunched session's own terminal tab
-        (RESTART-TOOL-DESIGN.md §12.5). Owns a ConPTY, hosts <argv...>
-        (normally `claude ...`) inside it, relays every byte
-        transparently, and - only during the startup window - checks the
-        screen against every embedded startup-prompt handler
-        (RESTART-TOOL-DESIGN.md §12), injecting the matching one's action.
+        (RESTART-TOOL-DESIGN.md §12.5). Loads the user's approvals, owns a
+        ConPTY, hosts <argv...> (normally `claude ...`) inside it, relays
+        every byte transparently, and - only during the startup window -
+        checks the screen against every approval (RESTART-TOOL-DESIGN.md
+        §12), injecting the matching one's action. If the window ends on a
+        dialog nothing answered, it messages the notify role's lane.
         Wired automatically by a restart; never run this by hand.
 
+    lane-restart approvals [--role <name>]
+        Fetch the approvals configured in ~/.overmind/lane-restart.json
+        (from that repo's default branch only) and list every active and
+        refused one, exactly as `host` would load them.
+
     lane-restart --version
-        Print the crate version plus every embedded handler's id and a
-        hash of its exact content (RESTART-TOOL-DESIGN.md §12.9).
+        Print the crate version and the configured approvals source. This
+        binary embeds no approvals (RESTART-TOOL-DESIGN.md §12.2).
 
     lane-restart --help
         Print this message.
@@ -405,6 +447,15 @@ fn main() -> ExitCode {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "approvals" {
+            return match parse_assert_idle_args(rest) {
+                Ok(role) => run_approvals_cmd(role),
+                Err(e) => {
+                    eprintln!("lane-restart approvals: {e}");
                     ExitCode::FAILURE
                 }
             };

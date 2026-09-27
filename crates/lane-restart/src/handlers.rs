@@ -1,29 +1,35 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Declarative startup-prompt handlers — RESTART-TOOL-DESIGN.md §12.
+//! Declarative startup-prompt handlers ("approvals") — RESTART-TOOL-DESIGN.md §12.
 //!
-//! ⚠️ ACTIVE HANDLERS COME ONLY FROM WHAT'S EMBEDDED AT BUILD TIME
-//! ([`EMBEDDED_HANDLER_JSON`]), never a runtime file. Every handler embedded here
-//! reached the binary through a merged PR against this repo — the PR is the
-//! provenance record; the `provenance` field inside each handler's own JSON
-//! is a human-readable restatement of what the PR already shows, not what
-//! makes the handler real (§12.7). A runtime directory (`.lane-state/handler-proposals/`,
-//! for the LLM-proposal loop) is never read by anything in this module.
+//! ⚠️ THIS CRATE SHIPS ZERO ACTIVE HANDLERS (§12.2, CIRESNAVE-EXPECTATIONS.md
+//! §5.1c, 2026-09-27: "approvals move OUT of OverMind"). Every handler the
+//! host ever acts on is fetched at host startup from the repo + path the
+//! USER configured (`approvals.rs`), from that repo's default branch only.
+//! Nothing configured means nothing active. This module only parses,
+//! validates and matches; it never decides where handlers come from.
+//!
+//! The one handler this repo still carries,
+//! `approval-example/claude-peers-dev-channels.json`, is an INERT example:
+//! nothing outside `#[cfg(test)]` reads it.
 
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// One handler, exactly as its own JSON file (`crates/lane-restart/handlers/*.json`)
-/// declares it. Every field is required by `serde` — a handler file missing
-/// any of them (most importantly `provenance`) fails to parse, which is
-/// caught at build/PR-review time (§12.3), not silently defaulted.
+/// One handler, exactly as its own JSON file declares it. Every field
+/// except `expires_at` is required, and an unknown field is an error
+/// (`deny_unknown_fields`) - a typo such as `"expires"` must refuse the
+/// handler, never silently mean "no expiry" (§12.3).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandlerSpec {
     pub id: String,
     #[serde(rename = "match")]
     pub match_spec: MatchSpec,
-    /// The literal keystrokes sent on an exact match, verbatim — never a
-    /// structured "always confirm" toggle (§12.2).
+    /// The literal keystrokes sent on an exact match, verbatim. Restricted
+    /// to at most one ASCII letter or digit plus an optional `\r`
+    /// ([`action_is_a_plain_keystroke`]) - short enough that no secret can
+    /// ride in it (§12.3a).
     pub action: String,
     pub scope: ScopeSpec,
     pub provenance: Provenance,
@@ -32,60 +38,196 @@ pub struct HandlerSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchSpec {
     /// Every string here must appear verbatim in the captured screen text
-    /// — not a fuzzy or partial match (§12.4).
+    /// — not a fuzzy or partial match (§12.4). At least one is required.
     pub text_anchors: Vec<String>,
-    /// Named fields pinned to an exact allowed value. Checked as the
-    /// literal substring `"{name}: {value}"` in the captured screen text —
-    /// an implementation choice flagged for revision once a real captured
-    /// dialog confirms (or corrects) the actual formatting (§12.4).
+    /// Named fields pinned to an exact allowed value, checked as
+    /// `"{name}: {value}"` ending at a line boundary (§12.4).
     #[serde(default)]
     pub fields: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeSpec {
     /// Which lane roles this handler applies to; `"*"` matches every role.
     pub roles: Vec<String>,
 }
 
+/// A human-readable restatement of who approved this and in what words.
+/// ⚠️ Not what makes the handler real - that is the user's own merge into
+/// their approvals repo's default branch (§12.7). Checked for completeness
+/// only.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Provenance {
     pub approved_by: String,
-    pub approved_at: chrono::DateTime<chrono::Utc>,
-    /// CireSnave's own verbatim words approving THIS handler's exact spec
-    /// — never the general framework approval alone (§12.1, §12.2).
-    pub quote: String,
+    /// Every approval this handler rests on, oldest first, each quoted
+    /// verbatim. At least one is required.
+    pub approvals: Vec<Approval>,
 }
 
-/// The ONLY handlers this binary can ever activate — embedded at build
-/// time, one `include_str!` per file under `crates/lane-restart/handlers/`.
-/// Adding an entry here, and the JSON file it reads, both went through this
-/// repo's own PR review (§12.7) — never a runtime edit.
-///
-/// `claude-peers-dev-channels`: CireSnave's own words, verbatim, approving
-/// this exact spec (`CIRESNAVE-EXPECTATIONS.md` §5.1c) — *"I like that.
-/// Proceed."* The PR that added this entry is the provenance record; the
-/// `provenance` field inside the JSON is a human-readable restatement of
-/// what that PR already shows (§12.7), not what makes the handler real.
-pub const EMBEDDED_HANDLER_JSON: &[&str] =
-    &[include_str!("../handlers/claude-peers-dev-channels.json")];
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approval {
+    /// The day it was said. A date, not a time: a guessed time of day would
+    /// be a made-up fact.
+    pub said_on: chrono::NaiveDate,
+    /// The approver's own words, verbatim - never a paraphrase.
+    pub quote: String,
+    /// What those words were answering.
+    pub approving: String,
+}
 
-/// Parses every embedded handler, refusing (and reporting, never silently
-/// dropping) any that fail to parse — malformed JSON, or missing a
-/// required field (most importantly `provenance`), per §12.3.
-pub fn load_embedded_handlers() -> Vec<HandlerSpec> {
-    let mut handlers = Vec::new();
-    for (i, json) in EMBEDDED_HANDLER_JSON.iter().enumerate() {
-        match serde_json::from_str::<HandlerSpec>(json) {
-            Ok(handler) => handlers.push(handler),
-            Err(e) => {
-                eprintln!("lane-restart: refusing embedded handler #{i} - failed to parse: {e}");
+/// Words that mark a dialog as asking for a secret. Matched as whole words
+/// (or whole word sequences) after lowercasing and replacing every
+/// non-alphanumeric character with a space, so `"PIN:"` hits but
+/// `"pinned"` does not. ⚠️ Secrets are never approvals (§12.3a): a handler
+/// mentioning one of these is refused at load, and a screen mentioning one
+/// is never answered, whatever handler matched it.
+const SECRET_WORDS: &[&str] = &[
+    "password",
+    "passwords",
+    "passphrase",
+    "passcode",
+    "pin",
+    "secret",
+    "secrets",
+    "token",
+    "tokens",
+    "credential",
+    "credentials",
+    "apikey",
+    "api key",
+    "private key",
+    "otp",
+    "2fa",
+    "mfa",
+    "one time code",
+    "one time password",
+    "verification code",
+    "security code",
+    "recovery code",
+    "seed phrase",
+    "recovery phrase",
+];
+
+/// The first [`SECRET_WORDS`] entry `text` contains as a whole word, if any.
+pub fn secret_word_in(text: &str) -> Option<&'static str> {
+    let normalized: String = text
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
             }
-        }
+        })
+        .collect();
+    let padded = format!(
+        " {} ",
+        normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    SECRET_WORDS
+        .iter()
+        .copied()
+        .find(|w| padded.contains(&format!(" {w} ")))
+}
+
+/// Whether `action` is one plain keystroke: at most one ASCII letter or
+/// digit, then an optional `\r`, and not empty. Nothing longer is ever
+/// sent, so no password, token or code can be carried by an action.
+pub fn action_is_a_plain_keystroke(action: &str) -> bool {
+    let body = action.strip_suffix('\r').unwrap_or(action);
+    !action.is_empty() && body.len() <= 1 && body.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Whether `id` is usable as a file stem and a log key: 1-64 characters of
+/// lowercase ASCII letters, digits and `-`.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Shortest text anchor accepted. An anchor like `"1"` would match almost
+/// any screen; eight characters keeps every anchor a real phrase.
+pub const MIN_ANCHOR_LEN: usize = 8;
+
+/// Why `handler` must be refused, or `None` if it may load (§12.3, §12.3a).
+/// Parsing already enforced the required fields; this enforces everything
+/// a well-formed but unsafe handler could still get wrong.
+pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
+    if !valid_id(&handler.id) {
+        return Some(format!(
+            "id {:?} must be 1-64 chars of a-z, 0-9 and '-'",
+            handler.id
+        ));
     }
-    handlers
+    if handler.match_spec.text_anchors.is_empty() {
+        return Some("match.text_anchors is empty - it would match any screen".into());
+    }
+    if let Some(a) = handler
+        .match_spec
+        .text_anchors
+        .iter()
+        .find(|a| a.trim().chars().count() < MIN_ANCHOR_LEN)
+    {
+        return Some(format!(
+            "text anchor {a:?} is shorter than {MIN_ANCHOR_LEN} characters"
+        ));
+    }
+    if !action_is_a_plain_keystroke(&handler.action) {
+        return Some(format!(
+            "action {:?} is not one plain keystroke (one letter or digit, optional \\r) - \
+             secrets are never approvals",
+            handler.action
+        ));
+    }
+    let mut texts: Vec<&str> = vec![handler.id.as_str()];
+    texts.extend(handler.match_spec.text_anchors.iter().map(String::as_str));
+    for (name, value) in &handler.match_spec.fields {
+        texts.push(name);
+        texts.push(value);
+    }
+    if let Some(w) = texts.iter().find_map(|t| secret_word_in(t)) {
+        return Some(format!(
+            "it matches a dialog that mentions {w:?} - secrets are never approvals"
+        ));
+    }
+    if handler.scope.roles.is_empty() {
+        return Some("scope.roles is empty".into());
+    }
+    if handler.provenance.approved_by.trim().is_empty() {
+        return Some("provenance.approved_by is empty".into());
+    }
+    if handler.provenance.approvals.is_empty() {
+        return Some("provenance.approvals is empty".into());
+    }
+    if handler
+        .provenance
+        .approvals
+        .iter()
+        .any(|a| a.quote.trim().is_empty() || a.approving.trim().is_empty())
+    {
+        return Some("a provenance approval has an empty quote or `approving`".into());
+    }
+    None
+}
+
+/// Parses one handler file and refuses it (with the reason) if it fails
+/// to parse or fails [`refusal_reason`]. Never partially parsed.
+pub fn parse_and_validate(json: &str) -> Result<HandlerSpec, String> {
+    let handler: HandlerSpec =
+        serde_json::from_str(json).map_err(|e| format!("does not parse: {e}"))?;
+    match refusal_reason(&handler) {
+        Some(reason) => Err(reason),
+        None => Ok(handler),
+    }
 }
 
 /// Whether `handler` is even eligible to be checked at all: its `scope`
@@ -122,11 +264,11 @@ fn field_matches(screen_text: &str, name: &str, value: &str) -> bool {
     false
 }
 
-/// Exact-match only (§12.4): every `text_anchor` must appear verbatim, and
+/// Exact-match only (§12.4): every `text_anchor` must appear verbatim,
 /// every `fields` entry must appear as `"{name}: {value}"` with nothing
-/// else appended to the value on the same line. Any deviation at all — an
-/// extra channel, changed wording, a missing anchor — means no match; this
-/// function is never a prefix or fuzzy check.
+/// else appended to the value on the same line, and the screen must not
+/// mention a secret (§12.3a) - a dialog that asks for one is never
+/// answered, even by a handler whose anchors it happens to contain.
 pub fn matches(handler: &HandlerSpec, screen_text: &str) -> bool {
     let anchors_ok = handler
         .match_spec
@@ -138,7 +280,7 @@ pub fn matches(handler: &HandlerSpec, screen_text: &str) -> bool {
         .fields
         .iter()
         .all(|(name, value)| field_matches(screen_text, name, value));
-    anchors_ok && fields_ok
+    anchors_ok && fields_ok && secret_word_in(screen_text).is_none()
 }
 
 /// The first active, exactly-matching handler for `screen_text`, if any.
@@ -165,6 +307,8 @@ pub struct MatchReport {
     pub anchors: Vec<(String, bool)>,
     /// (field name, pinned value, whether it matched at a real boundary)
     pub fields: Vec<(String, String, bool)>,
+    /// The secret word on screen that vetoed a match, if any.
+    pub secret_word: Option<&'static str>,
     pub matched: bool,
 }
 
@@ -187,21 +331,25 @@ pub fn match_report(
         .iter()
         .map(|(n, v)| (n.clone(), v.clone(), field_matches(screen_text, n, v)))
         .collect();
-    let matched =
-        active && anchors.iter().all(|(_, ok)| *ok) && fields.iter().all(|(_, _, ok)| *ok);
+    let secret_word = secret_word_in(screen_text);
+    let matched = active
+        && anchors.iter().all(|(_, ok)| *ok)
+        && fields.iter().all(|(_, _, ok)| *ok)
+        && secret_word.is_none();
     MatchReport {
         handler_id: handler.id.clone(),
         active,
         anchors,
         fields,
+        secret_word,
         matched,
     }
 }
 
-/// A short, stable hash of a handler's exact JSON content, for
-/// `lane-restart --version` (§12.9) — so anyone can see precisely what's
-/// active without reading source, and a diff between two `--version`
-/// outputs shows exactly what changed.
+/// A short, stable hash of a handler's exact file content, for
+/// `lane-restart approvals` and the host log (§12.9) - so anyone can see
+/// precisely what's active, and a diff between two listings shows exactly
+/// what changed.
 pub fn handler_content_hash(json: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -213,6 +361,11 @@ pub fn handler_content_hash(json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PROVENANCE: &str = r#"{
+        "approved_by": "CireSnave",
+        "approvals": [{"said_on": "2026-09-18", "quote": "Proceed!", "approving": "a test"}]
+    }"#;
 
     fn sample_json(id: &str, extra_field_value: Option<&str>) -> String {
         let fields = match extra_field_value {
@@ -226,40 +379,167 @@ mod tests {
                     "text_anchors": ["SECURITY CONFIRMATION", "local development"],
                     "fields": {fields}
                 }},
-                "action": "y\n",
+                "action": "1\r",
                 "scope": {{ "roles": ["overmind"] }},
-                "provenance": {{
-                    "approved_by": "CireSnave",
-                    "approved_at": "2026-09-18T22:00:00Z",
-                    "quote": "Proceed!"
-                }},
+                "provenance": {PROVENANCE},
                 "expires_at": null
             }}"#
         )
     }
 
+    fn with(json_fields: &str) -> String {
+        format!(
+            r#"{{
+                "id": "t",
+                "match": {{"text_anchors": ["SECURITY CONFIRMATION"], "fields": {{}}}},
+                "scope": {{"roles": ["overmind"]}},
+                "provenance": {PROVENANCE},
+                {json_fields}
+            }}"#
+        )
+    }
+
     #[test]
-    fn parses_a_well_formed_handler() {
-        let h: HandlerSpec = serde_json::from_str(&sample_json("test-handler", None)).unwrap();
+    fn parses_and_validates_a_well_formed_handler() {
+        let h = parse_and_validate(&sample_json("test-handler", None)).unwrap();
         assert_eq!(h.id, "test-handler");
         assert_eq!(h.provenance.approved_by, "CireSnave");
-        assert_eq!(h.provenance.quote, "Proceed!");
+        assert_eq!(h.provenance.approvals[0].quote, "Proceed!");
     }
 
     #[test]
     fn refuses_a_handler_with_no_provenance() {
         let json = r#"{
             "id": "test-handler",
-            "match": {"text_anchors": [], "fields": {}},
-            "action": "y\n",
+            "match": {"text_anchors": ["SECURITY CONFIRMATION"], "fields": {}},
+            "action": "1\r",
             "scope": {"roles": ["overmind"]}
         }"#;
-        assert!(serde_json::from_str::<HandlerSpec>(json).is_err());
+        assert!(parse_and_validate(json).is_err());
+    }
+
+    #[test]
+    fn refuses_an_unknown_field_rather_than_ignoring_it() {
+        // A typo'd expiry must refuse the handler, not silently mean "never
+        // expires". Positive control: the same JSON with the real field name
+        // parses.
+        let typo = with(r#""action": "1\r", "expires": "2020-01-01T00:00:00Z""#);
+        assert!(parse_and_validate(&typo).unwrap_err().contains("expires"));
+        let real = with(r#""action": "1\r", "expires_at": "2020-01-01T00:00:00Z""#);
+        assert!(parse_and_validate(&real).is_ok());
+    }
+
+    #[test]
+    fn refuses_the_old_single_quote_provenance_shape() {
+        let json = r#"{
+            "id": "t",
+            "match": {"text_anchors": ["SECURITY CONFIRMATION"], "fields": {}},
+            "action": "1\r",
+            "scope": {"roles": ["overmind"]},
+            "provenance": {"approved_by": "CireSnave", "approved_at": "2026-09-18T22:00:00Z", "quote": "q"}
+        }"#;
+        assert!(parse_and_validate(json).is_err());
     }
 
     #[test]
     fn refuses_malformed_json() {
-        assert!(serde_json::from_str::<HandlerSpec>("{not json").is_err());
+        assert!(parse_and_validate("{not json").is_err());
+    }
+
+    #[test]
+    fn refuses_an_action_long_enough_to_carry_a_secret() {
+        for bad in ["hunter2\r", "1234\r", "", "\r\r", "yes\r", "1\n", "\u{1b}"] {
+            let json = with(&format!(
+                r#""action": {}"#,
+                serde_json::to_string(bad).unwrap()
+            ));
+            let err = parse_and_validate(&json).unwrap_err();
+            assert!(err.contains("plain keystroke"), "{bad:?}: {err}");
+        }
+        for good in ["1\r", "y", "\r", "Y\r", "2"] {
+            let json = with(&format!(
+                r#""action": {}"#,
+                serde_json::to_string(good).unwrap()
+            ));
+            assert!(
+                parse_and_validate(&json).is_ok(),
+                "{good:?} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_handler_for_a_dialog_that_mentions_a_secret() {
+        for anchor in [
+            "Enter your password",
+            "Paste your API key here",
+            "Your PIN: please",
+            "One-time code sent",
+            "Authentication token required",
+        ] {
+            let json = format!(
+                r#"{{
+                    "id": "t",
+                    "match": {{"text_anchors": ["{anchor}"], "fields": {{}}}},
+                    "action": "1\r",
+                    "scope": {{"roles": ["overmind"]}},
+                    "provenance": {PROVENANCE}
+                }}"#
+            );
+            let err = parse_and_validate(&json).unwrap_err();
+            assert!(
+                err.contains("secrets are never approvals"),
+                "{anchor}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_words_match_whole_words_only() {
+        assert_eq!(secret_word_in("Enter PIN:"), Some("pin"));
+        assert_eq!(secret_word_in("API-key"), Some("api key"));
+        assert_eq!(secret_word_in("the pinned tab"), None);
+        assert_eq!(secret_word_in("tokenizer settings"), None);
+        assert_eq!(
+            secret_word_in("I am using this for local development"),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_or_too_short_anchor_list() {
+        let none = r#"{"id":"t","match":{"text_anchors":[],"fields":{}},"action":"1\r","scope":{"roles":["*"]},"provenance":PROV}"#
+            .replace("PROV", PROVENANCE);
+        assert!(parse_and_validate(&none).unwrap_err().contains("empty"));
+        let short = none.replace(r#""text_anchors":[]"#, r#""text_anchors":["1. Yes"]"#);
+        assert!(parse_and_validate(&short).unwrap_err().contains("shorter"));
+    }
+
+    #[test]
+    fn refuses_an_id_that_is_not_a_safe_file_stem() {
+        let json = sample_json("../escape", None);
+        assert!(parse_and_validate(&json).unwrap_err().contains("id"));
+    }
+
+    #[test]
+    fn refuses_empty_provenance_approvals() {
+        let json = sample_json("t", None).replace(
+            r#""approvals": [{"said_on": "2026-09-18", "quote": "Proceed!", "approving": "a test"}]"#,
+            r#""approvals": []"#,
+        );
+        assert!(parse_and_validate(&json).unwrap_err().contains("approvals"));
+    }
+
+    #[test]
+    fn a_screen_mentioning_a_secret_is_never_matched() {
+        let h = parse_and_validate(&sample_json("t", None)).unwrap();
+        let screen = "SECURITY CONFIRMATION\nI am using this for local development\n";
+        assert!(matches(&h, screen), "positive control");
+        let with_secret = format!("{screen}Password: ");
+        assert!(!matches(&h, &with_secret));
+        let report = match_report(&h, "overmind", chrono::Utc::now(), &with_secret);
+        assert_eq!(report.secret_word, Some("password"));
+        assert!(!report.matched);
     }
 
     #[test]
@@ -268,8 +548,7 @@ mod tests {
         // anchor or field caused a non-match - this is the diagnostic
         // host.rs logs, so it must actually pinpoint the failure, not just
         // restate the overall bool `matches()` already gives.
-        let h: HandlerSpec =
-            serde_json::from_str(&sample_json("t", Some("server:claude-peers"))).unwrap();
+        let h = parse_and_validate(&sample_json("t", Some("server:claude-peers"))).unwrap();
         let screen = "  I am using this for local development\n  Channels: server:claude-peers\n";
         let report = match_report(&h, "overmind", chrono::Utc::now(), screen);
         assert!(!report.matched);
@@ -293,16 +572,14 @@ mod tests {
 
     #[test]
     fn matches_when_every_anchor_and_field_is_present_exactly() {
-        let h: HandlerSpec =
-            serde_json::from_str(&sample_json("t", Some("server:claude-peers"))).unwrap();
+        let h = parse_and_validate(&sample_json("t", Some("server:claude-peers"))).unwrap();
         let screen = "  SECURITY CONFIRMATION\n  I am using this for local development\n  Channels: server:claude-peers\n";
         assert!(matches(&h, screen));
     }
 
     #[test]
     fn does_not_match_on_a_missing_anchor() {
-        let h: HandlerSpec =
-            serde_json::from_str(&sample_json("t", Some("server:claude-peers"))).unwrap();
+        let h = parse_and_validate(&sample_json("t", Some("server:claude-peers"))).unwrap();
         let screen = "  I am using this for local development\n  Channels: server:claude-peers\n";
         assert!(!matches(&h, screen));
     }
@@ -312,80 +589,57 @@ mod tests {
         // ⚠️ THE PREFIX-MATCH TRAP §12.4 warns about: "server:claude-peers"
         // plus anything else must NOT match a handler pinned to exactly
         // "server:claude-peers".
-        let h: HandlerSpec =
-            serde_json::from_str(&sample_json("t", Some("server:claude-peers"))).unwrap();
+        let h = parse_and_validate(&sample_json("t", Some("server:claude-peers"))).unwrap();
         let screen = "  SECURITY CONFIRMATION\n  I am using this for local development\n  Channels: server:claude-peers,server:extra\n";
         assert!(!matches(&h, screen));
     }
 
     #[test]
     fn is_active_respects_role_scope() {
-        let h: HandlerSpec = serde_json::from_str(&sample_json("t", None)).unwrap();
+        let h = parse_and_validate(&sample_json("t", None)).unwrap();
         let now = chrono::Utc::now();
         assert!(is_active(&h, "overmind", now));
         assert!(!is_active(&h, "synapse", now));
     }
 
     #[test]
-    fn is_active_treats_wildcard_scope_as_every_role() {
-        let json = r#"{
-            "id": "t",
-            "match": {"text_anchors": [], "fields": {}},
-            "action": "y\n",
-            "scope": {"roles": ["*"]},
-            "provenance": {"approved_by": "CireSnave", "approved_at": "2026-09-18T22:00:00Z", "quote": "q"}
-        }"#;
-        let h: HandlerSpec = serde_json::from_str(json).unwrap();
-        assert!(is_active(&h, "anything-at-all", chrono::Utc::now()));
-    }
-
-    #[test]
     fn is_active_treats_an_expired_handler_as_not_present() {
-        let json = r#"{
-            "id": "t",
-            "match": {"text_anchors": [], "fields": {}},
-            "action": "y\n",
-            "scope": {"roles": ["overmind"]},
-            "provenance": {"approved_by": "CireSnave", "approved_at": "2026-09-18T22:00:00Z", "quote": "q"},
-            "expires_at": "2020-01-01T00:00:00Z"
-        }"#;
-        let h: HandlerSpec = serde_json::from_str(json).unwrap();
+        let json = with(r#""action": "1\r", "expires_at": "2020-01-01T00:00:00Z""#);
+        let h = parse_and_validate(&json).unwrap();
         assert!(!is_active(&h, "overmind", chrono::Utc::now()));
     }
 
-    #[test]
-    fn embedded_handlers_all_parse_and_include_claude_peers_dev_channels() {
-        // RESTART-TOOL-DESIGN.md §12: `claude-peers-dev-channels`, CireSnave's
-        // own approval (`CIRESNAVE-EXPECTATIONS.md` §5.1c) - "I like that.
-        // Proceed." Every embedded handler must still parse (a malformed one
-        // is silently dropped, never a panic), and this one specifically must
-        // be present.
-        let handlers = load_embedded_handlers();
-        assert_eq!(handlers.len(), EMBEDDED_HANDLER_JSON.len(), "none refused");
-        assert!(handlers.iter().any(|h| h.id == "claude-peers-dev-channels"));
+    // -- the inert example: the same bytes the seed PR puts in the user's repo //
+
+    /// ⚠️ Read ONLY here, under `cfg(test)`. The binary never contains it.
+    const EXAMPLE_JSON: &str = include_str!("../approval-example/claude-peers-dev-channels.json");
+
+    fn example_handler() -> HandlerSpec {
+        parse_and_validate(EXAMPLE_JSON).expect("the example must pass the same validation")
     }
 
-    fn claude_peers_handler() -> HandlerSpec {
-        load_embedded_handlers()
-            .into_iter()
-            .find(|h| h.id == "claude-peers-dev-channels")
-            .expect("claude-peers-dev-channels must be embedded")
-    }
-
-    /// The real dialog text, per CireSnave's own screenshot (relayed via the
-    /// PM): "WARNING: Loading development channels / ... / Channels:
-    /// server:claude-peers / 1. I am using this for local development /
-    /// 2. Exit".
+    /// The real dialog, verbatim from `.lane-state/unhandled-prompts/
+    /// 2026-09-27T14-58-37.644790300+00-00.txt` - the Unpopped restart that
+    /// reached CireSnave's screen unasked (trailing blank rows trimmed).
     const REAL_DIALOG_SCREEN: &str = "\
-WARNING: Loading development channels\n\
-This is a research preview feature.\n\
-Channels: server:claude-peers\n\
-1. I am using this for local development\n\
-2. Exit\n";
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  WARNING: Loading development channels\n\
+\n\
+  --dangerously-load-development-channels is for local channel development only. Do not use this option to run\n\
+  channels you have downloaded off the internet.\n\
+\n\
+  Please use --channels to run a list of approved channels.\n\
+\n\
+  Channels: server:claude-peers\n\
+\n\
+  ❯ 1. I am using this for local development\n\
+    2. Exit\n\
+\n\
+  Enter to confirm · Esc to cancel\n";
 
     #[test]
-    fn claude_peers_handler_matches_the_real_dialog_and_selects_option_1() {
-        let h = claude_peers_handler();
+    fn example_matches_the_real_dialog_and_selects_option_1() {
+        let h = example_handler();
         assert!(matches(&h, REAL_DIALOG_SCREEN));
         assert_eq!(
             h.action, "1\r",
@@ -394,10 +648,8 @@ Channels: server:claude-peers\n\
     }
 
     #[test]
-    fn claude_peers_handler_does_not_match_an_extra_channel() {
-        // ⚠️ THE PREFIX-MATCH TRAP, against the REAL embedded handler, not
-        // just a synthetic fixture - an extra channel must still refuse.
-        let h = claude_peers_handler();
+    fn example_does_not_match_an_extra_channel() {
+        let h = example_handler();
         let screen = REAL_DIALOG_SCREEN.replace(
             "Channels: server:claude-peers\n",
             "Channels: server:claude-peers,server:extra\n",
@@ -406,32 +658,33 @@ Channels: server:claude-peers\n\
     }
 
     #[test]
-    fn claude_peers_handler_is_scoped_to_exactly_the_approved_roles() {
-        let h = claude_peers_handler();
-        let now = chrono::Utc::now();
-        for role in [
-            "overmind",
-            "synapse",
-            "thinkersjournal-community",
-            "pm",
-            "restarttest",
-        ] {
-            assert!(is_active(&h, role, now), "{role} must be in scope");
-        }
-        // A role outside the approved list must be refused, not silently
-        // widened - CireSnave approved this exact list, nothing broader.
-        assert!(!is_active(&h, "some-other-lane", now));
+    fn example_applies_to_every_role_until_its_approved_expiry() {
+        // "Yes on all fronts. Proceed." (2026-09-27) approved seeding it for
+        // ALL lanes - scope "*". Expiry is the 2026-09-19 approval's, unchanged.
+        let h = example_handler();
+        assert_eq!(h.scope.roles, vec!["*".to_string()]);
+        let before = "2026-09-27T00:00:00Z".parse().unwrap();
+        assert!(is_active(&h, "overmind", before));
+        assert!(is_active(&h, "some-new-lane", before));
+        let after = "2027-03-19T00:00:01Z".parse().unwrap();
+        assert!(!is_active(&h, "overmind", after));
     }
 
     #[test]
-    fn claude_peers_handler_is_not_active_past_its_approved_expiry() {
-        let h = claude_peers_handler();
-        let past_expiry = "2028-01-01T00:00:00Z".parse().unwrap();
-        assert!(!is_active(&h, "overmind", past_expiry));
-        // And still active well before it, to prove this isn't just always
-        // false - a positive control beside the negative one.
-        let before_expiry = "2026-09-19T04:00:00Z".parse().unwrap();
-        assert!(is_active(&h, "overmind", before_expiry));
+    fn example_quotes_both_approvals_verbatim() {
+        let quotes: Vec<String> = example_handler()
+            .provenance
+            .approvals
+            .into_iter()
+            .map(|a| a.quote)
+            .collect();
+        assert_eq!(
+            quotes,
+            vec![
+                "I like that.  Proceed.".to_string(),
+                "Yes on all fronts.  Proceed.".to_string()
+            ]
+        );
     }
 
     #[test]

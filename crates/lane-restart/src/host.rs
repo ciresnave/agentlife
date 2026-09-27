@@ -25,6 +25,7 @@
 //! `relay_chunk`'s own test for the property this claims.
 
 use crate::handlers::{self, HandlerSpec};
+use crate::{approvals, notify};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -160,7 +161,7 @@ pub fn screen_text(parser: &vt100::Parser) -> String {
         .join("\n")
 }
 
-/// Checks `screen_text` against every active, embedded handler for `role`;
+/// Checks `screen_text` against every active, loaded approval for `role`;
 /// on the FIRST exact match not already answered this session (`matched_ids`),
 /// writes its `action` to `input_writer` and reports it via `on_answered`.
 /// Never matches the same handler id twice, even if its dialog text is
@@ -435,7 +436,7 @@ fn run_with_handlers_and_window(
 /// restart left NOTHING to explain a handler that should have matched but
 /// didn't, so this diagnostic log exists purely to make the NEXT run
 /// explain itself: the screen text at each real change, the per-anchor and
-/// per-field match result for every embedded handler, and any injection
+/// per-field match result for every loaded approval, and any injection
 /// with the exact bytes sent.
 fn host_log_path(role: &str) -> std::path::PathBuf {
     std::path::Path::new("C:/Projects/.lane-state")
@@ -457,24 +458,67 @@ fn append_host_log(path: &std::path::Path, line: &str) {
     }
 }
 
-/// Convenience entry point for real production use: loads the embedded
-/// handlers (§12.3) and wires this process's OWN real stdin/stdout as the
-/// outer relay ends.
+/// Convenience entry point for real production use: loads the user's
+/// approvals (§12.3) BEFORE spawning the child - a dialog that renders
+/// before its handlers arrive would never be re-checked on a static screen
+/// - and wires this process's OWN real stdin/stdout as the outer relay ends.
 pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
-    // ⚠️ Kept alive for `run`'s ENTIRE scope - restored on every exit path
-    // via `Drop`, including a panic unwind.
+    let log_path = host_log_path(role);
+    let started_at = chrono::Utc::now();
+
+    eprintln!("lane-restart host: loading approvals...");
+    let (config, loaded) = match crate::paths::home_dir() {
+        Some(home) => approvals::load_configured(&home, &approvals::GhReader::default()),
+        None => (
+            None,
+            approvals::Loaded {
+                error: Some("no home directory (USERPROFILE/HOME unset)".into()),
+                ..approvals::Loaded::default()
+            },
+        ),
+    };
+    let approvals_summary = loaded.summary();
+    eprintln!("lane-restart host: approvals: {approvals_summary}");
+    append_host_log(
+        &log_path,
+        &format!(
+            "[{}] APPROVALS {approvals_summary}",
+            started_at.to_rfc3339()
+        ),
+    );
+    for (h, hash) in &loaded.handlers {
+        append_host_log(&log_path, &format!("  active {} {hash}", h.id));
+    }
+    for (name, reason) in &loaded.refused {
+        append_host_log(&log_path, &format!("  REFUSED {name}: {reason}"));
+    }
+    let handler_list = loaded.specs();
+
+    // ⚠️ Kept alive for the relay's ENTIRE scope - restored on every exit
+    // path via `Drop`, including a panic unwind.
     #[cfg(windows)]
     let _raw_console_guard = RawConsoleGuard::enable();
 
     let (cols, rows) = current_console_size().unwrap_or((80, 25));
-    let log_path = host_log_path(role);
     let log_path_for_answered = log_path.clone();
     let log_path_for_attempts = log_path.clone();
     let log_path_for_raw_io = log_path.clone();
+    let log_path_for_unhandled = log_path.clone();
+    let role_for_unhandled = role.to_string();
+    let on_unhandled = move |screen: String| {
+        handle_unhandled(
+            &role_for_unhandled,
+            started_at,
+            config.as_ref(),
+            &approvals_summary,
+            &log_path_for_unhandled,
+            screen,
+        )
+    };
     run_with_handlers_and_window(
         role,
         child_argv,
-        handlers::load_embedded_handlers(),
+        handler_list,
         cols,
         rows,
         std::io::stdin(),
@@ -495,7 +539,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                 ),
             );
         },
-        capture_unhandled_prompt,
+        on_unhandled,
         STARTUP_WINDOW,
         move |screen, reports| {
             append_host_log(
@@ -539,6 +583,53 @@ fn escape_bytes(bytes: &[u8]) -> String {
     format!("{:?}", String::from_utf8_lossy(&bytes[..take]))
 }
 
+const STATE_DIR: &str = "C:/Projects/.lane-state";
+
+/// RESTART-TOOL-DESIGN.md §12.6: the startup window ended and no handler
+/// matched. If the lane has since shown real progress there was no dialog
+/// to answer, and nothing happens. Otherwise: capture the screen, then tell
+/// the notify role's lane directly (§12.6's ask flow) - without anyone
+/// having to watch any stdout. Every step is logged; none can take down
+/// the relay.
+fn handle_unhandled(
+    role: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    config: Option<&approvals::Config>,
+    approvals_summary: &str,
+    log_path: &std::path::Path,
+    screen: String,
+) {
+    let state_dir = std::path::Path::new(STATE_DIR);
+    let now = chrono::Utc::now().to_rfc3339();
+    if notify::lane_progressed_since(state_dir, role, started_at) {
+        append_host_log(
+            log_path,
+            &format!("[{now}] UNHANDLED-CHECK lane progressed; no dialog waiting, no ask sent"),
+        );
+        return;
+    }
+    let capture = capture_unhandled_prompt(&screen);
+    let notify_role = config.map_or("pm", |c| c.notify_role.as_str());
+    let ask = notify::Ask {
+        role,
+        notify_role,
+        host_pid: std::process::id(),
+        capture_path: capture.as_deref(),
+        approvals_summary,
+        approvals_source: config.map(|c| (c.approvals.repo.as_str(), c.approvals.path.as_str())),
+        screen_text: &screen,
+    };
+    let line = match notify::notify_role(notify::broker_addr(), state_dir, notify_role, &ask.text())
+    {
+        Ok(ids) => format!("[{now}] ASK SENT to {notify_role} peers {ids:?}"),
+        Err(e) => {
+            eprintln!("lane-restart host: could not notify the {notify_role} lane: {e}");
+            format!("[{now}] ASK FAILED to {notify_role}: {e}")
+        }
+    };
+    append_host_log(log_path, &line);
+}
+
 /// RESTART-TOOL-DESIGN.md §12.6: writes the captured screen text verbatim
 /// to `.lane-state/unhandled-prompts/<timestamp>.txt` - the fixed,
 /// portfolio-wide state directory `main.rs`'s own `state_dir()` uses, not
@@ -546,15 +637,19 @@ fn escape_bytes(bytes: &[u8]) -> String {
 /// location would defeat the point of every lane and the PM agreeing on
 /// one place to look. Best-effort: a write failure is reported to stderr,
 /// never allowed to take down the relay that's still running.
-fn capture_unhandled_prompt(screen_text: String) {
-    let dir = std::path::Path::new("C:/Projects/.lane-state/unhandled-prompts");
-    if let Err(e) = std::fs::create_dir_all(dir) {
+fn capture_unhandled_prompt(screen_text: &str) -> Option<std::path::PathBuf> {
+    let dir = std::path::Path::new(STATE_DIR).join("unhandled-prompts");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("lane-restart host: could not create {dir:?}: {e}");
-        return;
+        return None;
     }
     let path = dir.join(format!("{}.txt", chrono::Utc::now().to_rfc3339()).replace(':', "-"));
-    if let Err(e) = std::fs::write(&path, screen_text) {
-        eprintln!("lane-restart host: could not write {path:?}: {e}");
+    match std::fs::write(&path, screen_text) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            eprintln!("lane-restart host: could not write {path:?}: {e}");
+            None
+        }
     }
 }
 
@@ -663,7 +758,7 @@ mod tests {
                 "match": {{"text_anchors": ["{anchor}"], "fields": {{}}}},
                 "action": "{action}",
                 "scope": {{"roles": ["overmind"]}},
-                "provenance": {{"approved_by": "CireSnave", "approved_at": "2026-09-18T22:00:00Z", "quote": "q"}}
+                "provenance": {{"approved_by": "CireSnave", "approvals": [{{"said_on": "2026-09-18", "quote": "q", "approving": "a test"}}]}}
             }}"#
         )
     }
@@ -1082,7 +1177,7 @@ mod tests {
             }
         }
 
-        // No handler is embedded (`Vec::new()` below), so nothing will ever
+        // No handler is loaded (`Vec::new()` below), so nothing will ever
         // inject a reply - `choice` is used instead of `set /p` so the
         // child still terminates ON ITS OWN (auto-selects after 2s)
         // rather than blocking forever on input that will never arrive.
@@ -1097,7 +1192,7 @@ mod tests {
         let outcome = run_with_handlers_and_window(
             "overmind",
             &child_argv,
-            Vec::new(), // no handlers embedded - nothing can ever match
+            Vec::new(), // no handlers loaded - nothing can ever match
             80,
             25,
             outer_input,

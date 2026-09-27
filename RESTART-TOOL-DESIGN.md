@@ -348,6 +348,10 @@ go confirm the dialog. Polling then CONTINUES (never re-notifying) up to the ~15
 confirming flips the outcome to `Relaunched`; reaching the full timeout still stuck returns
 `AwaitingConfirmation` as the final outcome instead.
 
+⚠️ **Found 2026-09-27: that stdout line has no reader after a `--self` restart**, because the restart
+kills the very session that ran `lane-restart`. The host now asks a lane itself (§12.6); the line
+stays for anyone who is watching.
+
 ## 6. Bulletproof requirements (from the task, restated as testable properties)
 
 1. **Positive identification** — §2's four-part check, every time, no exceptions, including for
@@ -742,7 +746,7 @@ project-level settings first if a narrower rollout than user-level is wanted) �
 populate correctly across a few real turns → only then widen to every lane, and only then does anyone
 attempt a real `--self` or PM-initiated restart for the first time.
 
-## 12. Declarative startup-prompt handlers — BUILT AND PROVEN END TO END (§12.11), real run 2026-09-19
+## 12. Declarative startup-prompt handlers ("approvals") — user-owned, fetched, never shipped (revised 2026-09-27)
 
 **CireSnave's idea, his words, 2026-09-18 (`CIRESNAVE-EXPECTATIONS.md` §5.1c):**
 
@@ -752,268 +756,287 @@ attempt a real `--self` or PM-initiated restart for the first time.
 
 **On the PM's framing of it, his own words:** *"I am *very* happy with that. Proceed!"*
 
-This section is the spec the PM reviews before anything is built - per CireSnave's own approval, the
-first real handler (the `claude-peers` dev-channels dialog, §5's `AwaitingConfirmation` outcome) needs
-its OWN separate, explicit approval of its exact spec before it exists at all. Nothing in this section
-authorizes writing that handler; it only authorizes the mechanism.
+⚠️ **REVISED 2026-09-27 — approvals move OUT of OverMind.** Two findings drove it. (1) A `--self`
+restart kills the only process watching for `awaiting_confirmation` (§5), and nothing read
+`.lane-state/unhandled-prompts/`, so an unapproved dialog reached CireSnave on screen instead of as a
+question. (2) OverMind is public: approvals embedded in its binary make one user's decisions every
+user's default. His words, verbatim (`CIRESNAVE-EXPECTATIONS.md` §5.1c): *"if OverMind is publicly
+distributed to other people and not just me, doesn't creating a PR to OverMind mean that *my decisions
+take effect for every user instead of them being able to choose for themselves*?"* Approving the PM's
+refinements and the scope of this revision, he said: *"Yes on all fronts.  Proceed."* The
+embedded-handler design this section used to describe (2026-09-18 to 2026-09-27,
+`crates/lane-restart/handlers/*.json` via `include_str!`) is gone; git history has it.
 
 ### 12.1 What this is, and isn't
 
-A **handler** is a declarative rule: "when the new session's screen shows exactly this dialog, send
-exactly this keystroke, because a human already decided that's the right answer under these exact
-conditions." It never guesses, never approximates, and never runs anywhere but the one place §5's
-`AwaitingConfirmation` outcome already looks: a STARTUP dialog on a session THIS tool itself just
-relaunched. **It is never wired into in-work permission prompts** - those stay exactly as they are
-today, answered by a human or by Claude Code's own permission system, never by this mechanism.
+A **handler** — an **approval**, in the user's terms — is a declarative rule: "when the new session's
+screen shows exactly this dialog, send exactly this keystroke, because the user already decided that's
+the right answer under these exact conditions." It never guesses, never approximates, and only ever
+runs on a STARTUP dialog of a session THIS tool itself just relaunched (§5, §12.5). **It is never
+wired into in-work permission prompts** — a human or Claude Code's own permission system answers those,
+exactly as before.
 
-### 12.2 Handlers are DATA, never code - but ACTIVE means shipped in the binary, never a loose file
+### 12.2 OverMind ships ZERO approvals; each user owns theirs
 
-⚠️ **REVISED (PM finding, 2026-09-18, reviewing this same PR before merge): a runtime handlers
-directory has no provenance a lane can't forge.** Every lane runs as the same Windows user; any lane
-(or the LLM-proposal loop, by a bug or an accident) can write a JSON file WITH a `provenance` block
-into any directory this tool reads. A `provenance` field inside a file the tool itself could write is
-a claim, not proof - it says "CireSnave approved this," it doesn't make that true. §12's first draft
-never said who is allowed to create or activate a handler; this revision does.
+- **The binary embeds no approvals.** `lane-restart --version` says so. The one approval file left in
+  this repo, `crates/lane-restart/approval-example/claude-peers-dev-channels.json`, is an **inert
+  example** and test fixture: only `#[cfg(test)]` code reads it.
+- **Approvals live in a GitHub repo and folder the user chooses**, named in
+  `~/.overmind/lane-restart.json`:
 
-**Handlers a user "adds or removes" (CireSnave's own framing) still means editing a JSON file** - that
-part of the design is unchanged. What changed is WHERE that file has to live to ever take effect:
-`crates/lane-restart/handlers/*.json`, inside the OverMind repo itself, reachable only through this
-project's own PR review and merge gate (the PM, with CireSnave's approval quoted verbatim in the PR -
-the PR itself becomes the provenance of record, not a field inside the JSON). **Embedded into the
-binary at build time** via `include_str!` (or a compiled-in hash list the binary checks any runtime
-file against, refusing anything whose hash isn't on it - exact mechanism settled during the build,
-either way the property holds): **a runtime directory must NEVER be able to activate a handler on its
-own**, no matter what it contains or claims.
+  ```json
+  {
+    "approvals": { "repo": "ciresnave/ciresnave", "path": ".overmind/lane-restart/approvals" },
+    "notify_role": "pm"
+  }
+  ```
 
-Handler file fields (unchanged from the first draft):
+  `repo` is `owner/name`. `path` is a folder in it holding one `<id>.json` per approval; it can sit
+  inside an existing repo, and CireSnave's is a folder in his `ciresnave/ciresnave` profile repo, as he
+  suggested. `notify_role` (default `pm`) is the lane told about unmatched dialogs (§12.6). The loader
+  refuses unknown keys, a repo that isn't `owner/name`, and a path containing `..`, a leading `/`, or
+  anything that needs URL-escaping. **No config file means no approvals**, and the mechanism does
+  nothing: §5 behaves as it did before this section existed.
+- **Private by default, public by choice** (a PM refinement he approved): the repo may be private,
+  since `gh`'s own auth reads it. A public profile repo is fine for approvals that reveal nothing
+  sensitive. How a public per-app folder points at private data is the draft standard in
+  `USER-REPO-APP-FOLDERS-SPEC.md`.
+
+Approval file fields. Every one is required except `expires_at`, and an unknown field refuses the file,
+so a typo such as `"expires"` can never silently mean "no expiry":
 
 ```jsonc
 {
-  "id": "claude-peers-dev-channels",             // unique, stable - referenced in restart.log
+  "id": "claude-peers-dev-channels",          // must equal the file name's stem; a-z, 0-9, '-'
   "match": {
-    "text_anchors": [                             // every string here MUST appear verbatim in the
-      "SECURITY CONFIRMATION",                    // captured screen text, or this handler does not
-      "I am using this for local development"     // match - not a fuzzy or partial match
+    "text_anchors": [                          // every one must appear verbatim; at least one,
+      "WARNING: Loading development channels", // each at least 8 characters
+      "I am using this for local development"
     ],
-    "fields": {                                    // named fields pinned to an EXACT allowed value -
-      "Channels": "server:claude-peers"            // any OTHER value (an extra channel, a changed
-    }                                               // spec) means this handler does not match either
+    "fields": { "Channels": "server:claude-peers" }  // "{name}: {value}" ending at a line boundary
   },
-  "action": "y\n",                                 // the literal keystrokes sent, verbatim - never a
-                                                     // structured "always confirm" toggle
-  "scope": {
-    "roles": ["overmind", "synapse"]                // which lanes this handler applies to; "*" for all
-  },
-  "provenance": {
+  "action": "1\r",                             // ONE letter or digit, then an optional \r - nothing longer
+  "scope": { "roles": ["*"] },                 // lane roles, or "*" for every role
+  "provenance": {                              // a restatement, checked for completeness (§12.7)
     "approved_by": "CireSnave",
-    "approved_at": "2026-09-18T22:00:00Z",
-    "quote": "<his own verbatim words approving THIS handler's exact spec - never the general\n         framework approval alone; see §12.1>"
+    "approvals": [
+      { "said_on": "2026-09-19", "quote": "I like that.  Proceed.", "approving": "..." },
+      { "said_on": "2026-09-27", "quote": "Yes on all fronts.  Proceed.", "approving": "..." }
+    ]
   },
-  "expires_at": null                                // optional ISO 8601 - an expired handler is
-                                                      // treated as though the file did not exist
+  "expires_at": "2027-03-19T00:00:00Z"         // optional; past it, the approval is treated as absent
 }
 ```
 
-### 12.3 Loading rules - fail closed, every time
+`said_on` is a date, not a time: a guessed time of day would be a made-up fact.
 
-- **No handlers load by default.** An empty `crates/lane-restart/handlers/` directory means the
-  mechanism is a no-op, identical to §5's behaviour before this section existed.
-- **Only handlers embedded at build time (§12.2) ever activate.** Nothing read from a runtime
-  directory is trusted, regardless of what its own `provenance` field claims - see §12.7.
-- **A handler file with no `provenance.approved_by`/`approved_at`/`quote` is refused at build/PR-review
-  time** - not embedded, not shipped. A handler is never "trusted until proven otherwise," and now
-  never gets the chance to be trusted without having gone through the PR gate at all.
-- **An expired handler (`expires_at` in the past) is treated as not present**, even though it was
-  embedded - the binary still has to check this at runtime, not just at build time.
-- **Malformed JSON is refused and logged** - never partially parsed, never guessed.
-- A handler whose `scope.roles` doesn't include the target lane's role is simply not applicable there;
-  not an error, just skipped for that lane.
+### 12.3 Loading rules — fail closed, every time (`approvals.rs`)
 
-### 12.4 Matching - exact, or it doesn't fire
+`lane-restart host` loads approvals **before** it spawns the child, because a dialog that renders
+before its approvals arrive would never be re-checked on a static screen. It reads through `gh api`,
+with a 15s hard timeout on each call and prompts disabled:
 
-Given the screen text captured from the relaunched session's console (§12.5) at the moment
-`AwaitingConfirmation` is first detected (§5's existing ~20s check - this reuses that detection point,
-it does not add a new one):
+1. **Resolve the default branch's tip commit** (`repos/{repo}` → `default_branch` →
+   `branches/{branch}` → `commit.sha`), and read everything at that one SHA. ⚠️ **The ref is never
+   taken from anywhere else**: GitHub serves a fork's commits through the parent repo's API too, so a
+   caller-chosen ref could name an unmerged fork PR's content. Only what the owner merged counts.
+2. **List `path`** at that commit. Only `*.json` files directly inside it are candidates; a README or a
+   subfolder is ignored. More than 64 candidates refuses them all.
+3. **Judge each file on its own.** A file over 64 KiB is refused unread. So is a file that isn't UTF-8,
+   doesn't parse, has an unknown or missing field, isn't named `<id>.json`, or breaks a §12.3a rule.
+   Only **that file** is refused, with its reason; the rest still load.
+4. **Any other failure loads nothing** and records why: no config, no `gh`, no network, a 404, or a
+   non-SHA commit. There is no cached copy, because a local cache is a file any lane could write.
+
+The host writes the outcome to `.lane-state/host-<role>-<pid>.log`. First comes the summary, for example
+`APPROVALS 1 active, 0 refused, from ciresnave/ciresnave:.overmind/lane-restart/approvals@<sha12>`. Then
+each active id is listed with the SHA-256 of its exact bytes, and each refusal with its reason. The
+host also prints the one-line summary in the tab before the child starts. An approval that has expired,
+or whose `scope.roles` excludes this lane, is loaded but never eligible (`is_active`).
+
+### 12.3a Secrets are never approvals
+
+This is the PM's refinement, approved verbatim in *"Yes on all fronts.  Proceed."*, and it matches
+CireSnave's own example: *"possibly asking about a password that should not be shown, much less stored
+in a public GitHub repo"*. It is enforced three ways, whether the approvals repo is public or private:
+
+- **The action cannot carry one.** `action` is at most one ASCII letter or digit plus an optional
+  `\r` (`action_is_a_plain_keystroke`). A password, token, PIN or code does not fit.
+- **An approval for a dialog about a secret is refused at load.** The file is refused if its `id`, any
+  text anchor, or any field name or value contains a secret word. `SECRET_WORDS` includes `password`,
+  `passphrase`, `passcode`, `pin`, `secret`, `token`, `credential`, `api key`, `private key`, `otp`,
+  `2fa`, `mfa`, `one time code`, `verification code`, `security code`, `recovery code` and
+  `seed phrase`. They are matched as whole words, so `pinned` and `tokenizer` don't trip the check.
+- **A screen that mentions a secret is never answered**, whichever approval's anchors it contains:
+  `matches()` returns false and the host log names the word.
+
+### 12.4 Matching — exact, or it doesn't fire
+
+The contract is unchanged. During the 60s startup window, the host checks the screen text its `vt100`
+model holds (§12.5):
 
 1. **Every one of `match.text_anchors` must appear verbatim** in the captured text.
-2. **Every one of `match.fields` must equal its pinned value EXACTLY** - read from the same captured
-   text (how a field is located within the text is an implementation detail settled during the build,
-   not this spec; the CONTRACT is exact equality, never a prefix or fuzzy match).
-3. **Any deviation at all - an extra channel, changed wording, a missing anchor - means NO match.** No
-   handler fires; the outcome stays `AwaitingConfirmation` exactly as §5 already defined it, and a
-   human still needs to look at it. This mechanism only ever narrows `AwaitingConfirmation` down to
-   cases a human has pre-approved; it never widens what counts as "safe to press."
-4. On an exact match: send `action` to the console (§12.5), log the automatic answer to `restart.log`
-   with the handler's `id` and the exact text that matched, and continue polling for real progress
-   through the SAME liveness check §5 already runs - pressing the button is not itself success; the
-   state file still has to show it.
+2. **Every one of `match.fields` must appear as `"{name}: {value}"` ending at a line boundary**, never as
+   a prefix of a longer value. `Channels: server:claude-peers,server:extra` does not match a pin to
+   `server:claude-peers`.
+3. **The screen must not mention a secret** (§12.3a).
+4. **Any deviation at all means NO match.** No keystroke is sent. If the window ends that way, §12.6's
+   ask flow runs. The mechanism only ever narrows what a human must answer to cases the user
+   pre-approved; it never widens what counts as "safe to press."
+5. **On an exact match**, the host sends `action` once, never twice for the same id. It logs the
+   approval's `id`, the exact bytes sent, and the screen text that matched. Pressing the key is not
+   itself success: the state file still has to show progress (§5).
 
 ### 12.5 Mechanism: `lane-restart host` owns its own ConPTY — PROVEN 2026-09-18
 
-⚠️ **REVISED - the `AttachConsole`-against-an-external-process approach this section originally
-described was tried live and does NOT work reliably.** Empirically, against a real `wt.exe`-launched
-process: `AttachConsole` returned `ERROR_INVALID_HANDLE` on one run, and on another the target's real
-output leaked straight into the ATTACHING process's own captured stdout instead of being read via the
-attach mechanism at all. Root cause (consistent with ConPTY's own architecture): a ConPTY-hosted
-console doesn't reliably expose the classic, externally-attachable screen buffer `AttachConsole` was
-built for. This is a design change, not a tuning fix - abandoned entirely, not patched.
+This revision does not change the mechanism. `spawn_relaunch` (§5) launches
+`wt.exe -w new -d <cwd> lane-restart host --role <r> -- claude <argv...>`. The host creates its own
+ConPTY via `portable-pty` (MIT, `github.com/wezterm/wezterm`), which the PM approved as a dependency on
+2026-09-18, verbatim: "APPROVED: portable-pty as a dependency. Take the LATEST version (dependency rule),
+and record its licence (MIT) and origin (wezterm/wezterm) in the PR per the provenance rule." It spawns
+`claude` in that ConPTY and relays bytes both ways, **transparently from byte 0**. It never answers a
+CPR itself; the real terminal does. It only OBSERVES a copy of the output through a `vt100` screen
+model, and only during the 60s `host::STARTUP_WINDOW`.
 
-**What's built instead: `lane-restart` relaunches through a small wrapper it owns both ends of.**
-`spawn_relaunch` (§5) no longer launches `claude` directly - it launches
-`wt.exe -w new -d <cwd> lane-restart host --role <r> -- claude <argv...>`. The NEW `lane-restart host`
-subcommand runs INSIDE that fresh tab (a real console/stdio from `wt.exe` itself, not nested inside
-this process's own), creates its own ConPTY via the `portable-pty` crate (see below), spawns `claude`
-inside it, and relays bytes bidirectionally - never attaching to a console it doesn't own itself. This
-sidesteps the `AttachConsole` problem architecturally, regardless of `wt.exe`'s own internals.
+The findings behind that shape stand as recorded:
 
-**⚠️ Transparent from byte 0, always.** The host's own stdin/stdout ARE the real terminal (`wt.exe`,
-which is what actually launched it) - `wt` answers `claude`'s cursor-position-report (CPR, `ESC[6n`)
-queries and any other terminal queries itself, the same way any real terminal answers any real TUI.
-Every byte the child writes is forwarded to the host's own stdout UNCHANGED; every byte on the host's
-own stdin is forwarded to the child UNCHANGED, for the whole session's life. The host only OBSERVES a
-copy of the output stream, via a `vt100`-crate screen model, to check for a handler match - and only
-during a bounded 60s startup window (`host::STARTUP_WINDOW`); after that it's pure passthrough,
-indefinitely. **This module must never answer a CPR itself** - doing so would compete with the real
-terminal's own legitimate answer. (The one place `lane-restart host` DOES intentionally answer a CPR
-is its own scratch-probe-derived test helpers, standing in for what a real terminal does - never the
-production relay path; `host::relay_chunk`'s own tests assert byte-for-byte transparency, including
-through mouse-mode and alt-screen sequences, to keep this property from regressing silently.)
+- `AttachConsole` against a ConPTY-hosted console was unreliable, so it was abandoned.
+- ConPTY blocks output until its early `ESC[6n` is answered on the input side. A real terminal answers
+  it; tests stand in for one.
+- ConPTY can hold its pipe open past child exit. The blocking read therefore lives on its own thread,
+  and the main loop polls `try_wait`.
+- The host's console must be switched out of cooked mode (`RawConsoleGuard`), or WT's CPR reply never
+  arrives.
+- `portable-pty`'s `CommandBuilder` defaults to `USERPROFILE`, so the child's `cwd` is set explicitly.
 
-**The CPR-blocking finding** (root-caused live, 2026-09-18, after three failed implementation attempts
-that all looked like "4 bytes then nothing"): ConPTY sends its own `ESC[6n` CPR query early in a
-hosted session's startup and BLOCKS all further output until something answers it on the input side. A
-production host never has to answer this itself (the real terminal does), but anything standing in for
-a terminal - the crate's own real-ConPTY integration tests included - must, or the child's output stalls
-forever right after that first 4-byte query.
+`host::tests` prove this against a real `cmd.exe` in a real ConPTY.
 
-**The ConPTY-holds-its-pipe-open-past-exit finding**: a blocking read on the ConPTY's own output pipe
-can hang forever even after the hosted child has exited, since ConPTY itself can keep an internal
-reference to the pipe's write end alive. `host::run_with_handlers` (internally,
-`run_with_handlers_and_window`) never blocks the exit-detection loop on that read directly: the
-blocking read lives on its own thread, sending chunks over a channel; the main loop polls that channel
-with a short timeout and separately checks the child's own exit status, abandoning (never joining) the
-reader thread once the child is confirmed gone.
+### 12.6 The ask flow — the host tells a lane itself, within ~1 minute
 
-**Dependency, approved verbatim (PM, 2026-09-18): "APPROVED: portable-pty as a dependency. Take the
-LATEST version (dependency rule), and record its licence (MIT) and origin (wezterm/wezterm) in the PR
-per the provenance rule."** `portable-pty` (the same crate WezTerm itself uses for its own ConPTY
-handling) - MIT licensed, from `github.com/wezterm/wezterm` - is what actually owns the ConPTY and the
-child process; `vt100` maintains the screen model used for matching; `windows-sys` is used only for the
-best-effort resize-forwarding thread's own console-size query on the host's OWN inherited console (no
-`AttachConsole` needed there either, since it's this process's own console, inherited normally from
-being launched by `wt.exe`).
+⚠️ **This replaces "write `unhandled-prompts/` and hope someone reads it".** If the startup window ends
+and no approval matched at any point in it, the host runs `handle_unhandled`. The host survives the
+restart, because it is the new tab.
 
-**Proven, not assumed**: `host::tests::run_with_handlers_hosts_a_real_child_and_relays_its_real_output`
-and `run_with_handlers_matches_and_answers_a_real_dialog_from_a_real_child` spawn a REAL `cmd.exe`
-inside a real ConPTY (no visible window - the test owns both pipe ends itself, the same way the host
-does in production) and assert the real child's real output arrives, and that a real handler match
-injects real keystrokes the real child actually receives on its own stdin - proving the full mechanism
-end to end, the same "prove it against something real" discipline this crate already applies to
-`sysinfo`-backed facts (`facts.rs`).
+1. **Check whether there was a dialog at all.** If an event other than `SessionStart` wrote the lane's
+   state file after the host started (§5's own progress signal), the session is running and there is
+   nothing to ask. The host logs that and sends nothing.
+2. **Capture** the screen verbatim to `.lane-state/unhandled-prompts/<timestamp>.txt`.
+3. **Notify `notify_role`'s lane** (default `pm`) through the claude-peers broker on
+   `127.0.0.1:${CLAUDE_PEERS_PORT:-7899}`. The host reads `.lane-state/<notify_role>.json` for that
+   lane's cwd, calls `POST /list-peers`, keeps the peers whose cwd matches (`paths_match`), and calls
+   `POST /send-message` for each, with sender id `lane-restart-host`. The message is a compact `[ASK]`
+   (`C:/Projects/CLAUDE.md` §10). It names the lane, the capture path and the approvals summary, and
+   quotes the first 15 non-blank screen lines. It says what to do: ask the user, and if they approve that
+   exact dialog, open a PR that adds `<path>/<id>.json` to their approvals repo with their words quoted
+   verbatim. **Their merge is the approval.** It also says that replies go nowhere, because the sender is
+   a tool.
+4. **Log** `ASK SENT to pm peers [...]` or `ASK FAILED to pm: <reason>` in the host log. A failure is
+   also printed in the tab.
 
-### 12.6 The LLM-proposal loop - drafts, never activation
+No stdout watcher is involved at any step. The window is 60s, so the ask lands about a minute after the
+child starts. The outer process still prints its `awaiting_confirmation` line (§5) for anyone watching
+it.
 
-When `AwaitingConfirmation` fires and NO handler matches (§12.4's "any deviation" case, or simply no
-handler exists yet for that dialog), the captured screen text is written verbatim to
-`.lane-state/unhandled-prompts/<timestamp>.txt` - the same honest, no-guessing spirit as everything
-else in this spec: a record of what actually happened, not an assumption about what should happen
-next.
+**In CireSnave's setup, `ciresnave-bot` has READ on `ciresnave/ciresnave` (measured 2026-09-27), so an
+approval arrives as a fork PR, and his merge is the approval.** Keep it that way: an agent with write
+access there could approve on his behalf.
 
-A model - the PM, or a future free-tier dispatch through this project's own `dispatch_lane_task` tool -
-may read that file and **draft** a candidate handler, written to `.lane-state/handler-proposals/` -
-⚠️ **REVISED (PM finding, 2026-09-18): NOT the runtime handlers path from the first draft, and this
-tool NEVER reads this directory for activation, under any circumstance.** It exists purely so a human
-(or the PM lane, drafting on CireSnave's behalf) has a starting point to copy from. **Promoting a
-proposal means opening a PR** that adds it to `crates/lane-restart/handlers/` (§12.2) with CireSnave's
-verbatim approval of that exact spec in the PR description - the same path as writing a handler by
-hand, no shortcut. A drafted proposal cannot activate itself, at any stage, by any path.
+**Known gap:** sometimes the lane being relaunched IS the notify role's lane, as when the PM restarts
+itself. Then the only session in that cwd is the one stuck at the dialog, so there is no one to tell.
+The send fails with "no live claude-peers session" and the host log records it. The dialog is on the
+PM's own screen, where CireSnave sees it.
 
-### 12.7 Provenance and activation: only a merged PR, never a runtime claim
+**Drafting a candidate approval** from a capture is still allowed. Any model may write one to
+`.lane-state/handler-proposals/` as a starting point, but nothing ever reads that directory for
+activation. Promotion is a PR to the user's approvals repo, merged by the user.
 
-⚠️ **PM finding, 2026-09-18, reviewing this PR before merge - the gap the first draft of this section
-left open.** Every lane on this machine runs as the same Windows user. Any lane - including a buggy or
-misbehaving §12.6 proposal-drafting step - can write a file into any directory this tool might read,
-and nothing stops that file's own `provenance` block from CLAIMING CireSnave's approval whether or not
-he gave it. A `provenance` field is data the tool reads; it is not, by itself, evidence of anything.
+### 12.7 Provenance and activation: only the user's merge, never a runtime claim
 
-**The only thing this design treats as real provenance is a merged pull request against this repo**:
-CireSnave's approval, quoted verbatim, in the PR description, reviewed through this project's own PM
-merge gate (`CLAUDE.md`'s "queue for the PM, never self-merge" rule - no exception for handler PRs).
-The PR *is* the provenance record; the `provenance` fields inside the JSON (§12.2) are a convenient,
-human-readable RESTATEMENT of what the PR already shows, checked at build time for completeness, never
-the thing that makes a handler real. A handler is active if and only if it shipped inside a binary
-built from a commit on `main` that a real, reviewable PR put there.
+Every lane on this machine runs as the same Windows user and can write any local file, so a
+`provenance` block in a local file is a claim, not proof. **The only thing this design treats as real
+provenance is the user's own merge into their approvals repo's default branch.** The PR diff shows the
+exact approval and the PR description quotes their words. The merge is theirs because only they can
+merge there, the rule `USER-REPO-APP-FOLDERS-SPEC.md` states for every app. The `provenance` fields are
+a human-readable restatement, checked for completeness (§12.3); they are never what makes an approval
+real.
 
-### 12.8 Threat model - stated plainly, not overclaimed
+### 12.8 Threat model — stated plainly, not overclaimed
 
-**What this stops**: a handler activating by accident (a stray file, a bug in the proposal loop, a
-copy-paste into the wrong directory), or by an automated process acting alone (the LLM-proposal loop
-drafting something and it silently taking effect). It gives a durable audit trail - every active
-handler traces to one merged PR, one reviewed diff, one verbatim quote from CireSnave.
+**What this stops:**
 
-**What this does NOT stop**: a fully compromised lane. A lane that can run arbitrary code on this
-machine can already press keys itself, read and write any file this tool could, or simply launch
-`claude.exe` directly without going through `lane-restart` at all - no handler-provenance scheme
-changes that threat model, and this section does not claim to. The value here is raising the bar from
-"any file that shows up gets trusted" to "only a change CireSnave has actually seen and approved gets
-shipped," not building a security boundary against a hostile lane.
+- an approval activating by accident or through an automated process acting alone: a stray local file,
+  the proposal loop, or an unmerged PR, including a fork PR (§12.3 step 1);
+- one user's approvals reaching another user;
+- any automatic answer that could type or approve a secret.
 
-### 12.9 The installed binary: build provenance and `--version`
+Every active approval traces to one merged commit in a repo its user controls.
 
-- **The PM builds the installed `lane-restart.exe` from a clean clone of `main`** (§11.2's existing
-  step - unchanged) and records its SHA-256 at `C:/Projects/.claude-hooks/lane-restart.sha256`, so the
-  binary actually running can be checked against the commit it was supposedly built from.
-- **`lane-restart --version` prints the crate version, plus every embedded handler's `id` and a hash
-  of its exact contents** - so anyone (CireSnave included) can see precisely what's active without
-  reading source, and a diff between two `--version` outputs shows exactly what changed.
+**What this does NOT stop:** a fully compromised lane. Such a lane can press keys itself, rewrite
+`~/.overmind/lane-restart.json` to point at a repo it controls, or launch `claude.exe` without this tool
+at all. The design also trusts the user's GitHub account and `gh`'s auth. What it adds is a higher bar:
+instead of trusting any file that shows up, it trusts only what the user merged into their own repo.
+It is not a security boundary against a hostile lane.
+
+### 12.9 The installed binary, `--version`, and `lane-restart approvals`
+
+- **The PM builds the installed `lane-restart.exe` from a clean clone of `main`** (§11.2) and records
+  its SHA-256 at `C:/Projects/.claude-hooks/lane-restart.sha256`.
+- **`lane-restart --version`** prints the crate version, `embedded approvals: none`, and the configured
+  approvals source. It makes no network call.
+- **`lane-restart approvals [--role <name>]`** fetches exactly as the host does. It lists every active
+  approval with its id, the SHA-256 of its bytes, its roles and its expiry, and with `--role` says
+  whether it applies now. It lists every refused approval with its reason, and exits 1 if nothing could
+  be loaded.
 
 ### 12.10 What this section does NOT authorize
 
-- **No change to how in-work permission prompts are handled** - this mechanism attaches only at the
-  one point §5's `AwaitingConfirmation` already exists, never anywhere else.
-- **No default handlers, no bundled handlers, no "trusted" handler source** - every handler, with no
-  exception, needs its own provenance record before it loads.
-- **No runtime directory, anywhere, ever activates a handler on its own** (§12.7) - only a merged PR
-  does, regardless of what any file on disk claims about itself.
+- **No change to how in-work permission prompts are handled.**
+- **No approvals shipped in OverMind, and no default approvals source.** No config means no approvals.
+- **No local directory, cache, or runtime file ever activates an approval.** Only the user's merge does.
+- **No approval for anything involving a secret**, in any repo, public or private (§12.3a).
 
-### 12.11 `claude-peers-dev-channels` — the first embedded handler
+### 12.11 `claude-peers-dev-channels` — the first approval, now seeded in the user's repo
 
-**CireSnave's own words, verbatim, approving this exact spec (`CIRESNAVE-EXPECTATIONS.md` §5.1c):**
-*"I like that. Proceed."* Embedded at `crates/lane-restart/handlers/claude-peers-dev-channels.json`,
-answering the `--dangerously-load-development-channels` security confirmation dialog §5's
-`AwaitingConfirmation` outcome was built to detect:
+**CireSnave's words, verbatim** (`CIRESNAVE-EXPECTATIONS.md` §5.1c): approving the exact spec, *"I like
+that.  Proceed."* (2026-09-19); approving the move out and the widening to every role, *"Yes on all
+fronts.  Proceed."* (2026-09-27). The approval answers the `--dangerously-load-development-channels`
+confirmation dialog:
 
 - **Text anchors**: `"WARNING: Loading development channels"` and `"I am using this for local
-  development"` - both must appear verbatim, per the real dialog CireSnave's own screenshot showed.
-- **Pinned field**: `Channels` must equal EXACTLY `server:claude-peers` - any extra or different
-  channel means no match (§12.4's prefix-match trap, tested against this exact handler).
-- **Action**: `"1\r"` - selects option 1 ("I am using this for local development"), press Enter. No
-  trailing `\n` - CireSnave's own correction to an earlier draft.
-- **Scope**: every current lane plus the disposable test lane -
-  `["overmind", "synapse", "thinkersjournal-community", "pm", "restarttest"]`.
-- **Expiry**: `2027-03-19T00:00:00Z` - not indefinite; a future review has to re-confirm it.
+  development"`. **Pinned field**: `Channels` is exactly `server:claude-peers`.
+- **Action**: `"1\r"`, which selects option 1 and presses Enter, with no trailing `\n` (CireSnave's own
+  correction).
+- **Scope**: `["*"]`, every role, per the 2026-09-27 approval. While embedded it covered five roles:
+  overmind, synapse, thinkersjournal-community, pm and restarttest.
+- **Expiry**: `2027-03-19T00:00:00Z`, unchanged.
 
-**PROVEN end to end, real run, 2026-09-19 ~05:43Z (`lane-restart@0.3.21`, PM):** a real restart of the
-disposable test lane, with the dev-channels flag carried over - kill of the old pid → `wt.exe` →
-`lane-restart host` → `claude` launched with the flag → the handler matched (both text anchors plus
-the exact `Channels` field) → injected `"1\r"` → the session actually started → it read its own
-`HANDOFF.md` and replied confirming a fresh session had processed it → the outer tool logged
-`Relaunched` and exited `0`. This is the mechanism's real acceptance test, not a unit test standing in
-for one - nine real rounds got here, and every failure along the way was safe (refused or stuck, never
-a wrong action).
+It is seeded by fork PR into
+`ciresnave/ciresnave/.overmind/lane-restart/approvals/claude-peers-dev-channels.json`. The inert
+example in this repo is byte-identical. `handlers.rs`'s tests check it against the real dialog captured
+on 2026-09-27 (`.lane-state/unhandled-prompts/2026-09-27T14-58-37.644790300+00-00.txt`).
 
-**Rollout (CireSnave delegated it to the PM):** the `.lane-state` hooks now live in USER-level
-`~/.claude/settings.json`, merged beside CireSnave's own `SessionStart` wrapper - the earlier
-per-project-level copies (§11.4) are removed, since they only carried `LANE_ROLE` and running both
-would double-fire the hooks. Every other lane starts recording state at its own next session start.
+**PROVEN end to end while embedded, in a real run on 2026-09-19 ~05:43Z (`lane-restart@0.3.21`, PM).**
+The kill led to `wt.exe`, then `lane-restart host`, then `claude` with the flag. Both anchors and the
+`Channels` field matched, `"1\r"` was injected, the session started and read its HANDOFF, and the outer
+tool logged `Relaunched`. The fetched-approval path has not had a real relaunch yet; the install check
+in §12.12 is its first.
 
-**A real-world side effect worth knowing about, not a bug in this tool**: after enough test sessions
-were killed mid-startup during this investigation, Claude Code itself printed *"the fullscreen renderer
-has repeatedly failed to start on this machine, so it has been turned off here"* and fell back to its
-classic renderer. This is Claude Code's own self-protection against a renderer that keeps not finishing
-startup - an expected consequence of this crate's own real-restart testing discipline, not something
-`lane-restart` or its host caused directly. Fix, if the fullscreen renderer is wanted back: run `/tui
-fullscreen` in an affected session.
+A side effect seen during that testing was not caused by this tool. After many sessions were killed
+mid-startup, Claude Code printed *"the fullscreen renderer has repeatedly failed to start on this
+machine, so it has been turned off here"*. Running `/tui fullscreen` in an affected session restores it.
+
+### 12.12 Install order — the seed must merge first
+
+⚠️ **Do not install a build of this revision until the seed PR to `ciresnave/ciresnave` is merged.**
+The installed binary is what every lane's next restart runs. A binary with no embedded approvals and
+nothing to fetch would put the dev-channels dialog in front of CireSnave again for overmind, synapse,
+community and pm. Before installing:
+
+1. Confirm the seed PR is merged into `ciresnave/ciresnave`'s default branch.
+2. Confirm `~/.overmind/lane-restart.json` exists with the §12.2 content.
+3. Run `lane-restart approvals --role overmind` from the NEW build. It must print `1 active, 0 refused`
+   and `active claude-peers-dev-channels ... roles=["*"] ... [applies to overmind]`.
+4. Install, record the SHA-256 (§12.9), and use the first real restart as the acceptance test.
 
 ## 13. How a lane restarts itself — a quick pointer
 
@@ -1032,8 +1055,9 @@ three real steps, in order:
    step 2's assertion, since you're the same process making the request). This kills your own current
    session and relaunches a genuinely fresh one in the same `cwd`, which will read your HANDOFF and
    continue (§5) - carrying over your model, permission mode, Remote Control, and any allowlisted
-   launch flags automatically (§5, §12.11's `claude-peers-dev-channels` handler included, if your
-   launch carries `--dangerously-load-development-channels`).
+   launch flags automatically (§5). A startup dialog you have approved in your approvals repo (§12)
+   is answered for you, for example `claude-peers-dev-channels` if your launch carries
+   `--dangerously-load-development-channels`.
 
 ⚠️ Unlike restarting a DIFFERENT lane (which defaults to a dry run unless `--yes` is also passed),
 **`--self` acts for real immediately** - no confirmation flag needed, since you're the same process

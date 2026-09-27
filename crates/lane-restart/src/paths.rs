@@ -49,6 +49,13 @@ pub fn paths_match(a: &str, b: &str) -> bool {
     }
 }
 
+/// The user's home directory: `USERPROFILE`, else `HOME`.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,11 +9,13 @@
 //! only place real OS calls happen is behind that one trait's real
 //! implementation, wired in `main.rs`.
 
+pub mod approvals;
 pub mod authorize;
 pub mod facts;
 pub mod handlers;
 pub mod host;
 pub mod lane_state_writer;
 pub mod log;
+pub mod notify;
 pub mod paths;
 pub mod state;
