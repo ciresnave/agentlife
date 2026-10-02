@@ -378,6 +378,7 @@ fn run_with_handlers_and_window(
 
     let mut on_answered = on_answered;
     let mut on_unhandled = Some(on_unhandled);
+    let mut unhandled_thread: Option<std::thread::JoinHandle<()>> = None;
     let mut parser = vt100::Parser::new(rows, cols, 0);
     let mut matched_ids: HashSet<String> = HashSet::new();
     let mut last_logged_screen: Option<String> = None;
@@ -387,7 +388,12 @@ fn run_with_handlers_and_window(
         if !still_in_startup_window {
             if let Some(capture) = on_unhandled.take() {
                 if matched_ids.is_empty() {
-                    capture(screen_text(&parser));
+                    // Issue #96 (a): `capture` sends the PM ask over the
+                    // claude-peers broker, so it runs on its own thread - a
+                    // stalled broker must never pause the terminal. The
+                    // screen text is taken HERE, at the window's end.
+                    let text = screen_text(&parser);
+                    unhandled_thread = Some(std::thread::spawn(move || capture(text)));
                 }
             }
         }
@@ -427,6 +433,11 @@ fn run_with_handlers_and_window(
     }
 
     let status = child.wait().ok();
+    // Joined so the process can't exit mid-ask. The relay has stopped by
+    // now, so waiting here stalls nothing.
+    if let Some(t) = unhandled_thread {
+        let _ = t.join();
+    }
     Ok(HostOutcome {
         child_exit_code: status.and_then(|s| s.exit_code().into()),
     })
@@ -1274,6 +1285,129 @@ mod tests {
         assert!(
             captured.lock().unwrap().is_empty(),
             "a real match must suppress the unhandled-prompt capture entirely"
+        );
+    }
+
+    /// Issue #96 (a): `on_unhandled` sends the PM ask over the claude-peers
+    /// broker, and a stalled broker must not freeze the terminal. The
+    /// callback here blocks until released (or 10s); the child prints a
+    /// second marker ~2s after the window ends. That marker must reach the
+    /// outer terminal WHILE the callback is still blocked - inline on the
+    /// relay thread, it can only arrive after the 10s timeout.
+    #[cfg(windows)]
+    #[test]
+    fn a_blocked_on_unhandled_never_stalls_the_relay() {
+        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul & echo AFTER_MARKER_24680".to_string(),
+        ];
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let callback_returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let returned_for_cb = Arc::clone(&callback_returned);
+
+        // Watches the outer terminal for the second marker, records whether
+        // the callback was still blocked at that moment, then releases it.
+        let output_for_watch = Arc::clone(&outer_output);
+        let returned_for_watch = Arc::clone(&callback_returned);
+        let watcher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut relayed_while_blocked = None;
+            while Instant::now() < deadline {
+                let seen = String::from_utf8_lossy(&output_for_watch.lock().unwrap())
+                    .contains("AFTER_MARKER_24680");
+                if seen {
+                    relayed_while_blocked =
+                        Some(!returned_for_watch.load(std::sync::atomic::Ordering::SeqCst));
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = release_tx.send(());
+            relayed_while_blocked
+        });
+
+        run_with_handlers_and_window(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            outer_input,
+            SharedVecWriter(Arc::clone(&outer_output)),
+            |_| {},
+            move |_text| {
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                returned_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            Duration::from_millis(800),
+            |_, _| {},
+            |_, _| {},
+        )
+        .expect("run_with_handlers_and_window failed");
+
+        assert_eq!(
+            watcher.join().unwrap(),
+            Some(true),
+            "the child's later output must reach the terminal while on_unhandled is still blocked"
+        );
+        assert!(
+            callback_returned.load(std::sync::atomic::Ordering::SeqCst),
+            "the host must still wait for the ask to finish before returning"
+        );
+    }
+
+    /// Issue #96 (a), the other half: with the ask off the relay thread, a
+    /// child that exits while the ask is still in flight must not let the
+    /// host return (and the process exit) mid-ask. The callback here
+    /// outlives the child by ~2s.
+    #[cfg(windows)]
+    #[test]
+    fn the_host_waits_for_an_in_flight_on_unhandled_before_returning() {
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo PROBE_MARKER_98765 & choice /t 1 /d y >nul".to_string(),
+        ];
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished_for_cb = Arc::clone(&finished);
+
+        run_with_handlers_and_window(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            Cursor::new(b"\x1b[1;1R".to_vec()),
+            std::io::sink(),
+            |_| {},
+            move |_text| {
+                std::thread::sleep(Duration::from_secs(3));
+                finished_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            Duration::from_millis(300),
+            |_, _| {},
+            |_, _| {},
+        )
+        .expect("run_with_handlers_and_window failed");
+
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "run must not return while on_unhandled is still running"
         );
     }
 }
