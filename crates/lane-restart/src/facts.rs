@@ -151,15 +151,6 @@ impl SysinfoFacts {
     pub fn new(claude_config_dir: PathBuf) -> Self {
         Self { claude_config_dir }
     }
-
-    fn project_dir_name(cwd: &str) -> String {
-        // ⚠️ MATCHES sessions.md: "your working directory path with
-        // non-alphanumeric characters replaced by -". Not a guess - quoted
-        // directly from the verified documentation this spec cites.
-        cwd.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect()
-    }
 }
 
 /// `kill_verified`'s exe-path check, pulled out as a pure function so it is
@@ -232,7 +223,7 @@ impl SystemFacts for SysinfoFacts {
     }
 
     fn transcript_is_recent(&self, cwd: &str, session_id: &str, max_age: Duration) -> bool {
-        let project = Self::project_dir_name(cwd);
+        let project = crate::paths::project_dir_name(cwd);
         let path = self
             .claude_config_dir
             .join("projects")
@@ -376,7 +367,7 @@ mod tests {
         // sessions.md: "working directory path with non-alphanumeric
         // characters replaced by -"
         assert_eq!(
-            SysinfoFacts::project_dir_name("C:/Projects/OverMind"),
+            crate::paths::project_dir_name("C:/Projects/OverMind"),
             "C--Projects-OverMind"
         );
     }

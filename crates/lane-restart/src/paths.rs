@@ -49,6 +49,16 @@ pub fn paths_match(a: &str, b: &str) -> bool {
     }
 }
 
+/// The directory name Claude Code files a session's transcript under,
+/// `~/.claude/projects/<this>/`. ⚠️ MATCHES sessions.md: "your working
+/// directory path with non-alphanumeric characters replaced by -". Not a
+/// guess - quoted directly from the verified documentation this spec cites.
+pub fn project_dir_name(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 /// The user's home directory: `USERPROFILE`, else `HOME`.
 pub fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("USERPROFILE")

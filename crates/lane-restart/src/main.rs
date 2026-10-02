@@ -482,6 +482,14 @@ fn main() -> ExitCode {
     let target = if args.target_self {
         Target::Myself {
             role: args.role.clone(),
+            // The same ancestry walk the hooks use to record `pid`: this
+            // process <- shell(s) <- claude. `decide` compares it with the
+            // state file's pid, so `--self` is a claim it can check.
+            caller_pid: lane_state_writer::claude_parent_pid(
+                std::process::id(),
+                &RealParentProcess,
+            )
+            .ok(),
         }
     } else {
         Target::Other {

@@ -63,6 +63,10 @@ pub struct HookInput {
     pub cwd: String,
     pub permission_mode: Option<String>,
     pub model: Option<ModelField>,
+    /// `~/.claude/projects/<launch dir, encoded>/<session_id>.jsonl` - the
+    /// one field that still names the LAUNCH directory after the session
+    /// has moved on, used only to cross-check which cwd to record.
+    pub transcript_path: Option<String>,
 }
 
 /// RESTART-TOOL-DESIGN.md §10.2, PM finding 2026-09-18: the cwd-leaf default
@@ -231,6 +235,45 @@ pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32,
     Err(PidError::HopLimitExceeded)
 }
 
+/// The parent directory's own name in a transcript path, either separator.
+fn transcript_project_dir(transcript_path: &str) -> Option<&str> {
+    let mut parts = transcript_path.rsplit(['/', '\\']);
+    parts.next()?;
+    parts.next().filter(|d| !d.is_empty())
+}
+
+/// The cwd a state file records: the lane's HOME (its launch directory),
+/// which `decide`'s transcript check, the relaunch and the liveness check
+/// all key on - never merely where the session happens to be right now.
+/// PM finding, 2026-10-02: `SessionStart` also fires on a compaction,
+/// mid-session, with the CURRENT cwd, and recording that sent the PM's own
+/// restart looking in the wrong project directory.
+///
+/// The candidates, in order: the cwd already recorded by this SAME process
+/// (a process's launch directory never changes), then this event's own cwd.
+/// When `transcript_path` is present, the first candidate whose encoding
+/// matches the transcript's own directory wins. When none matches, the
+/// order alone decides and nothing is guessed - `decide`'s transcript check
+/// then refuses rather than relaunching in the wrong place.
+fn recorded_cwd(existing: Option<&LaneState>, input: &HookInput, pid: u32) -> String {
+    let candidates: Vec<&str> = existing
+        .filter(|s| s.pid == pid)
+        .map(|s| s.cwd.as_str())
+        .into_iter()
+        .chain(std::iter::once(input.cwd.as_str()))
+        .collect();
+    let by_transcript = input
+        .transcript_path
+        .as_deref()
+        .and_then(transcript_project_dir)
+        .and_then(|dir| {
+            candidates
+                .iter()
+                .find(|c| crate::paths::project_dir_name(c).eq_ignore_ascii_case(dir))
+        });
+    by_transcript.unwrap_or(&candidates[0]).to_string()
+}
+
 /// A fresh baseline state, built exactly the way `SessionStart` builds one -
 /// PM finding, 2026-09-19: lanes already running when the user-level hooks
 /// were installed (synapse; the PM, via `--resume`) have no state file at
@@ -248,6 +291,7 @@ fn bootstrap_state(
     role: &str,
     input: &HookInput,
     pid: u32,
+    cwd: String,
     cli_flags: &ClaudeCliFlags,
     event: &str,
     now: chrono::DateTime<Utc>,
@@ -256,7 +300,7 @@ fn bootstrap_state(
         role: role.to_string(),
         session_id: input.session_id.clone(),
         pid,
-        cwd: input.cwd.clone(),
+        cwd,
         name: None,
         model: input.model.clone().map(ModelField::into_string),
         permission_mode: input
@@ -290,7 +334,7 @@ pub fn apply_event(
             role: role.to_string(),
             session_id: input.session_id.clone(),
             pid,
-            cwd: input.cwd.clone(),
+            cwd: recorded_cwd(existing.as_ref(), input, pid),
             name: existing.as_ref().and_then(|s| s.name.clone()),
             // ⚠️ Prefer THIS event's own value (PM finding, 2026-09-18: a
             // real SessionStart DOES carry `model`); fall back to what a
@@ -341,9 +385,10 @@ pub fn apply_event(
     // treated the same way (a genuinely new session under a state file this
     // module never saw start) - not merged with stale busy/subagent counts
     // from whatever session the old file was actually about.
+    let cwd = recorded_cwd(existing.as_ref(), input, pid);
     let mut state = match existing {
         Some(s) if s.session_id == input.session_id => s,
-        _ => bootstrap_state(role, input, pid, cli_flags, event, now),
+        _ => bootstrap_state(role, input, pid, cwd, cli_flags, event, now),
     };
     // A state a real `SessionStart` created BEFORE this fix never recorded
     // `launch_args` at all (the PM's own `pm.json`, via `--resume`) -
@@ -590,6 +635,7 @@ pub fn run_assert_idle(
         cwd: cwd.to_string(),
         permission_mode: None,
         model: None,
+        transcript_path: None,
     };
     let next = apply_event(
         existing,
@@ -667,6 +713,7 @@ mod tests {
             cwd: cwd.to_string(),
             permission_mode: Some("prompting".to_string()),
             model: None,
+            transcript_path: None,
         }
     }
 
@@ -1293,6 +1340,143 @@ mod tests {
         );
     }
 
+    // -- the recorded cwd is the lane's HOME, not wherever it is now ------- //
+    //
+    // PM finding, 2026-10-02 (a real `--self` refusal): `SessionStart` also
+    // fires on a compaction, mid-session, carrying the session's CURRENT
+    // cwd. The PM's last compaction ran while it was in `C:\Projects\fuel`
+    // and rewrote `pm.json`'s cwd to that, so the transcript lookup, the
+    // relaunch directory and the liveness check all pointed at the wrong
+    // place. A process's launch directory never changes, so the same pid
+    // keeps what it already recorded.
+
+    fn home_state(cwd: &str, pid: u32) -> LaneState {
+        apply_event(
+            None,
+            "SessionStart",
+            &input(cwd),
+            "pm",
+            pid,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_compaction_session_start_from_the_same_process_keeps_the_recorded_cwd() {
+        let s = apply_event(
+            Some(home_state("C:/Projects", 42)),
+            "SessionStart",
+            &input("C:/Projects/fuel"),
+            "pm",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.cwd, "C:/Projects",
+            "the same process's home, not where it has wandered"
+        );
+    }
+
+    #[test]
+    fn a_session_start_from_a_new_process_takes_its_own_cwd() {
+        let s = apply_event(
+            Some(home_state("C:/Projects", 42)),
+            "SessionStart",
+            &input("C:/Projects/OverMind"),
+            "pm",
+            77,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, "C:/Projects/OverMind");
+    }
+
+    #[test]
+    fn a_re_bootstrap_from_the_same_process_keeps_the_recorded_cwd_too() {
+        let mut other_session = input("C:/Projects/fuel");
+        other_session.session_id = "after-clear".to_string();
+        let s = apply_event(
+            Some(home_state("C:/Projects", 42)),
+            "Stop",
+            &other_session,
+            "pm",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.session_id, "after-clear");
+        assert_eq!(s.cwd, "C:/Projects");
+    }
+
+    /// The cross-check: the transcript's own directory names the launch
+    /// directory (sessions.md's encoding), so a candidate that matches it
+    /// beats one that doesn't - including a same-pid recorded cwd that was
+    /// already wrong before this fix (the PM's own `pm.json`).
+    #[test]
+    fn the_cwd_matching_transcript_path_wins_over_a_wrong_recorded_one() {
+        let mut compact = input("C:/Projects");
+        compact.transcript_path =
+            Some("C:/Users/u/.claude/projects/C--Projects/s-123.jsonl".to_string());
+        let s = apply_event(
+            Some(home_state("C:/Projects/fuel", 42)),
+            "SessionStart",
+            &compact,
+            "pm",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, "C:/Projects");
+    }
+
+    /// A real Windows hook payload's `transcript_path` uses backslashes; the
+    /// parent-directory read must not depend on the host's own separator.
+    #[test]
+    fn a_backslashed_transcript_path_is_read_the_same_way() {
+        let mut compact = input(r"C:\Projects");
+        compact.transcript_path =
+            Some(r"C:\Users\u\.claude\projects\C--Projects\s-123.jsonl".to_string());
+        let s = apply_event(
+            Some(home_state(r"C:\Projects\fuel", 42)),
+            "SessionStart",
+            &compact,
+            "pm",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, r"C:\Projects");
+    }
+
+    /// Fail closed: with no candidate matching the transcript, nothing is
+    /// guessed - the same-process rule stands, and `decide`'s own transcript
+    /// check refuses a restart rather than relaunching in the wrong place.
+    #[test]
+    fn with_no_candidate_matching_transcript_path_the_same_process_rule_stands() {
+        let mut compact = input("C:/Projects/coderipper");
+        compact.transcript_path =
+            Some("C:/Users/u/.claude/projects/C--Projects/s-123.jsonl".to_string());
+        let s = apply_event(
+            Some(home_state("C:/Projects/fuel", 42)),
+            "SessionStart",
+            &compact,
+            "pm",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, "C:/Projects/fuel");
+    }
+
     #[test]
     fn a_session_start_created_state_missing_launch_args_is_refreshed_on_a_later_event() {
         // PM's own case: "the PM's own pm.json has launch_args=None" - a
@@ -1848,6 +2032,116 @@ mod tests {
         );
         assert_eq!(plan.state.no_background_shells, Some(true));
         assert_eq!(plan.state.session_id, "e2e-session");
+    }
+
+    /// The PM's own 2026-10-02 refusal, end to end: launched in
+    /// `C:\Projects`, compacted while in `fuel`, process now sitting in
+    /// `coderipper`. Real hook JSON in, the real state file, `decide()` on
+    /// it, and the caller's pid from the same ancestry walk `main` uses.
+    #[test]
+    fn a_lane_that_compacted_elsewhere_can_still_restart_itself_and_only_itself() {
+        use crate::authorize::{self, Refusal, Request, Target};
+        use crate::facts::SystemFacts;
+
+        let dir = tempdir().unwrap();
+        let state_dir = dir.path();
+        let hook_pid = 4242u32;
+        let pm_ancestry = FakeAncestry::chain(&[(hook_pid, 99, "claude.exe")]);
+        let transcript = r#"C:\\Users\\u\\.claude\\projects\\C--Projects\\pm-session.jsonl"#;
+        for (event, cwd) in [
+            ("SessionStart", r#"C:\\Projects"#),
+            ("SessionStart", r#"C:\\Projects\\fuel"#), // the compaction
+            ("Stop", r#"C:\\Projects\\fuel"#),
+        ] {
+            let json = format!(
+                r#"{{"hook_event_name":"{event}","session_id":"pm-session","cwd":"{cwd}","transcript_path":"{transcript}"}}"#
+            );
+            run(
+                state_dir,
+                event,
+                hook_pid,
+                &pm_ancestry,
+                Some("pm"),
+                &mut json.as_bytes(),
+            )
+            .unwrap();
+        }
+
+        struct Wandered;
+        impl SystemFacts for Wandered {
+            fn is_alive_claude_process(&self, pid: u32) -> bool {
+                pid == 99
+            }
+            fn cwd_of(&self, _pid: u32) -> Option<std::path::PathBuf> {
+                Some(std::path::PathBuf::from(r"C:\Projects\coderipper\"))
+            }
+            fn has_live_shell_descendant(
+                &self,
+                _pid: u32,
+            ) -> Result<bool, crate::facts::ShellCheckError> {
+                Ok(false)
+            }
+            fn transcript_is_recent(
+                &self,
+                cwd: &str,
+                session_id: &str,
+                _max_age: std::time::Duration,
+            ) -> bool {
+                // The transcript lives under the LAUNCH directory only.
+                crate::paths::paths_match(cwd, r"C:\Projects") && session_id == "pm-session"
+            }
+            fn now(&self) -> chrono::DateTime<Utc> {
+                Utc::now()
+            }
+            fn process_identity(&self, pid: u32) -> Option<crate::facts::ProcessIdentity> {
+                (pid == 99).then_some(crate::facts::ProcessIdentity {
+                    start_time_secs: 0,
+                    exe: None,
+                })
+            }
+            fn kill_verified(
+                &self,
+                _pid: u32,
+                _expected: &crate::facts::ProcessIdentity,
+            ) -> Result<(), crate::facts::KillError> {
+                unreachable!("this test never kills anything")
+            }
+            fn find_claude_process_in(
+                &self,
+                _cwd: &str,
+                _after_start_time_secs: u64,
+            ) -> Option<u32> {
+                unreachable!("this test never relaunches anything")
+            }
+            fn process_table(
+                &self,
+            ) -> Result<Vec<crate::facts::ProcEntry>, crate::facts::ShellCheckError> {
+                unreachable!("this test never relaunches anything")
+            }
+        }
+
+        let self_request = |caller_ancestry: &FakeAncestry, caller: u32| Request {
+            target: Target::Myself {
+                role: "pm".to_string(),
+                caller_pid: claude_parent_pid(caller, caller_ancestry).ok(),
+            },
+            confirmed: false,
+            dry_run: true,
+        };
+
+        let plan = authorize::decide(&self_request(&pm_ancestry, hook_pid), &Wandered, state_dir)
+            .expect("the PM's own session must be able to restart itself");
+        assert_eq!(
+            plan.state.cwd, r"C:\Projects",
+            "the relaunch directory is the launch directory, not fuel"
+        );
+
+        // Another lane's session, naming the PM's role with --self.
+        let other_lane = FakeAncestry::chain(&[(5555, 77, "claude.exe")]);
+        assert!(matches!(
+            authorize::decide(&self_request(&other_lane, 5555), &Wandered, state_dir),
+            Err(Refusal::NotTheCaller { .. })
+        ));
     }
 
     // -- StateLock: the concurrency-safety property itself ------------------ //

@@ -28,7 +28,14 @@ pub enum Target {
     /// The lane restarting itself. RESTART-TOOL-DESIGN.md §3: no idle check -
     /// the requester IS the process being restarted, so there is no
     /// staleness window between "checked" and "acted."
-    Myself { role: String },
+    Myself {
+        role: String,
+        /// The `claude` process the CALLER runs under, from its own
+        /// ancestry (`lane_state_writer::claude_parent_pid`), or `None` if
+        /// that walk failed. "The requester IS the process" is checked
+        /// against this, never assumed from the `--self` flag.
+        caller_pid: Option<u32>,
+    },
     /// A different lane, restarted only if it is independently confirmed
     /// idle - RESTART-TOOL-DESIGN.md §3.
     Other { role: String },
@@ -37,7 +44,7 @@ pub enum Target {
 impl Target {
     fn role(&self) -> &str {
         match self {
-            Target::Myself { role } | Target::Other { role } => role,
+            Target::Myself { role, .. } | Target::Other { role } => role,
         }
     }
 
@@ -60,8 +67,17 @@ pub struct Request {
 pub enum Refusal {
     NoStateFile(String),
     MalformedStateFile(String),
-    StaleStateFile { role: String, age_secs: i64 },
+    StaleStateFile {
+        role: String,
+        age_secs: i64,
+    },
     ProcessNotIdentified(String),
+    /// `--self`, from a caller that is not the recorded process.
+    NotTheCaller {
+        role: String,
+        caller: Option<u32>,
+        recorded: u32,
+    },
     Busy(String),
     SubagentsRunning(String, u32),
     NoBackgroundShellsClaimMissing(String),
@@ -81,6 +97,22 @@ impl std::fmt::Display for Refusal {
                 )
             }
             Refusal::ProcessNotIdentified(msg) => write!(f, "identity check failed: {msg}"),
+            Refusal::NotTheCaller {
+                role,
+                caller: Some(caller),
+                recorded,
+            } => write!(
+                f,
+                "{role}: --self from claude pid {caller}, but the state file records pid {recorded} - only a lane itself may restart itself"
+            ),
+            Refusal::NotTheCaller {
+                role,
+                caller: None,
+                recorded,
+            } => write!(
+                f,
+                "{role}: --self, but the caller's own claude process could not be found to compare with pid {recorded}"
+            ),
             Refusal::Busy(r) => write!(f, "{r}: busy"),
             Refusal::SubagentsRunning(r, n) => write!(f, "{r}: {n} subagent(s) still running"),
             Refusal::NoBackgroundShellsClaimMissing(r) => {
@@ -117,7 +149,15 @@ pub struct Plan {
     pub will_act: bool,
 }
 
-fn identify(state: &LaneState, facts: &dyn SystemFacts) -> Result<ProcessIdentity, Refusal> {
+/// `check_cwd`: compare the live process's own cwd with the state file's.
+/// Only for `Target::Other` - a self-restart proves identity by the
+/// caller's ancestry instead (`decide`), because a session's OS cwd follows
+/// its tool calls and is not a fact about WHICH process it is.
+fn identify(
+    state: &LaneState,
+    facts: &dyn SystemFacts,
+    check_cwd: bool,
+) -> Result<ProcessIdentity, Refusal> {
     let age = facts.now().signed_duration_since(state.updated_at);
     let age_secs = age.num_seconds();
     if age_secs < 0 || age_secs as u64 > STALE_STATE_AFTER.as_secs() {
@@ -134,20 +174,21 @@ fn identify(state: &LaneState, facts: &dyn SystemFacts) -> Result<ProcessIdentit
         )));
     }
 
-    match facts.cwd_of(state.pid) {
+    match check_cwd.then(|| facts.cwd_of(state.pid)) {
+        None => {}
         // ⚠️ PM finding, 2026-09-18 (real restart attempt): a real Windows
         // process's own cwd carries a trailing separator the hook's
         // recorded cwd never has - `crate::paths::paths_match` normalises
         // both sides (separators, a trailing one, case) rather than a raw
         // `==`, without ever treating one path as a PREFIX of another.
-        Some(cwd) if crate::paths::paths_match(&cwd.to_string_lossy(), &state.cwd) => {}
-        Some(cwd) => {
+        Some(Some(cwd)) if crate::paths::paths_match(&cwd.to_string_lossy(), &state.cwd) => {}
+        Some(Some(cwd)) => {
             return Err(Refusal::ProcessNotIdentified(format!(
                 "{}: pid {} is in {cwd:?}, state file says {:?}",
                 state.role, state.pid, state.cwd
             )))
         }
-        None => {
+        Some(None) => {
             return Err(Refusal::ProcessNotIdentified(format!(
                 "{}: could not read the cwd of pid {}",
                 state.role, state.pid
@@ -193,7 +234,9 @@ fn idle_and_shell_free(state: &LaneState, facts: &dyn SystemFacts) -> Result<(),
 
 /// The one entry point. Loads the target's state file, runs the identity
 /// check (always), and - only for `Target::Other` - the idle+shell check.
-/// Never touches a real process; only decides.
+/// For `Target::Myself`, identity starts with the caller: its own claude
+/// process must BE the recorded one. Never touches a real process; only
+/// decides.
 pub fn decide(req: &Request, facts: &dyn SystemFacts, state_dir: &Path) -> Result<Plan, Refusal> {
     let role = req.target.role();
     let state = state::load(state_dir, role).map_err(|e| match e {
@@ -203,7 +246,17 @@ pub fn decide(req: &Request, facts: &dyn SystemFacts, state_dir: &Path) -> Resul
         }
     })?;
 
-    let identity = identify(&state, facts)?;
+    if let Target::Myself { caller_pid, .. } = &req.target {
+        if *caller_pid != Some(state.pid) {
+            return Err(Refusal::NotTheCaller {
+                role: state.role.clone(),
+                caller: *caller_pid,
+                recorded: state.pid,
+            });
+        }
+    }
+
+    let identity = identify(&state, facts, req.target.is_other())?;
 
     if req.target.is_other() {
         idle_and_shell_free(&state, facts)?;
@@ -361,6 +414,19 @@ mod tests {
         FakeFacts::new().alive(PID).cwd(PID, CWD).no_shell(PID)
     }
 
+    /// A self-restart whose caller IS the recorded process - the shape
+    /// `main` builds from the caller's own ancestry.
+    fn myself(role: &str) -> Target {
+        Target::Myself {
+            role: role.into(),
+            caller_pid: Some(PID),
+        }
+    }
+
+    fn other(role: &str) -> Target {
+        Target::Other { role: role.into() }
+    }
+
     // --- self-restart: no idle/shell check should ever run --------------- //
 
     #[test]
@@ -370,9 +436,7 @@ mod tests {
             v["busy"] = serde_json::json!(true);
         });
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -385,9 +449,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_state(dir.path(), "overmind", |_| {});
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: true,
         };
@@ -401,9 +463,7 @@ mod tests {
         write_state(dir.path(), "overmind", |_| {});
         let facts = FakeFacts::new().dead(PID); // identity fails: pid not alive
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -411,6 +471,113 @@ mod tests {
             decide(&req, &facts, dir.path()),
             Err(Refusal::ProcessNotIdentified(_))
         ));
+    }
+
+    // --- self-restart identity: the caller's ancestry, not the process cwd - //
+    //
+    // PM finding, 2026-10-02 (a real `--self` refusal): a session's OS cwd
+    // follows its tool calls, so the PM's own process sat in `coderipper`
+    // while its state file said `fuel`, and `--self` refused a restart of
+    // the very process asking. And `--self` was an unverified flag: nothing
+    // checked that the caller WAS the recorded process, so any lane could
+    // name another role with `--self` and skip that role's idle check.
+
+    #[test]
+    fn self_restart_ignores_where_the_process_has_wandered() {
+        let dir = tempdir().unwrap();
+        write_state(dir.path(), "overmind", |_| {});
+        let facts = FakeFacts::new()
+            .alive(PID)
+            .cwd(PID, "C:/Projects/coderipper/")
+            .no_shell(PID);
+        let req = Request {
+            target: myself("overmind"),
+            confirmed: false,
+            dry_run: false,
+        };
+        assert!(decide(&req, &facts, dir.path()).is_ok());
+    }
+
+    #[test]
+    fn self_restart_does_not_need_the_process_cwd_at_all() {
+        let dir = tempdir().unwrap();
+        write_state(dir.path(), "overmind", |_| {});
+        let facts = FakeFacts::new().alive(PID).no_shell(PID); // no cwd set -> None
+        let req = Request {
+            target: myself("overmind"),
+            confirmed: false,
+            dry_run: false,
+        };
+        assert!(decide(&req, &facts, dir.path()).is_ok());
+    }
+
+    /// The gap this closes: a DIFFERENT session running `--role overmind
+    /// --self` - busy, too, so the idle check `--self` skips would have
+    /// refused it.
+    #[test]
+    fn self_restart_refuses_a_caller_that_is_not_the_recorded_process() {
+        let dir = tempdir().unwrap();
+        write_state(dir.path(), "overmind", |v| {
+            v["busy"] = serde_json::json!(true);
+        });
+        let req = Request {
+            target: Target::Myself {
+                role: "overmind".into(),
+                caller_pid: Some(PID + 1),
+            },
+            confirmed: false,
+            dry_run: false,
+        };
+        assert!(matches!(
+            decide(&req, &healthy_facts(), dir.path()),
+            Err(Refusal::NotTheCaller { .. })
+        ));
+    }
+
+    #[test]
+    fn self_restart_refuses_when_the_caller_could_not_be_identified() {
+        let dir = tempdir().unwrap();
+        write_state(dir.path(), "overmind", |_| {});
+        let req = Request {
+            target: Target::Myself {
+                role: "overmind".into(),
+                caller_pid: None,
+            },
+            confirmed: false,
+            dry_run: false,
+        };
+        assert!(matches!(
+            decide(&req, &healthy_facts(), dir.path()),
+            Err(Refusal::NotTheCaller { .. })
+        ));
+    }
+
+    /// The refusal is what a lane reads in its own shell - it must name
+    /// both pids, in one readable sentence.
+    #[test]
+    fn not_the_caller_says_which_pids_disagreed() {
+        let wrong = Refusal::NotTheCaller {
+            role: "pm".into(),
+            caller: Some(7),
+            recorded: 9,
+        }
+        .to_string();
+        assert_eq!(
+            wrong,
+            "pm: --self from claude pid 7, but the state file records pid 9 - \
+             only a lane itself may restart itself"
+        );
+        let unknown = Refusal::NotTheCaller {
+            role: "pm".into(),
+            caller: None,
+            recorded: 9,
+        }
+        .to_string();
+        assert_eq!(
+            unknown,
+            "pm: --self, but the caller's own claude process could not be found \
+             to compare with pid 9"
+        );
     }
 
     // --- identity check, each of its parts -------------------------------- //
@@ -421,9 +588,7 @@ mod tests {
         write_state(dir.path(), "overmind", |_| {});
         let facts = FakeFacts::new().dead(PID).cwd(PID, CWD).no_shell(PID);
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -442,9 +607,7 @@ mod tests {
             .cwd(PID, "C:/Somewhere/Else")
             .no_shell(PID);
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: other("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -471,9 +634,7 @@ mod tests {
             .cwd(PID, "C:/Projects/OverMind/")
             .no_shell(PID);
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: other("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -486,9 +647,7 @@ mod tests {
         write_state(dir.path(), "overmind", |_| {});
         let facts = FakeFacts::new().alive(PID).no_shell(PID); // no cwd set -> None
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: other("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -504,9 +663,7 @@ mod tests {
         write_state(dir.path(), "overmind", |_| {});
         let facts = healthy_facts().transcript_stale();
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -524,9 +681,7 @@ mod tests {
             v["updated_at"] = serde_json::json!(old.to_rfc3339());
         });
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -546,9 +701,7 @@ mod tests {
             v["updated_at"] = serde_json::json!(future.to_rfc3339());
         });
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };
@@ -562,9 +715,7 @@ mod tests {
     fn refuses_a_missing_state_file() {
         let dir = tempdir().unwrap();
         let req = Request {
-            target: Target::Myself {
-                role: "nonexistent".into(),
-            },
+            target: myself("nonexistent"),
             confirmed: false,
             dry_run: false,
         };
@@ -734,9 +885,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_state(dir.path(), "overmind", |_| {});
         let req = Request {
-            target: Target::Myself {
-                role: "overmind".into(),
-            },
+            target: myself("overmind"),
             confirmed: false,
             dry_run: false,
         };

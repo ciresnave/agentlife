@@ -112,9 +112,12 @@ signal:
 
 1. **PID** is running, and is a `claude` process (checked via the OS process list's own recorded
    command/image name for that PID - not assumed from the state file).
-2. **`cwd`** of that live PID matches the state file's `cwd`.
+2. **Whose process it is.** For a *self*-restart (`--self`): the caller's own `claude` process, found
+   by the same ancestry walk the hooks use to record `pid`, IS the state file's `pid`. For a restart
+   of *another* lane: the `cwd` of that live PID matches the state file's `cwd`. (Revised 2026-10-02,
+   below.)
 3. **`session_id`** recorded in the state file corresponds to a transcript file that exists on disk
-   under that `cwd`'s project directory (`~/.claude/projects/<project>/<session-id>.jsonl`,
+   under the state file's `cwd`'s project directory (`~/.claude/projects/<project>/<session-id>.jsonl`,
    documented in `sessions.md`) and whose mtime is recent enough to be plausibly this run, not a
    leftover from a much older process that reused the PID.
 4. **`updated_at`** on the state file is recent (a tool-configurable staleness bound, e.g. 2 minutes) -
@@ -137,6 +140,35 @@ identity check for a lane whose path happens to start the same. Unit-tested dire
 trailing-separator, case, and the prefix-must-not-match property), plus a real-child-process test that
 reads a genuine Windows `cwd` (trailing separator and all) and confirms it matches the same path
 without one.
+
+⚠️ **REVISED (PM finding, 2026-10-02, a real `--self` refusal): this section assumed a lane's `cwd`
+never changes. It does, in two places.** The PM's `--self` refused with "pid 49284 is in
+`C:\Projects\coderipper\`, state file says `C:\Projects\fuel`", and the PM had launched in
+`C:\Projects`. These are the two drifts:
+
+- **The state file's `cwd`.** `SessionStart` also fires on a compaction, mid-session, carrying the
+  session's *current* cwd. The PM's last compaction (its transcript, 2026-10-02T03:51:14Z) ran while
+  it was in `fuel`, and the writer recorded that. The state file's `cwd` also feeds #3's transcript
+  lookup, the relaunch directory (`wt -d`), the post-relaunch liveness match and `notify`, so all of
+  them pointed at `fuel`, while the transcript was in `C--Projects`. **Fixed:** the recorded `cwd` is
+  the lane's *launch* directory. A `SessionStart` or re-bootstrap from the SAME pid keeps the `cwd`
+  already recorded, because a process's launch directory never changes. When the hook input carries
+  `transcript_path`, a candidate whose encoding matches the transcript's own directory wins over one
+  that doesn't. When none matches, nothing is guessed, and #3 then refuses rather than relaunching in
+  the wrong place.
+- **The live process's own `cwd`** follows the session's tool calls, so it is not a fact about
+  *which* process this is. **For `--self`, #2 is now the caller's ancestry instead.** That is
+  strictly stronger: before this, `--self` was an unverified flag. Nothing checked that the caller
+  was the recorded process, so any lane could run `--role <another lane> --self` and skip that
+  lane's idle check (§3). A caller whose `claude` process isn't the recorded `pid`, or can't be
+  found, is refused (`NotTheCaller`). **A restart of another lane keeps the live-`cwd` compare.** A
+  target whose process has wandered is refused, which is the closed direction. This is a known limit
+  of PM-restarts of lanes that move between directories, not fixed here.
+
+Tested end to end with the PM's own sequence: hook JSON (startup in `C:\Projects`, compaction in
+`fuel`) goes into the real state file, then `decide()` runs with the process in `coderipper`. Its own
+session is accepted with `cwd` `C:\Projects`, and another lane's session naming `--role pm --self` is
+refused.
 
 ## 3. Authorization: who may restart whom
 
