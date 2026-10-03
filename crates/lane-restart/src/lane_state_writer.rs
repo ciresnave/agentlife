@@ -387,7 +387,17 @@ pub fn apply_event(
     // from whatever session the old file was actually about.
     let cwd = recorded_cwd(existing.as_ref(), input, pid);
     let mut state = match existing {
-        Some(s) if s.session_id == input.session_id => s,
+        // PM task, 2026-10-03: the SAME process takes `recorded_cwd`'s
+        // answer on every event, not only at `SessionStart`, so a cwd
+        // recorded wrong before that fix heals instead of lasting the life
+        // of the process. For the same pid it moves only on transcript
+        // proof; another pid's event never moves it.
+        Some(mut s) if s.session_id == input.session_id => {
+            if s.pid == pid {
+                s.cwd = cwd;
+            }
+            s
+        }
         _ => bootstrap_state(role, input, pid, cwd, cli_flags, event, now),
     };
     // A state a real `SessionStart` created BEFORE this fix never recorded
@@ -1475,6 +1485,113 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.cwd, "C:/Projects/fuel");
+    }
+
+    // -- a cwd recorded wrong BEFORE the fix heals on a later event -------- //
+    //
+    // PM task, 2026-10-03 (Humboldt's real `--self` refusal): its session
+    // compacted in `...\backend-foundation\frontend` under the old binary,
+    // which recorded that subdirectory. The transcript cross-check ran only
+    // on `SessionStart` and bootstrap, so every later event kept the wrong
+    // cwd for the life of the process. Now any event from the SAME process
+    // takes `recorded_cwd`'s answer, which moves the cwd only on proof.
+
+    const HUMBOLDT_HOME: &str = r"C:\Projects\Humboldt\.claude\worktrees\backend-foundation";
+    const HUMBOLDT_SUBDIR: &str =
+        r"C:\Projects\Humboldt\.claude\worktrees\backend-foundation\frontend";
+    const HUMBOLDT_TRANSCRIPT: &str = r"C:\Users\u\.claude\projects\C--Projects-Humboldt--claude-worktrees-backend-foundation\s-123.jsonl";
+
+    fn later_event(cwd: &str, transcript_path: Option<&str>) -> HookInput {
+        HookInput {
+            transcript_path: transcript_path.map(str::to_string),
+            ..input(cwd)
+        }
+    }
+
+    #[test]
+    fn a_later_event_with_transcript_proof_heals_a_wrongly_recorded_cwd() {
+        let s = apply_event(
+            Some(home_state(HUMBOLDT_SUBDIR, 42)),
+            "PreToolUse",
+            &later_event(HUMBOLDT_HOME, Some(HUMBOLDT_TRANSCRIPT)),
+            "humboldt",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, HUMBOLDT_HOME);
+    }
+
+    /// Negative control: the same event without `transcript_path` proves
+    /// nothing, so the recorded cwd stays - healing is never a guess.
+    #[test]
+    fn a_later_event_without_transcript_proof_leaves_the_cwd_unchanged() {
+        let s = apply_event(
+            Some(home_state(HUMBOLDT_SUBDIR, 42)),
+            "PreToolUse",
+            &later_event(HUMBOLDT_HOME, None),
+            "humboldt",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, HUMBOLDT_SUBDIR);
+    }
+
+    /// Negative control: a transcript that matches neither candidate proves
+    /// nothing either.
+    #[test]
+    fn a_later_event_whose_transcript_matches_neither_cwd_leaves_it_unchanged() {
+        let s = apply_event(
+            Some(home_state(HUMBOLDT_SUBDIR, 42)),
+            "PreToolUse",
+            &later_event(
+                r"C:\Projects\Humboldt\.claude\worktrees\backend-foundation\backend",
+                Some(HUMBOLDT_TRANSCRIPT),
+            ),
+            "humboldt",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, HUMBOLDT_SUBDIR);
+    }
+
+    /// The right cwd is never moved by a later event from a subdirectory,
+    /// even when the event carries a transcript path.
+    #[test]
+    fn a_later_event_from_a_subdirectory_keeps_a_correctly_recorded_cwd() {
+        let s = apply_event(
+            Some(home_state(HUMBOLDT_HOME, 42)),
+            "PreToolUse",
+            &later_event(HUMBOLDT_SUBDIR, Some(HUMBOLDT_TRANSCRIPT)),
+            "humboldt",
+            42,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, HUMBOLDT_HOME);
+    }
+
+    /// Only the recorded process heals its own state: an event from another
+    /// pid under the same session leaves the cwd alone, proof or not.
+    #[test]
+    fn a_later_event_from_another_process_never_moves_the_cwd() {
+        let s = apply_event(
+            Some(home_state(HUMBOLDT_SUBDIR, 42)),
+            "PreToolUse",
+            &later_event(HUMBOLDT_HOME, Some(HUMBOLDT_TRANSCRIPT)),
+            "humboldt",
+            77,
+            &ClaudeCliFlags::default(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.cwd, HUMBOLDT_SUBDIR);
     }
 
     #[test]
