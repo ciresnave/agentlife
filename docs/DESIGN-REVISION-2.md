@@ -303,7 +303,10 @@ approver picks the duration in the **control tab / CLI**, and Hello then verifie
 | **forever** | no expiry; displayed as `FOREVER` in every listing |
 
 The preselected choice is `approval_default_duration` (`1d`); `forever` is never preselected and is
-confirmed by name in the prompt text. **R2-Q5** asks whether `forever` should be re-confirmed
+confirmed by name in the prompt text. **Per OverMind's approved `user-request` plan (relayed by the PM,
+2026-10-04): the duration is chosen *before* the Hello prompt, which then names the chosen grant, and
+`forever` and long grants need a typed confirmation.** What counts as "long" is OverMind's to define; this
+design only consumes it. **R2-Q5** asks whether `forever` should be re-confirmed
 periodically or capped for non-PM agents.
 
 **Secrets are unchanged.** `with-secret`'s same-day-per-secret ruling (`WITH-SECRET-DESIGN.md` §1: *"Approve
@@ -350,7 +353,8 @@ an API mandate:
 2. **No built-in timeout** (a caller may *poll with a bound*, but the request itself does not expire
    because a clock ran out). Expiry, if wanted, is the caller's policy.
 3. **Choices with a bound answer.** A request carries `options` (e.g. the duration list) and a **plan/hash
-   binding**; the answer returns `{choice, bound_hash}` and is **single-use**.
+   binding** (OverMind's plan calls it `bound_hash`, checked by `answer()` against the artifact, which for
+   agentlife is the frozen plan hash); the answer returns `{choice, bound_hash}` and is **single-use**.
 4. **Backends are interchangeable and have different presence requirements.** Windows Hello is
    *present-only* (collects an answer only when a person is at the desktop); SMS/push are *remote*. The
    interface must say which, so `agentlife` can notify through one and collect through another.
