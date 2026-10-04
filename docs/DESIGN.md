@@ -1,5 +1,10 @@
 # agentlife — design
 
+> **REVISED 2026-10-04: see `DESIGN-REVISION-1.md`.** It supersedes §1 (roster), §2.1–2.4 (what restore
+> reads), §4.1/§4.3/§4.4 (trust model) and the roster-lost row of §7. The rest of this document stands.
+> The sections it supersedes are left as written, as the dated record of the first proposal.
+
+
 **Status: PROPOSAL for PM approval. No feature code until approved.** Written 2026-10-03 by the
 `agentlife` lane against the PM's `[TASK] design-document`.
 

@@ -1,5 +1,10 @@
 # Roster file schema (draft, schema 1)
 
+> **SUPERSEDED 2026-10-04 by `DESIGN-REVISION-1.md`.** CireSnave ruled that agents must be tracked
+> dynamically, not hard-coded in a roster file. Kept as the dated record of the first proposal; its example
+> is still useful as a snapshot of what the 15 live lanes looked like on 2026-10-03.
+
+
 Follows `DESIGN.md` §1.3. **Draft for review; nothing implements it yet.**
 Location: `C:/Projects/.agentlife/roster.json`, outside every repo. Written by `agentlife roster …` or by
 hand; never by a lane's hook.
