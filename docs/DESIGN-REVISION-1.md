@@ -1,7 +1,8 @@
 # agentlife — design revision 1: a dynamic registry, consent at restore time
 
 **Status: PROPOSAL for PM approval. Docs only, no code.** Written 2026-10-04 against the PM's
-`[TASK] design-revision`. **Supersedes**, where they conflict: `DESIGN.md` §1 (roster), §2.1–2.4 (what
+`[TASK] design-revision`. **Further revised by `DESIGN-REVISION-2.md`** (park/stop, durable consent, timed
+approvals), which wins where they conflict. **Supersedes**, where they conflict: `DESIGN.md` §1 (roster), §2.1–2.4 (what
 restore reads), §4.1/§4.3/§4.4 (trust), §7 (roster-lost row), and in full `ROSTER-SCHEMA.md` and
 `V0.1.md`. Everything else in `DESIGN.md` stands (liveness method, launch mechanics, peer join, test
 discipline, failure modes).
@@ -304,6 +305,12 @@ A Hello prompt itself is a notification: Windows raises it on the desktop. If he
 | tokens a restored session spends before settling | first-turn context **51 k – 126 k** (median ≈ 53 k); first 10 assistant records total **0.57 M – 1.32 M** input-side tokens (cache reads and creation included) and **2 k – 5 k** output (n = 48 restored sessions found in `~/.claude/projects`) | first-user-message matches `read <role> HANDOFF and continue`. **Caveat:** counted per transcript assistant record, which may count one API call more than once. Order of magnitude, not a price. |
 
 ### 6.2 What those numbers mean
+
+> **Superseded in part by `DESIGN-REVISION-2.md` §1 (2026-10-04).** The first bullet below says hundreds
+> "cannot fit this machine". CireSnave corrected the framing: the models run in the cloud, and the measured
+> ≈ 0.65 GB per lane is each *local client process*; the machine handles the requests. The memory limit is
+> real for local clients only, and is met by parking plus a bigger machine, so the design scales instead of
+> capping. The measurement itself stands; the sentence below is left as the dated record.
 
 - **Hundreds running at once cannot fit this machine.** At ≈ 0.65 GB idle each, 22 GB free is ≈ 34 more
   lanes of idle footprint, and 100 lanes ≈ 65 GB, more than the 63 GB installed, before a single build.
