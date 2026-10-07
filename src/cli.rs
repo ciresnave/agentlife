@@ -43,6 +43,14 @@ pub enum Command {
         agent: String,
         no_start: bool,
     },
+    /// `flags` are `(config key, value)` pairs from the pacing flags, applied as the flag layer.
+    Restore {
+        dry_run: bool,
+        json: bool,
+        only: Option<Vec<String>>,
+        priority: Vec<String>,
+        flags: Vec<(String, String)>,
+    },
     Version,
     Help,
 }
@@ -75,6 +83,15 @@ USAGE:
         --timeout, default 600 s) until it provably has, then ends exactly that process. Without
         --yes it only prints what it would do. A lane cannot stop itself yet. A pinned agent (the PM,
         or one pinned by hand) needs --confirm with its name. <agent> is an id or a name.
+
+    agentlife restore --dry-run [--json] [--only a,b] [--priority a,b] [--batch N] [--delay S]
+                      [--max-running N] [--tabs-per-window N] [--free-ram-floor GB]
+        Prints the plan for bringing back every agent that should be running and is not: the PM
+        first and alone, then the --priority list, then the most recently active, in batches, in
+        windows agentlife-<k>, within --max-running and the memory floor, with each agent's rebuilt
+        launch arguments (anything not passed on is listed) and a hash of the whole plan. Writes
+        nothing and starts nothing. Without --dry-run it refuses: starting agents needs a person's
+        consent, which is not built yet.
 
     agentlife pin <agent> | unpin <agent>
         Never lazy-stop this agent. A lane may pin itself.
@@ -153,6 +170,50 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 }
             }
             Ok(Command::Reconcile { dry_run, json })
+        }
+        "restore" => {
+            let (mut dry_run, mut json) = (false, false);
+            let (mut only, mut priority) = (None, Vec::new());
+            let mut flags = Vec::new();
+            let list = |v: &str| -> Vec<String> {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            };
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                let mut value = |flag: &str| -> Result<String, String> {
+                    it.next()
+                        .cloned()
+                        .ok_or_else(|| format!("{flag} needs a value"))
+                };
+                match a.as_str() {
+                    "--dry-run" => dry_run = true,
+                    "--json" => json = true,
+                    "--only" => only = Some(list(&value("--only")?)),
+                    "--priority" => priority = list(&value("--priority")?),
+                    "--batch" => flags.push(("batch_size".to_string(), value("--batch")?)),
+                    "--delay" => flags.push(("batch_delay_secs".to_string(), value("--delay")?)),
+                    "--max-running" => {
+                        flags.push(("max_running".to_string(), value("--max-running")?))
+                    }
+                    "--tabs-per-window" => {
+                        flags.push(("tabs_per_window".to_string(), value("--tabs-per-window")?))
+                    }
+                    "--free-ram-floor" => {
+                        flags.push(("free_ram_floor_gb".to_string(), value("--free-ram-floor")?))
+                    }
+                    other => return Err(format!("unknown argument to restore: {other:?}")),
+                }
+            }
+            Ok(Command::Restore {
+                dry_run,
+                json,
+                only,
+                priority,
+                flags,
+            })
         }
         "pin" | "unpin" => {
             let (agent, tail) = one_agent(rest, cmd)?;
@@ -312,6 +373,56 @@ mod tests {
     }
 
     #[test]
+    fn restore_flags() {
+        assert_eq!(
+            p(&["restore", "--dry-run"]),
+            Ok(Command::Restore {
+                dry_run: true,
+                json: false,
+                only: None,
+                priority: vec![],
+                flags: vec![]
+            })
+        );
+        assert_eq!(
+            p(&[
+                "restore",
+                "--dry-run",
+                "--json",
+                "--only",
+                "a, b",
+                "--priority",
+                "x",
+                "--batch",
+                "5",
+                "--delay",
+                "30",
+                "--max-running",
+                "12",
+                "--tabs-per-window",
+                "4",
+                "--free-ram-floor",
+                "16"
+            ]),
+            Ok(Command::Restore {
+                dry_run: true,
+                json: true,
+                only: Some(vec!["a".into(), "b".into()]),
+                priority: vec!["x".into()],
+                flags: vec![
+                    ("batch_size".into(), "5".into()),
+                    ("batch_delay_secs".into(), "30".into()),
+                    ("max_running".into(), "12".into()),
+                    ("tabs_per_window".into(), "4".into()),
+                    ("free_ram_floor_gb".into(), "16".into()),
+                ]
+            })
+        );
+        assert!(p(&["restore", "--batch"]).is_err(), "a flag with no value");
+        assert!(p(&["restore", "--force"]).is_err());
+    }
+
+    #[test]
     fn reconcile_flags() {
         assert_eq!(
             p(&["reconcile"]),
@@ -448,7 +559,9 @@ mod tests {
         assert_eq!(p(&["--help"]), Ok(Command::Help));
         assert_eq!(p(&["list", "-h"]), Ok(Command::Help));
         assert_eq!(p(&["--version"]), Ok(Command::Version));
-        assert!(p(&["restore"]).unwrap_err().contains("restore"));
+        assert!(p(&["launch-everything"])
+            .unwrap_err()
+            .contains("launch-everything"));
     }
 
     #[test]
@@ -458,6 +571,7 @@ mod tests {
             "hook SessionEnd",
             "list",
             "reconcile",
+            "restore --dry-run",
             "park",
             "stop",
             "unpark",

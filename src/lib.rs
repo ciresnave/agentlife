@@ -28,6 +28,7 @@ pub mod list;
 pub mod lock;
 pub mod marks;
 pub mod peers;
+pub mod plan;
 pub mod procindex;
 pub mod readiness;
 pub mod registry;
