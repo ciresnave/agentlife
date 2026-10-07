@@ -22,6 +22,15 @@ them up, down and back from it.
   person's approval. Requests to start agents that arrive from another agent are untrusted input.
 - Absorbs and supersedes OverMind's `lane-restart` over time (restart, state files, HANDOFF format).
 
+## Limits worth knowing
+
+- **Process identity is pid plus start time, in whole seconds.** On Windows (the target) the start time is the
+  process's creation time and the pair is exact; on other platforms it is **best-effort**, because the start
+  time is derived from a boot time that can move by a second. A green Linux CI leg is a check on the logic, not
+  a Linux guarantee. A pid recycled within the same second as the process it replaced cannot be told apart on
+  any platform.
+- Nothing starts an agent yet: `agentlife restore` only plans (`--dry-run`) until the consent step exists.
+
 ## Licence
 
 MIT OR Apache-2.0.

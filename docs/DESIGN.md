@@ -231,6 +231,12 @@ previous one is settled *and* the delay has passed.
    `-n`).
 4. Else **ABSENT** → start.
 
+**How exact "alive" is (added 2026-10-07).** The `(pid, start time)` pair is exact on Windows, where the start
+time is the creation time. Off Windows it is best-effort (`sysinfo` derives it from a boot time that can drift
+by a second; unproven, tracked in an issue), and in whole seconds on every platform, so a pid recycled within
+the second of the process it replaced is indistinguishable. No tolerance is applied, because it would widen
+that window. A green Linux CI leg checks the logic, not Linux identity.
+
 The failure direction is **never start a duplicate**: two sessions in one cwd would both write
 `.lane-state/<role>.json` and both claim the same peer role, which is §0.3.
 
