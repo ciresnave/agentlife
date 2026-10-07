@@ -58,8 +58,9 @@ and every process they start is a stand-in they built themselves, killed at the 
   process**, so the variable does survive `wt.exe` on this machine (the hook also joins by name and directory,
   so it does not depend on this). Whether a window close, a kill or a shutdown still delivers `SessionEnd`
   is the M6 canary and is still unknown.
-* **`conhost.exe` is unreliable as a fallback here.** Back to back it started its command about half the
-  time; failures exited within 0.2 to 0.8 s, or showed the host and lost it within 200 ms, leaving no trace
+* **`conhost.exe` is unreliable as a fallback, here and on CI.** On the **GitHub Windows runner it failed on 5 of 6
+  attempts** of one commit (CI run 37622422236, head 2ded6a6): each of its five start attempts exited after about
+  120 ms with exit code 0 without running the command; the sixth attempt passed. On this machine, back to back, it started its command about half the time; failures exited within 0.2 to 0.8 s, or showed the host and lost it within 200 ms, leaving no trace
   of it having run. In some periods it failed five attempts in a row (each `conhost.exe` exiting after about
   270 ms). So a conhost start is only believed when the host has been seen as its child **for a full
   second**; otherwise it is ended and started again (up to five attempts); and if every attempt fails the
@@ -90,10 +91,13 @@ and every process they start is a stand-in they built themselves, killed at the 
   `[claude, prompt, flags...]`, got its own id and none of the identity variables; one agent shows lane-state
   progress and is Working, the others are AwaitingDialog; the report and journal are on disk; and the next
   plan is empty (idempotence against the real process table). Twelve stand-ins, PM first, batches of 5 with 1 s
-  delay, never more than a batch at once. The real spawner through **`conhost.exe`** (Windows): CI requires it
-  (`AGENTLIFE_REQUIRE_CONHOST=1`); a developer machine where `conhost.exe` will not run a command skips that one
-  test and says so. The real **`wt.exe`** test opens real Windows Terminal tabs, so it runs only with
-  `AGENTLIFE_REAL_WT=1`.
+  delay, never more than a batch at once. The real spawner's **fallback path** runs on both CI legs with a
+  **stand-in console host** (`examples/fake_conhost.rs`, which runs the command line it is given and stays
+  alive while it runs): the same `RealSpawner` code, the same working directory and environment handling,
+  the same verification by process tree, the whole chain through the real hook. The **real `conhost.exe`** and
+  the **real `wt.exe`** are opt-in (`AGENTLIFE_REAL_CONHOST=1`, `AGENTLIFE_REAL_WT=1`; the second opens real
+  Windows Terminal tabs): on this machine `wt.exe` worked (3 of 3 tabs, with the gap) and `conhost.exe` did
+  not reliably; on CI `conhost.exe` failed 5 of 6 attempts, so it cannot be a required test.
 
 ## Not here
 
