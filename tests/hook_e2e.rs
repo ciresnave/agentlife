@@ -1039,6 +1039,22 @@ fn pm_runs(d: &Down, park_args: &[&str]) -> i32 {
     c[0].2
 }
 
+/// Everything the stand-ins' commands printed, for failure messages.
+fn command_output(rig: &Rig) -> String {
+    let mut out = String::new();
+    if let Ok(rd) = std::fs::read_dir(rig.dir.path()) {
+        let mut files: Vec<_> = rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".cmdout"))
+            .collect();
+        files.sort_by_key(|e| e.file_name());
+        for f in files {
+            out.push_str(&std::fs::read_to_string(f.path()).unwrap_or_default());
+        }
+    }
+    out
+}
+
 fn journal_kinds(rig: &Rig) -> Vec<String> {
     Journal::new(rig.home.join("registry"), std::sync::Arc::new(SystemClock))
         .read_all()
@@ -1059,7 +1075,13 @@ fn the_pm_gracefully_parks_a_running_lane_and_the_process_really_ends() {
     let lane = play_the_lane(&d);
     let code = pm_runs(&d, &["--yes", "--timeout", "60"]);
     lane.join().unwrap();
-    assert_eq!(code, 0, "park must succeed:\n{}", d.rig.log());
+    assert_eq!(
+        code,
+        0,
+        "park must succeed:\n{}\n--- what the command printed:\n{}",
+        d.rig.log(),
+        command_output(&d.rig)
+    );
 
     // The REAL process is gone: pid and start time, not merely "the pid changed".
     wait_until("the target process to end", 15, || !pid_alive(d.target_pid));

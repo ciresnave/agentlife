@@ -110,13 +110,29 @@ fn main() {
                 // caller is a real registered agent (the only honest way to test who-may-do-what).
                 let args: Vec<&str> = parts.collect();
                 let started = Instant::now();
-                let status = Command::new(&agentlife)
+                let output = Command::new(&agentlife)
                     .args(&args)
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
+                    .output()
                     .expect("run the command");
+                let status = output.status;
+                // Keep what the command said: when a test fails on another OS, this is the only
+                // way to learn WHY (the exit code alone does not say).
+                if let Some(path) = get("--fake-report") {
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(format!("{path}.cmdout"))
+                        .expect("open the command log");
+                    let _ = writeln!(
+                        f,
+                        "$ agentlife {}\n{}{}[exit {}]\n",
+                        args.join(" "),
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                        status.code().unwrap_or(-1)
+                    );
+                }
                 report.push_str(&format!(
                     "CMD\t{}\t{}\n",
                     started.elapsed().as_millis(),
