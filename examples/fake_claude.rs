@@ -87,7 +87,12 @@ fn main() {
         }
     }
     if let Some(path) = get("--fake-report") {
-        std::fs::write(path, report).expect("write the report");
+        // Atomic: a test polls for this file, and a plain `fs::write` creates it before its content is
+        // there, so a poller could read it empty (it did, once, on the Windows CI leg: the test saw
+        // zero report lines). Write beside it, then rename into place.
+        let part = format!("{path}.part");
+        std::fs::write(&part, report).expect("write the report");
+        std::fs::rename(&part, &path).expect("publish the report");
     }
     if let Some(secs) = get("--fake-hold").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));
