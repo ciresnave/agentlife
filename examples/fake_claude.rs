@@ -34,10 +34,19 @@ fn main() {
             .filter(|a| *a != "--fake-nest")
             .cloned()
             .collect();
-        let status = Command::new(std::env::current_exe().expect("own path"))
-            .args(&rest)
-            .status()
-            .expect("start the nested copy");
+        let exe = std::env::current_exe().expect("own path");
+        // Retry on "Text file busy" (ETXTBSY): see `spawn_retrying` in tests/hook_e2e.rs.
+        let mut tries = 0;
+        let status = loop {
+            match Command::new(&exe).args(&rest).status() {
+                Ok(s) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("start the nested copy: {e}"),
+            }
+        };
         std::process::exit(status.code().unwrap_or(1));
     }
 

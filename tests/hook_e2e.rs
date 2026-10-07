@@ -111,7 +111,7 @@ impl Rig {
         for (k, v) in env {
             c.env(k, v);
         }
-        c.spawn().expect("start the stand-in claude")
+        spawn_retrying(&mut c)
     }
 
     /// Runs a stand-in to completion (hold 0) and returns its report lines.
@@ -147,6 +147,25 @@ fn hook_total_ms(log: &str, event: &str) -> Option<u128> {
         .and_then(|l| l.split("total ").nth(1))
         .and_then(|rest| rest.split(' ').next())
         .and_then(|n| n.parse().ok())
+}
+
+/// Starts `c`, retrying while Linux answers "Text file busy" (ETXTBSY, errno 26).
+///
+/// The tests copy an executable and then run it, in parallel. A `fork` in a sibling test can hold
+/// the copy's write handle open for the instant before its own `exec`, and `exec`ing a file that
+/// anyone holds open for writing fails with ETXTBSY. It is a property of the test harness, not of
+/// the hook, and it showed up only on the Ubuntu CI leg (two of three attempts at one commit).
+fn spawn_retrying(c: &mut Command) -> Child {
+    for _ in 0..100 {
+        match c.spawn() {
+            Ok(child) => return child,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("start the stand-in claude: {e}"),
+        }
+    }
+    panic!("start the stand-in claude: still `Text file busy` after 5 s");
 }
 
 fn unique() -> u128 {

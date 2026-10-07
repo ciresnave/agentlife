@@ -309,14 +309,29 @@ mod tests {
             "start time {} should be between {before} and {after}",
             got.start_secs
         );
-        let exe = got
-            .exe
-            .clone()
-            .expect("exe must be readable for our own child");
-        let lower = exe.to_lowercase();
+        // Between fork and exec a child still shows its PARENT's image, and on the Ubuntu CI
+        // leg this test once read exactly that (`exe was .../agentlife-<hash>`, the test binary).
+        // So poll until the image becomes the program we started, and if it never does, say
+        // everything that was seen, so the explanation is checked instead of assumed.
+        let mut seen: Vec<String> = Vec::new();
+        let mut converged = false;
+        for _ in 0..40 {
+            if let Some(i) = SysinfoTable.identity_of(pid) {
+                let exe = i.exe.unwrap_or_default();
+                let lower = exe.to_lowercase();
+                if lower.contains("ping") || lower.contains("sleep") {
+                    converged = true;
+                    break;
+                }
+                if seen.last() != Some(&exe) {
+                    seen.push(exe);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert!(
-            lower.contains("ping") || lower.contains("sleep"),
-            "exe was {exe}"
+            converged,
+            "the child's exe never became ping/sleep; images seen over 2 s: {seen:?}"
         );
 
         // The real table agrees with itself, and disagrees about a recycled pid.
