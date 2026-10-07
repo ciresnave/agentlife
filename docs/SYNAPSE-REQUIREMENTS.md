@@ -54,3 +54,22 @@ rule (for example role names assigned by `synapse id`), say so before either sid
 2. Should any session be allowed to read depths for *every* role, or only agentlife's? (Counts reveal that
    mail exists, not its content, on a single-user loopback; the same-user limit applies either way.)
 3. Roughly when are M7 and the M9 cutover expected? agentlife can sequence its own work around that.
+
+## Answers received (relayed by the PM, 2026-10-07)
+
+Only what was actually answered; S-2 (a role for agentlife) and S-3 (an event stream) have no answer
+recorded here.
+
+- **S-1 is built and merged** (Synapse #92, `6.0.0-rc.12`). Every role in `GET /v1/list` carries
+  `pending: {queued, leased, oldest_enqueued_at}` or `pending: null`.
+  - `queued` = what a fetch made now would return. `leased` = held by the current epoch and not expired.
+    `oldest_enqueued_at` is taken over both, and is `null` when there is no mail.
+  - **`pending: null` means UNKNOWN** (the mailbox could not be read). The list still returns 200 with
+    `online` and `last_seen`. agentlife's rule: **never wake on `null`, and never lazy-stop on `null`**.
+  - Counts only; any session may read every role's (this answers question 2 above).
+- **Poll no faster than every 10 s** until Synapse says otherwise: the depth scan costs up to 10,000 metadata
+  rows per role under the mailbox mutex per poll, and Synapse has not yet measured it (this is the open part of
+  question 1; the counts are exposed, but their cost is not yet known).
+- **Timing (question 3): no date.** M7 (the Claude Code channel adapter) comes after M6 (adapters). **M9, the
+  cutover from claude-peers, needs everything and changes how every lane messages, so it needs CireSnave's
+  go.** Synapse drafts the M6/M7 plan next. Until then lazy start stays **off**, as planned.
