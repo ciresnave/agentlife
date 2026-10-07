@@ -9,6 +9,19 @@ readme = "README.md"
 keywords = ["agents", "lifecycle", "restart", "orchestration"]
 categories = ["development-tools", "command-line-utilities"]
 
+[lib]
+name = "agentlife"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agentlife"
 path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
