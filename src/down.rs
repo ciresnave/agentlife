@@ -93,6 +93,9 @@ impl Terminator for SysinfoTerminator {
             ProcessRefreshKind::nothing(),
         );
         let proc_ = sys.process(pid).ok_or(KillError::NotRunning)?;
+        if crate::identity::process_is_dead(proc_) {
+            return Err(KillError::NotRunning);
+        }
         if proc_.start_time() != expected.start_secs {
             return Err(KillError::Mismatch {
                 expected_start: expected.start_secs,

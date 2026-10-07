@@ -97,6 +97,18 @@ fn normalise(p: &str) -> String {
     }
 }
 
+/// A process that has been killed but not yet reaped by its parent (a **zombie** on Linux; Windows
+/// has none) still has an entry in the process table. It is not running. Treating it as running made
+/// a stop that had WORKED report "still running after 5 s" and put the intent back: found when the
+/// graceful-stop end-to-end test failed on the Ubuntu CI leg in 6 of 6 attempts, because the test
+/// is the dead process's parent and had not yet waited for it.
+pub fn process_is_dead(p: &sysinfo::Process) -> bool {
+    matches!(
+        p.status(),
+        sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+    )
+}
+
 /// The real process table, via `sysinfo`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SysinfoTable;
@@ -114,6 +126,9 @@ impl ProcessTable for SysinfoTable {
             ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
         );
         let proc_ = sys.process(p)?;
+        if process_is_dead(proc_) {
+            return None;
+        }
         Some(ProcessIdentity {
             pid,
             start_secs: proc_.start_time(),
@@ -141,6 +156,7 @@ impl SnapshotTable {
         Self(
             sys.processes()
                 .iter()
+                .filter(|(_, p)| !process_is_dead(p))
                 .map(|(pid, p)| {
                     let pid = pid.as_u32();
                     (
@@ -382,5 +398,30 @@ mod tests {
     #[test]
     fn the_real_table_returns_nothing_for_a_pid_that_cannot_exist() {
         assert_eq!(SysinfoTable.identity_of(u32::MAX - 1), None);
+    }
+
+    /// A killed process its parent has not reaped is a zombie: still in the table, not running.
+    /// Only Linux has them, so this runs only there (and only CI runs it).
+    #[cfg(unix)]
+    #[test]
+    fn a_zombie_is_not_running_in_either_real_table() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("start a child that exits at once");
+        let pid = child.id();
+        // Do NOT wait for it: that is what keeps it a zombie. Give it time to exit.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(
+            SysinfoTable.identity_of(pid),
+            None,
+            "a zombie is not running"
+        );
+        assert_eq!(
+            SnapshotTable::capture().identity_of(pid),
+            None,
+            "nor in a snapshot"
+        );
+        child.wait().unwrap();
     }
 }
