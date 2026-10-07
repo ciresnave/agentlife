@@ -1,6 +1,6 @@
 [package]
 name = "agentlife"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 description = "Agent lifecycle control: bring a fleet of AI coding agents up, down and back after a restart, from a persistent roster."
 license = "MIT OR Apache-2.0"
