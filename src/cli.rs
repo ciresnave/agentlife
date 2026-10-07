@@ -30,10 +30,14 @@ pub enum Command {
     Park {
         agent: String,
         confirm: Option<String>,
+        yes: bool,
+        timeout: Option<u64>,
     },
     Stop {
         agent: String,
         confirm: Option<String>,
+        yes: bool,
+        timeout: Option<u64>,
     },
     Unpark {
         agent: String,
@@ -62,12 +66,15 @@ USAGE:
         (a person ended its session before any shutdown) or killed. Writes down each
         \"closed on purpose\" verdict the first time it is derived; --dry-run writes nothing.
 
-    agentlife park <agent> [--confirm <name>]
-    agentlife stop <agent> [--confirm <name>]
+    agentlife park <agent> [--confirm <name>] [--yes] [--timeout <secs>]
+    agentlife stop <agent> [--confirm <name>] [--yes] [--timeout <secs>]
     agentlife unpark <agent> --no-start
-        Mark an agent that is NOT running as closed (parked is kept forever; stopped ages out), or
-        clear the mark. They never touch a process. A running agent is refused for now. A pinned
-        agent (the PM, or one pinned by hand) needs --confirm with its name. <agent> is an id or a name.
+        Mark an agent as closed (parked is kept forever; stopped ages out), or clear the mark.
+        A NOT-running agent is just marked. A RUNNING agent is stopped GRACEFULLY: it is asked, over
+        claude-peers, to write its HANDOFF and run `lane-restart assert-idle`; agentlife waits (up to
+        --timeout, default 600 s) until it provably has, then ends exactly that process. Without
+        --yes it only prints what it would do. A lane cannot stop itself yet. A pinned agent (the PM,
+        or one pinned by hand) needs --confirm with its name. <agent> is an id or a name.
 
     agentlife pin <agent> | unpin <agent>
         Never lazy-stop this agent. A lane may pin itself.
@@ -165,12 +172,24 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "park" | "stop" => {
             let (agent, tail) = one_agent(rest, cmd)?;
             let mut confirm = None;
+            let (mut yes, mut timeout) = (false, None);
             let mut it = tail.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--confirm" => {
                         confirm =
                             Some(it.next().ok_or("--confirm needs the agent's name")?.clone());
+                    }
+                    "--yes" => yes = true,
+                    "--timeout" => {
+                        let v = it.next().ok_or("--timeout needs a number of seconds")?;
+                        let secs: u64 = v
+                            .parse()
+                            .map_err(|_| format!("--timeout wants whole seconds, not {v:?}"))?;
+                        if secs == 0 {
+                            return Err("--timeout must be at least 1 second".to_string());
+                        }
+                        timeout = Some(secs);
                     }
                     other => return Err(format!("unknown argument to {cmd}: {other:?}")),
                 }
@@ -179,11 +198,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 Command::Park {
                     agent: agent.clone(),
                     confirm,
+                    yes,
+                    timeout,
                 }
             } else {
                 Command::Stop {
                     agent: agent.clone(),
                     confirm,
+                    yes,
+                    timeout,
                 }
             })
         }
@@ -332,19 +355,39 @@ mod tests {
             p(&["park", "lane"]),
             Ok(Command::Park {
                 agent: "lane".into(),
-                confirm: None
+                confirm: None,
+                yes: false,
+                timeout: None
             })
         );
         assert_eq!(
             p(&["stop", "PM", "--confirm", "PM"]),
             Ok(Command::Stop {
                 agent: "PM".into(),
-                confirm: Some("PM".into())
+                confirm: Some("PM".into()),
+                yes: false,
+                timeout: None
             })
         );
         assert!(p(&["park"]).is_err());
         assert!(p(&["park", "lane", "--confirm"]).is_err());
         assert!(p(&["park", "lane", "--force"]).is_err());
+    }
+
+    #[test]
+    fn park_and_stop_take_yes_and_a_timeout_for_a_running_agent() {
+        assert_eq!(
+            p(&["park", "lane", "--yes", "--timeout", "90"]),
+            Ok(Command::Park {
+                agent: "lane".into(),
+                confirm: None,
+                yes: true,
+                timeout: Some(90)
+            })
+        );
+        assert!(p(&["stop", "lane", "--timeout"]).is_err());
+        assert!(p(&["stop", "lane", "--timeout", "soon"]).is_err());
+        assert!(p(&["stop", "lane", "--timeout", "0"]).is_err());
     }
 
     #[test]

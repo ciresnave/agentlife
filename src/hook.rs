@@ -40,7 +40,7 @@ pub const MAX_SESSIONS_KEPT: usize = 20;
 /// The reasons `SessionEnd` documents as matchers (hooks docs, fetched 2026-10-06).
 pub const KNOWN_END_REASONS: &[&str] = &["clear", "resume", "logout", "prompt_input_exit", "other"];
 
-const SHELLS: &[&str] = &["bash", "sh", "cmd", "powershell", "pwsh"];
+pub(crate) const SHELLS: &[&str] = &["bash", "sh", "cmd", "powershell", "pwsh"];
 const TERMINALS: &[&str] = &["windowsterminal", "openconsole", "conhost", "wt"];
 const HOSTS: &[&str] = &["lane-restart", "agentlife"];
 
@@ -488,6 +488,31 @@ impl SnapshotParents {
                 .map(|(pid, ppid, name, start)| (*pid, (*ppid, name.to_string(), *start)))
                 .collect(),
         }
+    }
+}
+
+impl crate::readiness::ProcTree for SnapshotParents {
+    /// Every process below `pid`. A recorded parent link is only believed if the child did not start
+    /// BEFORE its parent: Windows never rewrites a parent pid, so a "child" older than its "parent"
+    /// is a reused pid (OverMind's tab-closing rule, learned from a real misidentification).
+    fn descendants(&self, pid: u32) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![pid];
+        while let Some(parent) = frontier.pop() {
+            let parent_start = self.procs.get(&parent).map(|p| p.2);
+            for (child, (ppid, name, start)) in &self.procs {
+                if *ppid == Some(parent)
+                    && parent_start.is_none_or(|ps| *start >= ps)
+                    && seen.insert(*child)
+                {
+                    out.push((*child, norm_image(name)));
+                    frontier.push(*child);
+                }
+            }
+        }
+        out.sort();
+        out
     }
 }
 
@@ -1422,5 +1447,31 @@ mod tests {
             r.registry.get(&agent_id).unwrap().unwrap().intent,
             Intent::Closed { .. }
         ));
+    }
+
+    #[test]
+    fn descendants_are_found_at_any_depth_and_a_reused_parent_pid_is_not_believed() {
+        use crate::readiness::ProcTree;
+        // claude(10) <- bash(20) <- sleep(30); bun(40) is a direct helper.
+        // pid 50 CLAIMS parent 10 but started before claude did: a reused pid, not a child.
+        let snap = SnapshotParents::from_entries(&[
+            (10, Some(1), "claude.exe", 1000),
+            (20, Some(10), "bash.exe", 1010),
+            (30, Some(20), "sleep.exe", 1020),
+            (40, Some(10), "bun.exe", 1005),
+            (50, Some(10), "ghost.exe", 500),
+            (60, Some(2), "unrelated.exe", 1100),
+        ]);
+        let d = snap.descendants(10);
+        assert_eq!(
+            d,
+            vec![
+                (20, "bash".to_string()),
+                (30, "sleep".to_string()),
+                (40, "bun".to_string())
+            ],
+            "depth 2 is included; the reused pid and the unrelated process are not"
+        );
+        assert!(snap.descendants(99).is_empty());
     }
 }

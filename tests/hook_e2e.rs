@@ -805,3 +805,411 @@ fn the_pm_by_the_visible_rule_can_park_and_unpark_a_stopped_agent_and_a_lookalik
         agentlife::registry::Intent::Wanted
     );
 }
+
+// ---- M2b: graceful stop of a RUNNING agent, against real processes -------------------------------
+//
+// A stand-in `claude` plays the target lane (registered through the real hook, with a long-lived
+// child standing in for its MCP helper). A fake claude-peers broker listens on REAL loopback and
+// speaks the broker's two endpoints. The PM is another stand-in that runs the real `agentlife park`
+// as its child. A test thread plays the lane's side: when the wrap-up message arrives it writes a
+// HANDOFF and an idle claim, exactly what the message asks. The kill at the end is real.
+
+use agentlife::down::{SysinfoTerminator, Terminator};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+struct FakeBroker {
+    addr: SocketAddr,
+    /// `(to_id, text)` of every message the broker was asked to deliver.
+    received: Arc<Mutex<Vec<(String, String)>>>,
+    peers: Arc<Mutex<String>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl FakeBroker {
+    fn start() -> FakeBroker {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let peers = Arc::new(Mutex::new("[]".to_string()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (r, p, st) = (received.clone(), peers.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !st.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut conn, _)) => {
+                        conn.set_nonblocking(false).ok();
+                        conn.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 4096];
+                        // Read the head, then exactly Content-Length body bytes.
+                        loop {
+                            let n = conn.read(&mut chunk).unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                            let text = String::from_utf8_lossy(&buf).into_owned();
+                            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                                let want: usize = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.to_ascii_lowercase()
+                                            .strip_prefix("content-length:")
+                                            .map(|v| v.trim().parse().unwrap_or(0))
+                                    })
+                                    .unwrap_or(0);
+                                if body.len() >= want {
+                                    break;
+                                }
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&buf).into_owned();
+                        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+                        let reply = if head.starts_with("POST /list-peers") {
+                            p.lock().unwrap().clone()
+                        } else if head.starts_with("POST /send-message") {
+                            let v: serde_json::Value =
+                                serde_json::from_str(body).unwrap_or_default();
+                            r.lock().unwrap().push((
+                                v["to_id"].as_str().unwrap_or("").to_string(),
+                                v["text"].as_str().unwrap_or("").to_string(),
+                            ));
+                            r#"{"ok":true}"#.to_string()
+                        } else {
+                            "{}".to_string()
+                        };
+                        let _ = conn.write_all(
+                            format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes(),
+                        );
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+        FakeBroker {
+            addr,
+            received,
+            peers,
+            stop,
+        }
+    }
+
+    fn set_peers(&self, peers: serde_json::Value) {
+        *self.peers.lock().unwrap() = peers.to_string();
+    }
+
+    fn messages(&self) -> Vec<(String, String)> {
+        self.received.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeBroker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    SysinfoTable.identity_of(pid).is_some()
+}
+
+fn wait_until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while !f() {
+        assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Kills a stand-in (and whatever it started) when the test ends, pass or fail.
+struct Cleanup(Vec<u32>);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            if let Some(id) = SysinfoTable.identity_of(*pid) {
+                let _ = SysinfoTerminator.kill_verified(&id);
+            }
+        }
+    }
+}
+
+struct Down {
+    rig: Rig,
+    broker: FakeBroker,
+    lane_state: PathBuf,
+    target: Child,
+    target_pid: u32,
+    helper_pid: u32,
+    _cleanup: Cleanup,
+}
+
+/// A running target lane `target`, registered through the real hook, with a helper child, plus a
+/// broker that knows the helper as the lane's peer and a config pointing at it.
+fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
+    let rig = Rig::new();
+    let broker = FakeBroker::start();
+    let lane_state = rig.dir.path().join("lane-state");
+    std::fs::create_dir_all(&lane_state).unwrap();
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({
+            "portfolio_root": rig.cwd(),
+            "pin_roles": ["pm"],
+            "peers_addr": broker.addr.to_string(),
+            "lane_state_dir": lane_state.display().to_string(),
+            "down_poll_secs": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let start = rig.payload("t-start.json", "SessionStart", "sess-t", Some("startup"));
+    let script = rig.raw_script("t.txt", &start_line(&start));
+    let report = rig.dir.path().join("t-report.txt");
+    let pidfile = rig.dir.path().join("t-helper.pid");
+    let mut args: Vec<&str> = vec!["-n", "target"];
+    args.extend_from_slice(extra_target_args);
+    let pidfile_s = pidfile.display().to_string();
+    args.extend_from_slice(&["--fake-child", &pidfile_s]);
+    let target = rig.spawn(&args, &script, &report, 120, &[]);
+    let target_pid = target.id();
+    wait_for(&report);
+    let helper_pid: u32 = wait_for(&pidfile).trim().parse().unwrap();
+    let peer_pid = if peers_match { helper_pid } else { 999_999 };
+    broker.set_peers(serde_json::json!([
+        {"id": "peer-t", "pid": peer_pid, "cwd": rig.cwd(), "git_root": null, "tty": null,
+         "registered_at": "t", "last_seen": "t", "summary": "target lane"}
+    ]));
+    Down {
+        rig,
+        broker,
+        lane_state,
+        target,
+        target_pid,
+        helper_pid,
+        _cleanup: Cleanup(vec![target_pid, helper_pid]),
+    }
+}
+
+/// The lane's side of the protocol: once a wrap-up message arrives, write a HANDOFF and an idle
+/// claim for the lane's session. Returns a handle to join.
+fn play_the_lane(d: &Down) -> std::thread::JoinHandle<()> {
+    let received = d.broker.received.clone();
+    let handoff = d.rig.dir.path().join("HANDOFF.md");
+    let state = d.lane_state.join("target.json");
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while received.lock().unwrap().is_empty() {
+            if Instant::now() > deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        std::thread::sleep(Duration::from_millis(400)); // "working"
+        std::fs::write(&handoff, "# HANDOFF - target\nwritten on request\n").unwrap();
+        std::fs::write(
+            &state,
+            serde_json::json!({
+                "role": "target", "session_id": "sess-t", "pid": 1,
+                "busy": false, "subagents_running": 0, "no_background_shells": true,
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "updated_by_event": "Stop"
+            })
+            .to_string(),
+        )
+        .unwrap();
+    })
+}
+
+/// Runs the PM stand-in, which runs `agentlife park target <args>` as its child. Returns that
+/// command's exit code.
+fn pm_runs(d: &Down, park_args: &[&str]) -> i32 {
+    let rig = &d.rig;
+    let p = rig.payload("pm-start.json", "SessionStart", "sess-pm", Some("startup"));
+    let mut cmd = vec!["park", "target"];
+    cmd.extend_from_slice(park_args);
+    let script = rig.raw_script("pm.txt", &(start_line(&p) + &cmd_line(&cmd)));
+    let results = rig.run(&["-n", "PM"], &script, &[]);
+    let c: Vec<_> = results.iter().filter(|r| r.0 == "CMD").collect();
+    assert_eq!(c.len(), 1, "{results:?}\n{}", rig.log());
+    c[0].2
+}
+
+fn journal_kinds(rig: &Rig) -> Vec<String> {
+    Journal::new(rig.home.join("registry"), std::sync::Arc::new(SystemClock))
+        .read_all()
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|e| e.kind)
+        .collect()
+}
+
+#[test]
+fn the_pm_gracefully_parks_a_running_lane_and_the_process_really_ends() {
+    let mut d = running_target(&[], true);
+    assert!(
+        pid_alive(d.target_pid),
+        "the target is running before the park"
+    );
+    let lane = play_the_lane(&d);
+    let code = pm_runs(&d, &["--yes", "--timeout", "60"]);
+    lane.join().unwrap();
+    assert_eq!(code, 0, "park must succeed:\n{}", d.rig.log());
+
+    // The REAL process is gone: pid and start time, not merely "the pid changed".
+    wait_until("the target process to end", 15, || !pid_alive(d.target_pid));
+    let _ = d.target.wait();
+    // The helper below it was not the target and is untouched by agentlife.
+    assert!(
+        pid_alive(d.helper_pid),
+        "agentlife ended only the lane's own process"
+    );
+
+    // It asked exactly once, to the right peer, in the words the protocol needs.
+    let msgs = d.broker.messages();
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert_eq!(msgs[0].0, "peer-t");
+    assert!(
+        msgs[0].1.contains("assert-idle") && msgs[0].1.contains("HANDOFF"),
+        "{}",
+        msgs[0].1
+    );
+    assert!(
+        msgs[0].1.contains("pm-agent:"),
+        "it names who asked: {}",
+        msgs[0].1
+    );
+
+    // The registry says parked, by the PM, and the journal shows the order of events.
+    let rec = record_named(&d.rig, "target");
+    let pm = record_named(&d.rig, "PM");
+    assert!(
+        matches!(&rec.intent, agentlife::registry::Intent::Closed { how: agentlife::registry::ClosedHow::Parked, by, .. } if *by == format!("pm-agent:{}", pm.agent_id)),
+        "{:?}",
+        rec.intent
+    );
+    let kinds = journal_kinds(&d.rig);
+    let pos = |k: &str| {
+        kinds
+            .iter()
+            .position(|x| x == k)
+            .unwrap_or_else(|| panic!("no {k} in {kinds:?}"))
+    };
+    assert!(
+        pos("down-requested") < pos("closed") && pos("closed") < pos("stopped"),
+        "{kinds:?}"
+    );
+}
+
+#[test]
+fn without_yes_nothing_is_asked_and_nothing_is_stopped() {
+    let d = running_target(&[], true);
+    let code = pm_runs(&d, &[]);
+    assert_eq!(
+        code, 2,
+        "a plan only: exit 2, distinct from success and refusal"
+    );
+    assert!(d.broker.messages().is_empty(), "nothing was sent");
+    assert!(pid_alive(d.target_pid), "the target is untouched");
+    assert_eq!(
+        record_named(&d.rig, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
+    assert!(!journal_kinds(&d.rig)
+        .iter()
+        .any(|k| k == "closed" || k == "stopped"));
+}
+
+#[test]
+fn a_lane_that_never_wraps_up_is_left_running() {
+    let d = running_target(&[], true);
+    // No lane simulation: nobody writes a HANDOFF or an idle claim.
+    let code = pm_runs(&d, &["--yes", "--timeout", "4"]);
+    assert_ne!(code, 0, "{}", d.rig.log());
+    assert_eq!(d.broker.messages().len(), 1, "it did ask");
+    assert!(pid_alive(d.target_pid), "and it left the lane running");
+    assert_eq!(
+        record_named(&d.rig, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
+    let kinds = journal_kinds(&d.rig);
+    assert!(kinds.iter().any(|k| k == "down-timeout"), "{kinds:?}");
+    assert!(
+        !kinds.iter().any(|k| k == "closed" || k == "stopped"),
+        "{kinds:?}"
+    );
+}
+
+#[test]
+fn a_live_shell_below_the_lane_blocks_the_stop_even_after_it_wrote_everything() {
+    let d = running_target(&["--fake-shell-child"], true);
+    let lane = play_the_lane(&d);
+    let code = pm_runs(&d, &["--yes", "--timeout", "5"]);
+    lane.join().unwrap();
+    assert_ne!(
+        code,
+        0,
+        "a backgrounded command is a real child process: {}",
+        d.rig.log()
+    );
+    assert!(pid_alive(d.target_pid), "the lane was left running");
+    assert_eq!(
+        record_named(&d.rig, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
+    // The recorded blocker must NAME the live shell. Otherwise a timeout here could just as well be
+    // the lane simulation failing; the happy-path test above is the control (same rig, no shell).
+    let entries = Journal::new(
+        d.rig.home.join("registry"),
+        std::sync::Arc::new(SystemClock),
+    )
+    .read_all()
+    .unwrap()
+    .entries;
+    let timeout = entries
+        .iter()
+        .find(|e| e.kind == "down-timeout")
+        .unwrap_or_else(|| {
+            panic!(
+                "no down-timeout in {:?}",
+                entries.iter().map(|e| &e.kind).collect::<Vec<_>>()
+            )
+        });
+    let blockers: Vec<String> = timeout.data["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "the lane wrote everything, so the shell is the only blocker: {blockers:?}"
+    );
+    assert!(
+        blockers[0].contains("a live shell is running below it"),
+        "{blockers:?}"
+    );
+}
+
+#[test]
+fn a_lane_that_cannot_be_found_among_the_peers_is_not_asked_and_not_stopped() {
+    // The broker has a peer, but its helper is not below the target's process: the join is by
+    // parent process, so this peer is nobody's.
+    let d = running_target(&[], false);
+    let lane = play_the_lane(&d);
+    let code = pm_runs(&d, &["--yes", "--timeout", "4"]);
+    assert_ne!(code, 0, "{}", d.rig.log());
+    assert!(d.broker.messages().is_empty(), "nobody was messaged");
+    assert!(pid_alive(d.target_pid));
+    assert_eq!(
+        record_named(&d.rig, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
+    drop(lane); // the lane thread gives up on its own after its own deadline
+}

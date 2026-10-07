@@ -17,6 +17,7 @@ pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod control;
+pub mod down;
 pub mod home;
 pub mod hook;
 pub mod identity;
@@ -26,7 +27,9 @@ pub mod journal;
 pub mod list;
 pub mod lock;
 pub mod marks;
+pub mod peers;
 pub mod procindex;
+pub mod readiness;
 pub mod registry;
 pub mod select;
 

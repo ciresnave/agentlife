@@ -35,6 +35,10 @@ pub const KEYS: &[&str] = &[
     "waiting_mark_ttl_hours",
     "pin_roles",
     "portfolio_root",
+    "peers_addr",
+    "lane_state_dir",
+    "down_timeout_secs",
+    "down_poll_secs",
     "wake_poll_secs",
     "max_wakes_per_agent_per_hour",
     "max_wakes_per_minute",
@@ -131,6 +135,13 @@ pub struct Config {
     pub pin_roles: Vec<String>,
     /// The directory the portfolio's PM lane is launched in; with `pin_roles` it names the PM.
     pub portfolio_root: String,
+    /// The claude-peers broker (loopback only), used to ask a lane to wrap up.
+    pub peers_addr: SocketAddr,
+    /// OverMind's `lane-restart` state directory. agentlife only ever READS it.
+    pub lane_state_dir: String,
+    /// How long `park`/`stop` waits for a lane to write its HANDOFF and assert it is idle.
+    pub down_timeout_secs: u64,
+    pub down_poll_secs: u64,
     pub wake_poll_secs: u64,
     pub max_wakes_per_agent_per_hour: u32,
     pub max_wakes_per_minute: u32,
@@ -159,6 +170,10 @@ impl Default for Config {
             waiting_mark_ttl_hours: 24,
             pin_roles: vec!["pm".to_string()],
             portfolio_root: "C:/Projects".to_string(),
+            peers_addr: SocketAddr::from(([127, 0, 0, 1], 7899)),
+            lane_state_dir: "C:/Projects/.lane-state".to_string(),
+            down_timeout_secs: 600,
+            down_poll_secs: 2,
             wake_poll_secs: 10,
             max_wakes_per_agent_per_hour: 6,
             max_wakes_per_minute: 10,
@@ -221,6 +236,10 @@ pub struct Layer {
     pub waiting_mark_ttl_hours: Option<u32>,
     pub pin_roles: Option<Vec<String>>,
     pub portfolio_root: Option<String>,
+    pub peers_addr: Option<String>,
+    pub lane_state_dir: Option<String>,
+    pub down_timeout_secs: Option<u64>,
+    pub down_poll_secs: Option<u64>,
     pub wake_poll_secs: Option<u64>,
     pub max_wakes_per_agent_per_hour: Option<u32>,
     pub max_wakes_per_minute: Option<u32>,
@@ -280,6 +299,10 @@ impl Layer {
             "max_wakes_per_minute" => self.max_wakes_per_minute = Some(parse(key, value)?),
             "synapse_addr" => self.synapse_addr = Some(value.trim().to_string()),
             "portfolio_root" => self.portfolio_root = Some(value.trim().to_string()),
+            "peers_addr" => self.peers_addr = Some(value.trim().to_string()),
+            "lane_state_dir" => self.lane_state_dir = Some(value.trim().to_string()),
+            "down_timeout_secs" => self.down_timeout_secs = Some(parse(key, value)?),
+            "down_poll_secs" => self.down_poll_secs = Some(parse(key, value)?),
             "synapse_account" => self.synapse_account = Some(value.trim().to_string()),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         }
@@ -405,6 +428,32 @@ impl Config {
                 why: format!("{bad:?} is not a plain identifier"),
             });
         }
+        let peers_addr = match pick(
+            flags.peers_addr.clone(),
+            env.peers_addr.clone(),
+            file.peers_addr.clone(),
+        ) {
+            Some(s) => {
+                let a: SocketAddr = parse("peers_addr", &s)?;
+                if !a.ip().is_loopback() {
+                    return Err(ConfigError::Invalid {
+                        key: "peers_addr",
+                        why: format!(
+                            "{a} is not a loopback address; the claude-peers broker is local only"
+                        ),
+                    });
+                }
+                a
+            }
+            None => d.peers_addr,
+        };
+        let lane_state_dir = field!(lane_state_dir);
+        if lane_state_dir.is_empty() || lane_state_dir.contains(';') {
+            return Err(ConfigError::Invalid {
+                key: "lane_state_dir",
+                why: format!("{lane_state_dir:?} is not a usable directory name"),
+            });
+        }
         let portfolio_root = field!(portfolio_root);
         if portfolio_root.is_empty() || portfolio_root.contains(';') {
             return Err(ConfigError::Invalid {
@@ -469,6 +518,10 @@ impl Config {
             waiting_mark_ttl_hours: field!(waiting_mark_ttl_hours),
             pin_roles,
             portfolio_root,
+            peers_addr,
+            lane_state_dir,
+            down_timeout_secs: at_least_one("down_timeout_secs", field!(down_timeout_secs))?,
+            down_poll_secs: at_least_one("down_poll_secs", field!(down_poll_secs))?,
             wake_poll_secs: at_least_one("wake_poll_secs", field!(wake_poll_secs))?,
             max_wakes_per_agent_per_hour: at_least_one(
                 "max_wakes_per_agent_per_hour",
@@ -521,6 +574,9 @@ mod tests {
         assert_eq!(c.lazy_after_idle_minutes, 120);
         assert_eq!(c.pin_roles, ["pm"]);
         assert_eq!(c.portfolio_root, "C:/Projects");
+        assert_eq!(c.peers_addr.to_string(), "127.0.0.1:7899");
+        assert_eq!(c.lane_state_dir, "C:/Projects/.lane-state");
+        assert_eq!((c.down_timeout_secs, c.down_poll_secs), (600, 2));
     }
 
     #[test]
@@ -644,6 +700,8 @@ mod tests {
             "lazy_enabled": true, "lazy_after_idle_minutes": 45, "idle_sweep_secs": 30,
             "idle_stop_policy": "skip", "user_recent_minutes": 15,
             "waiting_mark_ttl_hours": 12, "pin_roles": ["pm","synapse"], "portfolio_root": "D:/ws",
+            "peers_addr": "127.0.0.1:9100", "lane_state_dir": "D:/ws/.ls",
+            "down_timeout_secs": 30, "down_poll_secs": 1,
             "wake_poll_secs": 5, "max_wakes_per_agent_per_hour": 2,
             "max_wakes_per_minute": 4, "synapse_addr": "127.0.0.1:9000",
             "synapse_account": "someone"
@@ -668,6 +726,10 @@ mod tests {
             ("waiting_mark_ttl_hours", "12"),
             ("pin_roles", "pm,synapse"),
             ("portfolio_root", "D:/ws"),
+            ("peers_addr", "127.0.0.1:9100"),
+            ("lane_state_dir", "D:/ws/.ls"),
+            ("down_timeout_secs", "30"),
+            ("down_poll_secs", "1"),
             ("wake_poll_secs", "5"),
             ("max_wakes_per_agent_per_hour", "2"),
             ("max_wakes_per_minute", "4"),
@@ -699,6 +761,8 @@ mod tests {
             ("wake_poll_secs", "0"),
             ("max_wakes_per_agent_per_hour", "0"),
             ("max_wakes_per_minute", "0"),
+            ("down_timeout_secs", "0"),
+            ("down_poll_secs", "0"),
             ("free_ram_floor_gb", "-1"),
             ("free_ram_floor_gb", "NaN"),
             ("free_ram_floor_gb", "inf"),

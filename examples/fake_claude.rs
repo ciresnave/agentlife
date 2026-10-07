@@ -14,12 +14,46 @@
 //!   the hook; `CMD<TAB>arg<TAB>arg...` runs `agentlife <args>` as this process's child;
 //! * `--fake-report <file>`    written when the script is done: `EVENT<TAB>millis<TAB>exit-code`;
 //! * `--fake-hold <secs>`      stay alive this long afterwards (default 0);
+//! * `--fake-child <pidfile>`  start a long-lived non-shell child (the stand-in for a lane's MCP helper,
+//!   whose parent is the `claude`) and write its pid to `<pidfile>`;
+//! * `--fake-shell-child`     also start a long-lived SHELL child (a backgrounded command);
 //! * `--fake-nest`             do not run the script: start a copy of this same program (so the
 //!   copy has a `claude` parent) with the other arguments and wait for it.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// A child that lives for a minute. `shell` makes it a SHELL (`cmd` / `sh`), so it counts as a
+/// backgrounded command; otherwise it is `ping` / `sleep`, which does not.
+fn long_child(shell: bool) -> Child {
+    #[cfg(windows)]
+    let mut c = if shell {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "ping -n 60 127.0.0.1 > nul"]);
+        c
+    } else {
+        let mut c = Command::new("ping");
+        c.args(["-n", "60", "127.0.0.1"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut c = if shell {
+        // `; true` keeps the shell alive: a lone `sleep` would be exec'd in place of it.
+        let mut c = Command::new("sh");
+        c.args(["-c", "sleep 60; true"]);
+        c
+    } else {
+        let mut c = Command::new("sleep");
+        c.arg("60");
+        c
+    };
+    c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start a long-lived child")
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,6 +83,19 @@ fn main() {
             }
         };
         std::process::exit(status.code().unwrap_or(1));
+    }
+
+    // Children first, so they exist before any script line runs.
+    let mut _children: Vec<Child> = Vec::new();
+    if let Some(pidfile) = get("--fake-child") {
+        let child = long_child(false);
+        let part = format!("{pidfile}.part");
+        std::fs::write(&part, child.id().to_string()).expect("write the child's pid");
+        std::fs::rename(&part, &pidfile).expect("publish the child's pid");
+        _children.push(child);
+    }
+    if args.iter().any(|a| a == "--fake-shell-child") {
+        _children.push(long_child(true));
     }
 
     let agentlife = get("--fake-agentlife").expect("--fake-agentlife <exe>");

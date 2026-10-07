@@ -6,13 +6,15 @@ use agentlife::cli::{self, Command};
 use agentlife::clock::SystemClock;
 use agentlife::config::{Config, Layer};
 use agentlife::control::{self, ControlError};
+use agentlife::down;
 use agentlife::home::Home;
-use agentlife::hook::{self, Ctx, RealEnv};
+use agentlife::hook::{self, Ctx, RealEnv, SnapshotParents};
 use agentlife::identity::{ProcessTable, SnapshotTable, SysinfoTable};
 use agentlife::intent::{self, EventLogMarker, ShutdownMarker};
 use agentlife::journal::Journal;
 use agentlife::list;
 use agentlife::marks;
+use agentlife::peers::Broker;
 use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
 use agentlife::select;
@@ -36,12 +38,18 @@ fn main() -> ExitCode {
         Ok(Command::Pin { agent }) => run_mark(&agent, Mark::Pin),
         Ok(Command::Unpin { agent }) => run_mark(&agent, Mark::Unpin),
         Ok(Command::Waiting { agent, note, clear }) => run_waiting(agent.as_deref(), note, clear),
-        Ok(Command::Park { agent, confirm }) => {
-            run_close(&agent, ClosedHow::Parked, confirm.as_deref())
-        }
-        Ok(Command::Stop { agent, confirm }) => {
-            run_close(&agent, ClosedHow::Exited, confirm.as_deref())
-        }
+        Ok(Command::Park {
+            agent,
+            confirm,
+            yes,
+            timeout,
+        }) => run_close(&agent, ClosedHow::Parked, confirm.as_deref(), yes, timeout),
+        Ok(Command::Stop {
+            agent,
+            confirm,
+            yes,
+            timeout,
+        }) => run_close(&agent, ClosedHow::Exited, confirm.as_deref(), yes, timeout),
         Ok(Command::Unpark { agent, .. }) => run_unpark(&agent),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
@@ -332,7 +340,13 @@ fn run_waiting(selector: Option<&str>, note: Option<String>, clear: bool) -> Exi
     report("waiting", &target_id.to_string(), result)
 }
 
-fn run_close(selector: &str, how: ClosedHow, confirm: Option<&str>) -> ExitCode {
+fn run_close(
+    selector: &str,
+    how: ClosedHow,
+    confirm: Option<&str>,
+    yes: bool,
+    timeout: Option<u64>,
+) -> ExitCode {
     let name = if how == ClosedHow::Parked {
         "park"
     } else {
@@ -354,10 +368,24 @@ fn run_close(selector: &str, how: ClosedHow, confirm: Option<&str>) -> ExitCode 
         }
     };
     let (caller, caller_rec) = who_is_calling(&app);
+    let table = SnapshotTable::capture();
+    if list::liveness(target, &table).0 != list::Liveness::Stopped {
+        return run_down(
+            &app,
+            name,
+            target,
+            how,
+            confirm,
+            yes,
+            timeout,
+            &caller,
+            caller_rec.as_ref(),
+        );
+    }
     let result = control::close(
         &app.registry,
         &app.journal,
-        &SnapshotTable::capture(),
+        &table,
         &app.cfg,
         &caller,
         caller_rec.as_ref(),
@@ -367,6 +395,81 @@ fn run_close(selector: &str, how: ClosedHow, confirm: Option<&str>) -> ExitCode 
         chrono::Utc::now(),
     );
     control_report(name, &target.agent_id.to_string(), result)
+}
+
+/// A RUNNING agent: the graceful stop (`down::stop_running`). The only place a process is ended.
+#[allow(clippy::too_many_arguments)]
+fn run_down(
+    app: &App,
+    command: &str,
+    target: &AgentRecord,
+    how: ClosedHow,
+    confirm: Option<&str>,
+    yes: bool,
+    timeout: Option<u64>,
+    caller: &Caller,
+    caller_rec: Option<&AgentRecord>,
+) -> ExitCode {
+    let table = SnapshotTable::capture();
+    let broker = Broker::new(app.cfg.peers_addr);
+    // One snapshot serves both the peer-to-lane join and the live-shell check.
+    let tree = SnapshotParents::capture();
+    let lane_state_dir = std::path::PathBuf::from(&app.cfg.lane_state_dir);
+    let facts = down::FsFacts {
+        lane_state_dir: &lane_state_dir,
+    };
+    let sleeper = |d: std::time::Duration| std::thread::sleep(d);
+    let outcome = down::stop_running(
+        &down::Deps {
+            registry: &app.registry,
+            journal: &app.journal,
+            cfg: &app.cfg,
+            table: &table,
+            messenger: &broker,
+            parents: &tree,
+            tree: &tree,
+            facts: &facts,
+            terminator: &down::SysinfoTerminator,
+            clock: &SystemClock,
+            sleep: &sleeper,
+        },
+        &down::Request {
+            target: &target.agent_id,
+            how,
+            confirm,
+            yes,
+            timeout: std::time::Duration::from_secs(timeout.unwrap_or(app.cfg.down_timeout_secs)),
+            poll: std::time::Duration::from_secs(app.cfg.down_poll_secs),
+            caller,
+            caller_rec,
+        },
+    );
+    match outcome {
+        Ok(down::Outcome::DryRun(plan)) => {
+            for line in plan {
+                println!("agentlife {command}: {line}");
+            }
+            // Distinct from success and from refusal, so a script can tell "only a plan" apart.
+            ExitCode::from(2)
+        }
+        Ok(down::Outcome::Stopped { pid, waited }) => {
+            println!(
+                "agentlife {command}: stopped {} (pid {pid}) after {}s; recorded {}",
+                target.name.as_deref().unwrap_or(target.agent_id.as_str()),
+                waited.as_secs(),
+                if how == ClosedHow::Parked {
+                    "parked"
+                } else {
+                    "stopped"
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("agentlife {command}: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_unpark(selector: &str) -> ExitCode {
