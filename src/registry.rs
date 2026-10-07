@@ -17,6 +17,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 pub const SCHEMA: u32 = 1;
 
@@ -250,11 +251,21 @@ pub struct Listing {
 
 pub struct Registry {
     dir: PathBuf,
+    lock_timeout: Duration,
 }
 
 impl Registry {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            lock_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+        }
+    }
+
+    /// How long a write waits for an agent's lock (see `Journal::with_lock_timeout`).
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -268,7 +279,7 @@ impl Registry {
     fn lock(&self, id: &AgentId) -> Result<FileLock, RegistryError> {
         FileLock::acquire(
             self.dir.join(format!("{id}.lock")),
-            DEFAULT_ACQUIRE_TIMEOUT,
+            self.lock_timeout,
             DEFAULT_STALE_AFTER,
         )
         .map_err(RegistryError::Lock)
@@ -524,7 +535,7 @@ mod tests {
     #[test]
     fn twenty_threads_updating_one_agent_lose_no_session() {
         let d = tempfile::tempdir().unwrap();
-        let reg = Arc::new(Registry::new(d.path()));
+        let reg = Arc::new(Registry::new(d.path()).with_lock_timeout(Duration::from_secs(120)));
         let id = AgentId::new("shared").unwrap();
         reg.create(&rec("shared")).unwrap();
         let barrier = Arc::new(Barrier::new(20));

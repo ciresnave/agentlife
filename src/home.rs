@@ -88,6 +88,18 @@ impl Home {
         self.0.join("registry")
     }
 
+    /// `<pid>-<process start>.id` pointer files: process -> agent, so a hook finds its agent
+    /// without scanning the fleet (SessionEnd has a 1.5 s budget).
+    pub fn procs_dir(&self) -> PathBuf {
+        self.0.join("registry").join("procs")
+    }
+
+    /// What the hook did or declined to do, one line per event. A hook that fails is silent to
+    /// Claude Code, so this file is the only place a broken install shows up.
+    pub fn hook_log(&self) -> PathBuf {
+        self.0.join("hook.log")
+    }
+
     pub fn pending_dir(&self) -> PathBuf {
         self.0.join("pending")
     }
@@ -155,6 +167,8 @@ mod tests {
         assert_eq!(h.config_file(), Path::new("X:/h/config.json"));
         assert_eq!(h.agents_dir(), Path::new("X:/h/registry/agents"));
         assert_eq!(h.journal_dir(), Path::new("X:/h/registry"));
+        assert_eq!(h.procs_dir(), Path::new("X:/h/registry/procs"));
+        assert_eq!(h.hook_log(), Path::new("X:/h/hook.log"));
         assert_eq!(h.pending_dir(), Path::new("X:/h/pending"));
         assert_eq!(h.reports_dir(), Path::new("X:/h/reports"));
     }

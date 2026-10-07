@@ -18,6 +18,7 @@ use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -66,6 +67,7 @@ pub struct ReadResult {
 pub struct Journal {
     dir: PathBuf,
     clock: Arc<dyn Clock>,
+    lock_timeout: Duration,
 }
 
 fn valid_kind(kind: &str) -> bool {
@@ -102,7 +104,16 @@ impl Journal {
         Self {
             dir: dir.into(),
             clock,
+            lock_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
+    }
+
+    /// How long an append waits for the journal lock. The default suits real use, where appends
+    /// are a few per session. A stress test that serialises hundreds of appends on a slow disk
+    /// needs longer: that tests "nothing is lost or torn", not "the wait is short".
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -130,9 +141,9 @@ impl Journal {
         let mut line = serde_json::to_vec(&entry).map_err(JournalError::Encode)?;
         line.push(b'\n');
 
-        let _lock = FileLock::acquire(
+        let lock = FileLock::acquire(
             self.dir.join("journal.lock"),
-            DEFAULT_ACQUIRE_TIMEOUT,
+            self.lock_timeout,
             DEFAULT_STALE_AFTER,
         )
         .map_err(JournalError::Lock)?;
@@ -153,6 +164,11 @@ impl Journal {
             }
         }
         f.write_all(&line)?;
+        // Release the lock BEFORE the fsync. The line is already written, so the next appender can
+        // go ahead, and one fsync covers every write before it. Holding the lock across it made
+        // 200 serialised appends wait on 200 disk flushes: on a slow CI disk that exceeded the
+        // lock timeout (a real failure, `Lock(TimedOut)`, in the 20-thread test).
+        drop(lock);
         f.sync_data()?;
         Ok(entry)
     }
@@ -270,7 +286,8 @@ mod tests {
             .map(|t| {
                 let (dir, barrier) = (dir.clone(), barrier.clone());
                 std::thread::spawn(move || {
-                    let j = Journal::new(dir, Arc::new(SystemClock));
+                    let j = Journal::new(dir, Arc::new(SystemClock))
+                        .with_lock_timeout(std::time::Duration::from_secs(120));
                     barrier.wait();
                     for i in 0..10 {
                         j.append("tick", Some(&format!("t{t}")), json!({ "i": i }))

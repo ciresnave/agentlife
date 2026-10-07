@@ -122,6 +122,47 @@ impl ProcessTable for SysinfoTable {
     }
 }
 
+/// One refresh of the whole process table, then any number of lookups. `list` checks every
+/// agent, and refreshing per agent would repeat the same system walk hundreds of times.
+#[derive(Debug, Default)]
+pub struct SnapshotTable(std::collections::HashMap<u32, ProcessIdentity>);
+
+impl SnapshotTable {
+    /// Pid and start time only: no executable path. Reading every process's image is the slow
+    /// part of a refresh, and every caller here compares start times; `check` skips the exe
+    /// comparison when either side has none.
+    pub fn capture() -> Self {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        Self(
+            sys.processes()
+                .iter()
+                .map(|(pid, p)| {
+                    let pid = pid.as_u32();
+                    (
+                        pid,
+                        ProcessIdentity {
+                            pid,
+                            start_secs: p.start_time(),
+                            exe: None,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+impl ProcessTable for SnapshotTable {
+    fn identity_of(&self, pid: u32) -> Option<ProcessIdentity> {
+        self.0.get(&pid).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,15 +309,42 @@ mod tests {
             "start time {} should be between {before} and {after}",
             got.start_secs
         );
-        let exe = got
-            .exe
-            .clone()
-            .expect("exe must be readable for our own child");
-        let lower = exe.to_lowercase();
+        // Between fork and exec a child still shows its PARENT's image, and on the Ubuntu CI
+        // leg this test once read exactly that (`exe was .../agentlife-<hash>`, the test binary).
+        // So poll until the image becomes the program we started, and if it never does, say
+        // everything that was seen, so the explanation is checked instead of assumed.
+        let mut seen: Vec<String> = Vec::new();
+        let mut converged = false;
+        for _ in 0..40 {
+            if let Some(i) = SysinfoTable.identity_of(pid) {
+                let exe = i.exe.unwrap_or_default();
+                let lower = exe.to_lowercase();
+                if lower.contains("ping") || lower.contains("sleep") {
+                    converged = true;
+                    break;
+                }
+                if seen.last() != Some(&exe) {
+                    seen.push(exe);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert!(
-            lower.contains("ping") || lower.contains("sleep"),
-            "exe was {exe}"
+            converged,
+            "the child's exe never became ping/sleep; images seen over 2 s: {seen:?}"
         );
+        // Re-read now that the image has settled. `got` above was taken at spawn, possibly in the
+        // fork-to-exec window, and comparing THAT with the settled process is a (correct)
+        // `DifferentExe`: attempt 6 on the Ubuntu CI leg did exactly this. The start time is the
+        // same either way, which is why the registry records identities WITHOUT an exe.
+        let settled = SysinfoTable
+            .identity_of(pid)
+            .expect("the child is still alive");
+        assert_eq!(
+            settled.start_secs, got.start_secs,
+            "an exec does not change the start time"
+        );
+        let got = settled;
 
         // The real table agrees with itself, and disagrees about a recycled pid.
         assert_eq!(check(&SysinfoTable, &got), Match::Same);
@@ -290,6 +358,25 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(check(&SysinfoTable, &got), Match::NotRunning);
+    }
+
+    #[test]
+    fn a_snapshot_agrees_with_the_per_pid_table_about_a_real_process() {
+        let mut child = long_running_child();
+        let pid = child.id();
+        let snap = SnapshotTable::capture();
+        let from_snap = snap.identity_of(pid).expect("the child is in the snapshot");
+        let direct = SysinfoTable
+            .identity_of(pid)
+            .expect("and in the direct lookup");
+        assert_eq!(from_snap.start_secs, direct.start_secs);
+        assert!(
+            snap.identity_of(std::process::id()).is_some(),
+            "it also sees this test process"
+        );
+        assert_eq!(snap.identity_of(u32::MAX - 1), None);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]
