@@ -81,6 +81,24 @@ pub fn paths_equal(a: &str, b: &str) -> bool {
     normalise(a) == normalise(b)
 }
 
+/// Whether `child` is `root` itself or somewhere below it, by path text alone (no disk access,
+/// so a symlink is not followed: a caller that needs that must check separately). A `..` anywhere
+/// in `child` is refused, because `C:/Projects/../Windows` is textually below `C:/Projects`.
+/// **Never a prefix match**: `C:/Projects2` is not under `C:/Projects`.
+pub fn path_is_under(child: &str, root: &str) -> bool {
+    let c = normalise(child);
+    if c.split('/').any(|part| part == "..") {
+        return false;
+    }
+    let r = normalise(root);
+    let r_slash = if r.ends_with('/') {
+        r.clone()
+    } else {
+        format!("{r}/")
+    };
+    c == r || c.starts_with(&r_slash)
+}
+
 fn normalise(p: &str) -> String {
     let mut s = p.replace('\\', "/");
     if let Some(rest) = s.strip_prefix("//?/") {
@@ -251,6 +269,19 @@ mod tests {
         assert!(paths_equal("C:\\Projects\\x\\", "C:/Projects/x"));
         assert!(paths_equal("\\\\?\\C:\\a\\b.exe", "C:/a/b.exe"));
         assert!(paths_equal("C:\\", "C:/"));
+    }
+
+    #[test]
+    fn path_is_under_is_textual_never_a_prefix_and_refuses_dot_dot() {
+        assert!(path_is_under("C:/Projects/x", "C:/Projects"));
+        assert!(path_is_under(r"C:\Projects\x\y\", "C:/Projects"));
+        assert!(
+            path_is_under("C:/Projects", "C:/Projects"),
+            "the root itself"
+        );
+        assert!(!path_is_under("C:/Projects2/x", "C:/Projects"));
+        assert!(!path_is_under("C:/Projects/../Windows", "C:/Projects"));
+        assert!(!path_is_under("C:/Other", "C:/Projects"));
     }
 
     #[test]

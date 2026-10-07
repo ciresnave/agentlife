@@ -15,6 +15,7 @@ use agentlife::journal::Journal;
 use agentlife::list;
 use agentlife::marks;
 use agentlife::peers::Broker;
+use agentlife::plan;
 use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
 use agentlife::select;
@@ -51,6 +52,13 @@ fn main() -> ExitCode {
             timeout,
         }) => run_close(&agent, ClosedHow::Exited, confirm.as_deref(), yes, timeout),
         Ok(Command::Unpark { agent, .. }) => run_unpark(&agent),
+        Ok(Command::Restore {
+            dry_run,
+            json,
+            only,
+            priority,
+            flags,
+        }) => run_restore(dry_run, json, only, priority, flags),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
             ExitCode::FAILURE
@@ -138,6 +146,75 @@ fn app(command: &str) -> Result<App, ExitCode> {
         procs: ProcIndex::new(home.procs_dir()),
         cfg,
     })
+}
+
+/// `agentlife restore`. Only `--dry-run` exists in M3a: it builds the plan and prints it, and
+/// writes nothing. Without it the command refuses (consent and the launcher are later milestones).
+fn run_restore(
+    dry_run: bool,
+    json: bool,
+    only: Option<Vec<String>>,
+    priority: Vec<String>,
+    flags: Vec<(String, String)>,
+) -> ExitCode {
+    if !dry_run {
+        eprintln!(
+            "agentlife restore: starting agents is not built yet; it needs a person's consent (M4). \
+             Run with --dry-run to see the plan."
+        );
+        return ExitCode::FAILURE;
+    }
+    let fail = |e: String| {
+        eprintln!("agentlife restore: {e}");
+        ExitCode::FAILURE
+    };
+    let home = match Home::from_env() {
+        Ok(h) => h,
+        Err(e) => return fail(e.to_string()),
+    };
+    let mut layer = Layer::default();
+    for (k, v) in &flags {
+        if let Err(e) = layer.set(k, v) {
+            return fail(e.to_string());
+        }
+    }
+    let cfg = match Config::load(&home, layer) {
+        Ok(c) => c,
+        Err(e) => return fail(e.to_string()),
+    };
+    let registry = Registry::new(home.agents_dir());
+    let listing = match registry.list() {
+        Ok(l) => l,
+        Err(e) => return fail(e.to_string()),
+    };
+    let table = SnapshotTable::capture();
+    let free_ram_gb = {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let bytes = sys.available_memory();
+        (bytes > 0).then(|| bytes as f64 / (1u64 << 30) as f64)
+    };
+    let p = plan::build(&plan::Inputs {
+        records: &listing.records,
+        table: &table,
+        cfg: &cfg,
+        free_ram_gb,
+        cwd_exists: &|c| std::path::Path::new(c).is_dir(),
+        priority: &priority,
+        only: only.as_deref(),
+    });
+    if json {
+        match serde_json::to_string_pretty(&p) {
+            Ok(s) => println!("{s}"),
+            Err(e) => return fail(e.to_string()),
+        }
+    } else {
+        print!("{}", plan::render_text(&p, true));
+    }
+    for (path, why) in &listing.problems {
+        eprintln!("agentlife restore: could not use {}: {why}", path.display());
+    }
+    ExitCode::SUCCESS
 }
 
 fn all_records(app: &App, command: &str) -> Result<Vec<AgentRecord>, ExitCode> {

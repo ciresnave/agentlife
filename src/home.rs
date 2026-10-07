@@ -104,6 +104,11 @@ impl Home {
         self.0.join("pending")
     }
 
+    /// Frozen restore plans, one file each (`plan::freeze`).
+    pub fn plans_dir(&self) -> PathBuf {
+        self.0.join("plans")
+    }
+
     pub fn reports_dir(&self) -> PathBuf {
         self.0.join("reports")
     }

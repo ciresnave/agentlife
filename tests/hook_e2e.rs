@@ -1274,3 +1274,133 @@ fn a_lane_that_cannot_be_found_among_the_peers_is_not_asked_and_not_stopped() {
     );
     drop(lane); // the lane thread gives up on its own after its own deadline
 }
+
+/// Every file under `dir` and its bytes, to prove a command wrote nothing.
+fn tree_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                let rel = p.strip_prefix(root).unwrap().display().to_string();
+                out.insert(rel, std::fs::read(&p).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+#[test]
+fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_nothing() {
+    let rig = Rig::new();
+    // The portfolio root for this run is the rig directory, so the stand-ins' cwd is inside it.
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({ "portfolio_root": rig.cwd() }).to_string(),
+    )
+    .unwrap();
+
+    // A lane that was running and is gone (no SessionEnd: the process just ended).
+    let start = rig.payload("start.json", "SessionStart", "sess-gone", Some("startup"));
+    let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
+    rig.run(LANE_ARGS, &script, &[]);
+    // A second lane that is still running while the plan is built.
+    let start2 = rig.payload("start2.json", "SessionStart", "sess-live", Some("startup"));
+    let script2 = rig.script("script2.txt", &[("SessionStart", "-", &start2)]);
+    let report2 = rig.dir.path().join("report2.txt");
+    let mut live = rig.spawn(
+        &["-n", "e2e-live", "--permission-mode", "auto"],
+        &script2,
+        &report2,
+        30,
+        &[],
+    );
+    wait_for(&report2);
+    assert_eq!(
+        rig.registry().list().unwrap().records.len(),
+        2,
+        "both lanes are registered:\n{}",
+        rig.log()
+    );
+
+    let before = tree_bytes(&rig.home);
+    let out = rig.agentlife(&["restore", "--dry-run", "--json"]);
+    let after = tree_bytes(&rig.home);
+    let _ = live.kill();
+    let _ = live.wait();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(before, after, "a dry run wrote something");
+    assert!(!rig.home.join("plans").exists(), "a dry run froze a plan");
+
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).expect("the plan is JSON");
+    let entries = plan["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "only the lane that is gone: {plan}");
+    let e = &entries[0];
+    assert_eq!(e["name"], "e2e-lane");
+    assert_eq!(e["batch"], 0);
+    assert_eq!(e["window"], 0);
+    // The argv is REBUILT from the real recorded command line, in the canonical order.
+    assert_eq!(
+        e["argv"],
+        serde_json::json!([
+            "--name",
+            "e2e-lane",
+            "--model",
+            "sonnet",
+            "--permission-mode",
+            "auto",
+            "--dangerously-load-development-channels",
+            "server:claude-peers"
+        ]),
+        "{plan}"
+    );
+    assert!(paths_equal(e["cwd"].as_str().unwrap(), &rig.cwd()));
+    // The running lane is left alone, and the plan says why.
+    assert!(
+        plan["excluded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["reason"] == "running"),
+        "{plan}"
+    );
+    let hash = plan["hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
+    assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    // Asked twice, the same registry gives the same plan (same hash).
+    let again = rig.agentlife(&["restore", "--dry-run", "--json"]);
+    let again: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    // The live lane was killed above, so this one has two candidates: a different plan.
+    assert_ne!(again["hash"], plan["hash"]);
+    assert_eq!(again["entries"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn restore_without_dry_run_refuses_and_starts_and_writes_nothing() {
+    let rig = Rig::new();
+    let start = rig.payload("start.json", "SessionStart", "sess-gone", Some("startup"));
+    let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
+    rig.run(LANE_ARGS, &script, &[]);
+    let before = tree_bytes(&rig.home);
+    let out = rig.agentlife(&["restore"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not built yet"), "{err}");
+    assert_eq!(
+        before,
+        tree_bytes(&rig.home),
+        "a refused restore wrote something"
+    );
+}
