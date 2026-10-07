@@ -518,9 +518,16 @@ impl crate::readiness::ProcTree for SnapshotParents {
 
 impl ParentProcess for SnapshotParents {
     fn parent_of(&self, pid: u32) -> Option<(u32, String)> {
-        let ppid = self.procs.get(&pid)?.0?;
-        let name = self.procs.get(&ppid)?.1.clone();
-        Some((ppid, name))
+        let (ppid, _, start) = self.procs.get(&pid)?;
+        let ppid = (*ppid)?;
+        let (_, name, parent_start) = self.procs.get(&ppid)?;
+        // Windows never rewrites a parent pid, so a recorded parent that started AFTER its child is
+        // a reused pid, not the real parent. Believing it made a hook see a stranger's `claude`
+        // above the session ("child session") on one of six Windows CI attempts at 26d7dcb.
+        if parent_start > start {
+            return None;
+        }
+        Some((ppid, name.clone()))
     }
 
     fn start_time_of(&self, pid: u32) -> Option<u64> {
@@ -1317,6 +1324,23 @@ mod tests {
             (10, None, "claude.exe", 1),
         ]);
         assert!(claude_parent_pid(40, &stranger).is_err());
+    }
+
+    #[test]
+    fn a_parent_that_started_after_its_child_is_a_reused_pid_and_is_not_followed() {
+        // hook(40) <- claude(30, real, started 100) <- 20 (dead; its pid now belongs to a stranger
+        // `claude` that started at 900, long after claude(30) did)
+        let snap = SnapshotParents::from_entries(&[
+            (40, Some(30), "powershell.exe", 110),
+            (30, Some(20), "claude.exe", 100),
+            (20, None, "claude.exe", 900),
+        ]);
+        assert_eq!(snap.parent_of(40), Some((30, "claude.exe".to_string())));
+        assert_eq!(
+            snap.parent_of(30),
+            None,
+            "the stranger is not claude's parent"
+        );
     }
 
     #[test]
