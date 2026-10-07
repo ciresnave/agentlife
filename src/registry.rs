@@ -136,6 +136,24 @@ pub struct Session {
     pub end_reason: Option<String>,
 }
 
+/// An explicit pin: this agent is never lazy-stopped by the idle sweep (DESIGN-REVISION-3 §5, S1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pin {
+    pub by: String,
+    pub at: DateTime<Utc>,
+}
+
+/// "This agent is waiting on the user" (DESIGN-REVISION-3 §5, S2): written by the agent itself, so
+/// that it is not shut down while a person is directly interacting with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingMark {
+    /// What it waits on; `"user"` today.
+    pub on: String,
+    pub since: DateTime<Utc>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRecord {
     pub schema: u32,
@@ -163,6 +181,10 @@ pub struct AgentRecord {
     pub origin: Origin,
     #[serde(default)]
     pub intent: Intent,
+    #[serde(default)]
+    pub pinned: Option<Pin>,
+    #[serde(default)]
+    pub waiting: Option<WaitingMark>,
 }
 
 impl AgentRecord {
@@ -186,6 +208,8 @@ impl AgentRecord {
             remote_control: false,
             origin: Origin::default(),
             intent: Intent::default(),
+            pinned: None,
+            waiting: None,
         }
     }
 }
