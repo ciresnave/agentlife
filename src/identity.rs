@@ -150,8 +150,9 @@ mod tests {
     fn the_same_pid_and_start_time_is_the_same_process() {
         let t = table(id(10, 1000, Some("C:/x/claude.exe")));
         assert_eq!(
-            check(&t, &id(10, 1000, Some("C:\\X\\claude.exe"))),
-            Match::Same
+            check(&t, &id(10, 1000, Some("C:\\x\\claude.exe"))),
+            Match::Same,
+            "a different separator style alone must not make two paths differ, on any OS"
         );
         assert!(
             is_same(&t, &id(10, 1000, None)),
@@ -203,6 +204,29 @@ mod tests {
             !paths_equal("C:/", "C:"),
             "a drive root's separator is significant"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_exe_comparison_ignores_case_on_windows() {
+        let t = table(id(10, 1000, Some("C:/x/claude.exe")));
+        assert_eq!(
+            check(&t, &id(10, 1000, Some("C:\\X\\CLAUDE.EXE"))),
+            Match::Same
+        );
+    }
+
+    /// The Linux counterpart: there paths are case-sensitive, so a different case really is a
+    /// different executable. (The first version of the shared test assumed otherwise and failed
+    /// on the Ubuntu CI leg.)
+    #[cfg(not(windows))]
+    #[test]
+    fn the_exe_comparison_is_case_sensitive_off_windows() {
+        let t = table(id(10, 1000, Some("/x/claude")));
+        assert!(matches!(
+            check(&t, &id(10, 1000, Some("/X/claude"))),
+            Match::DifferentExe { .. }
+        ));
     }
 
     #[cfg(windows)]
