@@ -2,7 +2,8 @@
 
 **Status: PROPOSAL for PM approval. Docs only, no code.** Written 2026-10-04 against the PM's
 `[TASK] design-revision-2`. Builds on `DESIGN-REVISION-1.md` (which builds on `DESIGN.md`); where this
-document conflicts with either, **this one wins**, and §1 lists exactly what it supersedes.
+document conflicts with either, **this one wins** (and `DESIGN-REVISION-3.md`, lazy start and exemptions,
+in turn extends it), and §1 lists exactly what it supersedes.
 
 **CireSnave's ruling, read in full from `C:/Projects/CIRESNAVE-DECIDED-ARCHIVE.md`, entry "121 (ruled
 parts)" (not paraphrased; the parts that drive this revision, verbatim):**
