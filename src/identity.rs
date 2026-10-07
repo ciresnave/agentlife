@@ -122,6 +122,47 @@ impl ProcessTable for SysinfoTable {
     }
 }
 
+/// One refresh of the whole process table, then any number of lookups. `list` checks every
+/// agent, and refreshing per agent would repeat the same system walk hundreds of times.
+#[derive(Debug, Default)]
+pub struct SnapshotTable(std::collections::HashMap<u32, ProcessIdentity>);
+
+impl SnapshotTable {
+    /// Pid and start time only: no executable path. Reading every process's image is the slow
+    /// part of a refresh, and every caller here compares start times; `check` skips the exe
+    /// comparison when either side has none.
+    pub fn capture() -> Self {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        Self(
+            sys.processes()
+                .iter()
+                .map(|(pid, p)| {
+                    let pid = pid.as_u32();
+                    (
+                        pid,
+                        ProcessIdentity {
+                            pid,
+                            start_secs: p.start_time(),
+                            exe: None,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+impl ProcessTable for SnapshotTable {
+    fn identity_of(&self, pid: u32) -> Option<ProcessIdentity> {
+        self.0.get(&pid).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +331,25 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(check(&SysinfoTable, &got), Match::NotRunning);
+    }
+
+    #[test]
+    fn a_snapshot_agrees_with_the_per_pid_table_about_a_real_process() {
+        let mut child = long_running_child();
+        let pid = child.id();
+        let snap = SnapshotTable::capture();
+        let from_snap = snap.identity_of(pid).expect("the child is in the snapshot");
+        let direct = SysinfoTable
+            .identity_of(pid)
+            .expect("and in the direct lookup");
+        assert_eq!(from_snap.start_secs, direct.start_secs);
+        assert!(
+            snap.identity_of(std::process::id()).is_some(),
+            "it also sees this test process"
+        );
+        assert_eq!(snap.identity_of(u32::MAX - 1), None);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

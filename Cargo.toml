@@ -18,6 +18,9 @@ name = "agentlife"
 path = "src/main.rs"
 
 [dependencies]
+# OverMind c3935ba: the `lane-restart` library (hook machinery, parent-process walk, launch-flag
+# parsing). Pinned by full SHA; both repos are public.
+lane-restart = { git = "https://github.com/ciresnave/OverMind", rev = "c3935babb0ae90b7a75f84eaaf58506cb782bad3" }
 chrono = { version = "0.4.45", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
