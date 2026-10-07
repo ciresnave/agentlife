@@ -878,6 +878,7 @@ mod relaunch {
         ("--session-id", FlagArity::OptionalOne),
         ("--fork-session", FlagArity::None),
         ("--name", FlagArity::One),
+        ("-n", FlagArity::One),
         // Recognised-and-intentionally-dropped, not "unknown": these are
         // already carried over by claude_argv itself, from state.model /
         // state.permission_mode / state.remote_control - each with its own
@@ -949,7 +950,8 @@ mod relaunch {
             // comment) - the equals form embeds its value in the same
             // token, so it never matches an exact `--permission-mode`
             // lookup below and would otherwise be misread as unknown.
-            if token.starts_with("--permission-mode=") {
+            // The same for `--name=value`: the relaunch emits a fresh `--name`.
+            if token.starts_with("--permission-mode=") || token.starts_with("--name=") {
                 continue;
             }
             if let Some((_, arity)) = ALLOWED_LAUNCH_ARG_FLAGS.iter().find(|(f, _)| f == token) {
@@ -1432,6 +1434,7 @@ mod relaunch {
                 role: role.to_string(),
                 session_id: "s".to_string(),
                 pid: 1,
+                pid_start_secs: None,
                 cwd: "C:/x".to_string(),
                 name: None,
                 model: Some("claude-sonnet-5".to_string()),
@@ -1704,6 +1707,23 @@ mod relaunch {
             // positional), not folded into the flag's own report.
             assert!(extra.is_empty());
             assert_eq!(dropped, vec!["--some-future-flag".to_string()]);
+        }
+
+        /// `-n` (short for `--name`) and `--name=` are recognised and
+        /// dropped like `--name`: the relaunch emits a fresh `--name`. Before,
+        /// `-n` was dropped as an unknown flag and its value left behind.
+        #[test]
+        fn the_short_and_equals_forms_of_name_are_dropped_with_their_value() {
+            let (extra, dropped) = extra_launch_args(&strs(&[
+                "claude.exe",
+                "-n",
+                "PM",
+                "--name=old",
+                "--settings",
+                "s.json",
+            ]));
+            assert_eq!(extra, strs(&["--settings", "s.json"]));
+            assert!(dropped.is_empty(), "reported as unknown: {dropped:?}");
         }
 
         #[test]

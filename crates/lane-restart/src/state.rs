@@ -17,6 +17,12 @@ pub struct LaneState {
     pub role: String,
     pub session_id: String,
     pub pid: u32,
+    /// When `pid` started (seconds since the epoch, as `sysinfo` reports
+    /// it), so the record names one process launch, not a pid the OS may
+    /// reuse. `None` in files written before it was recorded, or when it
+    /// could not be read.
+    #[serde(default)]
+    pub pid_start_secs: Option<u64>,
     pub cwd: String,
     pub name: Option<String>,
     /// `None` until `PostModelSwitch` fires at least once - hooks.md's
