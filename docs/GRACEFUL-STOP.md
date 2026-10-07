@@ -6,8 +6,12 @@ what is not built. Design: `DESIGN.md` §3, `DESIGN-REVISION-2.md` §3 to §4, `
 
 ## What happens, in order
 
-1. **Authorize.** A person: any agent. The PM agent (named by the visible `pin_roles` +
-   `portfolio_root` rule): any agent that is not itself. Any other agent: nothing. **A lane cannot
+1. **Authorize.** Only **a person** may stop a RUNNING agent (`down.rs`, the `only a person may stop a
+   RUNNING agent` check right after the liveness match). The PM agent and every other agent are
+   refused (`the_pm_is_denied_against_a_running_agent_and_nothing_is_asked_or_killed`, and end to end
+   `the_pm_agent_cannot_stop_a_running_lane`): the PM may park a *stopped* lane (M2a), but ending a live
+   session waits for a person's consent (M4). `control::authorize` alone would let the PM through;
+   this extra check is what refuses it. **A lane cannot
    stop itself**: that kills the process that is running the command, and is a separate change.
    A pinned agent also needs `--confirm <its name>`.
 2. **Identify what would be stopped.** The agent's last session must carry a process **start time**.
@@ -55,15 +59,18 @@ Journal events, in order for a normal stop: `down-requested`, `closed`, `stopped
 Unit tests with scripted fakes cover each branch of the sequence and its **order** (the intent is
 asserted to be recorded *at the moment of the kill*), plus the real terminator against a real child
 (wrong start time refused and the child left alive; right identity ended). End-to-end tests start a
-stand-in `claude` as the target lane, a fake claude-peers broker on **real loopback**, and the PM
-as another stand-in running the real `agentlife park`; a test thread plays the lane's side. They show
+stand-in `claude` as the target lane, a fake claude-peers broker on **real loopback**, and a person
+running the real `agentlife park` (the PM stand-in is used only to show it is refused); a test thread plays the lane's side. They show
 the real graceful stop (the process really ends, the helper below it is untouched), the dry run, a lane
 that never wraps up (left running), a live shell below the lane (blocks, and the journal names it), and a
 lane not found among the peers (not asked, not stopped).
 
 ## The risk surface (non-test code), measured
 
-One process kill: `src/down.rs:102` (`proc_.kill()`), reached only through `down::stop_running`, which
-only `main.rs` (`run_down`) calls. One network use: `src/peers.rs` connects to the configured broker
+One process kill: `src/down.rs:105` (`proc_.kill()`, at 7baf4e0 plus the person-only check), reached only through `down::stop_running`, which
+only `main.rs` (`run_down`) calls. **It is a hard end** (TerminateProcess / SIGKILL), not a polite close. It is reached only after a
+person asked with `--yes`, the lane wrote its HANDOFF and asserted idle, and nothing is running below it. A lane that never
+asserts idle is **left running**: nothing is killed, the journal records `down-timeout` with the blockers, and the intent is
+unchanged. One network use: `src/peers.rs` connects to the configured broker
 address, which the configuration refuses unless it is loopback. New reads: `.lane-state/*.json` and
 HANDOFF modification times. No new spawns, removals or writes.

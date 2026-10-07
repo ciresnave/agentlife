@@ -277,6 +277,15 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
         }
         Liveness::Running => {}
     }
+    // Ending a RUNNING session is the one thing here that cannot be undone, so only a person may do
+    // it: `authorize` lets the PM park a *stopped* lane, and that is as far as an agent's authority
+    // goes until a person's consent is built (M4). Checked after liveness so the refusal is about
+    // the running session and not a stopped one.
+    if !matches!(r.caller, Caller::Person) {
+        return Err(DownError::Denied(
+            "only a person may stop a RUNNING agent (the PM and other agents are refused); an agent's request needs a person's consent, which is not built yet".into(),
+        ));
+    }
     if pin_kind(&rec, d.cfg).is_some() {
         let expected = rec.name.clone().unwrap_or_else(|| rec.agent_id.to_string());
         if !r.confirm.is_some_and(|c| c.eq_ignore_ascii_case(&expected)) {
@@ -757,6 +766,11 @@ mod tests {
         }
     }
 
+    /// A person at a terminal: the only caller allowed to stop a RUNNING agent.
+    fn person() -> (Caller, AgentRecord) {
+        (Caller::Person, pm_record())
+    }
+
     fn pm() -> (Caller, AgentRecord) {
         (
             Caller::Agent {
@@ -787,7 +801,7 @@ mod tests {
     #[test]
     fn without_yes_it_prints_the_plan_and_does_nothing() {
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let ran = go(
             &rig,
             Scenario::default(),
@@ -820,7 +834,7 @@ mod tests {
     #[test]
     fn the_happy_path_asks_waits_records_the_intent_before_the_kill_then_stops() {
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let ran = go(
             &rig,
             Scenario::default(),
@@ -847,7 +861,7 @@ mod tests {
             ran.sent[0].1
         );
         assert!(
-            ran.sent[0].1.contains("pm-agent:a-pm"),
+            ran.sent[0].1.contains("person"),
             "it says who asked: {}",
             ran.sent[0].1
         );
@@ -857,7 +871,7 @@ mod tests {
             "exactly one kill, of exactly that process"
         );
         assert!(
-            matches!(intent(&rig), Intent::Closed { how: ClosedHow::Parked, ref by, .. } if by == "pm-agent:a-pm")
+            matches!(intent(&rig), Intent::Closed { how: ClosedHow::Parked, ref by, .. } if by == "person")
         );
         assert_eq!(kinds(&rig), ["down-requested", "closed", "stopped"]);
     }
@@ -879,7 +893,7 @@ mod tests {
             }
         }
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let cfg = Config::default();
         let table = Alive(vec![(100, 5000)]);
         let msg = Msg {
@@ -947,7 +961,7 @@ mod tests {
     #[test]
     fn an_agent_that_never_becomes_ready_is_left_running_with_every_blocker_named() {
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let sc = Scenario {
             ready_after_polls: None,
             shells: vec![(77, "bash".into())],
@@ -971,7 +985,7 @@ mod tests {
     #[test]
     fn a_live_shell_below_the_lane_blocks_even_when_everything_else_is_ready() {
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let sc = Scenario {
             shells: vec![(77, "pwsh".into())],
             ..Scenario::default()
@@ -1015,7 +1029,7 @@ mod tests {
             ),
         ] {
             let rig = rig(&[target(), pm_record()]);
-            let (c, rec) = pm();
+            let (c, rec) = person();
             let ran = go(&rig, sc, &c, Some(&rec), true, None, ClosedHow::Parked, 60);
             assert!(
                 matches!(ran.result, Err(DownError::CannotAsk(_))),
@@ -1031,7 +1045,7 @@ mod tests {
     #[test]
     fn a_recycled_pid_at_kill_time_stops_nothing_and_puts_the_intent_back() {
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let sc = Scenario {
             kill: Err(KillError::Mismatch {
                 expected_start: 5000,
@@ -1073,7 +1087,7 @@ mod tests {
             ),
         ] {
             let rig = rig(&[target(), pm_record()]);
-            let (c, rec) = pm();
+            let (c, rec) = person();
             let ran = go(&rig, sc, &c, Some(&rec), true, None, ClosedHow::Parked, 60);
             assert!(
                 matches!(ran.result, Err(DownError::StopFailed(_))),
@@ -1088,7 +1102,7 @@ mod tests {
     #[test]
     fn a_process_that_ended_by_itself_in_the_meantime_counts_as_stopped() {
         let rig = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let sc = Scenario {
             kill: Err(KillError::NotRunning),
             ..Scenario::default()
@@ -1206,6 +1220,52 @@ mod tests {
         );
     }
 
+    /// The PM may park a STOPPED lane (control.rs) but not end a RUNNING one: only a person may.
+    #[test]
+    fn the_pm_is_denied_against_a_running_agent_and_nothing_is_asked_or_killed() {
+        let rig = rig(&[target(), pm_record()]);
+        let (c, rec) = pm();
+        let ran = go(
+            &rig,
+            Scenario::default(),
+            &c,
+            Some(&rec),
+            true,
+            None,
+            ClosedHow::Parked,
+            60,
+        );
+        assert!(
+            matches!(&ran.result, Err(DownError::Denied(m)) if m.contains("only a person")),
+            "{:?}",
+            ran.result
+        );
+        assert!(
+            ran.sent.is_empty() && ran.kills.is_empty(),
+            "{:?} {:?}",
+            ran.sent,
+            ran.kills
+        );
+        assert_eq!(intent(&rig), Intent::Wanted);
+        // Positive control: the same request from a person goes through.
+        let (c, rec) = person();
+        let ran = go(
+            &rig,
+            Scenario::default(),
+            &c,
+            Some(&rec),
+            true,
+            None,
+            ClosedHow::Parked,
+            60,
+        );
+        assert!(
+            matches!(ran.result, Ok(Outcome::Stopped { .. })),
+            "{:?}",
+            ran.result
+        );
+    }
+
     fn rig_pinned() -> Rig {
         let mut t = target();
         t.pinned = Some(crate::registry::Pin {
@@ -1219,7 +1279,7 @@ mod tests {
     fn states_that_are_not_a_running_unclosed_verifiable_agent_are_refused() {
         // Not running.
         let rig1 = rig(&[target(), pm_record()]);
-        let (c, rec) = pm();
+        let (c, rec) = person();
         let ran = go(
             &rig1,
             Scenario {

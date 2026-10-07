@@ -1039,6 +1039,21 @@ fn pm_runs(d: &Down, park_args: &[&str]) -> i32 {
     c[0].2
 }
 
+/// A person at a terminal runs `park target ...`: not under any `claude`, so the caller is a person.
+/// (Run from inside a real Claude Code session this is NOT a person and the park is refused; CI is
+/// not under one.) Returns the exit code and what it printed.
+fn person_runs(d: &Down, park_args: &[&str]) -> (i32, String) {
+    let mut args = vec!["park", "target"];
+    args.extend_from_slice(park_args);
+    let out = d.rig.agentlife(&args);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().unwrap_or(-1), text)
+}
+
 /// Everything the stand-ins' commands printed, for failure messages.
 fn command_output(rig: &Rig) -> String {
     let mut out = String::new();
@@ -1066,21 +1081,21 @@ fn journal_kinds(rig: &Rig) -> Vec<String> {
 }
 
 #[test]
-fn the_pm_gracefully_parks_a_running_lane_and_the_process_really_ends() {
+fn a_person_gracefully_parks_a_running_lane_and_the_process_really_ends() {
     let mut d = running_target(&[], true);
     assert!(
         pid_alive(d.target_pid),
         "the target is running before the park"
     );
     let lane = play_the_lane(&d);
-    let code = pm_runs(&d, &["--yes", "--timeout", "60"]);
+    let (code, printed) = person_runs(&d, &["--yes", "--timeout", "60"]);
     lane.join().unwrap();
     assert_eq!(
         code,
         0,
         "park must succeed:\n{}\n--- what the command printed:\n{}",
         d.rig.log(),
-        command_output(&d.rig)
+        printed
     );
 
     // The REAL process is gone: pid and start time, not merely "the pid changed".
@@ -1102,16 +1117,15 @@ fn the_pm_gracefully_parks_a_running_lane_and_the_process_really_ends() {
         msgs[0].1
     );
     assert!(
-        msgs[0].1.contains("pm-agent:"),
+        msgs[0].1.contains("person"),
         "it names who asked: {}",
         msgs[0].1
     );
 
-    // The registry says parked, by the PM, and the journal shows the order of events.
+    // The registry says parked, by a person, and the journal shows the order of events.
     let rec = record_named(&d.rig, "target");
-    let pm = record_named(&d.rig, "PM");
     assert!(
-        matches!(&rec.intent, agentlife::registry::Intent::Closed { how: agentlife::registry::ClosedHow::Parked, by, .. } if *by == format!("pm-agent:{}", pm.agent_id)),
+        matches!(&rec.intent, agentlife::registry::Intent::Closed { how: agentlife::registry::ClosedHow::Parked, by, .. } if by == "person"),
         "{:?}",
         rec.intent
     );
@@ -1128,10 +1142,35 @@ fn the_pm_gracefully_parks_a_running_lane_and_the_process_really_ends() {
     );
 }
 
+/// Who may stop a RUNNING agent: only a person. The PM agent is refused; nothing is asked, nothing
+/// ends, and the intent is untouched. The happy-path test above is the control (same rig, a person).
+#[test]
+fn the_pm_agent_cannot_stop_a_running_lane() {
+    let d = running_target(&[], true);
+    let lane = play_the_lane(&d);
+    let code = pm_runs(&d, &["--yes", "--timeout", "4"]);
+    drop(lane);
+    assert_ne!(code, 0, "{}", d.rig.log());
+    let printed = command_output(&d.rig);
+    assert!(
+        printed.contains("only a person may stop a RUNNING agent"),
+        "{printed}"
+    );
+    assert!(d.broker.messages().is_empty(), "nobody was messaged");
+    assert!(pid_alive(d.target_pid), "the lane is still running");
+    assert_eq!(
+        record_named(&d.rig, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
+    assert!(!journal_kinds(&d.rig)
+        .iter()
+        .any(|k| k == "closed" || k == "stopped"));
+}
+
 #[test]
 fn without_yes_nothing_is_asked_and_nothing_is_stopped() {
     let d = running_target(&[], true);
-    let code = pm_runs(&d, &[]);
+    let (code, _) = person_runs(&d, &[]);
     assert_eq!(
         code, 2,
         "a plan only: exit 2, distinct from success and refusal"
@@ -1151,7 +1190,7 @@ fn without_yes_nothing_is_asked_and_nothing_is_stopped() {
 fn a_lane_that_never_wraps_up_is_left_running() {
     let d = running_target(&[], true);
     // No lane simulation: nobody writes a HANDOFF or an idle claim.
-    let code = pm_runs(&d, &["--yes", "--timeout", "4"]);
+    let (code, _) = person_runs(&d, &["--yes", "--timeout", "4"]);
     assert_ne!(code, 0, "{}", d.rig.log());
     assert_eq!(d.broker.messages().len(), 1, "it did ask");
     assert!(pid_alive(d.target_pid), "and it left the lane running");
@@ -1171,7 +1210,7 @@ fn a_lane_that_never_wraps_up_is_left_running() {
 fn a_live_shell_below_the_lane_blocks_the_stop_even_after_it_wrote_everything() {
     let d = running_target(&["--fake-shell-child"], true);
     let lane = play_the_lane(&d);
-    let code = pm_runs(&d, &["--yes", "--timeout", "5"]);
+    let (code, _) = person_runs(&d, &["--yes", "--timeout", "5"]);
     lane.join().unwrap();
     assert_ne!(
         code,
@@ -1225,7 +1264,7 @@ fn a_lane_that_cannot_be_found_among_the_peers_is_not_asked_and_not_stopped() {
     // parent process, so this peer is nobody's.
     let d = running_target(&[], false);
     let lane = play_the_lane(&d);
-    let code = pm_runs(&d, &["--yes", "--timeout", "4"]);
+    let (code, _) = person_runs(&d, &["--yes", "--timeout", "4"]);
     assert_ne!(code, 0, "{}", d.rig.log());
     assert!(d.broker.messages().is_empty(), "nobody was messaged");
     assert!(pid_alive(d.target_pid));
