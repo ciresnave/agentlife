@@ -424,3 +424,25 @@ watcher dies, the logon/unlock task restarts it; lazy agents' mail simply waits 
 - **R3-Q7. Defaults.** X = 120 min idle, 30 min for "he typed recently", 24 h for a waiting mark, 6 wakes
   per agent per hour. These are guesses to be adjusted; say if any matters to you.
 - **R3-Q8. Restore order** (board 121, §7): say `default` for option A, or name early lanes.
+
+---
+
+## 15. Rulings (added 2026-10-07; the questions above are left as asked)
+
+**R3-Q1 to R3-Q7: the PM's defaults**, relayed 2026-10-07, "within CireSnave's lazy-start ruling; he can
+veto". They are PM defaults, not CireSnave's own words:
+
+| question | ruling |
+|---|---|
+| R3-Q1 does mail to a *parked* agent wake it | **No**, as proposed. `lazy` wakes; `parked` does not. |
+| R3-Q2 may certain senders wake without a grant | **No sender exception.** The PM's mail uses the same grant. |
+| R3-Q3 may the PM be parked | **Yes, but an explicit park of the PM needs an extra typed confirmation.** |
+| R3-Q4 idle lane, stale HANDOFF | **(a)**: ask the lane to write it (one model turn), then stop. |
+| R3-Q5 `Notification` hook | **Deferred.** Build S1, S2 and S4 first; revisit once there is data. |
+| R3-Q6 may a lane pin or mark itself | **Yes.** |
+| R3-Q7 defaults (X = 120 min, 30 min, 24 h, 6 wakes per hour) | **Approved as starting values.** |
+
+**R3-Q8, restore order: CireSnave's own words** (board 121, 2026-10-07, verbatim): *"For agentlife, the
+default restore order is fine.  I would want the PM up first but beyond that, I'm not picky."* That is
+option A of §7: **PM first, then most recently active, with an empty optional `priority` list.** The
+recommendation in §7 stands as the decision.
