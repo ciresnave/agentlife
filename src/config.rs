@@ -39,6 +39,11 @@ pub const KEYS: &[&str] = &[
     "lane_state_dir",
     "down_timeout_secs",
     "down_poll_secs",
+    "host_program",
+    "claude_program",
+    "stop_after_failed_batches",
+    "progress_timeout_secs",
+    "spawn_gap_ms",
     "wake_poll_secs",
     "max_wakes_per_agent_per_hour",
     "max_wakes_per_minute",
@@ -142,6 +147,20 @@ pub struct Config {
     /// How long `park`/`stop` waits for a lane to write its HANDOFF and assert it is idle.
     pub down_timeout_secs: u64,
     pub down_poll_secs: u64,
+    /// The program a restored agent runs under (it owns the terminal and answers the start-up
+    /// dialog): `lane-restart`'s `host` subcommand. A name or a path; never run through a shell.
+    pub host_program: String,
+    /// The `claude` the host starts.
+    pub claude_program: String,
+    /// A restore stops starting agents after this many batches in a row in which none came up.
+    pub stop_after_failed_batches: u32,
+    /// How long a started agent may show no progress before it is reported as waiting at its
+    /// start-up dialog (when it carries the development-channels flag).
+    pub progress_timeout_secs: u64,
+    /// The pause between two agents' terminals being opened within one batch. Opening several at once
+    /// loses some (measured 2026-10-07 with `wt.exe` into one named window: of three back-to-back
+    /// tabs the later ones never ran; with 1.5 s between them all three did).
+    pub spawn_gap_ms: u64,
     pub wake_poll_secs: u64,
     pub max_wakes_per_agent_per_hour: u32,
     pub max_wakes_per_minute: u32,
@@ -174,6 +193,11 @@ impl Default for Config {
             lane_state_dir: "C:/Projects/.lane-state".to_string(),
             down_timeout_secs: 600,
             down_poll_secs: 2,
+            host_program: "lane-restart".to_string(),
+            claude_program: "claude".to_string(),
+            stop_after_failed_batches: 2,
+            progress_timeout_secs: 20,
+            spawn_gap_ms: 1500,
             wake_poll_secs: 10,
             max_wakes_per_agent_per_hour: 6,
             max_wakes_per_minute: 10,
@@ -240,6 +264,11 @@ pub struct Layer {
     pub lane_state_dir: Option<String>,
     pub down_timeout_secs: Option<u64>,
     pub down_poll_secs: Option<u64>,
+    pub host_program: Option<String>,
+    pub claude_program: Option<String>,
+    pub stop_after_failed_batches: Option<u32>,
+    pub progress_timeout_secs: Option<u64>,
+    pub spawn_gap_ms: Option<u64>,
     pub wake_poll_secs: Option<u64>,
     pub max_wakes_per_agent_per_hour: Option<u32>,
     pub max_wakes_per_minute: Option<u32>,
@@ -303,6 +332,13 @@ impl Layer {
             "lane_state_dir" => self.lane_state_dir = Some(value.trim().to_string()),
             "down_timeout_secs" => self.down_timeout_secs = Some(parse(key, value)?),
             "down_poll_secs" => self.down_poll_secs = Some(parse(key, value)?),
+            "host_program" => self.host_program = Some(value.trim().to_string()),
+            "claude_program" => self.claude_program = Some(value.trim().to_string()),
+            "stop_after_failed_batches" => {
+                self.stop_after_failed_batches = Some(parse(key, value)?)
+            }
+            "progress_timeout_secs" => self.progress_timeout_secs = Some(parse(key, value)?),
+            "spawn_gap_ms" => self.spawn_gap_ms = Some(parse(key, value)?),
             "synapse_account" => self.synapse_account = Some(value.trim().to_string()),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         }
@@ -454,6 +490,18 @@ impl Config {
                 why: format!("{lane_state_dir:?} is not a usable directory name"),
             });
         }
+        let program = |key: &'static str, v: String| {
+            if v.is_empty() || v.contains(';') || v.chars().any(char::is_control) {
+                Err(ConfigError::Invalid {
+                    key,
+                    why: format!("{v:?} is not a usable program name"),
+                })
+            } else {
+                Ok(v)
+            }
+        };
+        let host_program = program("host_program", field!(host_program))?;
+        let claude_program = program("claude_program", field!(claude_program))?;
         let portfolio_root = field!(portfolio_root);
         if portfolio_root.is_empty() || portfolio_root.contains(';') {
             return Err(ConfigError::Invalid {
@@ -522,6 +570,17 @@ impl Config {
             lane_state_dir,
             down_timeout_secs: at_least_one("down_timeout_secs", field!(down_timeout_secs))?,
             down_poll_secs: at_least_one("down_poll_secs", field!(down_poll_secs))?,
+            host_program,
+            claude_program,
+            stop_after_failed_batches: at_least_one(
+                "stop_after_failed_batches",
+                field!(stop_after_failed_batches),
+            )?,
+            progress_timeout_secs: at_least_one(
+                "progress_timeout_secs",
+                field!(progress_timeout_secs),
+            )?,
+            spawn_gap_ms: field!(spawn_gap_ms),
             wake_poll_secs: at_least_one("wake_poll_secs", field!(wake_poll_secs))?,
             max_wakes_per_agent_per_hour: at_least_one(
                 "max_wakes_per_agent_per_hour",
@@ -577,6 +636,15 @@ mod tests {
         assert_eq!(c.peers_addr.to_string(), "127.0.0.1:7899");
         assert_eq!(c.lane_state_dir, "C:/Projects/.lane-state");
         assert_eq!((c.down_timeout_secs, c.down_poll_secs), (600, 2));
+        assert_eq!(
+            (c.host_program.as_str(), c.claude_program.as_str()),
+            ("lane-restart", "claude")
+        );
+        assert_eq!(
+            (c.stop_after_failed_batches, c.progress_timeout_secs),
+            (2, 20)
+        );
+        assert_eq!(c.spawn_gap_ms, 1500);
     }
 
     #[test]
@@ -702,6 +770,8 @@ mod tests {
             "waiting_mark_ttl_hours": 12, "pin_roles": ["pm","synapse"], "portfolio_root": "D:/ws",
             "peers_addr": "127.0.0.1:9100", "lane_state_dir": "D:/ws/.ls",
             "down_timeout_secs": 30, "down_poll_secs": 1,
+            "host_program": "C:/bin/host.exe", "claude_program": "C:/bin/claude.exe",
+            "stop_after_failed_batches": 3, "progress_timeout_secs": 7, "spawn_gap_ms": 250,
             "wake_poll_secs": 5, "max_wakes_per_agent_per_hour": 2,
             "max_wakes_per_minute": 4, "synapse_addr": "127.0.0.1:9000",
             "synapse_account": "someone"
@@ -730,6 +800,11 @@ mod tests {
             ("lane_state_dir", "D:/ws/.ls"),
             ("down_timeout_secs", "30"),
             ("down_poll_secs", "1"),
+            ("host_program", "C:/bin/host.exe"),
+            ("claude_program", "C:/bin/claude.exe"),
+            ("stop_after_failed_batches", "3"),
+            ("progress_timeout_secs", "7"),
+            ("spawn_gap_ms", "250"),
             ("wake_poll_secs", "5"),
             ("max_wakes_per_agent_per_hour", "2"),
             ("max_wakes_per_minute", "4"),
@@ -763,6 +838,11 @@ mod tests {
             ("max_wakes_per_minute", "0"),
             ("down_timeout_secs", "0"),
             ("down_poll_secs", "0"),
+            ("stop_after_failed_batches", "0"),
+            ("progress_timeout_secs", "0"),
+            ("host_program", "a;b"),
+            ("host_program", ""),
+            ("claude_program", "x;y"),
             ("free_ram_floor_gb", "-1"),
             ("free_ram_floor_gb", "NaN"),
             ("free_ram_floor_gb", "inf"),

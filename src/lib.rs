@@ -24,6 +24,7 @@ pub mod identity;
 pub mod install;
 pub mod intent;
 pub mod journal;
+pub mod launch;
 pub mod list;
 pub mod lock;
 pub mod marks;
@@ -32,6 +33,7 @@ pub mod plan;
 pub mod procindex;
 pub mod readiness;
 pub mod registry;
+pub mod restore;
 pub mod select;
 
 /// The crate version, as one string.

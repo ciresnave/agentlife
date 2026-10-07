@@ -93,3 +93,24 @@ that is the moment to decide between re-copying and finishing the extraction.
 `RealParentProcess` (the per-hop full scan; `hook.rs` has its own one-snapshot implementation of the
 copied `ParentProcess` trait, measured at ~80 ms against ~860 ms per hop), `LaneState`, the lock, and the
 state writer. Everything copied is pure logic over injected data.
+
+## Second copy (M3b): `SESSION_IDENTITY_ENV_VARS` in `src/launch.rs`
+
+One more item, same rules, same blocker, same owner, same end state (it goes when OverMind publishes
+the crate; `launch.rs` then depends on it).
+
+* Origin: `crates/lane-restart/src/main.rs`, `const SESSION_IDENTITY_ENV_VARS: &[&str]` (lines 1090 to
+  1101 at the OverMind `origin/main` of 2026-10-07, `94ff807`), the list of environment variables that name a
+  running Claude Code session or its IPC channel, which a relaunch must not hand on (or the new session
+  believes it is a child of the old one).
+* Hash: SHA-256 of the item (from `const` to the closing `];`, leading whitespace of each line removed,
+  because OverMind's sits inside a module and agentlife's is `pub` at the top of its own): **`00a9552ba6db`**
+  (12 hex digits). The two are **identical** under that normalisation: ten names, same order.
+* Changed here: `pub` (the launcher's tests and the stand-in refer to it); the doc comment is
+  agentlife's own and credits OverMind. OverMind's longer comment, the record of the live incident behind
+  the list (2026-09-18, third real-restart retest), is not reproduced; read it at the origin.
+* Re-verify: `git -C <OverMind> show <rev>:crates/lane-restart/src/main.rs`, extract the item, strip
+  leading whitespace per line, compare with `src/launch.rs`.
+* `examples/fake_claude.rs` carries the same ten names (it reports which of them a launched process
+  still had), so the test would notice if the two lists drifted: `launch_e2e` asserts none reached a
+  launched agent.
