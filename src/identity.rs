@@ -6,6 +6,13 @@
 //! with the same pid apart. `lane-restart` records it as `LaneState.pid_start_secs` (seconds
 //! since the epoch, from `sysinfo`); this module uses the same unit so the two agree.
 //!
+//! **How exact this is.** On Windows the start time is the process's creation time, so the pair is
+//! exact. On other platforms `sysinfo` derives it from the boot time and the process's start tick, and
+//! the boot time can move by a second as the clock is adjusted (a hypothesis, **unproven**: one Linux CI
+//! test failed once in about thirty runs as if two reads of a live process had disagreed by a second).
+//! Start-time identity is therefore **exact on Windows and best-effort elsewhere**; a green Linux CI leg
+//! is not a Linux guarantee. No tolerance is applied: it would widen the pid-recycle window.
+//!
 //! Reading a process goes through [`ProcessTable`], so every decision built on it is testable
 //! with a fake, and [`SysinfoTable`] is proven against a **real spawned child** (the one kind of
 //! test a fake structurally cannot replace: OverMind's `cwd`/`cmd` bug was invisible to 79 passing

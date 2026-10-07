@@ -1378,15 +1378,33 @@ mod tests {
             .expect("start a child")
     }
 
+    /// An identity of the running `pid` that the terminator itself reads back as **alive**.
+    ///
+    /// Why not just one read: on Linux `sysinfo` has been seen (unproven, issue "start-time identity is
+    /// best-effort off Windows") to give a live process a start time one second different from an
+    /// earlier read, so `is_gone(&identity_read_a_moment_ago)` answered "gone" for a running child
+    /// (CI run 37682812078, attempt 1). The question these tests ask is about the terminator's decisions,
+    /// not about that, so each use takes a fresh read and retries until the two reads agree. No tolerance
+    /// is added to `identity::check` (PM ruling, 2026-10-07).
+    fn identity_that_reads_back(pid: u32) -> ProcessIdentity {
+        use crate::identity::{ProcessTable, SysinfoTable};
+        for _ in 0..40 {
+            if let Some(id) = SysinfoTable.identity_of(pid) {
+                if !SysinfoTerminator.is_gone(&id) {
+                    return id;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("pid {pid} never gave an identity that reads back as alive");
+    }
+
     /// The only code that ends a process, proven against a REAL one: a wrong start time is refused
     /// and the child is still alive afterwards; the right identity ends exactly that child.
     #[test]
     fn the_real_terminator_refuses_a_wrong_start_time_and_ends_the_right_process() {
-        use crate::identity::{ProcessTable, SysinfoTable};
         let mut child = real_child();
-        let right = SysinfoTable
-            .identity_of(child.id())
-            .expect("the child is running");
+        let right = identity_that_reads_back(child.id());
 
         let wrong = ProcessIdentity {
             start_secs: right.start_secs.saturating_sub(1000),
@@ -1402,6 +1420,8 @@ mod tests {
             child.try_wait().unwrap().is_none(),
             "a refused kill must leave the process alone"
         );
+        // Read again now, not 300 ms ago: see `identity_that_reads_back`.
+        let right = identity_that_reads_back(child.id());
         assert!(!SysinfoTerminator.is_gone(&right));
 
         SysinfoTerminator
