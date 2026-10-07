@@ -589,6 +589,7 @@ mod tests {
                 subagents_running: Some(0),
                 no_background_shells: Some(ready),
                 updated_at: self.clock.now(),
+                updated_by_event: None,
             })
         }
         fn handoff(&self, _: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, DateTime<Utc>)>) {

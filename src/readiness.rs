@@ -34,6 +34,9 @@ pub struct LaneStateView {
     #[serde(default)]
     pub no_background_shells: Option<bool>,
     pub updated_at: DateTime<Utc>,
+    /// The hook event that last wrote the record (`SessionStart` until the session does anything).
+    #[serde(default)]
+    pub updated_by_event: Option<String>,
 }
 
 /// The newest state record in `dir` whose `session_id` is `session_id`. Files that do not parse are
@@ -192,6 +195,7 @@ mod tests {
             subagents_running: subs,
             no_background_shells: claim,
             updated_at: at,
+            updated_by_event: None,
         }
     }
 

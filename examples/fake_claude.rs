@@ -17,6 +17,13 @@
 //! * `--fake-child <pidfile>`  start a long-lived non-shell child (the stand-in for a lane's MCP helper,
 //!   whose parent is the `claude`) and write its pid to `<pidfile>`;
 //! * `--fake-shell-child`     also start a long-lived SHELL child (a backgrounded command);
+//!
+//! Launched by the restore launcher the stand-in has no flags of its own (the launcher builds its argv),
+//! so each setting also has an environment fallback: `FAKE_AGENTLIFE`, `FAKE_REPORT`, `FAKE_HOLD`, and
+//! `FAKE_AUTO_START=1`, which runs a `SessionStart` hook for itself with a payload it builds (session id
+//! `sess-<pid>`, `cwd` = its own working directory). `FAKE_ENVLOG=<file>` appends one line saying which
+//! agent id and which session-identity variables this process was started with.
+//!
 //! * `--fake-nest`             do not run the script: start a copy of this same program (so the
 //!   copy has a `claude` parent) with the other arguments and wait for it.
 
@@ -57,11 +64,53 @@ fn long_child(shell: bool) -> Child {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let env_for = |flag: &str| -> Option<String> {
+        let key = match flag {
+            "--fake-agentlife" => "FAKE_AGENTLIFE",
+            "--fake-report" => "FAKE_REPORT",
+            "--fake-hold" => "FAKE_HOLD",
+            _ => return None,
+        };
+        std::env::var(key).ok().filter(|v| !v.is_empty())
+    };
     let get = |flag: &str| -> Option<String> {
         args.iter()
             .position(|a| a == flag)
             .and_then(|i| args.get(i + 1).cloned())
+            .or_else(|| env_for(flag))
     };
+
+    if let Ok(log) = std::env::var("FAKE_ENVLOG") {
+        const IDENTITY: &[&str] = &[
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_CODE_BRIDGE_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_SSE_PORT",
+            "CLAUDE_PID",
+        ];
+        let present: Vec<&str> = IDENTITY
+            .iter()
+            .copied()
+            .filter(|k| std::env::var_os(k).is_some())
+            .collect();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+        {
+            let _ = writeln!(
+                f,
+                "agent_id={} identity={}",
+                std::env::var("AGENTLIFE_AGENT_ID").unwrap_or_else(|_| "-".into()),
+                present.join(",")
+            );
+        }
+    }
 
     if args.iter().any(|a| a == "--fake-nest") {
         let rest: Vec<String> = args
@@ -98,10 +147,28 @@ fn main() {
         _children.push(long_child(true));
     }
 
-    let agentlife = get("--fake-agentlife").expect("--fake-agentlife <exe>");
+    let agentlife = get("--fake-agentlife").expect("--fake-agentlife <exe> (or FAKE_AGENTLIFE)");
     let mut report = String::new();
-    if let Some(script) = get("--fake-script") {
-        let text = std::fs::read_to_string(&script).expect("read the script");
+    let script_text = if let Some(script) = get("--fake-script") {
+        Some(std::fs::read_to_string(&script).expect("read the script"))
+    } else if std::env::var("FAKE_AUTO_START").is_ok_and(|v| v == "1") {
+        // Build this session's own SessionStart payload and write it where the script can read it.
+        let cwd = std::env::current_dir().expect("cwd").display().to_string();
+        let payload = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": format!("sess-{}", std::process::id()),
+            "cwd": cwd,
+            "source": "startup",
+        })
+        .to_string();
+        let file =
+            std::env::temp_dir().join(format!("fake-claude-start-{}.json", std::process::id()));
+        std::fs::write(&file, payload).expect("write the payload");
+        Some(format!("SessionStart\t-\t{}\n", file.display()))
+    } else {
+        None
+    };
+    if let Some(text) = script_text {
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let mut parts = line.split('\t');
             let event = parts.next().expect("event");

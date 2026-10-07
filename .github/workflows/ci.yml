@@ -39,3 +39,7 @@ jobs:
 
       - name: cargo test
         run: cargo test --no-fail-fast
+        env:
+          # The launcher's fallback through conhost.exe must really start a command on CI (a
+          # developer machine where it cannot is allowed to skip that one test).
+          AGENTLIFE_REQUIRE_CONHOST: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
