@@ -8,6 +8,7 @@
 //! registry joined with the process table. Neither acts on a running agent.
 
 pub mod atomic;
+pub mod claude_proc;
 pub mod cli;
 pub mod clock;
 pub mod config;

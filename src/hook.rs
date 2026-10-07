@@ -8,11 +8,12 @@
 //! silent to Claude Code and a broken install would otherwise never be seen (the lesson of
 //! OverMind's `hook-errors.log`, and of its first install that wrote no state file at all).
 //!
-//! What it reuses from `lane-restart` (the OverMind library, pinned by SHA): the walk from this
-//! hook process up to its `claude` (`claude_parent_pid`, which passes through the Git Bash layers a
-//! real hook runs under), the launch-flag parser (`parse_claude_cli_flags`, which reads `-n` /
-//! `--name`, `--permission-mode`, `--remote-control`) and the launch-directory rule
-//! (`recorded_cwd`).
+//! What it reuses from OverMind's `lane-restart`, as a **temporary copy** in `claude_proc.rs` (the
+//! library is not on crates.io and the portfolio forbids a new `git =` dependency; see that file's
+//! header): the walk from this hook process up to its `claude` (`claude_parent_pid`, which passes
+//! through the Git Bash layers a real hook runs under), the launch-flag parser
+//! (`parse_claude_cli_flags`, which reads `-n` / `--name`, `--permission-mode`, `--remote-control`)
+//! and the launch-directory rule (`recorded_cwd`).
 //!
 //! What it records, and what it deliberately does not register:
 //! * **Interactive sessions only.** A session whose command line has `-p`/`--print`, or which has
@@ -20,14 +21,14 @@
 //!   otherwise a fan-out of subagents would turn into a restore storm (DESIGN-REVISION-1 §2.3).
 //! * **Never a delete.** `SessionEnd` stamps `ended_at` and the reason; it removes nothing.
 
+use crate::claude_proc::{
+    claude_parent_pid, parse_claude_cli_flags, recorded_cwd, HookInput, ModelField, ParentProcess,
+};
 use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
 use crate::journal::Journal;
 use crate::procindex::ProcIndex;
 use crate::registry::{AgentId, AgentRecord, Origin, Registry, Session};
 use chrono::{DateTime, Utc};
-use lane_restart::lane_state_writer::{
-    claude_parent_pid, parse_claude_cli_flags, recorded_cwd, HookInput, ModelField, ParentProcess,
-};
 use serde_json::json;
 use std::collections::HashMap;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -420,15 +421,14 @@ fn session_end(ctx: &Ctx, input: &HookInput, reason: Option<&str>) -> Result<Out
     Ok(Outcome::Ended { agent_id: id })
 }
 
-/// One refresh of the process table, served as `lane-restart`'s `ParentProcess`.
+/// One refresh of the process table, served as the copied `ParentProcess` trait.
 ///
-/// **Why not `lane-restart`'s own `RealParentProcess`?** It refreshes every process with
+/// **Why not OverMind's own `RealParentProcess` (deliberately not copied)?** It refreshes every process with
 /// sysinfo's default (expensive) kind on *every hop*. Measured on this machine (640 processes,
 /// 15 live lanes), `parent_of` cost about 860 ms per hop, so a `SessionEnd` walk took 3 to 5.5 s
 /// under load against its documented **1.5 s** budget; the real-chain test caught it. One
-/// `refresh(All, nothing)` costs about 80 ms. The walk itself is still `lane-restart`'s
-/// `claude_parent_pid`; only the data source changed, so the shell-skipping and refusal rules are
-/// reused unchanged.
+/// `refresh(All, nothing)` costs about 80 ms. The walk itself is the copied `claude_parent_pid`;
+/// only the data source differs, so the shell-skipping and refusal rules are unchanged.
 pub struct SnapshotParents {
     /// pid -> (parent pid, image name, start time in seconds)
     procs: HashMap<u32, (Option<u32>, String, u64)>,
