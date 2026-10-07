@@ -333,6 +333,18 @@ mod tests {
             converged,
             "the child's exe never became ping/sleep; images seen over 2 s: {seen:?}"
         );
+        // Re-read now that the image has settled. `got` above was taken at spawn, possibly in the
+        // fork-to-exec window, and comparing THAT with the settled process is a (correct)
+        // `DifferentExe`: attempt 6 on the Ubuntu CI leg did exactly this. The start time is the
+        // same either way, which is why the registry records identities WITHOUT an exe.
+        let settled = SysinfoTable
+            .identity_of(pid)
+            .expect("the child is still alive");
+        assert_eq!(
+            settled.start_secs, got.start_secs,
+            "an exec does not change the start time"
+        );
+        let got = settled;
 
         // The real table agrees with itself, and disagrees about a recycled pid.
         assert_eq!(check(&SysinfoTable, &got), Match::Same);
