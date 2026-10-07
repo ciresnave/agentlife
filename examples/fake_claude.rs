@@ -21,7 +21,7 @@
 //! Launched by the restore launcher the stand-in has no flags of its own (the launcher builds its argv),
 //! so each setting also has an environment fallback: `FAKE_AGENTLIFE`, `FAKE_REPORT`, `FAKE_HOLD`, and
 //! `FAKE_AUTO_START=1`, which runs a `SessionStart` hook for itself with a payload it builds (session id
-//! `sess-<pid>`, `cwd` = its own working directory). `FAKE_ENVLOG=<file>` appends one line saying which
+//! `sess-<pid>-<nanos>`, unique even when Windows hands a pid to a new process, `cwd` = its own working directory). `FAKE_ENVLOG=<file>` appends one line saying which
 //! agent id and which session-identity variables this process was started with.
 //!
 //! * `--fake-nest`             do not run the script: start a copy of this same program (so the
@@ -156,7 +156,14 @@ fn main() {
         let cwd = std::env::current_dir().expect("cwd").display().to_string();
         let payload = serde_json::json!({
             "hook_event_name": "SessionStart",
-            "session_id": format!("sess-{}", std::process::id()),
+            "session_id": format!(
+                "sess-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ),
             "cwd": cwd,
             "source": "startup",
         })
