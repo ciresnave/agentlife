@@ -98,17 +98,24 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, ArgError>
 /// positional event name) doesn't fit the restart CLI's own flags at all,
 /// and mixing the two would make either grammar harder to read.
 fn run_state_hook(event: &str) -> ExitCode {
+    let started = std::time::Instant::now();
     let my_pid = std::process::id();
     let lane_role_env = std::env::var("LANE_ROLE").ok();
     let mut stdin = std::io::stdin();
-    match lane_state_writer::run(
+    let lookup = RealParentProcess::new();
+    let result = lane_state_writer::run(
         &state_dir(),
         event,
         my_pid,
-        &RealParentProcess,
+        &lookup,
         lane_role_env.as_deref(),
         &mut stdin,
-    ) {
+    );
+    if let Some(note) = lane_state_writer::slow_note(event, started.elapsed(), lookup.full_scans())
+    {
+        eprintln!("{note}");
+    }
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("lane-restart state {event}: {e}");
@@ -133,7 +140,7 @@ fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
     match lane_state_writer::run_assert_idle(
         &state_dir(),
         my_pid,
-        &RealParentProcess,
+        &RealParentProcess::new(),
         lane_role_env.as_deref(),
         &cwd,
     ) {
@@ -487,7 +494,7 @@ fn main() -> ExitCode {
             // state file's pid, so `--self` is a claim it can check.
             caller_pid: lane_state_writer::claude_parent_pid(
                 std::process::id(),
-                &RealParentProcess,
+                &RealParentProcess::new(),
             )
             .ok(),
         }

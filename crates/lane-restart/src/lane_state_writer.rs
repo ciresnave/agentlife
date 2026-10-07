@@ -682,11 +682,40 @@ pub fn write_atomic(path: &Path, state: &LaneState) -> Result<(), WriteError> {
 /// Records when the state's `claude` process started, once per process: a
 /// pid alone can be reused by the OS. Only for the pid this hook itself
 /// verified (`claude_parent_pid`), never another one a state carries.
-fn with_start_time(mut state: LaneState, pid: u32, lookup: &dyn ParentProcess) -> LaneState {
+fn with_start_time(mut state: LaneState, pid: u32, started: Option<u64>) -> LaneState {
     if state.pid == pid && state.pid_start_secs.is_none() {
-        state.pid_start_secs = lookup.start_time_of(pid);
+        state.pid_start_secs = started;
     }
     state
+}
+
+/// Everything this hook reads about its `claude` process (only ever the pid
+/// `claude_parent_pid` already verified; an unreadable command line is
+/// "nothing detected", not a failure), read BEFORE the
+/// state lock: each read used to scan the whole process table for seconds
+/// while the lane's next event waited on the lock (PM ruling 2026-10-07).
+fn read_claude_process(pid: u32, lookup: &dyn ParentProcess) -> (ClaudeCliFlags, Option<u64>) {
+    let flags = lookup
+        .cmdline_of(pid)
+        .map(|cmd| parse_claude_cli_flags(&cmd))
+        .unwrap_or_default();
+    (flags, lookup.start_time_of(pid))
+}
+
+/// A state hook slower than this says so on stderr, which the hook command
+/// appends to `.lane-state/hook-errors.log`: the hook's own record of its
+/// time, so a slow hook is visible without anyone timing it (PM ruling
+/// 2026-10-07).
+pub const SLOW_HOOK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The line a slow hook logs, or `None` when it was fast enough.
+pub fn slow_note(event: &str, elapsed: std::time::Duration, full_scans: u32) -> Option<String> {
+    (elapsed >= SLOW_HOOK).then(|| {
+        format!(
+            "lane-restart state {event}: slow, {} ms ({full_scans} full process scan(s))",
+            elapsed.as_millis()
+        )
+    })
 }
 
 /// The whole hook invocation: read stdin, lock, read-modify-write, unlock.
@@ -707,6 +736,7 @@ pub fn run(
 
     // The verified claude pid first: it is what names this process's file.
     let pid = claude_parent_pid(my_pid, parent_lookup).map_err(|e| e.to_string())?;
+    let (cli_flags, started) = read_claude_process(pid, parent_lookup);
     let role = hook_role(state_dir, &input, lane_role_env, pid);
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let path = state_dir.join(format!("{role}.json"));
@@ -718,15 +748,8 @@ pub fn run(
     .map_err(|e| e.to_string())?;
 
     let existing = crate::state::load(state_dir, &role).ok();
-    // ⚠️ Only ever read against the pid `claude_parent_pid` already
-    // verified - never an unvetted process. Missing/unreadable cmdline is
-    // "nothing detected", not a hard failure of the whole hook.
-    let cli_flags = parent_lookup
-        .cmdline_of(pid)
-        .map(|cmd| parse_claude_cli_flags(&cmd))
-        .unwrap_or_default();
     let next = apply_event(existing, event, &input, &role, pid, &cli_flags, Utc::now())
-        .map(|state| with_start_time(state, pid, parent_lookup));
+        .map(|state| with_start_time(state, pid, started));
 
     let result = match next {
         Some(state) => write_atomic(&path, &state).map_err(|e| e.to_string()),
@@ -759,7 +782,9 @@ pub fn run_assert_idle(
     lane_role_env: Option<&str>,
     cwd: &str,
 ) -> Result<(), String> {
-    let caller = claude_parent_pid(my_pid, parent_lookup).ok();
+    let walked = claude_parent_pid(my_pid, parent_lookup);
+    let caller = walked.as_ref().ok().copied();
+    let read = caller.map(|pid| read_claude_process(pid, parent_lookup));
     let role = assert_idle_role(state_dir, caller, lane_role_env, cwd);
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let path = state_dir.join(format!("{role}.json"));
@@ -778,7 +803,14 @@ pub fn run_assert_idle(
              has already recorded SessionStart"
         ));
     }
-    let pid = claude_parent_pid(my_pid, parent_lookup).map_err(|e| e.to_string())?;
+    let pid = match walked {
+        Ok(pid) => pid,
+        Err(e) => {
+            drop(lock);
+            return Err(e.to_string());
+        }
+    };
+    let (cli_flags, started) = read.unwrap_or_default();
     if let Some(s) = existing.as_ref().filter(|s| s.pid != pid) {
         drop(lock);
         return Err(format!(
@@ -787,10 +819,6 @@ pub fn run_assert_idle(
             s.pid
         ));
     }
-    let cli_flags = parent_lookup
-        .cmdline_of(pid)
-        .map(|cmd| parse_claude_cli_flags(&cmd))
-        .unwrap_or_default();
     // ⚠️ The placeholder MUST carry the existing state's own session_id
     // (found 2026-09-27, live): `apply_event` treats any other session_id
     // as a new session and bootstraps a fresh state - an empty one here
@@ -818,7 +846,7 @@ pub fn run_assert_idle(
         &cli_flags,
         Utc::now(),
     );
-    let result = match next.map(|state| with_start_time(state, pid, parent_lookup)) {
+    let result = match next.map(|state| with_start_time(state, pid, started)) {
         Some(state) => write_atomic(&path, &state).map_err(|e| e.to_string()),
         None => Err(format!("{role}: assert-idle produced no state to write")),
     };
@@ -831,28 +859,64 @@ pub fn run_assert_idle(
 /// a real process, which this crate must never spin up just to test itself.
 /// `apply_event`, `resolve_role`, `StateLock` and `write_atomic` carry the
 /// real test coverage; this is exercised by actually running the hook.
-pub struct RealParentProcess;
+/// ⚠️ ONE scan of the whole process table per hook invocation (PM ruling
+/// 2026-10-07): measured on ~600 processes, every `parent_of` hop and every
+/// `cmdline_of` used to scan the whole table again with every detail, so the
+/// hook took 3-10 s on each tool call of every lane. Now one lean snapshot
+/// (names, parents, start times) serves the whole ancestry walk and the start
+/// time, and only the `claude` process's own command line is read on top.
+#[derive(Default)]
+pub struct RealParentProcess {
+    snapshot: std::cell::RefCell<Option<sysinfo::System>>,
+    /// How many times the WHOLE process table was scanned.
+    full_scans: std::cell::Cell<u32>,
+}
+
+impl RealParentProcess {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many times this lookup scanned the whole process table.
+    pub fn full_scans(&self) -> u32 {
+        self.full_scans.get()
+    }
+
+    fn with_snapshot<R>(&self, f: impl FnOnce(&mut sysinfo::System) -> R) -> R {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut slot = self.snapshot.borrow_mut();
+        let sys = slot.get_or_insert_with(|| {
+            let mut sys = System::new();
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            self.full_scans.set(self.full_scans.get() + 1);
+            sys
+        });
+        f(sys)
+    }
+}
 
 impl ParentProcess for RealParentProcess {
     fn start_time_of(&self, pid: u32) -> Option<u64> {
-        use sysinfo::{Pid, ProcessesToUpdate, System};
-        let pid = Pid::from_u32(pid);
-        let mut sys = System::new();
-        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-        sys.process(pid).map(|p| p.start_time())
+        self.with_snapshot(|sys| {
+            sys.process(sysinfo::Pid::from_u32(pid))
+                .map(|p| p.start_time())
+        })
     }
 
     fn parent_of(&self, my_pid: u32) -> Option<(u32, String)> {
-        use sysinfo::{Pid, System};
-        let mut sys = System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let me = sys.process(Pid::from_u32(my_pid))?;
-        let parent_pid = me.parent()?;
-        let parent = sys.process(parent_pid)?;
-        Some((
-            parent_pid.as_u32(),
-            parent.name().to_string_lossy().to_string(),
-        ))
+        self.with_snapshot(|sys| {
+            let me = sys.process(sysinfo::Pid::from_u32(my_pid))?;
+            let parent_pid = me.parent()?;
+            let parent = sys.process(parent_pid)?;
+            Some((
+                parent_pid.as_u32(),
+                parent.name().to_string_lossy().to_string(),
+            ))
+        })
     }
 
     fn cmdline_of(&self, pid: u32) -> Option<Vec<String>> {
@@ -864,20 +928,24 @@ impl ParentProcess for RealParentProcess {
         // one, which is why `remote_control` read `false` even on a session
         // launched with `--remote-control` on its real command line. Same
         // root cause, and the same fix, as `facts.rs`'s `cwd_of`.
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
-        );
-        let process = sys.process(Pid::from_u32(pid))?;
-        Some(
-            process
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().to_string())
-                .collect(),
-        )
+        let _ = System::new;
+        let pid = Pid::from_u32(pid);
+        self.with_snapshot(|sys| {
+            // this one process only, with its command line
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+            );
+            let process = sys.process(pid)?;
+            Some(
+                process
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .collect(),
+            )
+        })
     }
 }
 
@@ -2640,7 +2708,7 @@ mod tests {
         let pid = child.id();
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let lookup = RealParentProcess;
+        let lookup = RealParentProcess::new();
         let observed = lookup
             .cmdline_of(pid)
             .expect("a real spawned child's argv must be readable, not None");
@@ -3033,7 +3101,7 @@ mod tests {
             .spawn()
             .expect("could not spawn a throwaway child process for this test");
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let started = RealParentProcess.start_time_of(child.id());
+        let started = RealParentProcess::new().start_time_of(child.id());
         let _ = child.kill();
         let _ = child.wait();
         let now_secs = std::time::SystemTime::now()
@@ -3239,6 +3307,105 @@ mod tests {
                 .unwrap()
                 .pid_start_secs,
             Some(7)
+        );
+    }
+
+    // -- one process-table scan per hook (PM ruling 2026-10-07) ------------ //
+    //
+    // Measured 2026-10-07 on ~600 processes: the installed hook took 3.5-10 s
+    // per tool call, almost all of it `parent_of` and `cmdline_of` each
+    // scanning the WHOLE process table again. Every tool call in every lane
+    // waits on PreToolUse.
+
+    /// A real walk up this test process's own ancestry, then its command
+    /// line and start time: one full scan, however many hops.
+    #[test]
+    fn a_whole_hook_scans_the_process_table_once() {
+        let l = RealParentProcess::new();
+        let me = std::process::id();
+        let (parent, name) = l.parent_of(me).expect("this test process has a parent");
+        assert!(!name.is_empty());
+        let _ = l.parent_of(parent);
+        assert!(l.start_time_of(me).is_some());
+        let cmd = l.cmdline_of(me).expect("this process's own command line");
+        assert!(!cmd.is_empty(), "cmd must be read, not left empty");
+        assert_eq!(l.full_scans(), 1);
+    }
+
+    /// The lock serialises a lane's own events; while it is held nothing may
+    /// touch the process table (each touch was seconds, so the lane's next
+    /// event timed out waiting).
+    struct LockWatcher {
+        chain: FakeAncestry,
+        lock: std::path::PathBuf,
+        touched_under_lock: std::cell::Cell<bool>,
+    }
+    impl LockWatcher {
+        fn note(&self) {
+            if self.lock.exists() {
+                self.touched_under_lock.set(true);
+            }
+        }
+    }
+    impl ParentProcess for LockWatcher {
+        fn parent_of(&self, pid: u32) -> Option<(u32, String)> {
+            self.note();
+            self.chain.parent_of(pid)
+        }
+        fn cmdline_of(&self, _: u32) -> Option<Vec<String>> {
+            self.note();
+            Some(vec![
+                "claude".to_string(),
+                "--name".to_string(),
+                "lane".to_string(),
+            ])
+        }
+        fn start_time_of(&self, _: u32) -> Option<u64> {
+            self.note();
+            Some(1)
+        }
+    }
+
+    #[test]
+    fn nothing_reads_the_process_table_while_the_lock_is_held() {
+        let dir = tempdir().unwrap();
+        let w = LockWatcher {
+            chain: FakeAncestry::chain(&[(4242, 99, "claude.exe")]),
+            lock: dir.path().join("lane.lock"),
+            touched_under_lock: std::cell::Cell::new(false),
+        };
+        let json = hook_json("SessionStart", "s1", LANE, Some(LANE_TRANSCRIPT));
+        run(
+            dir.path(),
+            "SessionStart",
+            4242,
+            &w,
+            None,
+            &mut json.as_bytes(),
+        )
+        .unwrap();
+        run_assert_idle(dir.path(), 4242, &w, None, LANE).unwrap();
+        let s = crate::state::load(dir.path(), "lane").unwrap();
+        assert_eq!(
+            (s.name.as_deref(), s.pid_start_secs),
+            (Some("lane"), Some(1))
+        );
+        assert!(
+            !w.touched_under_lock.get(),
+            "the process table was read under the lock"
+        );
+    }
+
+    #[test]
+    fn a_slow_hook_logs_its_own_time_and_a_fast_one_is_silent() {
+        use std::time::Duration;
+        assert_eq!(slow_note("PreToolUse", Duration::from_millis(499), 1), None);
+        let note = slow_note("PreToolUse", Duration::from_millis(1234), 1).unwrap();
+        assert!(
+            note.contains("PreToolUse")
+                && note.contains("1234 ms")
+                && note.contains("1 full process scan"),
+            "{note}"
         );
     }
 }
