@@ -11,6 +11,34 @@ pub enum Command {
         json: bool,
         all: bool,
     },
+    Reconcile {
+        dry_run: bool,
+        json: bool,
+    },
+    Pin {
+        agent: String,
+    },
+    Unpin {
+        agent: String,
+    },
+    /// `agent` is `None` for "the agent running this command".
+    Waiting {
+        agent: Option<String>,
+        note: Option<String>,
+        clear: bool,
+    },
+    Park {
+        agent: String,
+        confirm: Option<String>,
+    },
+    Stop {
+        agent: String,
+        confirm: Option<String>,
+    },
+    Unpark {
+        agent: String,
+        no_start: bool,
+    },
     Version,
     Help,
 }
@@ -29,11 +57,37 @@ USAGE:
         The registry joined with the process table. Closed (parked/exited) agents are hidden
         unless --all. Read-only.
 
+    agentlife reconcile [--dry-run] [--json]
+        For every agent that should be running but is not, say whether it was closed on purpose
+        (a person ended its session before any shutdown) or killed. Writes down each
+        \"closed on purpose\" verdict the first time it is derived; --dry-run writes nothing.
+
+    agentlife park <agent> [--confirm <name>]
+    agentlife stop <agent> [--confirm <name>]
+    agentlife unpark <agent> --no-start
+        Mark an agent that is NOT running as closed (parked is kept forever; stopped ages out), or
+        clear the mark. They never touch a process. A running agent is refused for now. A pinned
+        agent (the PM, or one pinned by hand) needs --confirm with its name. <agent> is an id or a name.
+
+    agentlife pin <agent> | unpin <agent>
+        Never lazy-stop this agent. A lane may pin itself.
+
+    agentlife waiting [--on user] [--note <text>] [--agent <agent>]
+    agentlife waiting --clear [--agent <agent>]
+        Mark (or unmark) that an agent is waiting for a person's answer, so it is not shut down
+        meanwhile. With no --agent it is the agent running the command.
+
     agentlife --version | --help
 
 STATE:
     <home> is $AGENTLIFE_HOME, else C:/Projects/.agentlife.
 ";
+
+fn one_agent<'a>(rest: &'a [String], cmd: &str) -> Result<(&'a String, &'a [String]), String> {
+    rest.split_first()
+        .filter(|(a, _)| !a.starts_with('-'))
+        .ok_or_else(|| format!("{cmd} needs an agent (an id or a name)"))
+}
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String> {
     let args: Vec<String> = args.into_iter().collect();
@@ -81,6 +135,99 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 }
             }
             Ok(Command::List { json, all })
+        }
+        "reconcile" => {
+            let (mut dry_run, mut json) = (false, false);
+            for a in rest {
+                match a.as_str() {
+                    "--dry-run" => dry_run = true,
+                    "--json" => json = true,
+                    other => return Err(format!("unknown argument to reconcile: {other:?}")),
+                }
+            }
+            Ok(Command::Reconcile { dry_run, json })
+        }
+        "pin" | "unpin" => {
+            let (agent, tail) = one_agent(rest, cmd)?;
+            if let Some(extra) = tail.first() {
+                return Err(format!("unexpected argument to {cmd}: {extra:?}"));
+            }
+            Ok(if cmd == "pin" {
+                Command::Pin {
+                    agent: agent.clone(),
+                }
+            } else {
+                Command::Unpin {
+                    agent: agent.clone(),
+                }
+            })
+        }
+        "park" | "stop" => {
+            let (agent, tail) = one_agent(rest, cmd)?;
+            let mut confirm = None;
+            let mut it = tail.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--confirm" => {
+                        confirm =
+                            Some(it.next().ok_or("--confirm needs the agent's name")?.clone());
+                    }
+                    other => return Err(format!("unknown argument to {cmd}: {other:?}")),
+                }
+            }
+            Ok(if cmd == "park" {
+                Command::Park {
+                    agent: agent.clone(),
+                    confirm,
+                }
+            } else {
+                Command::Stop {
+                    agent: agent.clone(),
+                    confirm,
+                }
+            })
+        }
+        "unpark" => {
+            let (agent, tail) = one_agent(rest, cmd)?;
+            let mut no_start = false;
+            for a in tail {
+                match a.as_str() {
+                    "--no-start" => no_start = true,
+                    other => return Err(format!("unknown argument to unpark: {other:?}")),
+                }
+            }
+            if !no_start {
+                return Err(
+                    "unpark without --no-start would launch the agent, which needs the launcher and consent (not built yet); use --no-start to clear the mark only"
+                        .to_string(),
+                );
+            }
+            Ok(Command::Unpark {
+                agent: agent.clone(),
+                no_start,
+            })
+        }
+        "waiting" => {
+            let (mut agent, mut note, mut clear) = (None, None, false);
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--on" => {
+                        let on = it.next().ok_or("--on needs a value")?;
+                        if on != "user" {
+                            return Err(format!("--on supports only `user`, not {on:?}"));
+                        }
+                    }
+                    "--note" => note = Some(it.next().ok_or("--note needs text")?.clone()),
+                    "--agent" => agent = Some(it.next().ok_or("--agent needs an agent")?.clone()),
+                    "--clear" => clear = true,
+                    other => return Err(format!("unknown argument to waiting: {other:?}")),
+                }
+            }
+            if clear && note.is_some() {
+                return Err("--clear and --note do not go together".to_string());
+            }
+            Ok(Command::Waiting { agent, note, clear })
         }
         other => Err(format!("unknown command {other:?}")),
     }
@@ -142,6 +289,117 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_flags() {
+        assert_eq!(
+            p(&["reconcile"]),
+            Ok(Command::Reconcile {
+                dry_run: false,
+                json: false
+            })
+        );
+        assert_eq!(
+            p(&["reconcile", "--json", "--dry-run"]),
+            Ok(Command::Reconcile {
+                dry_run: true,
+                json: true
+            })
+        );
+        assert!(p(&["reconcile", "--force"]).is_err());
+    }
+
+    #[test]
+    fn pin_and_unpin_take_exactly_one_agent() {
+        assert_eq!(
+            p(&["pin", "synapse"]),
+            Ok(Command::Pin {
+                agent: "synapse".into()
+            })
+        );
+        assert_eq!(
+            p(&["unpin", "a-0123"]),
+            Ok(Command::Unpin {
+                agent: "a-0123".into()
+            })
+        );
+        assert!(p(&["pin"]).is_err());
+        assert!(p(&["pin", "--all"]).is_err(), "a flag is not an agent");
+        assert!(p(&["pin", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn park_and_stop_take_an_agent_and_an_optional_confirmation() {
+        assert_eq!(
+            p(&["park", "lane"]),
+            Ok(Command::Park {
+                agent: "lane".into(),
+                confirm: None
+            })
+        );
+        assert_eq!(
+            p(&["stop", "PM", "--confirm", "PM"]),
+            Ok(Command::Stop {
+                agent: "PM".into(),
+                confirm: Some("PM".into())
+            })
+        );
+        assert!(p(&["park"]).is_err());
+        assert!(p(&["park", "lane", "--confirm"]).is_err());
+        assert!(p(&["park", "lane", "--force"]).is_err());
+    }
+
+    #[test]
+    fn unpark_requires_no_start_because_starting_is_not_built() {
+        assert_eq!(
+            p(&["unpark", "lane", "--no-start"]),
+            Ok(Command::Unpark {
+                agent: "lane".into(),
+                no_start: true
+            })
+        );
+        let e = p(&["unpark", "lane"]).unwrap_err();
+        assert!(e.contains("--no-start") && e.contains("launch"), "{e}");
+    }
+
+    #[test]
+    fn waiting_defaults_to_the_calling_agent_and_validates_its_flags() {
+        assert_eq!(
+            p(&["waiting"]),
+            Ok(Command::Waiting {
+                agent: None,
+                note: None,
+                clear: false
+            })
+        );
+        assert_eq!(
+            p(&[
+                "waiting",
+                "--on",
+                "user",
+                "--note",
+                "needs your OK",
+                "--agent",
+                "x"
+            ]),
+            Ok(Command::Waiting {
+                agent: Some("x".into()),
+                note: Some("needs your OK".into()),
+                clear: false
+            })
+        );
+        assert_eq!(
+            p(&["waiting", "--clear"]),
+            Ok(Command::Waiting {
+                agent: None,
+                note: None,
+                clear: true
+            })
+        );
+        assert!(p(&["waiting", "--on", "peer"]).is_err());
+        assert!(p(&["waiting", "--clear", "--note", "x"]).is_err());
+        assert!(p(&["waiting", "--note"]).is_err());
+    }
+
+    #[test]
     fn help_version_and_unknown() {
         assert_eq!(p(&[]), Ok(Command::Help));
         assert_eq!(p(&["--help"]), Ok(Command::Help));
@@ -156,6 +414,13 @@ mod tests {
             "hook SessionStart",
             "hook SessionEnd",
             "list",
+            "reconcile",
+            "park",
+            "stop",
+            "unpark",
+            "pin",
+            "unpin",
+            "waiting",
             "hook.log",
             "AGENTLIFE_HOME",
         ] {

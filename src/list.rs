@@ -5,7 +5,9 @@
 //! (DESIGN-REVISION-2 §2). An agent whose last session has no recorded start time cannot be
 //! verified, and is shown as `running?` rather than guessed.
 
+use crate::config::Config;
 use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
+use crate::marks::{is_waiting, pin_kind, PinKind};
 use crate::registry::{AgentRecord, ClosedHow, Intent};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -30,6 +32,10 @@ pub struct Row {
     pub model: Option<String>,
     pub origin: String,
     pub launch_cwd: String,
+    /// `rule` (the PM, by the visible rule) or `explicit` (pinned by hand); never lazy-stopped.
+    pub pinned: Option<String>,
+    /// A waiting-on-the-user mark that has not expired.
+    pub waiting: bool,
     pub sessions: usize,
     /// The latest of the last session's start and end.
     pub last_activity: Option<DateTime<Utc>>,
@@ -83,7 +89,13 @@ pub fn liveness(rec: &AgentRecord, table: &dyn ProcessTable) -> (Liveness, Optio
     }
 }
 
-pub fn rows(records: &[AgentRecord], table: &dyn ProcessTable, include_closed: bool) -> Vec<Row> {
+pub fn rows(
+    records: &[AgentRecord],
+    table: &dyn ProcessTable,
+    include_closed: bool,
+    cfg: &Config,
+    now: DateTime<Utc>,
+) -> Vec<Row> {
     let mut out: Vec<Row> = records
         .iter()
         .filter(|r| include_closed || !matches!(r.intent, Intent::Closed { .. }))
@@ -99,6 +111,11 @@ pub fn rows(records: &[AgentRecord], table: &dyn ProcessTable, include_closed: b
                 model: r.model.clone(),
                 origin: format!("{:?}", r.origin).to_lowercase(),
                 launch_cwd: r.launch_cwd.clone(),
+                pinned: pin_kind(r, cfg).map(|k| match k {
+                    PinKind::Rule => "rule".to_string(),
+                    PinKind::Explicit => "explicit".to_string(),
+                }),
+                waiting: is_waiting(r, now, cfg.waiting_mark_ttl_hours),
                 sessions: r.sessions.len(),
                 last_activity: r
                     .sessions
@@ -132,13 +149,15 @@ pub fn render_text(rows: &[Row]) -> String {
         "NAME",
         "INTENT",
         "STATE",
+        "PIN",
+        "WAIT",
         "PID",
         "MODE",
         "ORIGIN",
         "LAST ACTIVITY",
         "CWD",
     ];
-    let body: Vec<[String; 9]> = rows
+    let body: Vec<[String; 11]> = rows
         .iter()
         .map(|r| {
             [
@@ -146,6 +165,8 @@ pub fn render_text(rows: &[Row]) -> String {
                 r.name.clone().unwrap_or_else(|| "-".into()),
                 r.intent.clone(),
                 live_label(r.liveness).to_string(),
+                r.pinned.clone().unwrap_or_else(|| "-".into()),
+                if r.waiting { "yes".into() } else { "-".into() },
                 r.pid.map_or("-".into(), |p| p.to_string()),
                 r.permission_mode.clone().unwrap_or_else(|| "-".into()),
                 r.origin.clone(),
@@ -283,12 +304,15 @@ mod tests {
         ];
         let names = |rows: Vec<Row>| rows.into_iter().map(|r| r.agent_id).collect::<Vec<_>>();
         assert_eq!(
-            names(rows(&records, &table, false)),
+            names(rows(&records, &table, false, &Config::default(), t(9))),
             ["a", "b", "n"],
             "nameless last, closed hidden"
         );
-        assert_eq!(names(rows(&records, &table, true)), ["a", "b", "p", "n"]);
-        let all = rows(&records, &table, true);
+        assert_eq!(
+            names(rows(&records, &table, true, &Config::default(), t(9))),
+            ["a", "b", "p", "n"]
+        );
+        let all = rows(&records, &table, true, &Config::default(), t(9));
         assert_eq!(
             all.iter().find(|r| r.agent_id == "p").unwrap().intent,
             "parked"
@@ -302,7 +326,7 @@ mod tests {
             rec("a1", Some("synapse"), Some((10, Some(1000), false))),
             rec("a2", Some("overmind"), Some((30, Some(1), false))),
         ];
-        let out = render_text(&rows(&records, &table, false));
+        let out = render_text(&rows(&records, &table, false, &Config::default(), t(9)));
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[0].starts_with("AGENT"), "{out}");
         assert!(
@@ -324,8 +348,14 @@ mod tests {
     fn json_output_is_a_parseable_array_with_the_liveness_spelled_out() {
         let table = Alive(vec![(10, 1000)]);
         let records = vec![rec("a1", Some("synapse"), Some((10, Some(1000), false)))];
-        let v: serde_json::Value =
-            serde_json::from_str(&render_json(&rows(&records, &table, false))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&render_json(&rows(
+            &records,
+            &table,
+            false,
+            &Config::default(),
+            t(9),
+        )))
+        .unwrap();
         assert_eq!(v[0]["agent_id"], "a1");
         assert_eq!(v[0]["liveness"], "running");
         assert_eq!(v[0]["intent"], "wanted");

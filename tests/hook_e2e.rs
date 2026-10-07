@@ -86,6 +86,13 @@ impl Rig {
         p
     }
 
+    /// A script written verbatim, for lines the typed helper above cannot express (`CMD`).
+    fn raw_script(&self, name: &str, text: &str) -> PathBuf {
+        let p = self.dir.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
     fn spawn(
         &self,
         extra: &[&str],
@@ -499,4 +506,302 @@ fn clear_in_the_same_process_is_one_agent_whose_first_session_ended_with_clear()
     assert_eq!(recs[0].sessions.len(), 2);
     assert_eq!(recs[0].sessions[0].end_reason.as_deref(), Some("clear"));
     assert!(recs[0].sessions[1].ended_at.is_none());
+}
+
+// ---- M2a: the intent rule, marks and park/stop/unpark, against real processes ---------------------
+
+fn cmd_line(args: &[&str]) -> String {
+    format!("CMD\t{}\n", args.join("\t"))
+}
+
+fn start_line(payload: &Path) -> String {
+    format!("SessionStart\t-\t{}\n", payload.display())
+}
+
+fn end_line(reason: &str, payload: &Path) -> String {
+    format!("SessionEnd\t{reason}\t{}\n", payload.display())
+}
+
+fn record_named(rig: &Rig, name: &str) -> agentlife::registry::AgentRecord {
+    let recs = rig.registry().list().unwrap().records;
+    let mut found: Vec<_> = recs
+        .into_iter()
+        .filter(|r| r.name.as_deref() == Some(name))
+        .collect();
+    assert_eq!(found.len(), 1, "agent {name:?}: {}", rig.log());
+    found.remove(0)
+}
+
+fn json_of(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {}", String::from_utf8_lossy(&out.stdout)))
+}
+
+#[test]
+fn reconcile_tells_an_exited_agent_from_a_vanished_one_in_the_real_registry() {
+    let rig = Rig::new();
+    let s1 = rig.payload("s1.json", "SessionStart", "sess-1", Some("startup"));
+    let e1 = rig.payload("e1.json", "SessionEnd", "sess-1", None);
+    let s2 = rig.payload("s2.json", "SessionStart", "sess-2", Some("startup"));
+    // One agent whose person exited from the prompt; one whose process simply vanished (no
+    // SessionEnd), which is what a kill looks like.
+    rig.run(
+        &["-n", "exited-lane"],
+        &rig.raw_script(
+            "a.txt",
+            &(start_line(&s1) + &end_line("prompt_input_exit", &e1)),
+        ),
+        &[],
+    );
+    rig.run(
+        &["-n", "vanished-lane"],
+        &rig.raw_script("b.txt", &start_line(&s2)),
+        &[],
+    );
+
+    let out = rig.agentlife(&["reconcile", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = json_of(&out);
+    let by_name = |n: &str| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == n)
+            .cloned()
+            .unwrap()
+    };
+    let exited = by_name("exited-lane");
+    assert!(
+        exited["verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("closed on purpose"),
+        "{exited}"
+    );
+    assert_eq!(exited["persisted"], true);
+    let vanished = by_name("vanished-lane");
+    assert!(
+        vanished["verdict"]
+            .as_str()
+            .unwrap()
+            .contains("restore candidate"),
+        "{vanished}"
+    );
+    assert_eq!(
+        vanished["persisted"], false,
+        "a candidate is derived, never written"
+    );
+
+    // The decision is written down: `list --all` now shows it, and the vanished one is still wanted.
+    let list = json_of(&rig.agentlife(&["list", "--all", "--json"]));
+    let intent_of = |n: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == n)
+            .unwrap()["intent"]
+            .clone()
+    };
+    assert_eq!(intent_of("exited-lane"), "exited");
+    assert_eq!(intent_of("vanished-lane"), "wanted");
+    // And it is stable: a second reconcile does not re-derive it.
+    let again = json_of(&rig.agentlife(&["reconcile", "--json"]));
+    let second = again
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "exited-lane")
+        .unwrap();
+    assert!(
+        second["verdict"]
+            .as_str()
+            .unwrap()
+            .starts_with("not evaluated"),
+        "{second}"
+    );
+    assert_eq!(second["persisted"], false);
+    // A dry run writes nothing at all.
+    let rig2 = Rig::new();
+    let s = rig2.payload("s.json", "SessionStart", "sess-1", Some("startup"));
+    let e = rig2.payload("e.json", "SessionEnd", "sess-1", None);
+    rig2.run(
+        &["-n", "dry"],
+        &rig2.raw_script("a.txt", &(start_line(&s) + &end_line("logout", &e))),
+        &[],
+    );
+    let dry = json_of(&rig2.agentlife(&["reconcile", "--dry-run", "--json"]));
+    assert!(dry[0]["verdict"]
+        .as_str()
+        .unwrap()
+        .starts_with("closed on purpose"));
+    assert_eq!(
+        record_named(&rig2, "dry").intent,
+        agentlife::registry::Intent::Wanted
+    );
+}
+
+#[test]
+fn a_lane_can_mark_itself_pinned_and_waiting_and_list_shows_it() {
+    let rig = Rig::new();
+    let s = rig.payload("s.json", "SessionStart", "sess-1", Some("startup"));
+    let script = rig.raw_script(
+        "a.txt",
+        &(start_line(&s)
+            + &cmd_line(&["waiting", "--note", "needs your OK"])
+            + &cmd_line(&["pin", "marker-lane"])),
+    );
+    let results = rig.run(&["-n", "marker-lane"], &script, &[]);
+    let cmds: Vec<_> = results.iter().filter(|r| r.0 == "CMD").collect();
+    assert_eq!(cmds.len(), 2);
+    assert!(
+        cmds.iter().all(|c| c.2 == 0),
+        "a lane may mark itself: {results:?}\n{}",
+        rig.log()
+    );
+
+    let rec = record_named(&rig, "marker-lane");
+    let w = rec.waiting.expect("the waiting mark was written");
+    assert_eq!(
+        (w.on.as_str(), w.note.as_deref()),
+        ("user", Some("needs your OK"))
+    );
+    let pin = rec.pinned.expect("the pin was written");
+    assert_eq!(
+        pin.by,
+        format!("agent:{}", rec.agent_id),
+        "recorded as the agent itself"
+    );
+
+    let list = json_of(&rig.agentlife(&["list", "--json"]));
+    assert_eq!(list[0]["pinned"], "explicit");
+    assert_eq!(list[0]["waiting"], true);
+}
+
+#[test]
+fn a_lane_cannot_park_another_agent_and_nothing_changes() {
+    let rig = Rig::new();
+    let t = rig.payload("t.json", "SessionStart", "sess-t", Some("startup"));
+    let i = rig.payload("i.json", "SessionStart", "sess-i", Some("startup"));
+    rig.run(
+        &["-n", "target"],
+        &rig.raw_script("a.txt", &start_line(&t)),
+        &[],
+    );
+    // The intruder is a registered, ordinary lane. It parks the (stopped) target, and also pins
+    // ITSELF in the same run, so the refusal below is policy and not a broken rig.
+    let script = rig.raw_script(
+        "b.txt",
+        &(start_line(&i) + &cmd_line(&["park", "target"]) + &cmd_line(&["pin", "intruder"])),
+    );
+    let results = rig.run(&["-n", "intruder"], &script, &[]);
+    let cmds: Vec<_> = results.iter().filter(|r| r.0 == "CMD").collect();
+    assert_ne!(
+        cmds[0].2, 0,
+        "parking another agent must be refused: {results:?}"
+    );
+    assert_eq!(
+        cmds[1].2, 0,
+        "the positive control (pinning itself) succeeded"
+    );
+    assert_eq!(
+        record_named(&rig, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
+    let kinds: Vec<_> = Journal::new(rig.home.join("registry"), std::sync::Arc::new(SystemClock))
+        .read_all()
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(!kinds.iter().any(|k| k == "closed"), "{kinds:?}");
+}
+
+#[test]
+fn the_pm_by_the_visible_rule_can_park_and_unpark_a_stopped_agent_and_a_lookalike_cannot() {
+    let rig = Rig::new();
+    // The PM is named by the rule: pin_roles + portfolio_root. Point the root at the test's
+    // directory, where the stand-in's payload says it was launched.
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({"portfolio_root": rig.cwd(), "pin_roles": ["pm"]}).to_string(),
+    )
+    .unwrap();
+    let t = rig.payload("t.json", "SessionStart", "sess-t", Some("startup"));
+    let p = rig.payload("p.json", "SessionStart", "sess-p", Some("startup"));
+    rig.run(
+        &["-n", "target"],
+        &rig.raw_script("a.txt", &start_line(&t)),
+        &[],
+    );
+    let script = rig.raw_script(
+        "b.txt",
+        &(start_line(&p)
+            + &cmd_line(&["park", "target"])
+            + &cmd_line(&["unpark", "target", "--no-start"])
+            + &cmd_line(&["park", "target"])),
+    );
+    let results = rig.run(&["-n", "PM"], &script, &[]);
+    let cmds: Vec<_> = results.iter().filter(|r| r.0 == "CMD").collect();
+    assert_eq!(cmds.len(), 3);
+    assert!(
+        cmds.iter().all(|c| c.2 == 0),
+        "the PM may park and unpark a stopped agent: {results:?}\n{}",
+        rig.log()
+    );
+    let pm_id = record_named(&rig, "PM").agent_id;
+    let target = record_named(&rig, "target");
+    assert!(
+        matches!(
+            &target.intent,
+            agentlife::registry::Intent::Closed { how: agentlife::registry::ClosedHow::Parked, by, .. }
+                if *by == format!("pm-agent:{pm_id}")
+        ),
+        "{:?}",
+        target.intent
+    );
+    let kinds: Vec<_> = Journal::new(rig.home.join("registry"), std::sync::Arc::new(SystemClock))
+        .read_all()
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| *k == "closed" || *k == "reopened")
+            .collect::<Vec<_>>(),
+        ["closed", "reopened", "closed"]
+    );
+
+    // The lookalike: the same name, launched with NO config naming this directory as the portfolio
+    // root, is just a lane, and is refused. (Same flow, fresh home, default rule.)
+    let rig2 = Rig::new();
+    let t2 = rig2.payload("t.json", "SessionStart", "sess-t", Some("startup"));
+    let p2 = rig2.payload("p.json", "SessionStart", "sess-p", Some("startup"));
+    rig2.run(
+        &["-n", "target"],
+        &rig2.raw_script("a.txt", &start_line(&t2)),
+        &[],
+    );
+    let r2 = rig2.run(
+        &["-n", "PM"],
+        &rig2.raw_script("b.txt", &(start_line(&p2) + &cmd_line(&["park", "target"]))),
+        &[],
+    );
+    let c2: Vec<_> = r2.iter().filter(|r| r.0 == "CMD").collect();
+    assert_ne!(
+        c2[0].2, 0,
+        "a lane named PM in the wrong directory is not the PM: {r2:?}"
+    );
+    assert_eq!(
+        record_named(&rig2, "target").intent,
+        agentlife::registry::Intent::Wanted
+    );
 }

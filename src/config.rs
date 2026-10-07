@@ -34,6 +34,7 @@ pub const KEYS: &[&str] = &[
     "user_recent_minutes",
     "waiting_mark_ttl_hours",
     "pin_roles",
+    "portfolio_root",
     "wake_poll_secs",
     "max_wakes_per_agent_per_hour",
     "max_wakes_per_minute",
@@ -128,6 +129,8 @@ pub struct Config {
     pub user_recent_minutes: u32,
     pub waiting_mark_ttl_hours: u32,
     pub pin_roles: Vec<String>,
+    /// The directory the portfolio's PM lane is launched in; with `pin_roles` it names the PM.
+    pub portfolio_root: String,
     pub wake_poll_secs: u64,
     pub max_wakes_per_agent_per_hour: u32,
     pub max_wakes_per_minute: u32,
@@ -155,6 +158,7 @@ impl Default for Config {
             user_recent_minutes: 30,
             waiting_mark_ttl_hours: 24,
             pin_roles: vec!["pm".to_string()],
+            portfolio_root: "C:/Projects".to_string(),
             wake_poll_secs: 10,
             max_wakes_per_agent_per_hour: 6,
             max_wakes_per_minute: 10,
@@ -216,6 +220,7 @@ pub struct Layer {
     pub user_recent_minutes: Option<u32>,
     pub waiting_mark_ttl_hours: Option<u32>,
     pub pin_roles: Option<Vec<String>>,
+    pub portfolio_root: Option<String>,
     pub wake_poll_secs: Option<u64>,
     pub max_wakes_per_agent_per_hour: Option<u32>,
     pub max_wakes_per_minute: Option<u32>,
@@ -274,6 +279,7 @@ impl Layer {
             }
             "max_wakes_per_minute" => self.max_wakes_per_minute = Some(parse(key, value)?),
             "synapse_addr" => self.synapse_addr = Some(value.trim().to_string()),
+            "portfolio_root" => self.portfolio_root = Some(value.trim().to_string()),
             "synapse_account" => self.synapse_account = Some(value.trim().to_string()),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         }
@@ -399,6 +405,13 @@ impl Config {
                 why: format!("{bad:?} is not a plain identifier"),
             });
         }
+        let portfolio_root = field!(portfolio_root);
+        if portfolio_root.is_empty() || portfolio_root.contains(';') {
+            return Err(ConfigError::Invalid {
+                key: "portfolio_root",
+                why: format!("{portfolio_root:?} is not a usable directory name"),
+            });
+        }
         let synapse_account = field!(synapse_account);
         if !valid_identifier(&synapse_account) {
             return Err(ConfigError::Invalid {
@@ -455,6 +468,7 @@ impl Config {
             user_recent_minutes: field!(user_recent_minutes),
             waiting_mark_ttl_hours: field!(waiting_mark_ttl_hours),
             pin_roles,
+            portfolio_root,
             wake_poll_secs: at_least_one("wake_poll_secs", field!(wake_poll_secs))?,
             max_wakes_per_agent_per_hour: at_least_one(
                 "max_wakes_per_agent_per_hour",
@@ -506,6 +520,7 @@ mod tests {
         assert!(!c.lazy_enabled, "lazy ships off");
         assert_eq!(c.lazy_after_idle_minutes, 120);
         assert_eq!(c.pin_roles, ["pm"]);
+        assert_eq!(c.portfolio_root, "C:/Projects");
     }
 
     #[test]
@@ -628,7 +643,7 @@ mod tests {
             "approval_default_duration": "1h", "pending_nag": "every-15-minutes",
             "lazy_enabled": true, "lazy_after_idle_minutes": 45, "idle_sweep_secs": 30,
             "idle_stop_policy": "skip", "user_recent_minutes": 15,
-            "waiting_mark_ttl_hours": 12, "pin_roles": ["pm","synapse"],
+            "waiting_mark_ttl_hours": 12, "pin_roles": ["pm","synapse"], "portfolio_root": "D:/ws",
             "wake_poll_secs": 5, "max_wakes_per_agent_per_hour": 2,
             "max_wakes_per_minute": 4, "synapse_addr": "127.0.0.1:9000",
             "synapse_account": "someone"
@@ -652,6 +667,7 @@ mod tests {
             ("user_recent_minutes", "15"),
             ("waiting_mark_ttl_hours", "12"),
             ("pin_roles", "pm,synapse"),
+            ("portfolio_root", "D:/ws"),
             ("wake_poll_secs", "5"),
             ("max_wakes_per_agent_per_hour", "2"),
             ("max_wakes_per_minute", "4"),

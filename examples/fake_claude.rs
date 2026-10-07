@@ -10,7 +10,8 @@
 //! Flags it understands (all stay in its own command line, which is the point: the hook records
 //! that argv as `launch_args`):
 //! * `--fake-agentlife <exe>`  the `agentlife` binary to run as the hook;
-//! * `--fake-script <file>`    tab-separated lines `EVENT<TAB>REASON-or-<TAB>JSON-FILE`, run in order;
+//! * `--fake-script <file>`    tab-separated lines, run in order: `EVENT<TAB>REASON-or-<TAB>JSON-FILE` runs
+//!   the hook; `CMD<TAB>arg<TAB>arg...` runs `agentlife <args>` as this process's child;
 //! * `--fake-report <file>`    written when the script is done: `EVENT<TAB>millis<TAB>exit-code`;
 //! * `--fake-hold <secs>`      stay alive this long afterwards (default 0);
 //! * `--fake-nest`             do not run the script: start a copy of this same program (so the
@@ -57,6 +58,25 @@ fn main() {
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let mut parts = line.split('\t');
             let event = parts.next().expect("event");
+            if event == "CMD" {
+                // `CMD<TAB>arg<TAB>arg...`: run `agentlife <args>` as this process's child, so the
+                // caller is a real registered agent (the only honest way to test who-may-do-what).
+                let args: Vec<&str> = parts.collect();
+                let started = Instant::now();
+                let status = Command::new(&agentlife)
+                    .args(&args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .expect("run the command");
+                report.push_str(&format!(
+                    "CMD\t{}\t{}\n",
+                    started.elapsed().as_millis(),
+                    status.code().unwrap_or(-1)
+                ));
+                continue;
+            }
             let reason = parts.next().expect("reason or -");
             let json_file = parts.next().expect("json file");
             let json = std::fs::read(json_file).expect("read the payload");

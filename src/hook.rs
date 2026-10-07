@@ -27,7 +27,7 @@ use crate::claude_proc::{
 use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
 use crate::journal::Journal;
 use crate::procindex::ProcIndex;
-use crate::registry::{AgentId, AgentRecord, Origin, Registry, Session};
+use crate::registry::{AgentId, AgentRecord, Intent, Origin, Registry, Session};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::collections::HashMap;
@@ -295,6 +295,7 @@ fn session_start(ctx: &Ctx, input: &HookInput, source: Option<&str>) -> Result<O
         now,
         source,
     };
+    let mut reopened = false;
     let (rec, created) = ctx
         .registry
         .upsert(
@@ -326,6 +327,18 @@ fn session_start(ctx: &Ctx, input: &HookInput, source: Option<&str>) -> Result<O
                 }
                 r.remote_control = flags.remote_control;
                 r.origin = origin;
+                // A session starting is somebody intentionally (re)opening the agent, so a closed
+                // mark is cleared (CireSnave: "unless intentionally reopened"); a lazy agent that
+                // wakes is simply wanted again. Parking a RUNNING agent cannot trip this: that
+                // ends a session, it does not start one.
+                match &r.intent {
+                    Intent::Closed { .. } => {
+                        reopened = true;
+                        r.intent = Intent::Wanted;
+                    }
+                    Intent::Lazy => r.intent = Intent::Wanted,
+                    Intent::Wanted => {}
+                }
                 apply_session_start(r, &facts);
             },
         )
@@ -334,6 +347,13 @@ fn session_start(ctx: &Ctx, input: &HookInput, source: Option<&str>) -> Result<O
         ctx.procs
             .put(claude, start, &rec.agent_id)
             .map_err(|e| format!("could not write the process pointer: {e}"))?;
+    }
+    if reopened {
+        let _ = ctx.journal.append(
+            "reopened",
+            Some(rec.agent_id.as_str()),
+            json!({"by": origin, "session_id": input.session_id, "start": true}),
+        );
     }
     let _ = ctx.journal.append(
         if created {
@@ -1288,5 +1308,119 @@ mod tests {
             !cmd.is_empty(),
             "cmd is set explicitly, not left at sysinfo's empty default"
         );
+    }
+
+    #[test]
+    fn a_session_starting_reopens_a_closed_agent_and_wakes_a_lazy_one() {
+        let r = rig();
+        let first = FakeEnv::lane(100);
+        let Outcome::Registered { agent_id, .. } = go(
+            &r,
+            &first,
+            &Alive(vec![]),
+            "SessionStart",
+            None,
+            &payload("s1", None),
+        ) else {
+            panic!()
+        };
+        // Parked (by a person, while it was not running).
+        r.registry
+            .update(&agent_id, |rec| {
+                rec.intent = Intent::Closed {
+                    how: crate::registry::ClosedHow::Parked,
+                    by: "person".into(),
+                    at: t(2),
+                }
+            })
+            .unwrap();
+        // Somebody starts it by hand: that is intentionally reopening it.
+        let second = FakeEnv::lane(200);
+        let out = go(
+            &r,
+            &second,
+            &Alive(vec![(200, 5200)]),
+            "SessionStart",
+            None,
+            &payload("s2", None),
+        );
+        assert!(
+            matches!(out, Outcome::Registered { created: false, .. }),
+            "{out:?}"
+        );
+        assert_eq!(
+            r.registry.get(&agent_id).unwrap().unwrap().intent,
+            Intent::Wanted
+        );
+        let kinds: Vec<_> = r
+            .journal
+            .read_all()
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, ["registered", "reopened", "session-started"]);
+        // A lazy agent that starts is wanted again, without a "reopened" entry.
+        r.registry
+            .update(&agent_id, |rec| rec.intent = Intent::Lazy)
+            .unwrap();
+        let third = FakeEnv::lane(300);
+        go(
+            &r,
+            &third,
+            &Alive(vec![(300, 5300)]),
+            "SessionStart",
+            None,
+            &payload("s3", None),
+        );
+        assert_eq!(
+            r.registry.get(&agent_id).unwrap().unwrap().intent,
+            Intent::Wanted
+        );
+        let again: Vec<_> = r
+            .journal
+            .read_all()
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(again.iter().filter(|k| *k == "reopened").count(), 1);
+    }
+
+    #[test]
+    fn ending_a_session_never_reopens_a_closed_agent() {
+        // Parking a running lane ends its session; that must not undo the park.
+        let r = rig();
+        let env = FakeEnv::lane(100);
+        let alive = Alive(vec![(100, 5100)]);
+        let Outcome::Registered { agent_id, .. } =
+            go(&r, &env, &alive, "SessionStart", None, &payload("s1", None))
+        else {
+            panic!()
+        };
+        r.registry
+            .update(&agent_id, |rec| {
+                rec.intent = Intent::Closed {
+                    how: crate::registry::ClosedHow::Parked,
+                    by: "person".into(),
+                    at: t(2),
+                }
+            })
+            .unwrap();
+        let end = payload("s1", None).replace("SessionStart", "SessionEnd");
+        go(
+            &r,
+            &env,
+            &alive,
+            "SessionEnd",
+            Some("prompt_input_exit"),
+            &end,
+        );
+        assert!(matches!(
+            r.registry.get(&agent_id).unwrap().unwrap().intent,
+            Intent::Closed { .. }
+        ));
     }
 }
