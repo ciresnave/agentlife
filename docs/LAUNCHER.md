@@ -27,7 +27,7 @@ and every process they start is a stand-in they built themselves, killed at the 
   2026-10-08: *"I can't afford Opus."* The default model is not trusted (a flagless relaunch got Opus on
   2026-09-27). The planner replaces a recorded Opus, an unknown model, or no model flag with
   `--model sonnet` and says so on the entry (`model-pinned:<was>`, `none` for no flag); `build_tab` refuses
-  any launch whose last `--model` is not a Sonnet or Haiku (`ModelNotPinned`), so nothing spawns unpinned.
+  any launch whose last model flag, in either form (`--model v` or `--model=v`), is not a Sonnet or Haiku (`ModelNotPinned`; 0.2.9 added the equals form), so nothing spawns unpinned.
 * **The session-identity environment is stripped** (ten names, copied from OverMind; provenance in
   `docs/COPIED-FROM-OVERMIND.md`). The agent's id goes in `AGENTLIFE_AGENT_ID`.
 

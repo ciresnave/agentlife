@@ -1153,6 +1153,8 @@ mod tests {
             "claude-opus-5-5",
             "opus",
             "Opus",
+            "CLAUDE-OPUS-5-5",
+            "--model=CLAUDE-OPUS-5-5",
             "claude-opus-5-5[1m]",
             "--model=claude-opus-5-5",
         ] {
@@ -1195,6 +1197,23 @@ mod tests {
             let (argv, flags) = model_of(Some(ok));
             assert_eq!(model_value(&argv), [ok], "{ok}");
             assert!(flags.is_empty(), "{ok}: {flags:?}");
+        }
+    }
+
+    #[test]
+    fn the_last_model_flag_wins_across_both_forms() {
+        for (recorded, want, pinned) in [
+            (["--model", "sonnet", "--model=opus"], "sonnet", true),
+            (["--model=opus", "--model", "haiku"], "haiku", false),
+            (["--model", "opus", "--model=sonnet"], "sonnet", false),
+        ] {
+            let mut r = lane("a-x", "x", 1);
+            let mut args = std_args("x");
+            args.extend(recorded.map(String::from));
+            r.launch_args = Some(args);
+            let e = plan_of(&[r], &none_alive(), &cfg()).entries.remove(0);
+            assert_eq!(model_value(&e.argv), [want], "{recorded:?}");
+            assert_eq!(e.flags.is_empty(), !pinned, "{recorded:?}");
         }
     }
 

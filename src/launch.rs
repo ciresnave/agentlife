@@ -175,13 +175,7 @@ pub fn build_tab(
             what: bad.to_string(),
         });
     }
-    // The last `--model` is the one claude uses.
-    let model = e
-        .argv
-        .windows(2)
-        .rev()
-        .find(|w| w[0] == "--model")
-        .map(|w| w[1].clone());
+    let model = effective_model(&e.argv);
     if !model.as_deref().is_some_and(crate::plan::model_is_allowed) {
         return Err(BuildError::ModelNotPinned { found: model });
     }
@@ -193,6 +187,21 @@ pub fn build_tab(
         hosted_argv: hosted,
         env_set: vec![(AGENT_ID_ENV.to_string(), e.agent_id.clone())],
     })
+}
+
+/// The model claude will use: the value of the last model flag, in either form (`--model v` or
+/// `--model=v`). `None` for no model flag, or a last one with no value.
+fn effective_model(argv: &[String]) -> Option<String> {
+    let mut model = None;
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        if a == "--model" {
+            model = it.next().cloned();
+        } else if let Some(v) = a.strip_prefix("--model=") {
+            model = Some(v.to_string());
+        }
+    }
+    model
 }
 
 /// The arguments for `wt.exe`: one tab in the named window.
@@ -560,6 +569,19 @@ mod tests {
         let mut e = entry(Some("lane"), 0);
         e.argv.extend(["--model".to_string(), "opus".to_string()]);
         cases.push(("opus last", e));
+        // The equals form is a model flag too, and the last one of either form wins.
+        for (what, extra) in [
+            ("opus equals after sonnet pair", vec!["--model=opus"]),
+            ("upper-case equals", vec!["--model=CLAUDE-OPUS-5-5"]),
+            ("mixed case pair", vec!["--model", "Opus"]),
+            ("equals unknown", vec!["--model=fable"]),
+            ("empty equals", vec!["--model="]),
+            ("dangling flag", vec!["--model"]),
+        ] {
+            let mut e = entry(Some("lane"), 0);
+            e.argv.extend(extra.iter().map(|s| s.to_string()));
+            cases.push((what, e));
+        }
         for (what, e) in cases {
             assert!(
                 matches!(
@@ -572,6 +594,11 @@ mod tests {
         for ok in ["sonnet", "haiku", "claude-sonnet-5-5"] {
             assert!(build_tab(&with(ok), &programs(), true).is_ok(), "{ok}");
         }
+        // Equals form of an allowed model, after an opus pair: the last one wins, so it launches.
+        let mut e = entry(Some("lane"), 0);
+        e.argv
+            .extend(["--model", "opus", "--model=HAIKU"].map(String::from));
+        assert!(build_tab(&e, &programs(), true).is_ok());
     }
 
     #[test]
