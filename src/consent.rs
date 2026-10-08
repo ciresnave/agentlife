@@ -42,11 +42,15 @@ pub struct Request {
     pub reason: String,
 }
 
-/// How long an approval lasts. For plan consent it is the window in which the approved plan may be
-/// executed.
+/// How long an approval lasts. Plan consent is [`Grant::OneUse`] (CireSnave: "One-shot."): an approval
+/// the requester spends with `spend_one_use` before it acts. No duration, never `Forever`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Grant {
-    For { secs: i64 },
+    /// Spent once, by the requester, before it acts.
+    OneUse,
+    For {
+        secs: i64,
+    },
     Until(DateTime<Utc>),
     Forever,
 }
@@ -82,6 +86,36 @@ pub enum Resolved {
     Closed,
     /// Not answered: the request is still pending.
     StillPending,
+}
+
+/// What spending a one-use approval returns. The store never expires an unspent approval, so the
+/// requester judges freshness from `approved_at` itself (`pending::APPROVAL_FRESH_SECS`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spent {
+    pub approved_at: DateTime<Utc>,
+    pub bound_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpendError {
+    /// Nothing was approved under that id.
+    NoApproval,
+    /// Already spent: an approval is used once.
+    AlreadySpent,
+    /// The approval is for a different plan; it is left unspent.
+    Stale,
+    Unavailable(String),
+}
+
+impl std::fmt::Display for SpendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpendError::NoApproval => write!(f, "no approval exists for that request"),
+            SpendError::AlreadySpent => write!(f, "that approval was already spent"),
+            SpendError::Stale => write!(f, "the approval is for a different plan"),
+            SpendError::Unavailable(why) => write!(f, "consent is unavailable: {why}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +170,10 @@ pub trait Consent {
     fn submit(&mut self, req: &Request, grant: &Grant, bound_hash: &str) -> Result<String, String>;
     fn begin_answer(&mut self, id: &str, bound_hash: &str) -> Result<Asking, AnswerError>;
     fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String>;
+    /// Spends the one-use approval of request `id`, **before** the action it covers; the action runs
+    /// only on `Ok`. Spent is durable (and audited, in the real store). `bound_hash` is the plan held
+    /// now; a different one is refused and leaves the approval unspent.
+    fn spend_one_use(&mut self, id: &str, bound_hash: &str) -> Result<Spent, SpendError>;
     /// `false` when there was no such request.
     fn withdraw(&mut self, id: &str) -> Result<bool, String>;
     fn pending_ids(&self) -> Result<Vec<String>, String>;
@@ -178,6 +216,9 @@ impl Consent for NoBackend {
     fn resolve(&mut self, _: &Asking, _: Outcome) -> Result<Resolved, String> {
         Err(NO_BACKEND.into())
     }
+    fn spend_one_use(&mut self, _: &str, _: &str) -> Result<Spent, SpendError> {
+        Err(SpendError::Unavailable(NO_BACKEND.into()))
+    }
     fn withdraw(&mut self, _: &str) -> Result<bool, String> {
         Err(NO_BACKEND.into())
     }
@@ -217,9 +258,17 @@ pub mod fake {
         asking: Option<String>,
     }
 
+    struct Approval {
+        role: String,
+        bound_hash: String,
+        approved_at: DateTime<Utc>,
+        spent: bool,
+    }
+
     pub struct FakeConsent {
         clock: Arc<dyn Clock>,
         records: BTreeMap<String, Record>,
+        approvals: BTreeMap<String, Approval>,
         cooldowns: BTreeMap<(String, String), DateTime<Utc>>,
         next: u64,
         /// Every id ever approved, to prove an approval spends a request exactly once.
@@ -255,6 +304,7 @@ pub mod fake {
             Self {
                 clock,
                 records: BTreeMap::new(),
+                approvals: BTreeMap::new(),
                 cooldowns: BTreeMap::new(),
                 next: 0,
                 granted: Vec::new(),
@@ -292,6 +342,11 @@ pub mod fake {
         ) -> Result<String, String> {
             if bound_hash.is_empty() || bound_hash.chars().any(char::is_control) {
                 return Err("bound_hash must be plain and non-empty".into());
+            }
+            if self.approvals.values().any(|a| {
+                !a.spent && a.bound_hash == bound_hash && a.role == req.role.trim().to_lowercase()
+            }) {
+                return Err("an approval for this plan is unspent; spend it first".into());
             }
             if let Some(r) = self
                 .records
@@ -374,6 +429,15 @@ pub mod fake {
             match outcome {
                 Outcome::Approved => {
                     self.records.remove(&asking.pending_id);
+                    self.approvals.insert(
+                        asking.pending_id.clone(),
+                        Approval {
+                            role: asking.request.role.trim().to_lowercase(),
+                            bound_hash: asking.bound_hash.clone(),
+                            approved_at: now,
+                            spent: false,
+                        },
+                    );
                     self.granted.push(asking.pending_id.clone());
                     Ok(Resolved::Granted)
                 }
@@ -394,6 +458,21 @@ pub mod fake {
                     Ok(Resolved::StillPending)
                 }
             }
+        }
+
+        fn spend_one_use(&mut self, id: &str, bound_hash: &str) -> Result<Spent, SpendError> {
+            let a = self.approvals.get_mut(id).ok_or(SpendError::NoApproval)?;
+            if a.spent {
+                return Err(SpendError::AlreadySpent);
+            }
+            if a.bound_hash != bound_hash {
+                return Err(SpendError::Stale);
+            }
+            a.spent = true;
+            Ok(Spent {
+                approved_at: a.approved_at,
+                bound_hash: a.bound_hash.clone(),
+            })
         }
 
         fn withdraw(&mut self, id: &str) -> Result<bool, String> {
