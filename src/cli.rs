@@ -51,8 +51,18 @@ pub enum Command {
         priority: Vec<String>,
         flags: Vec<(String, String)>,
     },
+    /// `agentlife pending`: the durable restores that wait for a person.
+    Pending(PendingAction),
     Version,
     Help,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PendingAction {
+    List { json: bool, all: bool },
+    Show { id: String },
+    Approve { id: String },
+    Discard { id: String },
 }
 
 pub const USAGE: &str = "\
@@ -92,6 +102,15 @@ USAGE:
         launch arguments (anything not passed on is listed) and a hash of the whole plan. Writes
         nothing and starts nothing. Without --dry-run it refuses: starting agents needs a person's
         consent, which is not built yet.
+
+    agentlife pending [list] [--json] [--all]
+    agentlife pending show <id> | approve <id> | discard <id>
+        The restores waiting for a person's answer. A pending restore is a record plus a frozen
+        plan, not a process: nothing waits. `list` and `show` only read. `approve` asks the person
+        (Windows Hello) about the frozen plan, and refuses if the registry has moved since, so the
+        person never approves a plan that would no longer be the one executed. `discard` withdraws
+        the request. Approving and discarding need the consent backend, which is not installed yet
+        (OverMind's user-request is unpublished): they say so and change nothing.
 
     agentlife pin <agent> | unpin <agent>
         Never lazy-stop this agent. A lane may pin itself.
@@ -214,6 +233,41 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 priority,
                 flags,
             })
+        }
+        "pending" => {
+            let (sub, tail) = match rest.split_first() {
+                Some((s, t)) if !s.starts_with('-') => (s.as_str(), t),
+                _ => ("list", rest),
+            };
+            let id_of = |tail: &[String]| -> Result<String, String> {
+                match tail {
+                    [id] if !id.starts_with('-') => Ok(id.clone()),
+                    [] => Err(format!("pending {sub} needs a pending id")),
+                    [_, extra, ..] => {
+                        Err(format!("unexpected argument to pending {sub}: {extra:?}"))
+                    }
+                    [flag] => Err(format!("unknown argument to pending {sub}: {flag:?}")),
+                }
+            };
+            Ok(Command::Pending(match sub {
+                "list" => {
+                    let (mut json, mut all) = (false, false);
+                    for a in tail {
+                        match a.as_str() {
+                            "--json" => json = true,
+                            "--all" => all = true,
+                            other => {
+                                return Err(format!("unknown argument to pending list: {other:?}"))
+                            }
+                        }
+                    }
+                    PendingAction::List { json, all }
+                }
+                "show" => PendingAction::Show { id: id_of(tail)? },
+                "approve" => PendingAction::Approve { id: id_of(tail)? },
+                "discard" => PendingAction::Discard { id: id_of(tail)? },
+                other => return Err(format!("unknown pending subcommand: {other:?}")),
+            }))
         }
         "pin" | "unpin" => {
             let (agent, tail) = one_agent(rest, cmd)?;
@@ -370,6 +424,31 @@ mod tests {
             })
         );
         assert!(p(&["list", "--wide"]).is_err());
+    }
+
+    #[test]
+    fn pending_subcommands() {
+        let list = |json, all| Ok(Command::Pending(PendingAction::List { json, all }));
+        assert_eq!(p(&["pending"]), list(false, false));
+        assert_eq!(p(&["pending", "list", "--all", "--json"]), list(true, true));
+        assert_eq!(p(&["pending", "--json"]), list(true, false));
+        assert_eq!(
+            p(&["pending", "show", "p0001"]),
+            Ok(Command::Pending(PendingAction::Show { id: "p0001".into() }))
+        );
+        assert_eq!(
+            p(&["pending", "approve", "p1"]),
+            Ok(Command::Pending(PendingAction::Approve { id: "p1".into() }))
+        );
+        assert_eq!(
+            p(&["pending", "discard", "p1"]),
+            Ok(Command::Pending(PendingAction::Discard { id: "p1".into() }))
+        );
+        assert!(p(&["pending", "approve"]).is_err(), "needs an id");
+        assert!(p(&["pending", "approve", "--all"]).is_err());
+        assert!(p(&["pending", "approve", "a", "b"]).is_err());
+        assert!(p(&["pending", "list", "--wide"]).is_err());
+        assert!(p(&["pending", "forget", "a"]).is_err());
     }
 
     #[test]
@@ -572,6 +651,7 @@ mod tests {
             "list",
             "reconcile",
             "restore --dry-run",
+            "pending",
             "park",
             "stop",
             "unpark",

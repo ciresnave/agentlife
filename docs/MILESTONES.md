@@ -35,3 +35,5 @@ included). Origin, a hash of every copied item, the three adaptations and how to
 Whether `SessionEnd` fires at shutdown is **unknown** until M6; M1 to M5 are built to work either way
 (`DESIGN-REVISION-1.md` §2.6). The restore *order* is CireSnave's (board 121); the planner implements the
 default (PM first, then most recently active) with an empty optional `priority` list.
+
+**M4 progress (2026-10-08).** `user-request` is unpublished, so M4's consent is built behind a trait with a fake (PM ruling, `docs/CONSENT.md`): pending record, `agentlife pending`, consent contract. Not yet: real backend, logon task, unlock trigger, control tab.
