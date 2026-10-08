@@ -831,7 +831,12 @@ mod tests {
     }
 
     fn entry(i: usize, batch: u32, pm: bool, channel: bool) -> Entry {
-        let mut argv = vec!["--name".to_string(), format!("lane{i}")];
+        let mut argv = vec![
+            "--name".to_string(),
+            format!("lane{i}"),
+            "--model".to_string(),
+            "sonnet".to_string(),
+        ];
         if channel {
             argv.push("--dangerously-load-development-channels".into());
             argv.push("server:claude-peers".into());

@@ -77,6 +77,9 @@ pub enum BuildError {
     Unsafe { what: String },
     /// A role that is not a plain identifier.
     BadRole(String),
+    /// No `--model`, or one that is not a Sonnet or a Haiku (CireSnave, 2026-10-08: never Opus; the
+    /// default model is not trusted). The planner pins one; this is the last gate before a spawn.
+    ModelNotPinned { found: Option<String> },
 }
 
 impl std::fmt::Display for BuildError {
@@ -89,6 +92,11 @@ impl std::fmt::Display for BuildError {
             BuildError::BadRole(r) => {
                 write!(f, "refusing to launch: {r:?} is not a valid role name")
             }
+            BuildError::ModelNotPinned { found } => write!(
+                f,
+                "refusing to launch: the model must be explicit and a Sonnet or Haiku (found {})",
+                found.as_deref().unwrap_or("none")
+            ),
         }
     }
 }
@@ -166,6 +174,16 @@ pub fn build_tab(
         return Err(BuildError::Unsafe {
             what: bad.to_string(),
         });
+    }
+    // The last `--model` is the one claude uses.
+    let model = e
+        .argv
+        .windows(2)
+        .rev()
+        .find(|w| w[0] == "--model")
+        .map(|w| w[1].clone());
+    if !model.as_deref().is_some_and(crate::plan::model_is_allowed) {
+        return Err(BuildError::ModelNotPinned { found: model });
     }
     Ok(TabLaunch {
         agent_id: e.agent_id.clone(),
@@ -395,6 +413,8 @@ mod tests {
             argv: [
                 "--name",
                 "lane",
+                "--model",
+                "sonnet",
                 "--dangerously-load-development-channels",
                 "server:claude-peers",
             ]
@@ -432,6 +452,8 @@ mod tests {
                 "read lane HANDOFF and continue",
                 "--name",
                 "lane",
+                "--model",
+                "sonnet",
                 "--dangerously-load-development-channels",
                 "server:claude-peers"
             ]
@@ -513,6 +535,42 @@ mod tests {
                 matches!(build_tab(&e, &p, true), Err(BuildError::Unsafe { .. })),
                 "{what}"
             );
+        }
+    }
+
+    #[test]
+    fn a_launch_without_an_allowed_explicit_model_is_refused_before_anything_starts() {
+        let without = |mut e: Entry| {
+            let i = e.argv.iter().position(|a| a == "--model").unwrap();
+            e.argv.drain(i..i + 2);
+            e
+        };
+        let with = |model: &str| {
+            let mut e = without(entry(Some("lane"), 0));
+            e.argv.extend(["--model".to_string(), model.to_string()]);
+            e
+        };
+        let mut cases = vec![
+            ("no model flag", without(entry(Some("lane"), 0))),
+            ("opus id", with("claude-opus-5-5")),
+            ("opus alias", with("opus")),
+            ("unknown", with("fable")),
+        ];
+        // The last `--model` is the one claude uses: an opus after a sonnet still refuses.
+        let mut e = entry(Some("lane"), 0);
+        e.argv.extend(["--model".to_string(), "opus".to_string()]);
+        cases.push(("opus last", e));
+        for (what, e) in cases {
+            assert!(
+                matches!(
+                    build_tab(&e, &programs(), true),
+                    Err(BuildError::ModelNotPinned { .. })
+                ),
+                "{what}"
+            );
+        }
+        for ok in ["sonnet", "haiku", "claude-sonnet-5-5"] {
+            assert!(build_tab(&with(ok), &programs(), true).is_ok(), "{ok}");
         }
     }
 

@@ -52,6 +52,17 @@ const CHANNEL_FLAG: &str = "--dangerously-load-development-channels";
 
 /// Permission modes whose relation to each other is known (`DESIGN.md` §4.1). `plan` and anything
 /// else is *incomparable*: the entry is flagged so a person looks at it.
+/// The model every launch carries when the recorded one is not allowed (CireSnave, 2026-10-08: "I can't
+/// afford Opus"). The default model is not trusted, so a launch never goes without an explicit one.
+pub const PINNED_MODEL: &str = "sonnet";
+
+/// Whether a recorded model may be passed on: a Sonnet or a Haiku, by alias or full id. Everything else
+/// (any Opus, any unknown or default) is replaced, so a typo or a new expensive model fails safe.
+pub fn model_is_allowed(m: &str) -> bool {
+    let m = m.to_ascii_lowercase();
+    !m.contains("opus") && (m.contains("sonnet") || m.contains("haiku"))
+}
+
 const KNOWN_MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions"];
 
 /// Why an agent is not in the plan.
@@ -263,13 +274,29 @@ fn rebuild(
             flags.push(format!("mode-needs-a-person:{m}"));
         }
     }
-    let mut argv = Vec::new();
-    for (flag, v) in [("--name", &name), ("--model", &model)] {
-        if let Some(v) = v {
-            argv.push(flag.to_string());
-            argv.push(v.clone());
+    for v in [&name, &model, &mode].into_iter().flatten() {
+        if !safe_value(v) {
+            return Err((
+                Reason::UnsafeArgument,
+                format!("value {v:?} is not allowed"),
+            ));
         }
     }
+    // Always an explicit model: the recorded one only if it is allowed, else the pin, said on the entry.
+    let pinned = match model {
+        Some(m) if model_is_allowed(&m) => m,
+        was => {
+            flags.push(format!("model-pinned:{}", was.as_deref().unwrap_or("none")));
+            PINNED_MODEL.to_string()
+        }
+    };
+    let mut argv = Vec::new();
+    if let Some(v) = &name {
+        argv.push("--name".to_string());
+        argv.push(v.clone());
+    }
+    argv.push("--model".to_string());
+    argv.push(pinned);
     if let Some(m) = &mode {
         argv.push("--permission-mode".to_string());
         argv.push(m.clone());
@@ -289,14 +316,6 @@ fn rebuild(
             Reason::UnsafeArgument,
             format!("argument {bad:?} is not allowed"),
         ));
-    }
-    for v in [&name, &model, &mode].into_iter().flatten() {
-        if !safe_value(v) {
-            return Err((
-                Reason::UnsafeArgument,
-                format!("value {v:?} is not allowed"),
-            ));
-        }
     }
     Ok(Rebuilt {
         argv,
@@ -1104,6 +1123,94 @@ mod tests {
         }
     }
 
+    fn model_of(recorded_model: Option<&str>) -> (Vec<String>, Vec<String>) {
+        let mut r = lane("a-x", "x", 1);
+        let mut args = std_args("x");
+        if let Some(m) = recorded_model {
+            if m.starts_with("--model=") {
+                args.push(m.to_string());
+            } else {
+                args.push("--model".into());
+                args.push(m.to_string());
+            }
+        }
+        r.launch_args = Some(args);
+        let p = plan_of(&[r], &none_alive(), &cfg());
+        let e = p.entries.into_iter().next().expect("planned");
+        (e.argv, e.flags)
+    }
+
+    fn model_value(argv: &[String]) -> Vec<&str> {
+        argv.windows(2)
+            .filter(|w| w[0] == "--model")
+            .map(|w| w[1].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_recorded_opus_launch_comes_back_as_sonnet_and_says_so() {
+        for opus in [
+            "claude-opus-5-5",
+            "opus",
+            "Opus",
+            "claude-opus-5-5[1m]",
+            "--model=claude-opus-5-5",
+        ] {
+            let (argv, flags) = model_of(Some(opus));
+            assert_eq!(model_value(&argv), ["sonnet"], "{opus}");
+            assert_eq!(flags.len(), 1, "{opus}");
+            assert!(flags[0].starts_with("model-pinned:"), "{opus}: {flags:?}");
+            assert!(
+                flags[0].to_lowercase().contains("opus"),
+                "{opus}: {flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recorded_launch_with_no_model_flag_gets_an_explicit_sonnet() {
+        let (argv, flags) = model_of(None);
+        assert_eq!(model_value(&argv), ["sonnet"]);
+        assert_eq!(flags, ["model-pinned:none"]);
+    }
+
+    #[test]
+    fn a_model_that_is_not_known_to_be_sonnet_or_haiku_is_replaced_too() {
+        for other in ["fable", "claude-fable-5-1", "default", "o3"] {
+            let (argv, flags) = model_of(Some(other));
+            assert_eq!(model_value(&argv), ["sonnet"], "{other}");
+            assert_eq!(flags, [format!("model-pinned:{other}")], "{other}");
+        }
+    }
+
+    #[test]
+    fn sonnet_and_haiku_are_kept_exactly_as_recorded_with_no_flag() {
+        for ok in [
+            "sonnet",
+            "haiku",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "sonnet[1m]",
+        ] {
+            let (argv, flags) = model_of(Some(ok));
+            assert_eq!(model_value(&argv), [ok], "{ok}");
+            assert!(flags.is_empty(), "{ok}: {flags:?}");
+        }
+    }
+
+    #[test]
+    fn exactly_one_model_flag_is_ever_emitted() {
+        let mut r = lane("a-x", "x", 1);
+        r.launch_args = Some(
+            ["claude", "--model", "haiku", "--model", "claude-opus-5-5"]
+                .map(String::from)
+                .to_vec(),
+        );
+        let p = plan_of(&[r], &none_alive(), &cfg());
+        // The last flag wins in claude, so the recorded model is the opus one: replaced.
+        assert_eq!(model_value(&p.entries[0].argv), ["sonnet"]);
+    }
+
     #[test]
     fn a_dropped_argument_is_listed_never_silent_and_a_foreign_channel_is_flagged() {
         let mut r = lane("a-x", "x", 1);
@@ -1112,7 +1219,7 @@ mod tests {
                 "claude",
                 "--name=x",
                 "--model",
-                "opus",
+                "haiku",
                 "--add-dir",
                 "C:/secret",
                 "--dangerously-load-development-channels",
@@ -1127,7 +1234,7 @@ mod tests {
         let e = &p.entries[0];
         assert_eq!(
             e.argv,
-            ["--name", "x", "--model", "opus", "--remote-control"]
+            ["--name", "x", "--model", "haiku", "--remote-control"]
         );
         assert_eq!(
             e.dropped_args,
@@ -1167,6 +1274,8 @@ mod tests {
             [
                 "--name",
                 "x",
+                "--model",
+                "sonnet",
                 "--dangerously-load-development-channels",
                 "server:claude-peers"
             ]
@@ -1180,13 +1289,21 @@ mod tests {
             let mut r = lane("a-x", "x", 1);
             r.permission_mode = Some(m.into());
             let p = plan_of(&[r], &none_alive(), &cfg());
-            assert_eq!(p.entries[0].flags, [format!("mode-needs-a-person:{m}")]);
+            assert_eq!(
+                p.entries[0].flags,
+                [
+                    format!("mode-needs-a-person:{m}"),
+                    "model-pinned:none".into()
+                ]
+            );
         }
         let mut r = lane("a-x", "x", 1);
         r.permission_mode = Some("auto".into());
-        assert!(plan_of(&[r], &none_alive(), &cfg()).entries[0]
-            .flags
-            .is_empty());
+        // A known mode adds no mode flag; only the model pin is said.
+        assert_eq!(
+            plan_of(&[r], &none_alive(), &cfg()).entries[0].flags,
+            ["model-pinned:none"]
+        );
     }
 
     #[test]
@@ -1204,7 +1321,14 @@ mod tests {
         assert_eq!(p.entries[0].mode.as_deref(), Some("auto"));
         assert_eq!(
             p.entries[0].argv,
-            ["--name", "pm", "--permission-mode", "auto"]
+            [
+                "--name",
+                "pm",
+                "--model",
+                "sonnet",
+                "--permission-mode",
+                "auto"
+            ]
         );
     }
 
@@ -1349,7 +1473,7 @@ mod tests {
         // Anything that changes a launch does.
         let mut m = recs.clone();
         m[1].launch_args = Some(
-            ["claude", "--name", "x", "--model", "m"]
+            ["claude", "--name", "x", "--model", "haiku"]
                 .map(String::from)
                 .to_vec(),
         );
@@ -1398,7 +1522,7 @@ mod tests {
         // One agent's launch details changed.
         let mut changed = recs.clone();
         changed[1].launch_args = Some(
-            ["claude", "--name", "x", "--model", "m"]
+            ["claude", "--name", "x", "--model", "haiku"]
                 .map(String::from)
                 .to_vec(),
         );
