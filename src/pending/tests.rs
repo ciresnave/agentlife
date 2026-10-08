@@ -93,6 +93,13 @@ impl Consent for ForwardConsent<'_> {
     fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String> {
         self.0.lock().unwrap().resolve(asking, outcome)
     }
+    fn spend_one_use(
+        &mut self,
+        id: &str,
+        bound_hash: &str,
+    ) -> Result<crate::consent::Spent, crate::consent::SpendError> {
+        self.0.lock().unwrap().spend_one_use(id, bound_hash)
+    }
     fn withdraw(&mut self, id: &str) -> Result<bool, String> {
         self.0.lock().unwrap().withdraw(id)
     }
@@ -536,4 +543,99 @@ fn list_skips_temp_files_and_reports_an_unreadable_record() {
     assert_eq!(records[0].pending_id, rec.pending_id);
     assert_eq!(problems.len(), 1);
     assert!(problems[0].0.ends_with("broken.json"));
+}
+
+fn approved(r: &mut Rig, p: &Plan) -> PendingRestore {
+    let rec = made(r, p);
+    let out = answer(
+        &r.home,
+        &mut r.consent,
+        &Scripted::new(Outcome::Approved),
+        &rec.pending_id,
+        p,
+        t0(),
+    )
+    .unwrap();
+    assert!(matches!(out, Answered::Approved(_)), "{out:?}");
+    rec
+}
+
+#[test]
+fn the_plan_grant_is_one_use() {
+    assert_eq!(plan_consent_grant(), Grant::OneUse);
+}
+
+#[test]
+fn an_approval_is_spent_on_first_use_and_the_second_is_refused() {
+    let mut r = rig();
+    let p = plan_with(&["a", "b"], "default");
+    let rec = approved(&mut r, &p);
+    let frozen = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap();
+    assert_eq!(frozen.plan, p);
+    let again = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    assert!(again.contains("already spent"), "{again}");
+}
+
+#[test]
+fn a_request_for_a_plan_with_an_unspent_approval_is_refused_until_it_is_spent() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = approved(&mut r, &p);
+    let e = create(&r.home, &mut r.consent, &p, "again", t0()).unwrap_err();
+    assert!(e.contains("unspent"), "{e}");
+    spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap();
+    create(&r.home, &mut r.consent, &p, "again", t0()).unwrap();
+}
+
+#[test]
+fn a_changed_plan_voids_the_request_unasked_so_there_is_nothing_to_spend() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = made(&mut r, &p);
+    let changed = plan_with(&["a", "b"], "default");
+    let prompt = Scripted::new(Outcome::Approved);
+    let out = answer(
+        &r.home,
+        &mut r.consent,
+        &prompt,
+        &rec.pending_id,
+        &changed,
+        t0(),
+    )
+    .unwrap();
+    assert!(matches!(out, Answered::Voided { .. }), "{out:?}");
+    assert_eq!(prompt.asked.get(), 0);
+    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    assert!(e.contains("not approved"), "{e}");
+}
+
+#[test]
+fn an_approval_older_than_five_minutes_is_refused_and_spent() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = approved(&mut r, &p);
+    let late = t0() + chrono::Duration::seconds(APPROVAL_FRESH_SECS + 1);
+    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, late).unwrap_err();
+    assert!(e.contains("freshness"), "{e}");
+    // spent by the refusal: it cannot be retried inside the window either
+    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    assert!(e.contains("already spent"), "{e}");
+}
+
+#[test]
+fn an_approval_exactly_five_minutes_old_is_still_good() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = approved(&mut r, &p);
+    let edge = t0() + chrono::Duration::seconds(APPROVAL_FRESH_SECS);
+    assert!(spend_approval(&r.home, &mut r.consent, &rec.pending_id, edge).is_ok());
+}
+
+#[test]
+fn an_unapproved_or_open_request_cannot_be_spent() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = made(&mut r, &p);
+    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    assert!(e.contains("not been approved"), "{e}");
 }

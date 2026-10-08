@@ -29,12 +29,15 @@ pub const PENDING_SCHEMA: u32 = 1;
 /// The role agentlife asks as.
 pub const ROLE: &str = "agentlife";
 
-/// PROVISIONAL, pending the ruling on the `RestorePlan` kind (`docs/CONSENT.md`, "Proposal"): the
-/// approval is used once, at once, by the process that asked, so the window only has to cover one
-/// run. Thirty minutes is the proposed cap; it is not a standing grant.
+/// One-shot (CireSnave: "One-shot."; `user-request` 0.10.0 `RestorePlan`): the approval is spent by
+/// [`spend_approval`] before the restore runs. No duration, never `Forever`.
 pub fn plan_consent_grant() -> Grant {
-    Grant::For { secs: 30 * 60 }
+    Grant::OneUse
 }
+
+/// The crate never expires an unspent approval, so freshness is ours (PM ruling 2026-10-08): an
+/// approval whose `approved_at` is older than this is refused, spent all the same.
+pub const APPROVAL_FRESH_SECS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -425,6 +428,46 @@ pub fn answer(
             @ (AnswerError::AlreadyAnswering | AnswerError::Gate(_) | AnswerError::Unavailable(_)),
         ) => Ok(Answered::NotAsked(e.to_string())),
     }
+}
+
+/// Spends the one-use approval of request `id` and returns the frozen plan to run. **Call this
+/// before the restore and run only on `Ok`.** Refuses, with nothing to run, when the request was not
+/// approved, the approval is spent already, it is for another plan, or it is older than
+/// [`APPROVAL_FRESH_SECS`] (that one is spent: ask again).
+pub fn spend_approval(
+    home: &Home,
+    consent: &mut dyn Consent,
+    id: &str,
+    now: DateTime<Utc>,
+) -> Result<Frozen, String> {
+    let rec = load(home, id)?;
+    match &rec.closed {
+        Some(c) if c.how == Closure::Approved => {}
+        Some(c) => {
+            return Err(format!(
+                "pending restore {id} was not approved ({:?})",
+                c.how
+            ))
+        }
+        None => return Err(format!("pending restore {id} has not been approved")),
+    }
+    let frozen = plan::load_frozen(&frozen_path(home, &rec)).map_err(|e| e.to_string())?;
+    if frozen.plan.hash != rec.plan_hash {
+        return Err(format!(
+            "the frozen plan hashes to {} but {id} was approved for {}",
+            frozen.plan.hash, rec.plan_hash
+        ));
+    }
+    let spent = consent
+        .spend_one_use(id, &frozen.plan.hash)
+        .map_err(|e| format!("not spending {id}: {e}"))?;
+    let age = (now - spent.approved_at).num_seconds();
+    if !(-60..=APPROVAL_FRESH_SECS).contains(&age) {
+        return Err(format!(
+            "the approval of {id} is {age} s old, outside the {APPROVAL_FRESH_SECS} s freshness window; it was spent and refused: ask again"
+        ));
+    }
+    Ok(frozen)
 }
 
 /// `agentlife pending discard`: the requester gives up. The request is withdrawn first, so a prompt
