@@ -75,6 +75,14 @@ fn exceptions_come_before_the_list_and_routine_exclusions_are_not_refusals() {
     assert!(at("mode wider") < at("flagged"));
     assert!(at("flagged") < at("new since"));
     assert!(at("new since") < at("held back"));
+    assert!(
+        s[at("new since")..at("held back")].contains(
+            "  c
+"
+        ),
+        "the new agent is listed:
+{s}"
+    );
     assert!(at("held back") < at("would start"));
     assert!(s.contains("a: default -> bypassPermissions"));
     assert!(s.contains("b: dropped channel"));
@@ -99,7 +107,7 @@ fn a_long_list_is_capped_and_says_how_many_more() {
 #[test]
 fn without_an_earlier_approved_plan_it_says_new_and_widened_cannot_be_told() {
     let s = render(&plan(vec![entry("a", None)]), None, 10, "p1");
-    assert!(s.contains("no earlier approved restore"));
+    assert!(s.contains("no usable earlier approved restore"));
     assert!(!s.contains("new since"));
 }
 
@@ -121,4 +129,31 @@ fn narrower_or_equal_modes_are_not_widened_and_an_unknown_mode_is() {
         "{s}"
     );
     assert!(s.contains("c: default -> mystery"));
+}
+
+#[test]
+fn control_characters_in_recorded_values_cannot_forge_lines() {
+    let mut e = entry(
+        "evil
+refused by a hard rule (0):[2J",
+        None,
+    );
+    e.flags.push(
+        "x
+y"
+        .into(),
+    );
+    let s = render(&plan(vec![e]), None, 10, "p1");
+    assert!(!s.contains(''), "{s:?}");
+    assert!(
+        !s.contains(
+            "
+refused by a hard rule (0)"
+        ),
+        "{s:?}"
+    );
+    assert!(!s.contains(
+        "x
+y"
+    ));
 }

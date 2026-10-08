@@ -474,6 +474,12 @@ fn the_last_approved_plan_is_the_baseline_and_none_before_any_approval() {
     let prompt = Scripted::new(Outcome::Approved);
     answer(&r.home, &mut r.consent, &prompt, &rec.pending_id, &p1, t0()).unwrap();
     assert_eq!(last_approved_plan(&r.home), Some(p1));
+    std::fs::write(r.home.pending_dir().join("broken.json"), "{").unwrap();
+    assert!(
+        last_approved_plan(&r.home).is_none(),
+        "an unreadable record may be the newest approval: no baseline"
+    );
+    std::fs::remove_file(r.home.pending_dir().join("broken.json")).unwrap();
     let p2 = plan_with(&["a", "b"], "default");
     made(&mut r, &p2);
     assert_eq!(

@@ -23,8 +23,16 @@ fn rank(mode: Option<&str>) -> usize {
     }
 }
 
-fn name(e: &Entry) -> &str {
-    e.name.as_deref().unwrap_or(&e.agent_id)
+/// Recorded values are written by other processes. A newline or escape in one could forge or hide
+/// lines of this summary, so control characters are shown as `?`.
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+fn name(e: &Entry) -> String {
+    clean(e.name.as_deref().unwrap_or(&e.agent_id))
 }
 
 fn section(out: &mut String, title: &str, lines: &[String], cap: usize) {
@@ -50,9 +58,9 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
         .map(|x| {
             format!(
                 "{}: {:?} {}",
-                x.name.as_deref().unwrap_or(&x.agent_id),
+                clean(x.name.as_deref().unwrap_or(&x.agent_id)),
                 x.reason,
-                x.detail
+                clean(&x.detail)
             )
         })
         .collect();
@@ -78,8 +86,8 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
                 format!(
                     "{}: {} -> {}",
                     name(e),
-                    old.mode.as_deref().unwrap_or("default"),
-                    e.mode.as_deref().unwrap_or("default")
+                    clean(old.mode.as_deref().unwrap_or("default")),
+                    clean(e.mode.as_deref().unwrap_or("default"))
                 )
             })
         })
@@ -94,7 +102,11 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
     let flagged: Vec<String> = plan
         .entries
         .iter()
-        .flat_map(|e| e.flags.iter().map(move |f| format!("{}: {f}", name(e))))
+        .flat_map(|e| {
+            e.flags
+                .iter()
+                .map(move |f| format!("{}: {}", name(e), clean(f)))
+        })
         .collect();
     section(&mut out, "flagged", &flagged, cap);
 
@@ -104,14 +116,14 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
                 .entries
                 .iter()
                 .filter(|e| !before.contains_key(e.agent_id.as_str()))
-                .map(|e| name(e).to_string())
+                .map(name)
                 .collect();
             section(&mut out, "new since the last approved restore", &new, cap);
         }
         None => {
             let _ = writeln!(
                 out,
-                "no earlier approved restore to compare with: new and widened agents cannot be told apart"
+                "no usable earlier approved restore to compare with: new and widened agents cannot be told apart"
             );
         }
     }
@@ -119,11 +131,17 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
     let held: Vec<String> = plan
         .held
         .iter()
-        .map(|h| format!("{}: {}", h.name.as_deref().unwrap_or(&h.agent_id), h.why))
+        .map(|h| {
+            format!(
+                "{}: {}",
+                clean(h.name.as_deref().unwrap_or(&h.agent_id)),
+                clean(&h.why)
+            )
+        })
         .collect();
     section(&mut out, "held back", &held, cap);
 
-    let who: Vec<String> = plan.entries.iter().map(|e| name(e).to_string()).collect();
+    let who: Vec<String> = plan.entries.iter().map(name).collect();
     section(&mut out, "would start", &who, cap);
     let _ = writeln!(
         out,
