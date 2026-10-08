@@ -46,6 +46,9 @@ pub enum Closure {
     Discarded,
     /// Voided by the consent store, or the frozen plan was unusable. `detail` says why.
     Voided,
+    /// A newer pending restore for a different plan replaced it (`DESIGN-REVISION-2.md` §6.5). Kept
+    /// for audit; nothing is lost because candidates are always derived from the registry.
+    Superseded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,7 +253,32 @@ pub fn create(
         let _ = consent.withdraw(&id);
         return Err(e);
     }
+    supersede_older(home, consent, &rec, now);
     Ok(rec)
+}
+
+/// A newer boot's pending restore supersedes every older open one for a different plan. Each is
+/// withdrawn first, so a prompt already up cannot approve it afterwards, and closed only once that
+/// has happened. One that cannot be withdrawn stays open: it is still safe, because answering it
+/// compares hashes and voids it unasked.
+fn supersede_older(
+    home: &Home,
+    consent: &mut dyn Consent,
+    newer: &PendingRestore,
+    now: DateTime<Utc>,
+) {
+    let (records, _) = list(home);
+    for mut old in records {
+        if !old.is_open() || old.pending_id == newer.pending_id || old.plan_hash == newer.plan_hash
+        {
+            continue;
+        }
+        if consent.withdraw(&old.pending_id).is_err() {
+            continue;
+        }
+        let detail = format!("superseded by {}", newer.pending_id);
+        let _ = close(home, &mut old, Closure::Superseded, detail, now);
+    }
 }
 
 /// What came of asking.

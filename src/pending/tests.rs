@@ -359,6 +359,51 @@ fn discard_withdraws_then_closes_and_a_closed_record_cannot_be_answered_or_disca
 }
 
 #[test]
+fn a_newer_plan_supersedes_the_older_open_one_which_is_withdrawn_and_kept() {
+    let mut r = rig();
+    let closed_old = made(&mut r, &plan_with(&["z"], "default"));
+    discard(&r.home, &mut r.consent, &closed_old.pending_id, t0()).unwrap();
+    let old = made(&mut r, &plan_with(&["a"], "default"));
+    let new = made(&mut r, &plan_with(&["a", "b"], "default"));
+    assert!(new.is_open());
+    let old_now = load(&r.home, &old.pending_id).unwrap();
+    let c = old_now.closed.expect("superseded");
+    assert_eq!(c.how, Closure::Superseded);
+    assert!(c.detail.contains(&new.pending_id));
+    assert!(!r.consent.is_pending(&old.pending_id), "withdrawn");
+    assert!(r.consent.is_pending(&new.pending_id));
+    assert_eq!(
+        load(&r.home, &closed_old.pending_id)
+            .unwrap()
+            .closed
+            .unwrap()
+            .how,
+        Closure::Discarded,
+        "an already closed record keeps its own closure"
+    );
+    let prompt = Scripted::new(Outcome::Approved);
+    assert!(answer(
+        &r.home,
+        &mut r.consent,
+        &prompt,
+        &old.pending_id,
+        &plan_with(&["a"], "default"),
+        t0()
+    )
+    .is_err());
+    assert_eq!(prompt.asked.get(), 0, "a superseded request is never shown");
+}
+
+#[test]
+fn asking_the_same_plan_again_supersedes_nothing() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let one = made(&mut r, &p);
+    made(&mut r, &p);
+    assert!(load(&r.home, &one.pending_id).unwrap().is_open());
+}
+
+#[test]
 fn no_backend_stores_nothing_and_approves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let home = Home::new(dir.path()).unwrap();
