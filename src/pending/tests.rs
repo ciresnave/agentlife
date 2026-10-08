@@ -427,14 +427,30 @@ fn a_request_the_store_no_longer_holds_is_not_claimed_as_superseded() {
 
 #[test]
 fn two_creators_at_once_leave_exactly_one_open_request() {
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
     let home = Home::new(dir.path()).unwrap();
     let clock = Arc::new(ManualClock::new(t0()));
-    let consent = std::sync::Mutex::new(FakeConsent::new(clock));
+    let consent = Mutex::new(FakeConsent::new(clock));
+    // Each creator stops after saving its record until the other has saved too. Under the create
+    // lock the second never gets that far while the first waits, so the wait times out and both
+    // finish in turn. Without the lock both have saved before either scans, each supersedes the
+    // other, and nothing is open: this is the interleaving the lock exists to prevent, forced.
+    let saved = Arc::new((Mutex::new(0u32), Condvar::new()));
     std::thread::scope(|s| {
         for ids in [["a"], ["b"]] {
-            let (home, consent) = (&home, &consent);
+            let (home, consent, saved) = (&home, &consent, saved.clone());
             s.spawn(move || {
+                crate::pending::test_hook::set_after_save(Box::new(move || {
+                    let (n, cv) = &*saved;
+                    let mut n = n.lock().unwrap();
+                    *n += 1;
+                    cv.notify_all();
+                    let _ = cv
+                        .wait_timeout_while(n, Duration::from_secs(2), |n| *n < 2)
+                        .unwrap();
+                }));
                 let p = plan_with(&ids, "default");
                 // the FakeConsent is not thread safe; the lock under test is the file lock
                 let mut c = ForwardConsent(consent);
