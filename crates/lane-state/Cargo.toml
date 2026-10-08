@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["claude-code", "process", "agents", "lane", "windows"]
+categories = ["development-tools", "os"]
+# The highest `rust-version` any dependency declares (sysinfo 0.39.6: 1.95);
+# not separately tested against older toolchains.
+rust-version = "1.95"
 description = "Reads what a Claude Code lane wrote about itself (its state file), and the pure rules for finding a lane's claude process, launch flags and home directory. Shared by lane-restart, with-secret and agentlife."
 
 [dependencies]
