@@ -21,6 +21,7 @@ use agentlife::plan;
 use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
 use agentlife::select;
+use agentlife::summary;
 use agentlife::task;
 use std::io::{Read, Write};
 use std::process::ExitCode;
@@ -247,13 +248,28 @@ fn run_pending(action: PendingAction) -> ExitCode {
     };
     match action {
         PendingAction::Prompt => {
-            let open = pending::list(&home)
-                .0
-                .iter()
-                .filter(|r| r.is_open())
-                .count();
+            let (records, _) = pending::list(&home);
+            let open_records: Vec<_> = records.iter().filter(|r| r.is_open()).collect();
+            let open = open_records.len();
             if open == 0 {
                 return ExitCode::SUCCESS;
+            }
+            let previous = pending::last_approved_plan(&home);
+            for r in &open_records {
+                match plan::load_frozen(&pending::frozen_path(&home, r)) {
+                    Ok(f) => print!(
+                        "{}",
+                        summary::render(
+                            &f.plan,
+                            previous.as_ref(),
+                            summary::DEFAULT_CAP,
+                            &r.pending_id
+                        )
+                    ),
+                    Err(e) => {
+                        eprintln!("agentlife pending: cannot summarise {}: {e}", r.pending_id)
+                    }
+                }
             }
             if let Err(e) = consent::installed() {
                 return fail(format!(

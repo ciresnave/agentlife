@@ -462,6 +462,28 @@ fn asking_the_same_plan_again_supersedes_nothing() {
 }
 
 #[test]
+fn the_last_approved_plan_is_the_baseline_and_none_before_any_approval() {
+    let mut r = rig();
+    assert!(last_approved_plan(&r.home).is_none());
+    let p1 = plan_with(&["a"], "default");
+    let rec = made(&mut r, &p1);
+    assert!(
+        last_approved_plan(&r.home).is_none(),
+        "open is not approved"
+    );
+    let prompt = Scripted::new(Outcome::Approved);
+    answer(&r.home, &mut r.consent, &prompt, &rec.pending_id, &p1, t0()).unwrap();
+    assert_eq!(last_approved_plan(&r.home), Some(p1));
+    let p2 = plan_with(&["a", "b"], "default");
+    made(&mut r, &p2);
+    assert_eq!(
+        last_approved_plan(&r.home).unwrap().entries.len(),
+        1,
+        "a newer open request is not the baseline"
+    );
+}
+
+#[test]
 fn no_backend_stores_nothing_and_approves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let home = Home::new(dir.path()).unwrap();
