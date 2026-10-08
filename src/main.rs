@@ -2,9 +2,10 @@
 //! `agentlife`: agent lifecycle control. See `docs/MILESTONES.md`.
 
 use agentlife::caller::{self, Caller};
-use agentlife::cli::{self, Command};
-use agentlife::clock::SystemClock;
+use agentlife::cli::{self, Command, PendingAction};
+use agentlife::clock::{Clock, SystemClock};
 use agentlife::config::{Config, Layer};
+use agentlife::consent;
 use agentlife::control::{self, ControlError};
 use agentlife::down;
 use agentlife::home::Home;
@@ -15,6 +16,7 @@ use agentlife::journal::Journal;
 use agentlife::list;
 use agentlife::marks;
 use agentlife::peers::Broker;
+use agentlife::pending;
 use agentlife::plan;
 use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
             priority,
             flags,
         }) => run_restore(dry_run, json, only, priority, flags),
+        Ok(Command::Pending(action)) => run_pending(action),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
             ExitCode::FAILURE
@@ -215,6 +218,80 @@ fn run_restore(
         eprintln!("agentlife restore: could not use {}: {why}", path.display());
     }
     ExitCode::SUCCESS
+}
+
+/// `agentlife pending`. Listing and showing only read. Approving and discarding need the consent
+/// backend, which this build does not have: they say so first and change nothing.
+fn run_pending(action: PendingAction) -> ExitCode {
+    let fail = |e: String| {
+        eprintln!("agentlife pending: {e}");
+        ExitCode::FAILURE
+    };
+    let home = match Home::from_env() {
+        Ok(h) => h,
+        Err(e) => return fail(e.to_string()),
+    };
+    match action {
+        PendingAction::List { json, all } => {
+            let (records, problems) = pending::list(&home);
+            let shown: Vec<_> = records.iter().filter(|r| all || r.is_open()).collect();
+            if json {
+                match serde_json::to_string_pretty(&shown) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => return fail(e.to_string()),
+                }
+            } else if shown.is_empty() {
+                println!(
+                    "no pending restores{}",
+                    if all {
+                        ""
+                    } else {
+                        " (--all includes closed ones)"
+                    }
+                );
+            } else {
+                for r in shown {
+                    print!("{}", r.render_text());
+                }
+            }
+            for (path, why) in &problems {
+                eprintln!("agentlife pending: could not use {}: {why}", path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        PendingAction::Show { id } => match pending::load(&home, &id) {
+            Ok(r) => {
+                print!("{}", r.render_text());
+                println!(
+                    "  frozen plan: {}",
+                    pending::frozen_path(&home, &r).display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e),
+        },
+        PendingAction::Discard { id } => {
+            let mut backend = match consent::installed() {
+                Ok(b) => b,
+                Err(e) => return fail(e),
+            };
+            match pending::discard(&home, backend.as_mut(), &id, SystemClock.now()) {
+                Ok(()) => {
+                    println!("discarded {id}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        PendingAction::Approve { id } => {
+            if let Err(e) = consent::installed() {
+                return fail(e);
+            }
+            fail(format!(
+                "cannot ask about {id}: the person-facing prompt is not wired in this build"
+            ))
+        }
+    }
 }
 
 fn all_records(app: &App, command: &str) -> Result<Vec<AgentRecord>, ExitCode> {
