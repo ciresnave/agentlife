@@ -262,8 +262,29 @@ pub fn create(
         let _ = consent.withdraw(&id);
         return Err(e);
     }
+    #[cfg(test)]
+    test_hook::after_save();
     supersede_older(home, consent, &rec, now)?;
     Ok(rec)
+}
+
+/// Test-only: lets a test pause a creator between saving its record and scanning for older ones,
+/// the window the create lock exists to close. Per thread, so other tests are unaffected.
+#[cfg(test)]
+pub(crate) mod test_hook {
+    use std::cell::RefCell;
+    type Hook = Box<dyn Fn()>;
+    thread_local!(static AFTER_SAVE: RefCell<Option<Hook>> = const { RefCell::new(None) });
+    pub(crate) fn set_after_save(h: Hook) {
+        AFTER_SAVE.with(|c| *c.borrow_mut() = Some(h));
+    }
+    pub(super) fn after_save() {
+        AFTER_SAVE.with(|c| {
+            if let Some(h) = c.borrow().as_ref() {
+                h();
+            }
+        });
+    }
 }
 
 /// A newer boot's pending restore supersedes every older open one for a different plan. Each is
