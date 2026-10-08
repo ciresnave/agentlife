@@ -1091,30 +1091,7 @@ mod relaunch {
     /// both unit tested directly; this function's own fallback branching
     /// is exercised by real use, the same way a real restart is the
     /// acceptance check for the rest of §5.
-    /// PM finding, 2026-09-18 (third real-restart retest): `lane-restart`
-    /// itself always runs from a lane's own Bash tool, i.e. FROM INSIDE a
-    /// running Claude Code session - `wt.exe` inherits that whole
-    /// environment by default, so the "fresh" relaunch came up believing
-    /// it was a CHILD of the session that requested the restart
-    /// (`CLAUDE_CODE_CHILD_SESSION` inherited): no transcript, and the
-    /// positional prompt never auto-submitted. Confirmed live by dumping
-    /// `env` from inside a real session (not guessed) - only vars that
-    /// actually name THIS session or its IPC channel are stripped; a
-    /// user's own persistent config vars (`CLAUDE_EFFORT`,
-    /// `CLAUDE_CODE_USE_POWERSHELL_TOOL`, `CLAUDE_CODE_EXECPATH`, and
-    /// anything unrelated like `CLOUDFLARE_*`) are left alone.
-    const SESSION_IDENTITY_ENV_VARS: &[&str] = &[
-        "CLAUDECODE",
-        "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_SESSION_ATTENDED",
-        "CLAUDE_CODE_BRIDGE_SESSION_ID",
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_SSE_PORT",
-        "CLAUDE_PID",
-    ];
+    use lane_state::claude_proc::SESSION_IDENTITY_ENV_VARS;
 
     fn strip_session_identity_env(cmd: &mut std::process::Command) {
         for var in SESSION_IDENTITY_ENV_VARS {

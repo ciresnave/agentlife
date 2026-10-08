@@ -9,14 +9,14 @@
 //! only place real OS calls happen is behind that one trait's real
 //! implementation, wired in `main.rs`.
 
+// Moved to the `lane-state` crate; the old paths keep working.
+pub use lane_state::{facts, paths, state};
+
 pub mod approvals;
 pub mod authorize;
-pub mod facts;
 pub mod handlers;
 pub mod host;
 pub mod lane_state_writer;
 pub mod log;
 pub mod notify;
-pub mod paths;
-pub mod state;
 pub mod tab_close;

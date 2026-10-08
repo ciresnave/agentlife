@@ -157,7 +157,7 @@ impl SysinfoFacts {
 /// unit-testable without a real process (unlike the rest of this module -
 /// see its own doc comment). Absence on either side is not itself a
 /// mismatch; only two PRESENT paths that fail to normalise-match are.
-pub(crate) fn exe_matches(current: &Option<PathBuf>, expected: &Option<PathBuf>) -> bool {
+pub fn exe_matches(current: &Option<PathBuf>, expected: &Option<PathBuf>) -> bool {
     match (current, expected) {
         (Some(a), Some(b)) => crate::paths::paths_match(&a.to_string_lossy(), &b.to_string_lossy()),
         _ => true,
