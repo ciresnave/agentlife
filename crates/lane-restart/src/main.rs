@@ -426,6 +426,12 @@ USAGE:
         (from that repo's default branch only) and list every active and
         refused one, exactly as `host` would load them.
 
+    lane-restart models
+        Read-only: list each lane's recorded model and flag Opus. A relaunch
+        pins `--model` from the original launch's explicit --model, else
+        `model-policy.json` (default sonnet) - never the recorded model - and
+        refuses Opus unless LANE_RESTART_ALLOW_OPUS=1.
+
     lane-restart --version
         Print the crate version and the configured approvals source. This
         binary embeds no approvals (RESTART-TOOL-DESIGN.md §12.2).
@@ -458,6 +464,10 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             };
+        }
+        if first == "models" && rest.is_empty() {
+            print!("{}", relaunch::models_report(&state_dir()));
+            return ExitCode::SUCCESS;
         }
         if first == "approvals" {
             return match parse_assert_idle_args(rest) {
@@ -768,6 +778,9 @@ mod relaunch {
         /// known dialog" case, which is `RelaunchOutcome::AwaitingConfirmation`
         /// instead (a real, expected outcome, never an error).
         SessionNeverProcessedPrompt,
+        /// CireSnave, 2026-10-08: "I can't afford Opus." The resolved model
+        /// id names Opus and no override was given.
+        OpusRefused(String),
     }
 
     /// What `kill_and_relaunch` actually achieved - `Relaunched` is the
@@ -812,6 +825,11 @@ mod relaunch {
                 RelaunchError::SessionNeverProcessedPrompt => {
                     write!(f, "relaunch FAILED: session never processed its prompt")
                 }
+                RelaunchError::OpusRefused(model) => write!(
+                    f,
+                    "refusing to relaunch on model {model:?} (an Opus model); set \
+                     {ALLOW_OPUS_ENV}=1 to override"
+                ),
             }
         }
     }
@@ -1015,14 +1033,12 @@ mod relaunch {
     /// `no_positional_ever_directly_follows_a_variadic_flags_values` for the
     /// general property this now guarantees for every allowlisted variadic
     /// flag, not just this one.
-    fn claude_argv(name: &str, state: &LaneState, prompt: &str) -> Vec<String> {
+    fn claude_argv(name: &str, state: &LaneState, prompt: &str, model: &str) -> Vec<String> {
         let mut argv = vec!["claude".to_string(), prompt.to_string()];
         argv.push("--name".to_string());
         argv.push(name.to_string());
-        if let Some(model) = &state.model {
-            argv.push("--model".to_string());
-            argv.push(model.clone());
-        }
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
         if let Some(permission_mode) = &state.permission_mode {
             argv.push("--permission-mode".to_string());
             argv.push(permission_mode.clone());
@@ -1128,6 +1144,79 @@ mod relaunch {
         ];
         argv.extend_from_slice(claude_argv);
         argv
+    }
+
+    /// Env var that lets a relaunch use an Opus model (CireSnave's
+    /// 2026-10-08 rule: never, unless explicitly overridden).
+    pub const ALLOW_OPUS_ENV: &str = "LANE_RESTART_ALLOW_OPUS";
+
+    /// The portfolio default model: `{"model": "..."}` in
+    /// `model-policy.json` under `state_dir`, else `sonnet`. A missing or
+    /// unreadable file yields `sonnet`, never the session's own model.
+    pub fn policy_default_model(state_dir: &std::path::Path) -> String {
+        std::fs::read(state_dir.join("model-policy.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("model")?.as_str().map(str::to_string))
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| "sonnet".to_string())
+    }
+
+    pub fn allow_opus_from_env() -> bool {
+        std::env::var(ALLOW_OPUS_ENV).is_ok_and(|v| v == "1")
+    }
+
+    pub fn is_opus(model: &str) -> bool {
+        model.to_ascii_lowercase().contains("opus")
+    }
+
+    /// The `--model` value of the ORIGINAL launch, if it had one: the only
+    /// explicit per-lane setting. `state.model` is deliberately NOT used -
+    /// it records what the session happened to run on, not what was chosen.
+    fn explicit_launch_model(state: &LaneState) -> Option<String> {
+        let args = state.launch_args.as_ref()?;
+        let i = args.iter().position(|a| a == "--model")?;
+        args.get(i + 1).filter(|v| !is_flag_token(v)).cloned()
+    }
+
+    /// Model a relaunch is pinned to: explicit launch `--model`, else
+    /// `policy_default`. Opus is refused unless `allow_opus`.
+    pub fn resolve_model(
+        state: &LaneState,
+        policy_default: &str,
+        allow_opus: bool,
+    ) -> Result<String, RelaunchError> {
+        let model = explicit_launch_model(state).unwrap_or_else(|| policy_default.to_string());
+        if is_opus(&model) && !allow_opus {
+            return Err(RelaunchError::OpusRefused(model));
+        }
+        Ok(model)
+    }
+
+    /// Read-only: one line per lane state file, its recorded model, Opus flagged.
+    pub fn models_report(state_dir: &std::path::Path) -> String {
+        let mut lines = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(state_dir) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(role) = path.file_stem().and_then(|x| x.to_str()) else {
+                    continue;
+                };
+                let Ok(st) = lane_restart::state::load(state_dir, role) else {
+                    continue;
+                };
+                let model = st.model.as_deref().unwrap_or("-");
+                let flag = if is_opus(model) { "  <-- OPUS" } else { "" };
+                lines.push(format!("{role}\t{model}{flag}"));
+            }
+        }
+        lines.sort();
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
     }
 
     fn spawn_relaunch(state: &LaneState, argv: &[String]) -> Result<(), RelaunchError> {
@@ -1279,7 +1368,12 @@ mod relaunch {
             return Err(RelaunchError::InvalidIdentifier(format!("name {name:?}")));
         }
         let prompt = format!("read {} HANDOFF and continue", state.role);
-        Ok(claude_argv(name, state, &prompt))
+        let model = resolve_model(
+            state,
+            &policy_default_model(&super::state_dir()),
+            allow_opus_from_env(),
+        )?;
+        Ok(claude_argv(name, state, &prompt, &model))
     }
 
     pub fn kill_and_relaunch(
@@ -1301,7 +1395,12 @@ mod relaunch {
         }
 
         let prompt = format!("read {} HANDOFF and continue", state.role);
-        let argv = claude_argv(name, state, &prompt);
+        let model = resolve_model(
+            state,
+            &policy_default_model(&super::state_dir()),
+            allow_opus_from_env(),
+        )?;
+        let argv = claude_argv(name, state, &prompt, &model);
         if let Some(bad) = first_unsafe_argument(
             std::iter::once(state.cwd.as_str()).chain(argv.iter().map(String::as_str)),
         ) {
@@ -1551,20 +1650,123 @@ mod relaunch {
             assert_eq!(wrapped[1], "host");
         }
 
+        // -- model policy (PM TASK 2026-10-08) --------------------------- //
+        // CireSnave, 2026-10-08: "I can't afford Opus." The model a session
+        // happened to be RUNNING (state.model) must never decide the
+        // relaunch's model: only an explicit `--model` in the original
+        // launch, else the portfolio policy default.
+
+        #[test]
+        fn a_state_recording_opus_relaunches_on_the_policy_default_not_opus() {
+            let mut state = state_with_role("overmind");
+            state.model = Some("claude-opus-5-5".to_string());
+            state.launch_args = None;
+            let model = resolve_model(&state, "sonnet", false).unwrap();
+            assert_eq!(model, "sonnet");
+            let argv = claude_argv("overmind", &state, "p", &model);
+            assert!(!argv.iter().any(|a| a.contains("opus")), "got {argv:?}");
+            let i = argv.iter().position(|a| a == "--model").unwrap();
+            assert_eq!(argv[i + 1], "sonnet");
+        }
+
+        #[test]
+        fn an_explicit_launch_model_pin_wins_over_the_policy_default() {
+            let mut state = state_with_role("overmind");
+            state.model = Some("claude-opus-5-5".to_string());
+            state.launch_args = Some(strs(&["claude.exe", "--model", "haiku"]));
+            assert_eq!(resolve_model(&state, "sonnet", false).unwrap(), "haiku");
+        }
+
+        #[test]
+        fn an_explicit_opus_pin_is_refused_without_the_override() {
+            let mut state = state_with_role("overmind");
+            state.launch_args = Some(strs(&["claude.exe", "--model", "opus"]));
+            assert!(matches!(
+                resolve_model(&state, "sonnet", false),
+                Err(RelaunchError::OpusRefused(_))
+            ));
+        }
+
+        #[test]
+        fn a_policy_default_naming_opus_is_refused_without_the_override() {
+            let state = state_with_role("overmind");
+            assert!(matches!(
+                resolve_model(&state, "claude-opus-5-5", false),
+                Err(RelaunchError::OpusRefused(_))
+            ));
+        }
+
+        #[test]
+        fn the_explicit_override_allows_opus() {
+            let mut state = state_with_role("overmind");
+            state.launch_args = Some(strs(&["claude.exe", "--model", "opus"]));
+            assert_eq!(resolve_model(&state, "sonnet", true).unwrap(), "opus");
+        }
+
+        #[test]
+        fn the_opus_check_is_case_insensitive() {
+            let mut state = state_with_role("overmind");
+            state.launch_args = Some(strs(&["claude.exe", "--model", "Claude-OPUS-5"]));
+            assert!(resolve_model(&state, "sonnet", false).is_err());
+        }
+
+        #[test]
+        fn policy_default_reads_the_file_and_falls_back_to_sonnet() {
+            let dir = tempfile::tempdir().unwrap();
+            assert_eq!(policy_default_model(dir.path()), "sonnet", "no file");
+            std::fs::write(dir.path().join("model-policy.json"), r#"{"model":"haiku"}"#).unwrap();
+            assert_eq!(policy_default_model(dir.path()), "haiku");
+            std::fs::write(dir.path().join("model-policy.json"), "not json").unwrap();
+            assert_eq!(policy_default_model(dir.path()), "sonnet", "garbage");
+        }
+
+        #[test]
+        fn models_report_lists_each_lane_and_flags_opus() {
+            let dir = tempfile::tempdir().unwrap();
+            for (role, model) in [("a", "claude-sonnet-5-5"), ("b", "claude-opus-5-5")] {
+                let mut s = state_with_role(role);
+                s.model = Some(model.to_string());
+                std::fs::write(
+                    dir.path().join(format!("{role}.json")),
+                    serde_json::to_string(&s).unwrap(),
+                )
+                .unwrap();
+            }
+            let report = models_report(dir.path());
+            assert!(report.contains("claude-sonnet-5-5"), "{report}");
+            let opus_line = report
+                .lines()
+                .find(|l| l.contains("claude-opus-5-5"))
+                .unwrap();
+            assert!(opus_line.contains("OPUS"), "{report}");
+            let sonnet_line = report
+                .lines()
+                .find(|l| l.contains("claude-sonnet-5-5"))
+                .unwrap();
+            assert!(!sonnet_line.contains("OPUS"), "{report}");
+        }
+
         // -- claude_argv ------------------------------------------------- //
 
         #[test]
-        fn claude_argv_omits_model_and_permission_mode_when_absent() {
+        fn claude_argv_always_pins_the_model_and_omits_permission_mode_when_absent() {
             let mut state = state_with_role("overmind");
             state.model = None;
             state.permission_mode = None;
-            let argv = claude_argv("overmind", &state, "the prompt");
+            let argv = claude_argv("overmind", &state, "the prompt", "sonnet");
             assert_eq!(
                 argv,
-                vec!["claude", "the prompt", "--name", "overmind"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<Vec<_>>()
+                vec![
+                    "claude",
+                    "the prompt",
+                    "--name",
+                    "overmind",
+                    "--model",
+                    "sonnet"
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
             );
         }
 
@@ -1572,7 +1774,7 @@ mod relaunch {
         fn claude_argv_includes_remote_control_flag_when_set() {
             let mut state = state_with_role("overmind");
             state.remote_control = true;
-            let argv = claude_argv("overmind", &state, "p");
+            let argv = claude_argv("overmind", &state, "p", "sonnet");
             assert!(argv.contains(&"--remote-control".to_string()));
         }
 
@@ -1581,7 +1783,7 @@ mod relaunch {
             // ⚠️ PM finding, 2026-09-18: --resume reloads the whole prior
             // transcript - exactly the cost a restart exists to cut.
             let state = state_with_role("overmind");
-            let argv = claude_argv("overmind", &state, "p");
+            let argv = claude_argv("overmind", &state, "p", "sonnet");
             assert!(!argv.iter().any(|a| a == "--resume"));
         }
 
@@ -1610,7 +1812,7 @@ mod relaunch {
                 "server:claude-peers",
                 "--resume",
             ]));
-            let argv = claude_argv("overmind", &state, "the prompt");
+            let argv = claude_argv("overmind", &state, "the prompt", "sonnet");
             assert_eq!(
                 argv,
                 strs(&[
@@ -1618,6 +1820,8 @@ mod relaunch {
                     "the prompt",
                     "--name",
                     "overmind",
+                    "--model",
+                    "sonnet",
                     "--dangerously-load-development-channels",
                     "server:claude-peers",
                 ]),
@@ -1737,7 +1941,7 @@ mod relaunch {
         fn claude_argv_never_duplicates_name_when_the_original_launch_already_had_one() {
             let mut state = state_with_role("overmind");
             state.launch_args = Some(strs(&["claude.exe", "--name", "old-name"]));
-            let argv = claude_argv("overmind", &state, "p");
+            let argv = claude_argv("overmind", &state, "p", "sonnet");
             assert_eq!(
                 argv.iter().filter(|a| *a == "--name").count(),
                 1,
@@ -1757,7 +1961,7 @@ mod relaunch {
             // invent anything.
             let mut state = state_with_role("overmind");
             state.launch_args = None;
-            let argv = claude_argv("overmind", &state, "p");
+            let argv = claude_argv("overmind", &state, "p", "sonnet");
             assert_eq!(
                 argv,
                 strs(&[
@@ -1766,7 +1970,7 @@ mod relaunch {
                     "--name",
                     "overmind",
                     "--model",
-                    "claude-sonnet-5",
+                    "sonnet",
                     "--permission-mode",
                     "prompting",
                 ])
@@ -1807,7 +2011,7 @@ mod relaunch {
                 "C:/a",
                 "C:/b",
             ]));
-            let argv = claude_argv("overmind", &state, "the prompt");
+            let argv = claude_argv("overmind", &state, "the prompt", "sonnet");
 
             assert_eq!(argv[0], "claude");
             assert_eq!(argv[1], "the prompt", "the prompt must come FIRST");
@@ -1879,7 +2083,9 @@ mod relaunch {
         #[test]
         fn kill_and_relaunch_refuses_a_model_containing_a_semicolon_before_touching_the_process() {
             let mut state = state_with_role("overmind");
-            state.model = Some("claude;calc".to_string());
+            // The model now comes only from the launch's explicit --model
+            // (or the policy file), never from state.model.
+            state.launch_args = Some(strs(&["claude.exe", "--model", "claude;calc"]));
             let result = kill_and_relaunch(
                 &NeverCalled,
                 &NeverCalledStateReader,
