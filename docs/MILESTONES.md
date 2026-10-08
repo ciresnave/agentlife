@@ -36,4 +36,4 @@ Whether `SessionEnd` fires at shutdown is **unknown** until M6; M1 to M5 are bui
 (`DESIGN-REVISION-1.md` §2.6). The restore *order* is CireSnave's (board 121); the planner implements the
 default (PM first, then most recently active) with an empty optional `priority` list.
 
-**M4 progress (2026-10-08).** `user-request` is unpublished, so M4's consent is built behind a trait with a fake (PM ruling, `docs/CONSENT.md`): pending record, `agentlife pending`, consent contract. Not yet: real backend, logon task, unlock trigger, control tab.
+**M4 progress (2026-10-08).** `user-request` is unpublished, so M4's consent is built behind a trait with a fake (PM ruling, `docs/CONSENT.md`): pending record, `agentlife pending`, consent contract. Logon and unlock tasks: `agentlife install-task`, `restore --from-logon`, `pending --prompt` (`docs/TASKS.md`; creating the unlock trigger without elevation is measured to work; that it fires is M6). Not yet: real backend, control tab, supersede-by-newer-boot.

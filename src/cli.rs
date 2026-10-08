@@ -47,22 +47,41 @@ pub enum Command {
     Restore {
         dry_run: bool,
         json: bool,
+        /// Run by the logon task: wait (bounded) for the network, the broker and the host program first.
+        from_logon: bool,
         only: Option<Vec<String>>,
         priority: Vec<String>,
         flags: Vec<(String, String)>,
     },
     /// `agentlife pending`: the durable restores that wait for a person.
     Pending(PendingAction),
+    /// `agentlife install-task`: print (or, with `register`, create) the logon and unlock tasks.
+    InstallTask {
+        register: bool,
+        remove: bool,
+        exe: Option<String>,
+    },
     Version,
     Help,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PendingAction {
-    List { json: bool, all: bool },
-    Show { id: String },
-    Approve { id: String },
-    Discard { id: String },
+    List {
+        json: bool,
+        all: bool,
+    },
+    Show {
+        id: String,
+    },
+    Approve {
+        id: String,
+    },
+    Discard {
+        id: String,
+    },
+    /// Run by the unlock task: if a restore waits, ask about it.
+    Prompt,
 }
 
 pub const USAGE: &str = "\
@@ -111,6 +130,17 @@ USAGE:
         person never approves a plan that would no longer be the one executed. `discard` withdraws
         the request. Approving and discarding need the consent backend, which is not installed yet
         (OverMind's user-request is unpublished): they say so and change nothing.
+
+    agentlife restore --from-logon
+    agentlife pending --prompt
+    agentlife install-task [--register | --remove] [--exe <path>]
+        The two per-user Task Scheduler tasks (\"run only when the user is logged on\"): at logon,
+        `restore --from-logon` first waits (up to network_wait_secs, default 120) for the network, the
+        claude-peers broker and the lane-restart host program, then does what `restore` does; on
+        session unlock, `pending --prompt` asks about a restore that is waiting, if there is one.
+        `install-task` only PRINTS both tasks' XML and the schtasks commands; a person runs it with
+        --register to create them (replacing same-named tasks) or --remove to delete them. Nothing
+        starts an agent until the consent backend is installed.
 
     agentlife pin <agent> | unpin <agent>
         Never lazy-stop this agent. A lane may pin itself.
@@ -191,7 +221,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             Ok(Command::Reconcile { dry_run, json })
         }
         "restore" => {
-            let (mut dry_run, mut json) = (false, false);
+            let (mut dry_run, mut json, mut from_logon) = (false, false, false);
             let (mut only, mut priority) = (None, Vec::new());
             let mut flags = Vec::new();
             let list = |v: &str| -> Vec<String> {
@@ -210,6 +240,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 match a.as_str() {
                     "--dry-run" => dry_run = true,
                     "--json" => json = true,
+                    "--from-logon" => from_logon = true,
                     "--only" => only = Some(list(&value("--only")?)),
                     "--priority" => priority = list(&value("--priority")?),
                     "--batch" => flags.push(("batch_size".to_string(), value("--batch")?)),
@@ -229,9 +260,33 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             Ok(Command::Restore {
                 dry_run,
                 json,
+                from_logon,
                 only,
                 priority,
                 flags,
+            })
+        }
+        "pending" if rest.len() == 1 && rest[0] == "--prompt" => {
+            Ok(Command::Pending(PendingAction::Prompt))
+        }
+        "install-task" => {
+            let (mut register, mut remove, mut exe) = (false, false, None);
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--register" => register = true,
+                    "--remove" => remove = true,
+                    "--exe" => exe = Some(it.next().ok_or("--exe needs a path")?.clone()),
+                    other => return Err(format!("unknown argument to install-task: {other:?}")),
+                }
+            }
+            if register && remove {
+                return Err("install-task: --register and --remove are exclusive".into());
+            }
+            Ok(Command::InstallTask {
+                register,
+                remove,
+                exe,
             })
         }
         "pending" => {
@@ -458,6 +513,7 @@ mod tests {
             Ok(Command::Restore {
                 dry_run: true,
                 json: false,
+                from_logon: false,
                 only: None,
                 priority: vec![],
                 flags: vec![]
@@ -486,6 +542,7 @@ mod tests {
             Ok(Command::Restore {
                 dry_run: true,
                 json: true,
+                from_logon: false,
                 only: Some(vec!["a".into(), "b".into()]),
                 priority: vec!["x".into()],
                 flags: vec![
@@ -499,6 +556,46 @@ mod tests {
         );
         assert!(p(&["restore", "--batch"]).is_err(), "a flag with no value");
         assert!(p(&["restore", "--force"]).is_err());
+    }
+
+    #[test]
+    fn logon_and_task_commands() {
+        assert_eq!(
+            p(&["restore", "--from-logon"]),
+            Ok(Command::Restore {
+                dry_run: false,
+                json: false,
+                from_logon: true,
+                only: None,
+                priority: vec![],
+                flags: vec![]
+            })
+        );
+        assert_eq!(
+            p(&["pending", "--prompt"]),
+            Ok(Command::Pending(PendingAction::Prompt))
+        );
+        assert!(p(&["pending", "--prompt", "--all"]).is_err());
+        assert!(p(&["pending", "list", "--prompt"]).is_err());
+        assert_eq!(
+            p(&["install-task"]),
+            Ok(Command::InstallTask {
+                register: false,
+                remove: false,
+                exe: None
+            })
+        );
+        assert_eq!(
+            p(&["install-task", "--register", "--exe", "C:/a/agentlife.exe"]),
+            Ok(Command::InstallTask {
+                register: true,
+                remove: false,
+                exe: Some("C:/a/agentlife.exe".into())
+            })
+        );
+        assert!(p(&["install-task", "--register", "--remove"]).is_err());
+        assert!(p(&["install-task", "--exe"]).is_err());
+        assert!(p(&["install-task", "--now"]).is_err());
     }
 
     #[test]
@@ -652,6 +749,9 @@ mod tests {
             "reconcile",
             "restore --dry-run",
             "pending",
+            "install-task",
+            "--from-logon",
+            "pending --prompt",
             "park",
             "stop",
             "unpark",
