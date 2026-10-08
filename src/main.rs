@@ -21,6 +21,7 @@ use agentlife::plan;
 use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
 use agentlife::select;
+use agentlife::task;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -57,11 +58,17 @@ fn main() -> ExitCode {
         Ok(Command::Restore {
             dry_run,
             json,
+            from_logon,
             only,
             priority,
             flags,
-        }) => run_restore(dry_run, json, only, priority, flags),
+        }) => run_restore(dry_run, json, from_logon, only, priority, flags),
         Ok(Command::Pending(action)) => run_pending(action),
+        Ok(Command::InstallTask {
+            register,
+            remove,
+            exe,
+        }) => run_install_task(register, remove, exe),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
             ExitCode::FAILURE
@@ -156,10 +163,17 @@ fn app(command: &str) -> Result<App, ExitCode> {
 fn run_restore(
     dry_run: bool,
     json: bool,
+    from_logon: bool,
     only: Option<Vec<String>>,
     priority: Vec<String>,
     flags: Vec<(String, String)>,
 ) -> ExitCode {
+    if from_logon {
+        if let Err(e) = wait_for_logon_preconditions() {
+            eprintln!("agentlife restore: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     if !dry_run {
         eprintln!(
             "agentlife restore: starting agents is not built yet; it needs a person's consent (M4). \
@@ -232,6 +246,24 @@ fn run_pending(action: PendingAction) -> ExitCode {
         Err(e) => return fail(e.to_string()),
     };
     match action {
+        PendingAction::Prompt => {
+            let open = pending::list(&home)
+                .0
+                .iter()
+                .filter(|r| r.is_open())
+                .count();
+            if open == 0 {
+                return ExitCode::SUCCESS;
+            }
+            if let Err(e) = consent::installed() {
+                return fail(format!(
+                    "{open} restore(s) are waiting for an answer, but cannot be asked about: {e}"
+                ));
+            }
+            fail(format!(
+                "{open} restore(s) are waiting, but the person-facing prompt is not wired in this build"
+            ))
+        }
         PendingAction::List { json, all } => {
             let (records, problems) = pending::list(&home);
             let shown: Vec<_> = records.iter().filter(|r| all || r.is_open()).collect();
@@ -290,6 +322,166 @@ fn run_pending(action: PendingAction) -> ExitCode {
             fail(format!(
                 "cannot ask about {id}: the person-facing prompt is not wired in this build"
             ))
+        }
+    }
+}
+
+/// The real preconditions a logon restore waits for.
+struct SystemProbe {
+    broker: std::net::SocketAddr,
+    host_program: String,
+}
+
+impl task::Probe for SystemProbe {
+    fn holds(&self, p: task::Precondition) -> bool {
+        match p {
+            task::Precondition::Network => std::process::Command::new("gh")
+                .args(["api", "rate_limit"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success()),
+            task::Precondition::Broker => std::net::TcpStream::connect_timeout(
+                &self.broker,
+                std::time::Duration::from_secs(2),
+            )
+            .is_ok(),
+            task::Precondition::HostProgram => program_exists(&self.host_program),
+        }
+    }
+    fn sleep(&self, d: std::time::Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+/// A path that exists, or a bare name found on `PATH` (with `.exe` tried on Windows).
+fn program_exists(program: &str) -> bool {
+    let direct = std::path::Path::new(program);
+    if direct.components().count() > 1 {
+        return direct.is_file() || direct.with_extension("exe").is_file();
+    }
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths)
+            .any(|d| d.join(program).is_file() || d.join(format!("{program}.exe")).is_file())
+    })
+}
+
+/// Waits (bounded by `network_wait_secs`) for what a logon restore needs. Not being ready is not an
+/// error: the restore goes on and names what was missing, because a missing broker blocks only the
+/// notice and a missing network only the approvals fetch.
+fn wait_for_logon_preconditions() -> Result<(), String> {
+    let home = Home::from_env().map_err(|e| e.to_string())?;
+    let cfg = Config::load(&home, Layer::default()).map_err(|e| e.to_string())?;
+    let probe = SystemProbe {
+        broker: cfg.peers_addr,
+        host_program: cfg.host_program.clone(),
+    };
+    let report = task::wait_ready(
+        &probe,
+        std::time::Duration::from_secs(cfg.network_wait_secs),
+        std::time::Duration::from_secs(5),
+    );
+    if report.ready() {
+        eprintln!(
+            "agentlife restore: ready after {} s",
+            report.waited.as_secs()
+        );
+    } else {
+        let names: Vec<_> = report.missing.iter().map(|p| p.name()).collect();
+        eprintln!(
+            "agentlife restore: not ready after {} s, missing: {}",
+            report.waited.as_secs(),
+            names.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// `agentlife install-task`. Prints by default; `--register` / `--remove` call `schtasks`.
+fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCode {
+    if (register || remove) && !cfg!(windows) {
+        eprintln!("agentlife install-task: Task Scheduler exists only on Windows");
+        return ExitCode::FAILURE;
+    }
+    let exe = match exe {
+        Some(e) => e,
+        None => match std::env::current_exe() {
+            Ok(p) => p.display().to_string(),
+            Err(e) => {
+                eprintln!("agentlife install-task: cannot find this binary ({e}); pass --exe");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        (Ok(d), Ok(u)) if !d.is_empty() && !u.is_empty() => format!("{d}\\{u}"),
+        (_, Ok(u)) if !u.is_empty() => u,
+        _ => {
+            eprintln!("agentlife install-task: cannot tell the user (USERNAME is unset)");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut failed = false;
+    for t in [task::Trigger::Logon, task::Trigger::SessionUnlock] {
+        if remove {
+            failed |= !run_schtasks(&task::delete_args(t));
+            continue;
+        }
+        let xml = task::task_xml(t, &user, &exe);
+        if register {
+            let path =
+                std::env::temp_dir().join(format!("{}-{}.xml", t.task_name(), std::process::id()));
+            if let Err(e) = std::fs::write(&path, task::utf16le_with_bom(&xml)) {
+                eprintln!(
+                    "agentlife install-task: cannot write {}: {e}",
+                    path.display()
+                );
+                failed = true;
+                continue;
+            }
+            failed |= !run_schtasks(&task::create_args(t, &path.display().to_string()));
+            let _ = std::fs::remove_file(&path);
+        } else {
+            println!("# {}  ({})", t.task_name(), t.arguments());
+            println!(
+                "schtasks {}\n",
+                task::create_args(t, "<file>.xml").join(" ")
+            );
+            println!("{xml}");
+        }
+    }
+    if !register && !remove {
+        println!(
+            "# Nothing was changed. Save each XML as UTF-16 and run its schtasks line, or run"
+        );
+        println!("# `agentlife install-task --register`.");
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Runs `schtasks`, echoing what it said. `true` when it succeeded.
+fn run_schtasks(args: &[String]) -> bool {
+    match std::process::Command::new("schtasks").args(args).output() {
+        Ok(out) => {
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            if !out.status.success() {
+                eprintln!(
+                    "agentlife install-task: schtasks {} failed ({})",
+                    args.join(" "),
+                    out.status
+                );
+            }
+            out.status.success()
+        }
+        Err(e) => {
+            eprintln!("agentlife install-task: cannot run schtasks: {e}");
+            false
         }
     }
 }
