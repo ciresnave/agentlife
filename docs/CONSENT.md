@@ -54,10 +54,37 @@ say so and change nothing.
 1. **A kind for plan consent.** `user-request`'s `KindId` is a closed set compiled into that crate (`Secret`,
    `LaneDialogBypass`). agentlife needs a `RestorePlan` kind with a stated maximum grant. Needs OverMind and
    the PM; it changes what the crate publishes.
-2. **What a grant means for a plan.** Plan consent is "start these agents now". The request states a 24 h
-   window (`plan_consent_grant`, the revision-2 §7 "1 day"); the person approves or cancels that text.
+2. **What a grant means for a plan.** Plan consent is "start these agents now". See "Proposal" below; the 24 h first assumed was withdrawn (PM, 2026-10-08).
 3. **The prompt text** for a plan (three lines: who, what, how long) belongs to the channel; agentlife
    supplies `subject` ("restore N agents") and `summary` only.
 4. **Not built yet:** the logon task and unlock trigger, network wait, the control tab, superseding an older
    pending record by a newer boot's, and the real execution after approval (`restore::execute` exists and is
    not called).
+
+## Proposal: the `RestorePlan` kind for `user-request` (for CireSnave's ruling)
+
+A new kind and its maximum grant are a security parameter on the Hello prompt, so this is a proposal, not
+a decision. Nothing is wired until the kind exists in OverMind's `KindId`.
+
+**What an approval covers.** Starting exactly the agents in one frozen plan, identified by the plan's hash
+(`bound_hash`): each by id and name, its working directory and its rebuilt launch arguments including the
+permission mode. It starts new `claude` processes through `lane-restart host`, in batches. It does **not**
+cover: any other plan (a changed plan voids the request, unasked), a mode wider than the plan lists
+(`bypassPermissions` stays PM-only and refused elsewhere), stopping or parking anything, or later wakes.
+Standing permission to launch (an hour, a day, forever) is the separate M5 grant and is not this kind.
+
+**Who asks.** Role `agentlife`, taken from the process table by the crate, run by the logon task, the unlock
+trigger or a person at a terminal with no `claude` ancestor. Restore is not meant to be run by a lane; agentlife's own refusal of an agent caller for `restore` is not built yet.
+
+**Shortest window that works.** One-shot is enough. The requester executes in the same process right after
+the approval and never consults the grant again; a crash mid-run needs a fresh approval, which is the safe
+direction. So the preferred shape is a kind whose approval is **spent on use and is not a standing grant**
+(the pending request is already single-use in 0.8.0). If the crate requires a duration, ask for the
+**shortest that covers one run: a maximum of 30 minutes** (a lower bound for a large fleet is
+`batches x (delay + about 12 s)`, e.g. 14 batches at 30 s is about 10 minutes; memory holds can lengthen
+it), requested as 30 minutes. Never `Forever`, never past local midnight, and no day-long default.
+
+**Why not longer.** A longer window would be a standing launch grant under another name, valid for plans
+the person never saw. The plan hash already binds the approval to what was shown; a short window bounds
+how long that approval can be used. **Why not shorter.** Under about 10 minutes a 40-agent restore can
+outlast the approval and stop half-way.

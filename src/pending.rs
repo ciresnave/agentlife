@@ -28,10 +28,11 @@ pub const PENDING_SCHEMA: u32 = 1;
 /// The role agentlife asks as.
 pub const ROLE: &str = "agentlife";
 
-/// How long an approved plan may be executed, as the request states it: a day, the revision-2 §7
-/// "1 day" (24 h, not until midnight).
+/// PROVISIONAL, pending the ruling on the `RestorePlan` kind (`docs/CONSENT.md`, "Proposal"): the
+/// approval is used once, at once, by the process that asked, so the window only has to cover one
+/// run. Thirty minutes is the proposed cap; it is not a standing grant.
 pub fn plan_consent_grant() -> Grant {
-    Grant::For { secs: 24 * 3600 }
+    Grant::For { secs: 30 * 60 }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
