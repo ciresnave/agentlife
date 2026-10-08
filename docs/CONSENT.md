@@ -57,8 +57,10 @@ say so and change nothing.
 2. **What a grant means for a plan.** Plan consent is "start these agents now". See "Proposal" below; the 24 h first assumed was withdrawn (PM, 2026-10-08).
 3. **The prompt text** for a plan (three lines: who, what, how long) belongs to the channel; agentlife
    supplies `subject` ("restore N agents") and `summary` only.
-4. **Not built yet:** the logon task and unlock trigger, network wait, the control tab, superseding an older
-   pending record by a newer boot's, and the real execution after approval (`restore::execute` exists and is
+4. **Superseding (built):** creating a pending record for a different plan withdraws every older open record
+   and closes it `superseded` (kept for audit; one that cannot be withdrawn stays open and is voided unasked
+   when answered, since the hashes differ). "Newer boot" is approximated by "newer plan": records carry no boot id.
+   **Not built yet:** network wait, the control tab, and the real execution after approval (`restore::execute` exists and is
    not called).
 
 ## Proposal: the `RestorePlan` kind for `user-request` (for CireSnave's ruling)

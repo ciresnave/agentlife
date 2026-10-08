@@ -18,6 +18,7 @@
 use crate::atomic::{is_temp_name, write_atomic};
 use crate::consent::{self, AnswerError, Consent, Grant, Kind, Prompt, Request, Resolved, Voided};
 use crate::home::Home;
+use crate::lock::{FileLock, DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_STALE_AFTER};
 use crate::plan::{self, Frozen, Plan};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,9 @@ pub enum Closure {
     Discarded,
     /// Voided by the consent store, or the frozen plan was unusable. `detail` says why.
     Voided,
+    /// A newer pending restore for a different plan replaced it (`DESIGN-REVISION-2.md` §6.5). Kept
+    /// for audit; nothing is lost because candidates are always derived from the registry.
+    Superseded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +208,14 @@ pub fn create(
     if !plan.hash_is_valid() {
         return Err("the plan's hash does not match its content; refusing to ask about it".into());
     }
+    // One creator at a time: otherwise two processes that each saved a record before either scanned
+    // would supersede each other and leave nothing open.
+    let _lock = FileLock::acquire(
+        home.pending_dir().join("create.lock"),
+        DEFAULT_ACQUIRE_TIMEOUT,
+        DEFAULT_STALE_AFTER,
+    )
+    .map_err(|e| format!("cannot serialise pending creation: {e}"))?;
     let req = Request {
         kind: Kind::RestorePlan,
         role: ROLE.into(),
@@ -250,7 +262,44 @@ pub fn create(
         let _ = consent.withdraw(&id);
         return Err(e);
     }
+    supersede_older(home, consent, &rec, now)?;
     Ok(rec)
+}
+
+/// A newer boot's pending restore supersedes every older open one for a different plan. Each is
+/// withdrawn first, so a prompt already up cannot approve it afterwards, and closed only once that
+/// has happened. A request the store no longer holds (`Ok(false)`: already answered, or never
+/// there) is left alone, not claimed as superseded: the audit record must not contradict an answer.
+/// A directory that cannot be read, a record that cannot be closed or a withdraw that fails is an
+/// error, so `create` does not report success while an older request may still be approvable.
+fn supersede_older(
+    home: &Home,
+    consent: &mut dyn Consent,
+    newer: &PendingRestore,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let (records, problems) = list(home);
+    if let Some((path, why)) = problems.first() {
+        return Err(format!(
+            "cannot tell which pending restores to supersede: {}: {why}",
+            path.display()
+        ));
+    }
+    for mut old in records {
+        if !old.is_open() || old.pending_id == newer.pending_id || old.plan_hash == newer.plan_hash
+        {
+            continue;
+        }
+        let withdrawn = consent
+            .withdraw(&old.pending_id)
+            .map_err(|e| format!("cannot withdraw {}: {e}", old.pending_id))?;
+        if !withdrawn {
+            continue;
+        }
+        let detail = format!("superseded by {}", newer.pending_id);
+        close(home, &mut old, Closure::Superseded, detail, now)?;
+    }
+    Ok(())
 }
 
 /// What came of asking.
@@ -308,6 +357,17 @@ pub fn answer(
     };
     match consent::answer(consent, prompt, id, &rebuilt.hash) {
         Ok(Resolved::Granted) => {
+            // A newer request may have replaced this one while the prompt was up.
+            if let Ok(now_rec) = load(home, id) {
+                if let Some(c) = &now_rec.closed {
+                    if c.how == Closure::Superseded {
+                        return Ok(Answered::Voided {
+                            why: format!("superseded while the prompt was up: {}", c.detail),
+                            diffs: vec![],
+                        });
+                    }
+                }
+            }
             // The consent is spent whether or not this write lands, and cannot be spent twice.
             let _ = close(home, &mut rec, Closure::Approved, "approved".into(), now);
             Ok(Answered::Approved(Box::new(frozen)))
