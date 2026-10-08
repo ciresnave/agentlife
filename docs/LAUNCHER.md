@@ -23,6 +23,11 @@ and every process they start is a stand-in they built themselves, killed at the 
 * **The `;` hazard.** `wt.exe` reads `;` as its own command separator. Every element that reaches it
   (window, title, cwd, host, claude, prompt, every flag) is checked, and a `;` or a control character
   refuses that agent **before anything starts**. The role must be `[A-Za-z0-9_-]{1,64}`.
+* **Every launch carries an explicit `--model`, a Sonnet or a Haiku, never Opus (0.2.8).** CireSnave,
+  2026-10-08: *"I can't afford Opus."* The default model is not trusted (a flagless relaunch got Opus on
+  2026-09-27). The planner replaces a recorded Opus, an unknown model, or no model flag with
+  `--model sonnet` and says so on the entry (`model-pinned:<was>`, `none` for no flag); `build_tab` refuses
+  any launch whose last `--model` is not a Sonnet or Haiku (`ModelNotPinned`), so nothing spawns unpinned.
 * **The session-identity environment is stripped** (ten names, copied from OverMind; provenance in
   `docs/COPIED-FROM-OVERMIND.md`). The agent's id goes in `AGENTLIFE_AGENT_ID`.
 

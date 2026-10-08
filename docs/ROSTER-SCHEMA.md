@@ -32,7 +32,7 @@ Per lane:
 | `order` | integer ≥ 0 | yes | 0 starts alone first. Lower first; equal values start in one batch pool. |
 | `cwd` | string | yes | launch directory, must exist, under `C:/Projects`. |
 | `name` | string \| null | yes | the `--name` value; same charset; unique per `(cwd, name)`. `null` means "use `role`", but then `restore` cannot recognise an already-running copy by name (DESIGN §2.4 rule 2). |
-| `model` | string \| null | yes | passed verbatim; `null` omits `--model`. |
+| `model` | string \| null | yes | passed on only if it is a Sonnet or Haiku; `null`, Opus or anything else becomes `--model sonnet` (0.2.8; see `PLAN.md`). |
 | `mode` | string \| null | yes | approved permission-mode ceiling. `null` omits `--permission-mode` (Claude Code default). Only `pm` may be `bypassPermissions`. |
 | `remote_control` | bool | no (false) | adds `--remote-control`. |
 | `channels` | string[] | no ([]) | each becomes part of `--dangerously-load-development-channels`. v0.1: only `server:claude-peers`. |

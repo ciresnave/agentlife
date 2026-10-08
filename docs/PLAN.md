@@ -39,6 +39,12 @@ listed** on the entry (`dropped_args`) and in the text output, never silently. A
 the launch flag, so a restart never widens (a lane launched with the bypass flag but seen running in
 `auto` comes back as `auto`). `plan` and unknown modes are flagged `mode-needs-a-person`.
 
+**The model is always explicit and never Opus (0.2.8).** A recorded `--model` is kept only if it names a
+Sonnet or a Haiku (alias or full id; the check is case-insensitive and rejects anything containing `opus`).
+Opus, any other or unknown model, and a record with no `--model` come back as `--model sonnet`, with the
+entry flagged `model-pinned:<recorded value>` (`model-pinned:none` for no flag). Why: CireSnave, 2026-10-08,
+*"I can't afford Opus."*
+
 Whether restore should add a start-up prompt ("read your HANDOFF and continue") is a launcher question
 (M3b); the plan carries no prompt.
 

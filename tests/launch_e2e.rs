@@ -435,6 +435,8 @@ fn a_real_registry_is_planned_launched_through_a_host_and_each_agent_is_seen_com
             [
                 "--name",
                 n,
+                "--model",
+                "sonnet",
                 "--permission-mode",
                 "auto",
                 "--dangerously-load-development-channels",
@@ -776,7 +778,12 @@ fn real_windows_terminal_opens_one_tab_per_agent_in_a_named_window() {
             name: Some((*n).to_string()),
             title: (*n).to_string(),
             cwd: cwd.display().to_string(),
-            argv: vec!["--name".into(), (*n).to_string()],
+            argv: vec![
+                "--name".into(),
+                (*n).to_string(),
+                "--model".into(),
+                "sonnet".into(),
+            ],
             mode: None,
             pm: false,
             flags: vec![],
@@ -814,7 +821,7 @@ fn real_windows_terminal_opens_one_tab_per_agent_in_a_named_window() {
             .collect();
         assert_eq!(argv[0], "claude");
         assert_eq!(argv[1], format!("read {} HANDOFF and continue", t.title));
-        assert_eq!(argv[2..], ["--name", t.title.as_str()]);
+        assert_eq!(argv[2..], ["--name", t.title.as_str(), "--model", "sonnet"]);
         eprintln!(
             "wt tab {}: AGENTLIFE_AGENT_ID reached it: {}",
             t.title,
