@@ -19,4 +19,14 @@ pub mod host;
 pub mod lane_state_writer;
 pub mod log;
 pub mod notify;
+pub mod relaunch;
 pub mod tab_close;
+
+/// `C:/Projects/.lane-state` - RESTART-TOOL-DESIGN.md section 7. Not
+/// configurable via CLI on purpose: a caller-supplied state directory would
+/// defeat the whole point of a fixed, portfolio-wide location every lane and
+/// the PM agree on. (Moved here from the binary with `relaunch`, which reads
+/// the policy default model from it; the path is unchanged.)
+pub fn state_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("C:/Projects/.lane-state")
+}
