@@ -37,6 +37,7 @@ pub mod readiness;
 pub mod registry;
 pub mod restore;
 pub mod select;
+pub mod summary;
 pub mod task;
 
 /// The crate version, as one string.

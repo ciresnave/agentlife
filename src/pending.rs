@@ -431,6 +431,28 @@ pub fn discard(
     )
 }
 
+/// The plan of the most recently approved restore, the baseline the control tab compares against.
+/// `None` if nothing was ever approved or its frozen plan cannot be read (then the summary says so).
+pub fn last_approved_plan(home: &Home) -> Option<Plan> {
+    let (records, problems) = list(home);
+    // An unreadable record might be the newest approval: better no baseline than an older one.
+    if !problems.is_empty() {
+        return None;
+    }
+    // Newest by close time; a tie (or a clock that moved backwards) is broken by id, deterministically.
+    let rec = records
+        .iter()
+        .filter(|r| {
+            r.closed
+                .as_ref()
+                .is_some_and(|c| c.how == Closure::Approved)
+        })
+        .max_by_key(|r| (r.closed.as_ref().map(|c| c.at), r.pending_id.clone()))?;
+    plan::load_frozen(&frozen_path(home, rec))
+        .ok()
+        .map(|f| f.plan)
+}
+
 /// Where the frozen plan of a record lives.
 pub fn frozen_path(home: &Home, rec: &PendingRestore) -> PathBuf {
     home.plans_dir().join(&rec.plan_file)
