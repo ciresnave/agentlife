@@ -80,11 +80,14 @@ trigger or a person at a terminal with no `claude` ancestor. Restore is not mean
 the approval and never consults the grant again; a crash mid-run needs a fresh approval, which is the safe
 direction. So the preferred shape is a kind whose approval is **spent on use and is not a standing grant**
 (the pending request is already single-use in 0.8.0). If the crate requires a duration, ask for the
-**shortest that covers one run: a maximum of 30 minutes** (a lower bound for a large fleet is
-`batches x (delay + about 12 s)`, e.g. 14 batches at 30 s is about 10 minutes; memory holds can lengthen
-it), requested as 30 minutes. Never `Forever`, never past local midnight, and no day-long default.
+**shortest that covers the hand-off from answer to use: a maximum of 30 minutes**, requested as 30
+minutes. Never `Forever`, and no day-long default. (No midnight cutoff: a relative duration is the whole
+rule, as `DESIGN-REVISION-2.md` chose for its "1 day" row, "not until midnight".)
 
 **Why not longer.** A longer window would be a standing launch grant under another name, valid for plans
 the person never saw. The plan hash already binds the approval to what was shown; a short window bounds
-how long that approval can be used. **Why not shorter.** Under about 10 minutes a 40-agent restore can
-outlast the approval and stop half-way.
+how long that approval can be used. **What the window governs.** Only the approval step: the time between
+the person's answer and the requester spending it. `restore::execute` does not consult the grant during the
+batches, so a restore that outlasts the window is **not** interrupted. **Why not shorter.** Not because a
+long run would stop half-way (it does not), but because the requester may be slow to pick the answer up
+(a busy machine, a retry); a window of a few minutes would void a good approval for no safety gain.
