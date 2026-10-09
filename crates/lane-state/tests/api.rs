@@ -9,9 +9,8 @@ use lane_state::claude_proc::{
 use lane_state::paths::project_dir_name;
 use lane_state::state::LaneState;
 
-/// agentlife's copy of this list (docs/COPIED-FROM-OVERMIND.md, "Second
-/// copy") is hashed as ten names in this order; the relaunch must strip
-/// exactly these and no user config var.
+/// The list is ten names in this order (agentlife's former copy was hashed that way); the relaunch
+/// must strip exactly these and no user config var.
 #[test]
 fn the_session_identity_env_vars_are_the_ten_agentlife_copied() {
     assert_eq!(
