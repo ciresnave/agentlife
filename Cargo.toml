@@ -1,10 +1,27 @@
-[package]
-name = "agentlife"
-version = "0.2.16"
+[workspace]
+members = [".", "crates/lane-restart", "crates/lane-state"]
+
+# One version for the whole project (CIRESNAVE-EXPECTATIONS.md 2.2): the higher of
+# agentlife (0.2.16) and lane-restart / lane-state (0.11.1).
+[workspace.package]
+version = "0.11.1"
 edition = "2021"
-description = "Agent lifecycle control: bring a fleet of AI coding agents up, down and back after a restart, from a persistent roster."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ciresnave/agentlife"
+
+# `lane-state` is published to crates.io, so its dependents name it by VERSION as well
+# as by workspace path (cargo drops the path when it packages them). Same repo, so the
+# path is not a cross-repo dependency. Keep in step with the version above.
+[workspace.dependencies]
+lane-state = { version = "0.11.1", path = "crates/lane-state" }
+
+[package]
+name = "agentlife"
+version.workspace = true
+edition.workspace = true
+description = "Agent lifecycle control: bring a fleet of AI coding agents up, down and back after a restart, from a persistent roster."
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["agents", "lifecycle", "restart", "orchestration"]
 categories = ["development-tools", "command-line-utilities"]
