@@ -12,7 +12,6 @@
 
 pub mod atomic;
 pub mod caller;
-pub mod claude_proc;
 pub mod cli;
 pub mod clock;
 pub mod config;

@@ -103,4 +103,13 @@ mod tests {
     fn a_bare_drive_root_with_its_slash_is_distinct_from_the_drive_letter_alone() {
         assert!(!paths_match(r"C:\", "C:"));
     }
+
+    #[test]
+    fn the_project_directory_name_is_the_cwd_with_non_alphanumerics_replaced_by_dashes() {
+        assert_eq!(
+            project_dir_name("C:\\Projects\\agentlife"),
+            "C--Projects-agentlife"
+        );
+        assert_eq!(project_dir_name("C:/Projects"), "C--Projects");
+    }
 }

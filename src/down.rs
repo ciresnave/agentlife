@@ -21,7 +21,6 @@
 //!    fails or the process does not go, the intent is **put back** and the failure journalled.
 
 use crate::caller::Caller;
-use crate::claude_proc::ParentProcess;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::control::{authorize, by_label, Action};
@@ -34,6 +33,7 @@ use crate::peers::{peers_of_claude, Messenger, Peer};
 use crate::readiness::{self, Evidence, LaneStateView, ProcTree};
 use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
 use chrono::{DateTime, Utc};
+use lane_state::claude_proc::ParentProcess;
 use serde_json::json;
 use std::fmt;
 use std::path::{Path, PathBuf};

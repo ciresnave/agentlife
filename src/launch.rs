@@ -27,23 +27,10 @@ use crate::plan::Entry;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The variables that name a running Claude Code session or its IPC channel. **Copied from OverMind**
-/// (`crates/lane-restart/src/main.rs`, `SESSION_IDENTITY_ENV_VARS`; see `docs/COPIED-FROM-OVERMIND.md`
-/// for the commit, hash and how to re-verify). Only variables that name *this* session are listed: a
-/// user's own persistent settings (`CLAUDE_EFFORT` and the like) are left alone. Temporary, like
-/// `claude_proc.rs`: it goes when OverMind publishes the crate.
-pub const SESSION_IDENTITY_ENV_VARS: &[&str] = &[
-    "CLAUDECODE",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_CODE_BRIDGE_SESSION_ID",
-    "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN",
-    "CLAUDE_CODE_SSE_PORT",
-    "CLAUDE_PID",
-];
+/// The variables that name a running Claude Code session or its IPC channel, which a relaunch must not
+/// hand on. They live in `lane-state` (moved there from OverMind's `lane-restart`); re-exported so the
+/// launcher's callers and the stand-in tests keep one name for them.
+pub use lane_state::claude_proc::SESSION_IDENTITY_ENV_VARS;
 
 /// The variable that carries an agent's id into its new session, so the hook joins the session to the
 /// same record. Whether it survives `wt.exe` is **unverified** (the canary of M6); the hook also joins

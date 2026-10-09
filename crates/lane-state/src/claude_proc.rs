@@ -497,4 +497,147 @@ mod tests {
             }
         );
     }
+
+    /// ⚠️ THE REAL-WORLD FAILURE, REPRODUCED AS A PARSE, NOT JUST A STRUCT
+    /// LITERAL: a struct built by hand in Rust can't prove the JSON parser
+    /// itself tolerates a missing field the way the code above assumes.
+    #[test]
+    fn a_real_session_start_payload_missing_permission_mode_parses_cleanly() {
+        let json = r#"{
+            "hook_event_name": "SessionStart",
+            "session_id": "abc-123",
+            "cwd": "C:/Projects/OverMind"
+        }"#;
+        let parsed: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.permission_mode, None);
+        assert_eq!(parsed.model, None);
+        assert_eq!(parsed.hook_event_name, "SessionStart");
+    }
+
+    #[test]
+    fn name_is_read_from_every_spelling_and_a_trailing_one_is_ignored() {
+        for (args, want) in [
+            (&["claude.exe", "-n", "PM"][..], Some("PM")),
+            (&["claude.exe", "--name", "synapse"][..], Some("synapse")),
+            (&["claude.exe", "--name=overmind"][..], Some("overmind")),
+            (&["claude.exe", "-n"][..], None),
+            (&["claude.exe", "--verbose"][..], None),
+        ] {
+            let cmdline = strs(args);
+            assert_eq!(
+                parse_claude_cli_flags(&cmdline).name.as_deref(),
+                want,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_field_accepts_a_plain_string_or_an_object_with_an_id() {
+        let plain: HookInput = serde_json::from_str(
+            r#"{"hook_event_name":"SessionStart","session_id":"s","cwd":"C:/x","model":"claude-sonnet-5"}"#,
+        )
+        .unwrap();
+        assert_eq!(plain.model.unwrap().into_string(), "claude-sonnet-5");
+        let obj: HookInput = serde_json::from_str(
+            r#"{"hook_event_name":"SessionStart","session_id":"s","cwd":"C:/x","model":{"id":"claude-opus-5-5"}}"#,
+        )
+        .unwrap();
+        assert_eq!(obj.model.unwrap().into_string(), "claude-opus-5-5");
+    }
+
+    // -- recorded_cwd. OverMind's tests for it go through its state writer (`apply_event`); these
+    // are the same scenarios and the same expected answers, against the function itself.
+    // (Ported from agentlife's former copy of this module.)
+
+    fn input_at(cwd: &str, transcript: Option<&str>) -> HookInput {
+        HookInput {
+            hook_event_name: "SessionStart".to_string(),
+            session_id: "s-123".to_string(),
+            cwd: cwd.to_string(),
+            permission_mode: None,
+            model: None,
+            transcript_path: transcript.map(str::to_string),
+        }
+    }
+
+    fn known(cwd: &str, pid: u32) -> LaneState {
+        LaneState {
+            role: "r".to_string(),
+            session_id: "s-123".to_string(),
+            pid,
+            pid_start_secs: None,
+            cwd: cwd.to_string(),
+            name: None,
+            model: None,
+            permission_mode: None,
+            remote_control: false,
+            busy: false,
+            subagents_running: 0,
+            no_background_shells: None,
+            launch_args: None,
+            updated_at: chrono::Utc::now(),
+            updated_by_event: "SessionStart".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_compaction_from_the_same_process_keeps_the_recorded_launch_directory() {
+        let got = recorded_cwd(
+            Some(&known("C:/Projects", 42)),
+            &input_at("C:/Projects/fuel", None),
+            42,
+        );
+        assert_eq!(
+            got, "C:/Projects",
+            "the same process's home, not where it has wandered"
+        );
+    }
+
+    #[test]
+    fn a_new_process_takes_its_own_directory() {
+        let got = recorded_cwd(
+            Some(&known("C:/Projects", 42)),
+            &input_at("C:/Projects/OverMind", None),
+            77,
+        );
+        assert_eq!(got, "C:/Projects/OverMind");
+        assert_eq!(
+            recorded_cwd(None, &input_at("C:/Projects/x", None), 1),
+            "C:/Projects/x"
+        );
+    }
+
+    #[test]
+    fn the_directory_matching_the_transcript_path_wins_over_a_wrong_recorded_one() {
+        let t = "C:/Users/u/.claude/projects/C--Projects/s-123.jsonl";
+        let got = recorded_cwd(
+            Some(&known("C:/Projects/fuel", 42)),
+            &input_at("C:/Projects", Some(t)),
+            42,
+        );
+        assert_eq!(got, "C:/Projects");
+    }
+
+    #[test]
+    fn a_backslashed_transcript_path_is_read_the_same_way() {
+        let t = r"C:\Users\u\.claude\projects\C--Projects\s-123.jsonl";
+        let got = recorded_cwd(
+            Some(&known(r"C:\Projects\fuel", 42)),
+            &input_at(r"C:\Projects", Some(t)),
+            42,
+        );
+        assert_eq!(got, r"C:\Projects");
+    }
+
+    #[test]
+    fn with_no_candidate_matching_the_transcript_the_same_process_rule_stands() {
+        let t = "C:/Users/u/.claude/projects/C--Projects/s-123.jsonl";
+        let got = recorded_cwd(
+            Some(&known("C:/Projects/fuel", 42)),
+            &input_at("C:/Projects/coderipper", Some(t)),
+            42,
+        );
+        assert_eq!(got, "C:/Projects/fuel");
+    }
 }

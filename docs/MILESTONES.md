@@ -20,15 +20,15 @@ observes, then widens (the entries CireSnave approved; **no `Notification` hook*
 | **M6** | M | `docs/ACCEPTANCE.md` with real runs; the canary experiment (does `SessionEnd` fire on window close, `taskkill`, a real shutdown, and its payload); env var through `wt.exe`; unlock trigger; toast if feasible | logged commands and outputs | M4, M5 |
 | **M7** | L | lazy start: `agentlife watch`, wake poller, idle sweep, exemptions S1/S2/S4, wake grants, storm limits; ships `lazy_enabled = false` | a test against a real `synapsed` | Synapse S-1, channel adapter, cutover |
 
-## Temporary copy: `src/claude_proc.rs` (from OverMind `c3935ba`)
+## Former temporary copy: `src/claude_proc.rs` (resolved in 0.11.2)
 
-**TEMPORARY. Blocker:** `lane-restart` is not on crates.io (404, 2026-10-07), and the portfolio rule
-(`CLAUDE.md` §9 "Sources"; `CIRESNAVE-EXPECTATIONS.md` §6.8) forbids a new `git =` dependency.
-**Blocker to clear:** OverMind extracts a small crate holding these items and CireSnave clears its
-publish. **Owner:** the OverMind lane. **End state:** `src/claude_proc.rs` is deleted and `hook.rs`
-depends on the published crate. The PM ruled this on 2026-10-07 (sign-off for the provenance rule
-included). Origin, a hash of every copied item, the three adaptations and how to re-verify are in
-`docs/COPIED-FROM-OVERMIND.md`.
+M1 and M3b carried a temporary copy of a few OverMind items (`claude_proc.rs`, and the list of
+session-identity variables in `launch.rs`) because `lane-restart` was not on crates.io. OverMind's code now
+lives in this workspace (`crates/lane-state`, published; `crates/lane-restart`, 0.11.1), so the copy is
+deleted and `agentlife` depends on `lane-state`. Its tests that the original lacked (the hook payload
+parse, the `-n` / `--name` spellings, `ModelField`, `recorded_cwd`, `project_dir_name`) were moved into
+`lane-state`. The provenance record `docs/COPIED-FROM-OVERMIND.md` is deleted with it; read it with
+`git show e742f01:docs/COPIED-FROM-OVERMIND.md`.
 
 ## Not in any milestone
 

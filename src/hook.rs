@@ -8,12 +8,10 @@
 //! silent to Claude Code and a broken install would otherwise never be seen (the lesson of
 //! OverMind's `hook-errors.log`, and of its first install that wrote no state file at all).
 //!
-//! What it reuses from OverMind's `lane-restart`, as a **temporary copy** in `claude_proc.rs` (the
-//! library is not on crates.io and the portfolio forbids a new `git =` dependency; see that file's
-//! header): the walk from this hook process up to its `claude` (`claude_parent_pid`, which passes
-//! through the Git Bash layers a real hook runs under), the launch-flag parser
-//! (`parse_claude_cli_flags`, which reads `-n` / `--name`, `--permission-mode`, `--remote-control`)
-//! and the launch-directory rule (`recorded_cwd`).
+//! What it reuses from the workspace's `lane-state` crate (OverMind's code, moved here): the walk from
+//! this hook process up to its `claude` (`claude_parent_pid`, which passes through the Git Bash layers a
+//! real hook runs under), the launch-flag parser (`parse_claude_cli_flags`, which reads `-n` / `--name`,
+//! `--permission-mode`, `--remote-control`) and the launch-directory rule (`recorded_cwd`).
 //!
 //! What it records, and what it deliberately does not register:
 //! * **Interactive sessions only.** A session whose command line has `-p`/`--print`, or which has
@@ -21,14 +19,14 @@
 //!   otherwise a fan-out of subagents would turn into a restore storm (DESIGN-REVISION-1 §2.3).
 //! * **Never a delete.** `SessionEnd` stamps `ended_at` and the reason; it removes nothing.
 
-use crate::claude_proc::{
-    claude_parent_pid, parse_claude_cli_flags, recorded_cwd, HookInput, ModelField, ParentProcess,
-};
 use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
 use crate::journal::Journal;
 use crate::procindex::ProcIndex;
 use crate::registry::{AgentId, AgentRecord, Intent, Origin, Registry, Session};
 use chrono::{DateTime, Utc};
+use lane_state::claude_proc::{
+    claude_parent_pid, parse_claude_cli_flags, recorded_cwd, HookInput, ModelField, ParentProcess,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};

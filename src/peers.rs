@@ -16,7 +16,7 @@
 //! Everything speaks plain HTTP/1.1 over loopback with `Connection: close` and short timeouts, and the
 //! address is checked to be loopback by the configuration, never here.
 
-use crate::claude_proc::ParentProcess;
+use lane_state::claude_proc::ParentProcess;
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
