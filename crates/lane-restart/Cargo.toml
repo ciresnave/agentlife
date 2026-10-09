@@ -1,0 +1,21 @@
+[package]
+name = "lane-restart"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Restarts an idle Claude Code lane session with the same identity - self, or PM-of-idle-lane only. See RESTART-TOOL-DESIGN.md."
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+lane-state.workspace = true
+portable-pty = "0.9.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sysinfo = "0.39.6"
+vt100 = "0.16.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
