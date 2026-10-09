@@ -1,47 +1,75 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Write a file so a reader never sees half of it: write a sibling temp file, flush it to disk,
-//! then rename it over the target (the temp + rename pattern `lane-restart`'s `write_atomic`
-//! uses; DESIGN-REVISION-1 §4.3 item 1).
+//! Write a file so a reader never sees half of it, through `persistant`'s blocking `fs` store:
+//! it writes a temp file in `atomic_write_dir`, syncs it, then renames it over the target.
 //!
-//! Temp files are named `.<name>.tmp.<pid>.<n>` so a crash can leave one behind, and
-//! [`is_temp_name`] lets a lister skip it.
+//! `persistant` requires that scratch directory to be on the target's filesystem and outside
+//! its root, and it leaves an abandoned write's temp file behind (OpenDAL has no cleanup on
+//! drop). So each call gets its own scratch directory, a sibling of the target's directory
+//! (`<dir>.tmp/<pid>-<n>`), and removes it before returning, whatever the outcome: nothing
+//! shares it, so nothing can be swept from under a live writer. A crash mid-write can leave
+//! that directory behind, but never inside the directory a lister reads.
+//!
+//! [`is_temp_name`] still recognises the `.<name>.tmp.<pid>.<n>` files an earlier version
+//! wrote beside their target, so a lister skips any that survive from before.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use persistant::blocking::Store;
+use persistant::{Config, Need, Needs};
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_path_for(target: &Path) -> PathBuf {
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_string());
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = format!(".{name}.tmp.{}.{n}", std::process::id());
-    target.with_file_name(tmp)
-}
-
-/// True for a name produced by [`write_atomic`]'s temp files.
+/// True for a temp file left beside its target by the pre-`persistant` writer.
 pub fn is_temp_name(file_name: &str) -> bool {
     file_name.starts_with('.') && file_name.contains(".tmp.")
 }
 
+fn scratch_for(dir: &Path) -> PathBuf {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "root".to_string());
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    dir.with_file_name(format!("{name}.tmp"))
+        .join(format!("{}-{n}", std::process::id()))
+}
+
+fn other(e: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(e.to_string())
+}
+
 /// Writes `bytes` to `target` atomically. The parent directory is created if missing.
 pub fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = temp_path_for(target);
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let key = target
+        .file_name()
+        .ok_or_else(|| other(format!("{} has no file name", target.display())))?
+        .to_string_lossy()
+        .into_owned();
+    std::fs::create_dir_all(&parent)?;
+    let scratch = scratch_for(&parent);
+    std::fs::create_dir_all(&scratch)?;
     let result = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, target)
+        let needs = Needs::new().with(Need::Write).with(Need::AtomicReplace);
+        let store = Store::open(
+            Config::Fs {
+                root: parent.clone(),
+                atomic_write_dir: Some(scratch.clone()),
+            },
+            needs,
+        )
+        .map_err(other)?;
+        store.replace(&key, bytes.to_vec()).map_err(other)
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // Our own directory, so removing it cannot touch another writer. Take the now-empty
+    // `<dir>.tmp` too when we were the last one in it (fails harmlessly if not).
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Some(shared) = scratch.parent() {
+        let _ = std::fs::remove_dir(shared);
     }
     result
 }
@@ -108,6 +136,22 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn leaves_no_scratch_directory_behind_on_success_or_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("store");
+        write_atomic(&dir.join("a.json"), b"x").unwrap();
+        // A directory in the target's place makes the final rename fail.
+        let blocked = dir.join("blocked");
+        std::fs::create_dir_all(blocked.join("child")).unwrap();
+        assert!(write_atomic(&blocked, b"nope").is_err());
+        let names: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["store".to_string()], "no store.tmp left");
     }
 
     #[test]
