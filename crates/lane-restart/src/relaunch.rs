@@ -459,12 +459,35 @@ pub fn models_report(state_dir: &std::path::Path) -> String {
     out
 }
 
-pub fn spawn_launch(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchError> {
+/// The child's role for its own `lane_state_writer::resolve_role`, where `LANE_ROLE` always wins.
+/// Set explicitly on every launch: a peer's launch (the PM running `--role x`) would otherwise hand
+/// the child the PM's own `LANE_ROLE`, and the child would write the PM's role file, not its own.
+fn set_lane_role(cmd: &mut std::process::Command, role: &str) {
+    cmd.env("LANE_ROLE", role);
+}
+
+/// The `wt.exe` command and the `conhost.exe` fallback for one launch, not yet started.
+fn launch_commands(
+    spec: &LaunchSpec,
+    argv: &[String],
+) -> (std::process::Command, std::process::Command) {
     let hosted_argv = host_wrapped_argv(&spec.role, argv);
     let mut wt = std::process::Command::new("wt.exe");
     wt.args(["-w", "new", "-d", &spec.cwd]);
     wt.args(&hosted_argv);
     strip_session_identity_env(&mut wt);
+    set_lane_role(&mut wt, &spec.role);
+
+    let mut conhost = std::process::Command::new("conhost.exe");
+    conhost.args(&hosted_argv);
+    conhost.current_dir(&spec.cwd);
+    strip_session_identity_env(&mut conhost);
+    set_lane_role(&mut conhost, &spec.role);
+    (wt, conhost)
+}
+
+pub fn spawn_launch(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchError> {
+    let (mut wt, mut conhost) = launch_commands(spec, argv);
     match wt.spawn() {
         Ok(_) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -473,10 +496,6 @@ pub fn spawn_launch(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchEr
         Err(e) => return Err(RelaunchError::Spawn(e.to_string())),
     }
 
-    let mut conhost = std::process::Command::new("conhost.exe");
-    conhost.args(&hosted_argv);
-    conhost.current_dir(&spec.cwd);
-    strip_session_identity_env(&mut conhost);
     conhost
         .spawn()
         .map(|_| ())
@@ -815,6 +834,29 @@ mod tests {
             Some(&Some(std::ffi::OsStr::new("keep-me"))),
             "an unrelated var must be left alone - this isn't a blanket env wipe"
         );
+    }
+
+    // -- LANE_ROLE on a launch ----------------------------------------- //
+    // `LANE_ROLE`, when set, always wins in `resolve_role`. A launch run by a
+    // peer inherited the peer's, so the child wrote the peer's role file.
+
+    #[test]
+    fn both_launch_commands_set_the_launched_role_not_the_spawners() {
+        let spec = LaunchSpec {
+            role: "overmind".to_string(),
+            cwd: "C:/Projects/OverMind".to_string(),
+            ..LaunchSpec::from(&state_with_role("overmind"))
+        };
+        // An explicit set overrides whatever the spawner's own environment carries.
+        let (wt, conhost) = launch_commands(&spec, &strs(&["claude"]));
+        for (what, cmd) in [("wt", &wt), ("conhost", &conhost)] {
+            let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new("LANE_ROLE")),
+                Some(&Some(std::ffi::OsStr::new("overmind"))),
+                "{what} must set LANE_ROLE to the launched role"
+            );
+        }
     }
 
     // -- host_wrapped_argv --------------------------------------------- //

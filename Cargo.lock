@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentlife"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "chrono",
  "lane-state",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "chrono",
  "lane-state",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "chrono",
  "serde",

@@ -37,6 +37,9 @@ pub use lane_state::claude_proc::SESSION_IDENTITY_ENV_VARS;
 /// by name and directory, so a lane that loses it is still found.
 pub const AGENT_ID_ENV: &str = "AGENTLIFE_AGENT_ID";
 
+/// The variable `lane-restart` reads first to name a lane's role file.
+const LANE_ROLE_ENV: &str = "LANE_ROLE";
+
 /// What to run, taken from the configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Programs {
@@ -54,7 +57,7 @@ pub struct TabLaunch {
     pub cwd: String,
     /// `[host, "host", "--role", role, "--", claude, prompt, flags...]`.
     pub hosted_argv: Vec<String>,
-    /// Variables to set (the agent id).
+    /// Variables to set (the agent id, and `LANE_ROLE` = the role in `hosted_argv`).
     pub env_set: Vec<(String, String)>,
 }
 
@@ -172,7 +175,12 @@ pub fn build_tab(
         title: e.title.clone(),
         cwd: e.cwd.clone(),
         hosted_argv: hosted,
-        env_set: vec![(AGENT_ID_ENV.to_string(), e.agent_id.clone())],
+        env_set: vec![
+            (AGENT_ID_ENV.to_string(), e.agent_id.clone()),
+            // `lane-restart`'s `LANE_ROLE` always wins over the cwd leaf. Without this the tab
+            // inherits the spawner's role and writes the spawner's role file, not its own.
+            (LANE_ROLE_ENV.to_string(), role),
+        ],
     })
 }
 
@@ -460,7 +468,10 @@ mod tests {
         assert_eq!(t.window, "agentlife-2");
         assert_eq!(
             t.env_set,
-            [("AGENTLIFE_AGENT_ID".to_string(), "a-7".to_string())]
+            [
+                ("AGENTLIFE_AGENT_ID".to_string(), "a-7".to_string()),
+                ("LANE_ROLE".to_string(), "lane".to_string()),
+            ]
         );
     }
 
@@ -633,6 +644,8 @@ mod tests {
                 assert_eq!(envs.get(*var), Some(&None), "{what} must remove {var}");
             }
             assert_eq!(envs["AGENTLIFE_AGENT_ID"].as_deref(), Some("a-7"), "{what}");
+            // Set explicitly, so the spawner's own LANE_ROLE (the PM's) is never inherited.
+            assert_eq!(envs["LANE_ROLE"].as_deref(), Some("lane"), "{what}");
             assert_eq!(envs["AGENTLIFE_HOME"].as_deref(), Some("D:/h"), "{what}");
         }
         assert_eq!(s.wt_command(&t).get_program(), "wt.exe");

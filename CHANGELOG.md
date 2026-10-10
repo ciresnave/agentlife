@@ -2,6 +2,15 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.11.4
+
+- A launched lane no longer inherits the spawner's `LANE_ROLE`. `lane-restart`'s role resolution
+  lets `LANE_ROLE` win over the cwd leaf, so a lane started by a peer (the PM running
+  `lane-restart --role x`, or `agentlife restore` from a lane's shell) used to write the
+  spawner's role file instead of its own. `lane-restart`'s `spawn_launch` (both the `wt.exe` and
+  the `conhost.exe` command) and agentlife's `RealSpawner` (via `TabLaunch.env_set`) now set
+  `LANE_ROLE` to the launched role.
+
 ## 0.11.3
 
 - `write_atomic` (used by the registry, the process index, pending restores, frozen plans and
