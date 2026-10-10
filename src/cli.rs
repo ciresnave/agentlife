@@ -127,8 +127,10 @@ USAGE:
         first and alone, then the --priority list, then the most recently active, in batches, in
         windows agentlife-<k>, within --max-running and the memory floor, with each agent's rebuilt
         launch arguments (anything not passed on is listed) and a hash of the whole plan. Writes
-        nothing and starts nothing. Without --dry-run it refuses: running an approved restore is
-        not built yet.
+        nothing and starts nothing. Without --dry-run it freezes the plan, shows the agent list, asks
+        the person (Windows Hello) and, only if approved, spends the one-use approval and starts the
+        plan. It refuses a caller that is an agent session: starting agents is for a person at a
+        terminal or the logon task. One restore runs at a time; the report goes to <home>/reports.
 
     agentlife pending [list] [--json] [--all]
     agentlife pending show <id> | approve <id> | discard <id>
@@ -137,7 +139,9 @@ USAGE:
         (Windows Hello) about the frozen plan, and refuses if the registry has moved since, so the
         person never approves a plan that would no longer be the one executed. `discard` withdraws
         the request, in OverMind's user-request store (the one every user of it shares). `approve`
-        is not wired to the prompt yet and says so.
+        shows the agent list, asks, and on approval runs the plan at once (an approval is good for 5
+        minutes); `pending --prompt` does the same for every open request, stopping at the first run.
+        Both refuse an agent session.
 
     agentlife restore --from-logon
     agentlife pending --prompt

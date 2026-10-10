@@ -357,9 +357,21 @@ pub fn outcome_from_channel(o: &ur::Outcome) -> Outcome {
     }
 }
 
+/// Debug builds only: a test that runs the real binary sets this so no Windows Hello dialog is ever put
+/// on a desktop. It can only make the answer **Unavailable**, never an approval, and a release build
+/// does not read it (the same discipline as `USER_REQUEST_DIR`).
+pub const NO_HELLO_ENV: &str = "AGENTLIFE_NO_HELLO";
+
+fn hello_disabled_for_tests() -> bool {
+    cfg!(debug_assertions) && std::env::var_os(NO_HELLO_ENV).is_some_and(|v| !v.is_empty())
+}
+
 impl Prompt for HelloPrompt {
     fn ask(&self, asking: &Asking) -> Outcome {
         use ur::Channel;
+        if hello_disabled_for_tests() {
+            return Outcome::Unavailable;
+        }
         let channel = ur::HelloChannel::new(ur::hello::HelloConsent::default());
         let req = to_ur_request(&asking.request, &self.requester);
         outcome_from_channel(&channel.present(&req, &to_ur_grant(&asking.grant), self.wait))

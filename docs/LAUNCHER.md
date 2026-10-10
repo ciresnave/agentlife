@@ -5,9 +5,9 @@ How a plan (`docs/PLAN.md`) would be executed, and what was measured while build
 Design: `DESIGN.md` §2.2, §2.3, §2.5, §6, with the revisions in `DESIGN-REVISION-1.md` §3 and §6 and
 `DESIGN-REVISION-2.md` §5.
 
-**Nothing calls the launcher from a command.** `agentlife restore` without `--dry-run` still refuses:
-starting agents needs a person's consent (M4). The only things that ever started a process in M3b are tests,
-and every process they start is a stand-in they built themselves, killed at the end.
+**The launcher runs only after an approval was spent** (0.12.2, `src/run.rs`): `agentlife restore` without
+`--dry-run`, `pending approve` and `pending --prompt` ask a person first and refuse an agent caller. The
+tests start only stand-ins they built themselves, killed at the end.
 
 ## One agent, one tab
 

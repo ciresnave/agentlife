@@ -5,8 +5,8 @@ What `agentlife restore --dry-run` computes, the rules it applies, and what it d
 `DESIGN-REVISION-2.md` §3 and §5.
 
 **It starts nothing and writes nothing.** A plan is a value. `restore --dry-run` prints one; plain
-`restore` refuses ("starting agents is not built yet; it needs a person's consent (M4)"). The launcher
-(wt.exe tabs, per-batch liveness, the report) is M3b; consent and the durable pending restore are M4.
+`restore` asks a person first (`src/run.rs`, 0.12.2). The launcher (wt.exe tabs, per-batch liveness, the
+report) is M3b; consent and the durable pending restore are M4.
 
 ## What is a candidate
 

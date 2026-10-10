@@ -141,6 +141,11 @@ impl Rig {
         Command::new(AGENTLIFE)
             .args(args)
             .env("AGENTLIFE_HOME", &self.home)
+            // Never the machine's consent store and never a Hello dialog on a desktop: a store of
+            // this test's own, and the debug switch that makes the prompt unavailable.
+            .env("USER_REQUEST_DIR", self.dir.path().join("consent-store"))
+            .env("USER_REQUEST_HEAD", self.dir.path().join("consent-head"))
+            .env("AGENTLIFE_NO_HELLO", "1")
             .output()
             .expect("run agentlife")
     }
@@ -1388,19 +1393,36 @@ fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_noth
 }
 
 #[test]
-fn restore_without_dry_run_refuses_and_starts_and_writes_nothing() {
+fn restore_without_an_approval_starts_nothing_and_leaves_a_pending_request() {
     let rig = Rig::new();
+    // The rig directory is the portfolio root, so the gone lane is planned (an empty plan asks nothing).
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({ "portfolio_root": rig.cwd() }).to_string(),
+    )
+    .unwrap();
     let start = rig.payload("start.json", "SessionStart", "sess-gone", Some("startup"));
     let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
     rig.run(LANE_ARGS, &script, &[]);
-    let before = tree_bytes(&rig.home);
     let out = rig.agentlife(&["restore"]);
+    // The prompt is unavailable (the debug switch): nobody approved, so nothing may start.
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("not built yet"), "{err}");
-    assert_eq!(
-        before,
-        tree_bytes(&rig.home),
-        "a refused restore wrote something"
+    assert!(
+        !rig.home.join("reports").exists(),
+        "a restore without an approval wrote a report"
     );
+    if cfg!(windows) {
+        assert!(
+            err.contains("nothing was started and it is still pending"),
+            "{err}"
+        );
+        let pending = rig.agentlife(&["pending", "list", "--json"]);
+        let text = String::from_utf8_lossy(&pending.stdout);
+        assert!(text.contains("\"closed\": null"), "{text}");
+    } else {
+        // Off Windows the consent store fails closed: nothing can even be recorded.
+        assert!(err.contains("DPAPI"), "{err}");
+    }
 }

@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.2
+
+- **`agentlife restore` runs.** Without `--dry-run` it freezes the plan, prints the agent list, asks the
+  person (Windows Hello), and only if approved spends the one-use approval and starts the plan; the report
+  goes to `<home>/reports`. New `agentlife::run` owns the order for `restore`, `pending approve` and
+  `pending --prompt` (the last two run the plan at once on approval).
+- **A lane cannot start agents:** an agent or unclear caller is refused (R10) before anything is stored,
+  shown or asked. A person and the logon task pass.
+- **The plan that runs is the plan that was approved:** it is rebuilt after the answer and before the
+  spend; a different hash spends nothing and starts nothing.
+- **A caveat, in `docs/CONSENT.md`:** the Hello text names only the plan hash, so a logon-task restore shows
+  the person no agent list at the moment of approval.
+
 ## 0.12.1
 
 - **The real consent backend.** `consent::installed()` returns `consent::real::UserRequestBackend`, over
