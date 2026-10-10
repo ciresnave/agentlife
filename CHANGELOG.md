@@ -2,6 +2,24 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.1
+
+- **The real consent backend.** `consent::installed()` returns `consent::real::UserRequestBackend`, over
+  `user-request` 0.11.1 from crates.io (new dependency; it needs rust 1.95, which the workspace already
+  does). It asks as agentlife, **not a registered lane** (role `agentlife`, empty session, own pid and start
+  time), in the one store every user of `user-request` shares (`locate::dir()`, `head_copy()`, DPAPI),
+  opened per call and dropped before a prompt is shown or a restore runs.
+- `agentlife pending discard` now withdraws the request from that store. Nothing else a person sees
+  changed: `pending approve` still says the prompt is not wired, and `restore` without `--dry-run` still
+  refuses.
+- **Fake corrected.** `RestorePlan` is `Scope::AnyRequester` in the real store (the plan hash is the
+  binding), so the fake no longer narrows an approval by the requester's role, and the test that said
+  another role "cannot spend" it now says the plan, not the spender, is what matches. Behaviour of
+  `pending::spend_approval` against the real store is unchanged; only the fake's claim was wrong.
+- New `consent::real::HelloPrompt` (`Prompt` over `user-request`'s Windows Hello channel). A channel
+  `Refused` is `Unavailable`, which leaves the request pending. Not yet called by a command.
+- Off Windows every consent call fails closed (the crate's DPAPI refuses), so nothing can be approved.
+
 ## 0.12.0
 
 - **Breaking (library API):** the `Consent` trait takes the shape of `user-request` 0.11.1's store
@@ -14,7 +32,9 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   `plan <64 lowercase hex>` (`consent::restore_plan_subject`, `parse_restore_plan_subject`), as the
   real crate requires; it used to be `restore N agents` (the count is still in the summary).
 - The fake enforces the same: it refuses a restore-plan subject that is not `plan <hash>` or names
-  another plan than the bound hash, and finds an approval by kind, subject and requester role.
+  another plan than the bound hash. (It also said the fake finds an approval by requester role; that
+  was wrong for `RestorePlan`, a `Scope::AnyRequester` kind, and was retracted in 0.12.1: the plan hash
+  is the binding, not who spends.)
 - No real backend yet: `consent::installed()` still reports that none is installed, no dependency was
   added, and nothing a person sees or approves changed.
 

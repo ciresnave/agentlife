@@ -1,18 +1,43 @@
 # Consent and the durable pending restore (M4, first part)
 
-Status at this change: the **trait, the fake, the pending record and `agentlife pending`** are built and
-tested. **No real consent backend is wired**, so nothing can be asked or approved, and `agentlife restore`
-without `--dry-run` still refuses. Wiring is one function, `consent::installed()`.
+Status (0.12.1): the **trait, the fake, the pending record, `agentlife pending` and the real backend**
+(`consent::real::UserRequestBackend` over `user-request` 0.11.1) are built and tested. `consent::installed()`
+returns the real backend. Still **not built**: the person-facing prompt behind `pending approve` and
+`pending --prompt` (`consent::real::HelloPrompt` exists and is tested at its mapping, not wired to a
+command), and running an approved restore, so `agentlife restore` without `--dry-run` still refuses.
 
 ## Why a trait
 
-OverMind's `user-request` crate (0.8.0, OverMind#125, merged 2026-10-08T15:28Z) is **not on crates.io**
-(`cargo info user-request` and `overmind-user-request`: "could not find in registry", measured 2026-10-08
-about 15:30Z). CireSnave's Sources rule forbids a path or new `git =` dependency, and the PM refused an
-exception (2026-10-08). Ruling: build the non-consent parts behind a trait shaped like the crate's pending
-API, test against a fake that enforces its semantics, wire the real crate once it is published (it moves
-homes under board 143). Nothing is copied from OverMind; the shape was read from its README and
-`store/pending.rs` at `main`.
+OverMind's `user-request` crate was **not on crates.io** when this was built (2026-10-08;
+`cargo info user-request` and `overmind-user-request`: "could not find in registry"). CireSnave's Sources
+rule forbids a path or new `git =` dependency, and the PM refused an exception. Ruling: build the
+non-consent parts behind a trait shaped like the crate's pending API, test against a fake that enforces its
+semantics, wire the real crate once it is published. It is published (0.11.1, crates.io, rust 1.95) and is
+wired (0.12.1, next section); the trait stays so the rest of agentlife is tested without a Hello store.
+Nothing is copied from OverMind.
+
+## The real backend (`src/consent/real.rs`, 0.12.1)
+
+Rulings from OverMind `origin/main@04aa5d2`, relayed by the PM 2026-10-10:
+
+* **Not a registered lane.** The requester is role `agentlife`, empty `session_id`, this process's pid and
+  start time, `managed: false` (`real::this_process`); the prompt reads "agentlife (pid N) - NOT a registered
+  lane". The binding is the plan hash in the subject (`restore_plan_subject`), and the kind is
+  `Scope::AnyRequester` and `MaxGrant::OneUse`: who asks is shown, not matched on. The fake does the same.
+* **The shared store.** `locate::dir()`, `locate::head_copy()` and `locate::PROTECTOR` (DPAPI): never a path of
+  ours, so `user-request list` / `revoke --all` see and stop agentlife's approvals. The store is opened **per
+  call** and dropped at its end, so `store.lock` is never held while a prompt is up or a restore runs. Reads
+  use `Store::inspect` and a change to something that must exist uses `open_existing`, so asking never
+  creates a store; only `submit` does. `USER_REQUEST_DIR` / `USER_REQUEST_HEAD` work in debug builds only, so
+  tests set them (one test, under a lock, for the production constructor; the rest use a temp store with a
+  test key protector so both CI legs run them).
+* **Windows only, closed elsewhere.** The crate's `Dpapi` refuses off Windows and `HelloConsent` says Hello
+  exists only on Windows, so on Linux every call fails closed: nothing can be recorded, approved or spent.
+* **A channel answer that is not an answer leaves the request pending.** `Outcome::Refused` and
+  `Unavailable` map to `Outcome::Unavailable` (with the reason); `Denied` is a cancel and closes it.
+
+Mapping of an error to `AnswerError` reads what became of the record (gone means voided and **nobody was
+asked**), not the store's prose; the prose only picks the kind of void.
 
 ## The contract (`src/consent.rs`)
 
@@ -66,8 +91,7 @@ say so and change nothing.
 ## One-shot wiring (the `RestorePlan` kind merged: OverMind#131, `user-request` 0.10.0)
 
 CireSnave ruled the proposal below one-shot (*"One-shot."*). The kind exists; agentlife is wired to its
-contract behind the `Consent` trait (the crate is still not on crates.io, so `consent::installed()` still
-returns none).
+contract behind the `Consent` trait (at that change the crate was not yet on crates.io; see "The real backend").
 
 * **Grant:** `Grant::OneUse`: no duration, never `Forever`. The request is bound to ONE frozen plan
   (`subject` "plan <hash>", `bound_hash` = the plan hash); a changed plan voids it unasked; a request
@@ -76,15 +100,20 @@ returns none).
   `Consent::spend_one_use(kind, subject, requester)` (the crate's `Store::find` and
   `Store::spend_one_use`, 0.11.1) and returns the frozen plan **only on `Ok`**. The restore must run only
   on that `Ok`; `Err` means nothing was spent. The approval is found by what it covers (`RestorePlan`,
-  subject `plan <hash>` built by `consent::restore_plan_subject`, never by hand) and who asked: another
-  requester's role finds nothing and spends nothing. The caller supplies the `Requester` (no
-  process-table constructor exists in 0.11.1); agentlife's is role `agentlife`, empty `session_id`, its own
-  pid and start time, `managed: false`. A second approval or request for a plan with an unspent approval is
-  refused by the store.
+  subject `plan <hash>` built by `consent::restore_plan_subject`, never by hand). **It is not narrowed by
+  who asks** (`Scope::AnyRequester`: a restore after a reboot is a new process, and that is the case the
+  kind exists for): an earlier version of this document, and the fake, said another requester's role finds
+  nothing; the real store does not do that, and that was corrected in 0.12.1. The plan hash is the binding.
+  The caller supplies the `Requester` (no process-table constructor exists in 0.11.1); agentlife's is role
+  `agentlife`, empty `session_id`, its own pid and start time, `managed: false`. A second approval or request
+  for a plan with an unspent approval is refused by the store.
 * **Freshness is agentlife's:** the crate never expires an unspent approval, so `spend_approval` refuses an
   approval whose `approved_at` is **older than 5 minutes** (`pending::APPROVAL_FRESH_SECS`; PM ruling
   2026-10-08). The refused approval is spent all the same: ask again. An `approved_at` more than 60 s in the
   future is refused too. Exactly 5 minutes is accepted.
+* **`HelloPrompt` must stay the ONLY production `Prompt`.** agentlife fabricates the `Approval` from the
+  `Outcome` a `Prompt` returns, so any `Prompt` that returns `Approved` grants. Never add another in
+  production code.
 * **Registered lane:** the prompt reads "agentlife (pid N) - NOT a registered lane" unless OverMind's
   registry lists agentlife as a lane. That registration is outside this repo (asked of the PM).
 * The 30-minute window below is superseded; the rest of that section (what an approval covers, who asks)
@@ -102,7 +131,7 @@ cover: any other plan (a changed plan voids the request, unasked), a mode wider 
 (`bypassPermissions` stays PM-only and refused elsewhere), stopping or parking anything, or later wakes.
 Standing permission to launch (an hour, a day, forever) is the separate M5 grant and is not this kind.
 
-**Who asks.** Role `agentlife`, taken from the process table by the crate, run by the logon task, the unlock
+**Who asks.** Role `agentlife`, supplied by agentlife (the crate has no process-table constructor), run by the logon task, the unlock
 trigger or a person at a terminal with no `claude` ancestor. Restore is not meant to be run by a lane; agentlife's own refusal of an agent caller for `restore` is not built yet.
 
 **Shortest window that works.** One-shot is enough. The requester executes in the same process right after

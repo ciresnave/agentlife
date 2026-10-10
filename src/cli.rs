@@ -127,8 +127,8 @@ USAGE:
         first and alone, then the --priority list, then the most recently active, in batches, in
         windows agentlife-<k>, within --max-running and the memory floor, with each agent's rebuilt
         launch arguments (anything not passed on is listed) and a hash of the whole plan. Writes
-        nothing and starts nothing. Without --dry-run it refuses: starting agents needs a person's
-        consent, which is not built yet.
+        nothing and starts nothing. Without --dry-run it refuses: running an approved restore is
+        not built yet.
 
     agentlife pending [list] [--json] [--all]
     agentlife pending show <id> | approve <id> | discard <id>
@@ -136,8 +136,8 @@ USAGE:
         plan, not a process: nothing waits. `list` and `show` only read. `approve` asks the person
         (Windows Hello) about the frozen plan, and refuses if the registry has moved since, so the
         person never approves a plan that would no longer be the one executed. `discard` withdraws
-        the request. Approving and discarding need the consent backend, which is not installed yet
-        (OverMind's user-request is unpublished): they say so and change nothing.
+        the request, in OverMind's user-request store (the one every user of it shares). `approve`
+        is not wired to the prompt yet and says so.
 
     agentlife restore --from-logon
     agentlife pending --prompt
@@ -148,7 +148,7 @@ USAGE:
         session unlock, `pending --prompt` asks about a restore that is waiting, if there is one.
         `install-task` only PRINTS both tasks' XML and the schtasks commands; a person runs it with
         --register to create them (replacing same-named tasks) or --remove to delete them. Nothing
-        starts an agent until the consent backend is installed.
+        starts an agent yet: `restore` without --dry-run is not built.
 
     agentlife import-lane-state [--write] [--json] [--since 48h] [--park a,b]
         Seeds the registry from OverMind's .lane-state/<role>.json files (read only) so the first

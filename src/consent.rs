@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Consent (M4): the shape of OverMind's `user-request` durable-pending API, as a trait.
 //!
-//! **Why a trait and not the crate.** `user-request` is not on crates.io (measured 2026-10-08,
-//! `cargo info user-request`: not found), and CireSnave's Sources rule forbids a path or `git =`
-//! dependency (`CLAUDE.md` §9). The PM ruled (2026-10-08): build against a trait shaped like the
-//! crate's API, test against a fake that enforces its semantics, and wire the real crate when it is
-//! published (board 143 moves it). Nothing from OverMind is copied here; the shape below was read
-//! from its README and `store/pending.rs` at OverMind `main` after #125.
+//! **Why a trait.** `user-request` was not on crates.io when this was built (2026-10-08), and
+//! CireSnave's Sources rule forbids a path or `git =` dependency (`CLAUDE.md` §9), so the pending
+//! restore was built against a trait shaped like the crate's API and a fake that enforces its
+//! semantics. It is published now (0.11.1) and [`real::UserRequestBackend`] is the backend
+//! [`installed`] returns; the trait stays so the rest of agentlife is tested without a Windows Hello
+//! store. Nothing from OverMind is copied here.
 //!
 //! The semantics every implementation must have (the fake in [`fake`] enforces them):
 //!
@@ -22,10 +22,14 @@
 //! * `withdraw` ends a request; a prompt already up can no longer be approved.
 //! * `spend_one_use(kind, subject, requester)` is the crate's shape (`Store::spend_one_use`): it
 //!   returns the id it spent, or `Err` when **nothing** was spent, and the action must then not run.
-//!   The approval is found by what it covers (kind, subject) and who asked, never by a request id.
+//!   The approval is found by what it covers (kind, subject), never by a request id. For
+//!   [`Kind::RestorePlan`] the requester does **not** narrow it (`Scope::AnyRequester`): the plan hash
+//!   in the subject is the binding, because a restore after a reboot is asked for by a new process.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub mod real;
 
 /// What is asked. `user-request`'s `KindId` is a closed set compiled into that crate; agentlife needs
 /// a plan-consent kind added there (an open question for OverMind, recorded in `docs/CONSENT.md`).
@@ -38,7 +42,8 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub kind: Kind,
-    /// Who asks, by role. The real crate takes this from the process table, never an argument.
+    /// Who asks, by role. The caller supplies it (see `Requester`); `user-request` 0.11.1 has no
+    /// process-table constructor.
     pub role: String,
     pub subject: String,
     pub summary: String,
@@ -222,13 +227,12 @@ pub fn answer(
         .map_err(AnswerError::Unavailable)
 }
 
-/// The backend until `user-request` is published: every call says so. Nothing is recorded, so
-/// nothing can be approved.
+/// A backend that refuses everything: nothing is recorded, so nothing can be approved. For tests of
+/// "consent is unavailable"; [`installed`] no longer returns it.
 #[derive(Debug, Default)]
 pub struct NoBackend;
 
-const NO_BACKEND: &str = "no consent backend is installed: OverMind's user-request crate is not \
-published yet (board 143), so nothing can be asked or approved";
+const NO_BACKEND: &str = "no consent backend is installed, so nothing can be asked or approved";
 
 impl Consent for NoBackend {
     fn submit(&mut self, _: &Request, _: &Grant, _: &str) -> Result<String, String> {
@@ -254,10 +258,12 @@ impl Consent for NoBackend {
     }
 }
 
-/// The backend this build has. **The one place to wire `user-request`** once it is published: until
-/// then there is none, and every command that needs consent says so and changes nothing.
+/// The backend this build has: OverMind's `user-request` store, shared with every other user of it,
+/// asking as agentlife (not a registered lane). `Err` when the store's place or this process cannot
+/// be determined; nothing is opened here, so a store that cannot be read says so on first use.
 pub fn installed() -> Result<Box<dyn Consent>, String> {
-    Err(NO_BACKEND.into())
+    let backend = real::UserRequestBackend::production(real::this_process()?)?;
+    Ok(Box::new(backend))
 }
 
 /// A fake that enforces the semantics above, for tests. It is **not** a security component: its
@@ -288,7 +294,6 @@ pub mod fake {
     struct Approval {
         kind: Kind,
         subject: String,
-        role: String,
         bound_hash: String,
         approved_at: DateTime<Utc>,
         spent: bool,
@@ -357,18 +362,13 @@ pub mod fake {
             }
         }
 
-        /// The id of the unspent approval covering `(kind, subject)` for `requester`'s role, or why
-        /// there is none. The oldest unspent one is used.
-        fn unspent_for(
-            &self,
-            kind: Kind,
-            subject: &str,
-            requester: &Requester,
-        ) -> Result<String, String> {
-            let role = requester.role.trim().to_lowercase();
+        /// The id of the unspent approval covering `(kind, subject)`, or why there is none. The oldest
+        /// unspent one is used. The requester does not narrow it: a restore-plan approval is
+        /// `Scope::AnyRequester` in the real store (the plan hash is the binding).
+        fn unspent_for(&self, kind: Kind, subject: &str) -> Result<String, String> {
             let mut spent = false;
             for (id, a) in &self.approvals {
-                if a.kind == kind && a.subject == subject && a.role == role {
+                if a.kind == kind && a.subject == subject {
                     if !a.spent {
                         return Ok(id.clone());
                     }
@@ -404,9 +404,11 @@ pub mod fake {
                     return Err("the subject names a different plan than the bound hash".into());
                 }
             }
-            if self.approvals.values().any(|a| {
-                !a.spent && a.bound_hash == bound_hash && a.role == req.role.trim().to_lowercase()
-            }) {
+            if self
+                .approvals
+                .values()
+                .any(|a| !a.spent && a.bound_hash == bound_hash)
+            {
                 return Err("an approval for this plan is unspent; spend it first".into());
             }
             if let Some(r) = self
@@ -495,7 +497,6 @@ pub mod fake {
                         Approval {
                             kind: asking.request.kind,
                             subject: asking.request.subject.clone(),
-                            role: asking.request.role.trim().to_lowercase(),
                             bound_hash: asking.bound_hash.clone(),
                             approved_at: now,
                             spent: false,
@@ -527,9 +528,9 @@ pub mod fake {
             &mut self,
             kind: Kind,
             subject: &str,
-            requester: &Requester,
+            _requester: &Requester,
         ) -> Result<DateTime<Utc>, String> {
-            let id = self.unspent_for(kind, subject, requester)?;
+            let id = self.unspent_for(kind, subject)?;
             Ok(self.approvals[&id].approved_at)
         }
 
@@ -537,9 +538,9 @@ pub mod fake {
             &mut self,
             kind: Kind,
             subject: &str,
-            requester: &Requester,
+            _requester: &Requester,
         ) -> Result<String, String> {
-            let id = self.unspent_for(kind, subject, requester)?;
+            let id = self.unspent_for(kind, subject)?;
             self.approvals.get_mut(&id).expect("just found").spent = true;
             Ok(id)
         }
