@@ -3,9 +3,8 @@
 //! after repeated failures, and write a report. `DESIGN.md` §2.2, §2.3 and §2.5, as revised by
 //! `DESIGN-REVISION-1.md` §3 and §6 and `DESIGN-REVISION-2.md` §5.
 //!
-//! **Nothing calls [`execute`] from a command yet.** `agentlife restore` without `--dry-run` still
-//! refuses: starting agents needs a person's consent (M4). The tests drive it with stand-ins they
-//! spawned themselves.
+//! [`execute`] is called by `run` (`agentlife restore`, `pending approve`, `pending --prompt`) only
+//! after a person's approval was spent. The tests drive it with stand-ins they spawned themselves.
 //!
 //! The rules:
 //!

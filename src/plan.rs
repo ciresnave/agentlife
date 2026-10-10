@@ -782,7 +782,7 @@ pub fn render_text(p: &Plan, dry_run: bool) -> String {
         if dry_run {
             "DRY RUN: nothing was started and nothing was written."
         } else {
-            "This is a plan only; starting it needs a person's consent (not built yet)."
+            "This is a plan only; `agentlife restore` (without --dry-run) asks a person before it starts anything."
         }
     );
     s

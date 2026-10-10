@@ -829,3 +829,140 @@ fn real_windows_terminal_opens_one_tab_per_agent_in_a_named_window() {
         );
     }
 }
+
+/// Answers as told. The only `Prompt` here: no test ever reaches a desktop.
+struct Scripted(agentlife::consent::Outcome);
+
+impl agentlife::consent::Prompt for Scripted {
+    fn ask(&self, _: &agentlife::consent::Asking) -> agentlife::consent::Outcome {
+        self.0
+    }
+}
+
+#[test]
+fn restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_starts_nothing() {
+    use agentlife::caller::Caller;
+    use agentlife::consent::fake::FakeConsent;
+    use agentlife::consent::Requester;
+    use agentlife::run::{self, Ran, Runtime};
+
+    let rig = Rig::new();
+    rig.write_config(serde_json::json!({
+        "batch_size": 2, "batch_delay_secs": 1,
+        "liveness_timeout_secs": 40, "progress_timeout_secs": 3, "spawn_gap_ms": 0
+    }));
+    for n in ["alpha", "beta"] {
+        let dir = rig.lane_dir(n);
+        rig.register_gone(n, &dir);
+    }
+    let plan = rig.plan(None);
+    assert_eq!(plan.entries.len(), 2, "{plan:?}");
+
+    let cfg = rig.config();
+    let home = Home::new(&rig.home).unwrap();
+    let registry = rig.registry();
+    let journal = Journal::new(home.journal_dir(), std::sync::Arc::new(SystemClock));
+    let table = SysinfoTable;
+    let lane_state = rig.dir.path().join("lane-state");
+    let programs = Programs {
+        host: cfg.host_program.clone(),
+        claude: cfg.claude_program.clone(),
+    };
+    let spawner = DirectSpawner::new(rig.env());
+    let me = table
+        .identity_of(std::process::id())
+        .expect("this test process");
+    let requester = Requester {
+        role: agentlife::pending::ROLE.into(),
+        session_id: String::new(),
+        claude_pid: me.pid,
+        claude_start_secs: me.start_secs,
+        managed: false,
+    };
+    let mut consent = FakeConsent::new(std::sync::Arc::new(SystemClock));
+    let shown = std::cell::RefCell::new(String::new());
+    let show = |t: &str| shown.borrow_mut().push_str(t);
+    let rebuild = || Ok(rig.plan(None));
+    let execute = |p: &Plan| {
+        let observer = RegistryObserver {
+            registry: &registry,
+            table: &table,
+            lane_state_dir: &lane_state,
+        };
+        let sleep = |d: Duration| std::thread::sleep(d);
+        execute(
+            p,
+            preflight(&programs, &program_exists),
+            &Deps {
+                spawner: &spawner,
+                observer: &observer,
+                clock: &SystemClock,
+                sleep: &sleep,
+                memory_gb: &|| None,
+                handoff_exists: &run::entry_has_handoff,
+                journal: &journal,
+                programs: &programs,
+                poll: Duration::from_millis(250),
+                progress_timeout: Duration::from_secs(cfg.progress_timeout_secs),
+                stop_after_failed_batches: cfg.stop_after_failed_batches,
+                spawn_gap: Duration::from_millis(cfg.spawn_gap_ms),
+            },
+        )
+    };
+    let prompt = Scripted(agentlife::consent::Outcome::Approved);
+
+    // A lane asking is refused: nothing recorded, shown or started.
+    for caller in [Caller::Agent { id: None }, Caller::Unclear("x".into())] {
+        let mut rt = Runtime {
+            home: &home,
+            consent: &mut consent,
+            prompt: &prompt,
+            requester: &requester,
+            caller: &caller,
+            clock: &SystemClock,
+            table: &table,
+            me: &me,
+            show: &show,
+            rebuild: &rebuild,
+            execute: &execute,
+        };
+        let err = run::restore_now(&mut rt, &plan, "test").unwrap_err();
+        assert!(err.starts_with("refused:"), "{err}");
+    }
+    assert!(shown.borrow().is_empty());
+    assert_eq!(rig.plan(None).entries.len(), 2, "nothing was started");
+    assert!(!home.reports_dir().exists(), "no report");
+
+    // A person: asked, spent, started.
+    let caller = Caller::Person;
+    let mut rt = Runtime {
+        home: &home,
+        consent: &mut consent,
+        prompt: &prompt,
+        requester: &requester,
+        caller: &caller,
+        clock: &SystemClock,
+        table: &table,
+        me: &me,
+        show: &show,
+        rebuild: &rebuild,
+        execute: &execute,
+    };
+    let ran = run::restore_now(&mut rt, &plan, "test").expect("a person may restore");
+    let Ran::Executed {
+        report,
+        report_path,
+        ..
+    } = ran
+    else {
+        panic!("expected a run, got {ran:?}")
+    };
+    assert_eq!(report.plan_hash, plan.hash);
+    for n in ["alpha", "beta"] {
+        assert!(outcome(&report, n).came_up(), "{n}: {report:#?}");
+    }
+    assert!(report_path.unwrap().is_file());
+    assert!(shown.borrow().contains("alpha"), "the list was shown first");
+    // Everything is up, so there is nothing left to ask about.
+    assert!(rig.plan(None).entries.is_empty());
+}

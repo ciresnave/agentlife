@@ -36,6 +36,7 @@ pub mod procindex;
 pub mod readiness;
 pub mod registry;
 pub mod restore;
+pub mod run;
 pub mod select;
 pub mod summary;
 pub mod task;

@@ -1,10 +1,11 @@
 # Consent and the durable pending restore (M4, first part)
 
-Status (0.12.1): the **trait, the fake, the pending record, `agentlife pending` and the real backend**
-(`consent::real::UserRequestBackend` over `user-request` 0.11.1) are built and tested. `consent::installed()`
-returns the real backend. Still **not built**: the person-facing prompt behind `pending approve` and
-`pending --prompt` (`consent::real::HelloPrompt` exists and is tested at its mapping, not wired to a
-command), and running an approved restore, so `agentlife restore` without `--dry-run` still refuses.
+Status (0.12.2): the **trait, the fake, the pending record, `agentlife pending`, the real backend**
+(`consent::real::UserRequestBackend` over `user-request` 0.11.1) **and running an approved restore**
+(`src/run.rs`) are built and tested. `consent::installed()` returns the real backend, and
+`consent::real::HelloPrompt` is wired to `restore`, `pending approve` and `pending --prompt`. See
+"Running an approved restore" below. Still **not built**: the control tab, the logon task's registration
+and any real run against real lanes (the PM's canary).
 
 ## Why a trait
 
@@ -88,6 +89,35 @@ say so and change nothing.
    **Not built yet:** network wait, the control tab, and the real execution after approval (`restore::execute` exists and is
    not called).
 
+## Running an approved restore (`src/run.rs`, 0.12.2)
+
+One function owns the order, for every command that can start agents (`restore`, `pending approve`,
+`pending --prompt`):
+
+1. **The caller must be a person** (R10): `Caller::Agent` and `Caller::Unclear` are refused before the
+   store is touched. A person at a terminal and the logon task (no `claude` above it) pass. This is a
+   convenience, not a boundary (`caller.rs`): a lane that detaches from its `claude` ancestor passes it;
+   what protects the machine is the Hello prompt a person must answer.
+2. One restore at a time (`restore.lock`), held until the report is written.
+3. The agent list is **printed**, then the person is asked (`pending::answer`).
+4. After an approval, the plan is **rebuilt again** from the registry and the process table; if its hash is
+   not the approved one, **nothing is spent and nothing starts** (the approval stays unspent and goes stale).
+5. The approval is **spent** (`pending::spend_approval`, which also refuses one older than 5 minutes: that
+   one *is* spent), and only on `Ok` the **frozen plan that was approved** is executed.
+6. The report goes to `<home>/reports`; the exit code is 0 only if every planned agent came up or was
+   already running.
+
+`pending approve` and `pending --prompt` run the plan on approval at once: an approval is good for 5
+minutes, so approving without running would only waste it. They rebuild the plan with the defaults, so a
+request made with `restore --only` or `--priority` is voided unasked there (the differing agents are
+named); run `restore` again with the same flags.
+
+**What a person sees is not the consent.** The terminal list is printed by agentlife; the Hello prompt
+itself is the crate's three lines and names **only the plan hash** (`Wants: restore lanes: plan <hash>`).
+A restore started by the **logon task** therefore shows the person **no agent list** at the moment they
+answer: they approve a hash. Until `user-request` puts the summary in its own prompt (asked of OverMind,
+2026-10-10), that is the honest state, and a person at a terminal is the only one who sees the list first.
+
 ## One-shot wiring (the `RestorePlan` kind merged: OverMind#131, `user-request` 0.10.0)
 
 CireSnave ruled the proposal below one-shot (*"One-shot."*). The kind exists; agentlife is wired to its
@@ -132,7 +162,7 @@ cover: any other plan (a changed plan voids the request, unasked), a mode wider 
 Standing permission to launch (an hour, a day, forever) is the separate M5 grant and is not this kind.
 
 **Who asks.** Role `agentlife`, supplied by agentlife (the crate has no process-table constructor), run by the logon task, the unlock
-trigger or a person at a terminal with no `claude` ancestor. Restore is not meant to be run by a lane; agentlife's own refusal of an agent caller for `restore` is not built yet.
+trigger or a person at a terminal with no `claude` ancestor. Restore is not meant to be run by a lane; agentlife refuses an agent caller for `restore`, `pending approve` and `pending --prompt` (0.12.2, `run::require_person`).
 
 **Shortest window that works.** One-shot is enough. The requester executes in the same process right after
 the approval and never consults the grant again; a crash mid-run needs a fresh approval, which is the safe

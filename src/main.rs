@@ -20,8 +20,8 @@ use agentlife::pending;
 use agentlife::plan;
 use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
+use agentlife::run;
 use agentlife::select;
-use agentlife::summary;
 use agentlife::task;
 use std::io::{Read, Write};
 use std::process::ExitCode;
@@ -181,13 +181,6 @@ fn run_restore(
             return ExitCode::FAILURE;
         }
     }
-    if !dry_run {
-        eprintln!(
-            "agentlife restore: starting agents is not built yet; it needs a person's consent (M4). \
-             Run with --dry-run to see the plan."
-        );
-        return ExitCode::FAILURE;
-    }
     let fail = |e: String| {
         eprintln!("agentlife restore: {e}");
         ExitCode::FAILURE
@@ -206,43 +199,224 @@ fn run_restore(
         Ok(c) => c,
         Err(e) => return fail(e.to_string()),
     };
+    let (p, problems) = match build_plan(&home, &cfg, &priority, only.as_deref()) {
+        Ok(b) => b,
+        Err(e) => return fail(e),
+    };
+    for (path, why) in &problems {
+        eprintln!("agentlife restore: could not use {}: {why}", path.display());
+    }
+    if dry_run {
+        if json {
+            match serde_json::to_string_pretty(&p) {
+                Ok(s) => println!("{s}"),
+                Err(e) => return fail(e.to_string()),
+            }
+        } else {
+            print!("{}", plan::render_text(&p, true));
+        }
+        return ExitCode::SUCCESS;
+    }
+    let reason = if from_logon {
+        "restore at logon"
+    } else {
+        "restore requested by a person"
+    };
+    run_with_runtime(&home, &cfg, &priority, only.as_deref(), "restore", |rt| {
+        run::restore_now(rt, &p, reason)
+    })
+}
+
+/// The plan from the registry and the process table **now**, with the registry files that could not
+/// be read.
+fn build_plan(
+    home: &Home,
+    cfg: &Config,
+    priority: &[String],
+    only: Option<&[String]>,
+) -> Result<(plan::Plan, Vec<(std::path::PathBuf, String)>), String> {
     let registry = Registry::new(home.agents_dir());
-    let listing = match registry.list() {
-        Ok(l) => l,
-        Err(e) => return fail(e.to_string()),
-    };
+    let listing = registry.list().map_err(|e| e.to_string())?;
     let table = SnapshotTable::capture();
-    let free_ram_gb = {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let bytes = sys.available_memory();
-        (bytes > 0).then(|| bytes as f64 / (1u64 << 30) as f64)
-    };
+    let free_ram_gb = free_memory_gb();
     let p = plan::build(&plan::Inputs {
         records: &listing.records,
         table: &table,
-        cfg: &cfg,
+        cfg,
         free_ram_gb,
         cwd_exists: &|c| std::path::Path::new(c).is_dir(),
-        priority: &priority,
-        only: only.as_deref(),
+        priority,
+        only,
     });
-    if json {
-        match serde_json::to_string_pretty(&p) {
-            Ok(s) => println!("{s}"),
-            Err(e) => return fail(e.to_string()),
+    Ok((p, listing.problems))
+}
+
+fn free_memory_gb() -> Option<f64> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let bytes = sys.available_memory();
+    (bytes > 0).then(|| bytes as f64 / (1u64 << 30) as f64)
+}
+
+/// Builds the real runtime (the shared consent store, the Hello prompt, the real launcher) and runs
+/// `f` with it. **This is the only place that puts `HelloPrompt` in front of a person**, and the
+/// only caller of `restore::execute` with a real spawner.
+fn run_with_runtime(
+    home: &Home,
+    cfg: &Config,
+    priority: &[String],
+    only: Option<&[String]>,
+    command: &str,
+    f: impl FnOnce(&mut run::Runtime) -> Result<run::Ran, String>,
+) -> ExitCode {
+    use agentlife::consent::real::{self, HelloPrompt};
+    use agentlife::launch::{Programs, RealSpawner};
+    use agentlife::restore::{self, Deps, RegistryObserver};
+    let fail = |e: String| {
+        eprintln!("agentlife {command}: {e}");
+        ExitCode::FAILURE
+    };
+    let mut backend = match consent::installed() {
+        Ok(b) => b,
+        Err(e) => return fail(e),
+    };
+    let requester = match real::this_process() {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    let prompt = HelloPrompt::new(requester.clone());
+    let procs = ProcIndex::new(home.procs_dir());
+    let caller = caller::detect(&RealEnv::new(), &procs);
+    let table = SysinfoTable;
+    let Some(me) = table.identity_of(std::process::id()) else {
+        return fail("cannot read this process from the process table".into());
+    };
+    let registry = Registry::new(home.agents_dir());
+    let journal = Journal::new(home.journal_dir(), Arc::new(SystemClock));
+    let lane_state_dir = std::path::PathBuf::from(&cfg.lane_state_dir);
+    let programs = Programs {
+        host: cfg.host_program.clone(),
+        claude: cfg.claude_program.clone(),
+    };
+    let spawner = RealSpawner::default();
+    let show = |text: &str| print!("{text}");
+    let rebuild = || build_plan(home, cfg, priority, only).map(|(p, _)| p);
+    let execute = |p: &plan::Plan| {
+        // The live table, not a snapshot: the observer must see the sessions it is waiting for.
+        let live = SysinfoTable;
+        let observer = RegistryObserver {
+            registry: &registry,
+            table: &live,
+            lane_state_dir: &lane_state_dir,
+        };
+        let sleep = |d: std::time::Duration| std::thread::sleep(d);
+        let pre = restore::preflight(&programs, &restore::program_exists);
+        restore::execute(
+            p,
+            pre,
+            &Deps {
+                spawner: &spawner,
+                observer: &observer,
+                clock: &SystemClock,
+                sleep: &sleep,
+                memory_gb: &free_memory_gb,
+                handoff_exists: &run::entry_has_handoff,
+                journal: &journal,
+                programs: &programs,
+                poll: std::time::Duration::from_secs(2),
+                progress_timeout: std::time::Duration::from_secs(cfg.progress_timeout_secs),
+                stop_after_failed_batches: cfg.stop_after_failed_batches,
+                spawn_gap: std::time::Duration::from_millis(cfg.spawn_gap_ms),
+            },
+        )
+    };
+    let mut rt = run::Runtime {
+        home,
+        consent: backend.as_mut(),
+        prompt: &prompt,
+        requester: &requester,
+        caller: &caller,
+        clock: &SystemClock,
+        table: &table,
+        me: &me,
+        show: &show,
+        rebuild: &rebuild,
+        execute: &execute,
+    };
+    match f(&mut rt) {
+        Ok(ran) => report_ran(command, &ran),
+        Err(e) => fail(e),
+    }
+}
+
+/// Says truthfully what happened, and exits 0 only when every planned agent came up or was already
+/// running.
+fn report_ran(command: &str, ran: &run::Ran) -> ExitCode {
+    use agentlife::restore::Outcome;
+    match ran {
+        run::Ran::Executed {
+            pending_id,
+            report,
+            report_path,
+        } => {
+            println!(
+                "agentlife {command}: {pending_id} approved; the approval was spent before the run"
+            );
+            print!("{}", report.render_text());
+            match report_path {
+                Ok(p) => println!("report: {}", p.display()),
+                Err(e) => eprintln!(
+                    "agentlife {command}: the restore ran but its report could not be written: {e}"
+                ),
+            }
+            let all_ok = report
+                .entries
+                .iter()
+                .all(|e| e.outcome.came_up() || matches!(e.outcome, Outcome::Skipped(_)));
+            if all_ok && report.halted.is_none() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
-    } else {
-        print!("{}", plan::render_text(&p, true));
+        run::Ran::Cancelled { pending_id } => {
+            eprintln!("agentlife {command}: {pending_id} was cancelled; nothing was started");
+            ExitCode::FAILURE
+        }
+        run::Ran::StillPending { pending_id } => {
+            eprintln!(
+                "agentlife {command}: {pending_id} was not answered; nothing was started and it is still pending"
+            );
+            ExitCode::FAILURE
+        }
+        run::Ran::NotAsked { pending_id, why } => {
+            eprintln!(
+                "agentlife {command}: {pending_id}: the person was not asked ({why}); nothing was started and it is still pending"
+            );
+            ExitCode::FAILURE
+        }
+        run::Ran::Voided {
+            pending_id,
+            why,
+            diffs,
+        } => {
+            eprintln!(
+                "agentlife {command}: {pending_id} was voided and nobody was asked: {why}; nothing was started"
+            );
+            for d in diffs {
+                eprintln!("  {d}");
+            }
+            ExitCode::FAILURE
+        }
+        run::Ran::NothingToStart => {
+            println!("agentlife {command}: the plan starts nothing; nothing to ask about");
+            ExitCode::SUCCESS
+        }
     }
-    for (path, why) in &listing.problems {
-        eprintln!("agentlife restore: could not use {}: {why}", path.display());
-    }
-    ExitCode::SUCCESS
 }
 
 /// `agentlife pending`. Listing and showing only read. Discarding withdraws the request from the
-/// shared `user-request` store; approving is not wired to the prompt yet and says so.
+/// shared `user-request` store; approving asks (agent list, then Hello) and runs on approval.
 fn run_pending(action: PendingAction) -> ExitCode {
     let fail = |e: String| {
         eprintln!("agentlife pending: {e}");
@@ -255,36 +429,16 @@ fn run_pending(action: PendingAction) -> ExitCode {
     match action {
         PendingAction::Prompt => {
             let (records, _) = pending::list(&home);
-            let open_records: Vec<_> = records.iter().filter(|r| r.is_open()).collect();
-            let open = open_records.len();
-            if open == 0 {
+            // Oldest first; creating a newer one superseded the older ones, so normally one is open.
+            let open: Vec<String> = records
+                .iter()
+                .filter(|r| r.is_open())
+                .map(|r| r.pending_id.clone())
+                .collect();
+            if open.is_empty() {
                 return ExitCode::SUCCESS;
             }
-            let previous = pending::last_approved_plan(&home);
-            for r in &open_records {
-                match plan::load_frozen(&pending::frozen_path(&home, r)) {
-                    Ok(f) => print!(
-                        "{}",
-                        summary::render(
-                            &f.plan,
-                            previous.as_ref(),
-                            summary::DEFAULT_CAP,
-                            &r.pending_id
-                        )
-                    ),
-                    Err(e) => {
-                        eprintln!("agentlife pending: cannot summarise {}: {e}", r.pending_id)
-                    }
-                }
-            }
-            if let Err(e) = consent::installed() {
-                return fail(format!(
-                    "{open} restore(s) are waiting for an answer, but cannot be asked about: {e}"
-                ));
-            }
-            fail(format!(
-                "{open} restore(s) are waiting, but the person-facing prompt is not wired in this build"
-            ))
+            approve_open(&home, &open)
         }
         PendingAction::List { json, all } => {
             let (records, problems) = pending::list(&home);
@@ -337,15 +491,45 @@ fn run_pending(action: PendingAction) -> ExitCode {
                 Err(e) => fail(e),
             }
         }
-        PendingAction::Approve { id } => {
-            if let Err(e) = consent::installed() {
-                return fail(e);
-            }
-            fail(format!(
-                "cannot ask about {id}: the person-facing prompt is not wired in this build"
-            ))
-        }
+        PendingAction::Approve { id } => approve_open(&home, &[id]),
     }
+}
+
+/// Asks about each pending request in turn (the agent list first, then Hello) and, on the first
+/// approval, spends it and runs the plan. Stops there: that run changed what the others were about.
+fn approve_open(home: &Home, ids: &[String]) -> ExitCode {
+    let cfg = match Config::load(home, Layer::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("agentlife pending: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The plan is rebuilt with the defaults: a request made with `--only` or `--priority` is a
+    // different plan now and is voided unasked (re-run `restore` with the same flags instead).
+    run_with_runtime(home, &cfg, &[], None, "pending", |rt| {
+        let mut last: Option<Result<run::Ran, String>> = None;
+        for id in ids {
+            let r = run::approve_pending(rt, id);
+            let done = !matches!(
+                r,
+                Ok(run::Ran::Cancelled { .. }
+                    | run::Ran::StillPending { .. }
+                    | run::Ran::NotAsked { .. }
+                    | run::Ran::Voided { .. })
+            );
+            if !done {
+                if let Ok(ran) = &r {
+                    let _ = report_ran("pending", ran);
+                }
+            }
+            last = Some(r);
+            if done {
+                break;
+            }
+        }
+        last.unwrap_or(Ok(run::Ran::NothingToStart))
+    })
 }
 
 /// The real preconditions a logon restore waits for.

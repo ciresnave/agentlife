@@ -11,9 +11,8 @@
 //! The record here says **what is owed and why**; the consent store holds the request itself. A record
 //! is never deleted: closing marks it, so the audit trail stays.
 //!
-//! **Nothing in the binary can reach [`create`] or an approval yet.** The only backend is
-//! [`consent::NoBackend`] until OverMind's `user-request` is published, so `agentlife restore` without
-//! `--dry-run` still refuses. Tests drive these functions with [`consent::fake::FakeConsent`].
+//! `run` is the only caller that acts on an approval: it asks, spends ([`spend_approval`]) and then
+//! executes. Tests drive these functions with [`consent::fake::FakeConsent`].
 
 use crate::atomic::{is_temp_name, write_atomic};
 use crate::consent::{

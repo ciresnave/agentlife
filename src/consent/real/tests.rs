@@ -493,6 +493,27 @@ fn a_store_that_cannot_be_unprotected_fails_closed_everywhere() {
 /// Process-global environment: one test touches it, under this lock.
 static ENV: Mutex<()> = Mutex::new(());
 
+/// A test binary that sets the variable can never put a Hello dialog up, and what it gets is
+/// `Unavailable`, which leaves the request pending (never an approval).
+#[test]
+fn hello_is_never_shown_when_the_debug_switch_is_set_and_the_answer_is_unavailable() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var(super::NO_HELLO_ENV, "1");
+    let asking = Asking {
+        pending_id: "p1".into(),
+        request: request_for(&hash('1')),
+        grant: Grant::OneUse,
+        bound_hash: hash('1'),
+        reservation: "r".into(),
+    };
+    let out = HelloPrompt::new(me()).ask(&asking);
+    std::env::remove_var(super::NO_HELLO_ENV);
+    assert_eq!(out, Outcome::Unavailable);
+}
+
 /// The production constructor, through the crate's own `locate` (debug overrides). On Windows the
 /// key is really DPAPI-protected; elsewhere the crate refuses DPAPI and the backend fails closed.
 #[test]
