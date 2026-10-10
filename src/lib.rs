@@ -21,6 +21,7 @@ pub mod down;
 pub mod home;
 pub mod hook;
 pub mod identity;
+pub mod import;
 pub mod install;
 pub mod intent;
 pub mod journal;

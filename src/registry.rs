@@ -118,6 +118,9 @@ pub enum Origin {
     Hand,
     /// A `lane-restart host` or `agentlife` host started it.
     Host,
+    /// Seeded from `.lane-state/<role>.json` by `agentlife import-lane-state`; the first real
+    /// `SessionStart` for the same name and directory takes the record over.
+    Imported,
     #[default]
     Other,
 }

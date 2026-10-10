@@ -61,6 +61,14 @@ pub enum Command {
         remove: bool,
         exe: Option<String>,
     },
+    /// `agentlife import-lane-state`: seed the registry from `.lane-state`; dry run unless `write`.
+    ImportLaneState {
+        write: bool,
+        json: bool,
+        /// A duration such as `48h`; `None` is the default window.
+        since: Option<String>,
+        park: Vec<String>,
+    },
     Version,
     Help,
 }
@@ -141,6 +149,16 @@ USAGE:
         `install-task` only PRINTS both tasks' XML and the schtasks commands; a person runs it with
         --register to create them (replacing same-named tasks) or --remove to delete them. Nothing
         starts an agent until the consent backend is installed.
+
+    agentlife import-lane-state [--write] [--json] [--since 48h] [--park a,b]
+        Seeds the registry from OverMind's .lane-state/<role>.json files (read only) so the first
+        restore after a reboot does not have to wait for the hooks. Only files written within
+        --since (default 48h), whose directory exists under the portfolio root and which recorded
+        launch arguments; one record per name and directory (the newest file wins); test fixtures
+        (*restarttest*) and names already in the registry are skipped. The recorded permission mode
+        is carried as it was; restore still refuses bypassPermissions for any agent but the PM.
+        --park a,b imports those agents as parked (restore leaves them down). Without --write it
+        prints what it would write and what it skipped and why, and writes nothing.
 
     agentlife pin <agent> | unpin <agent>
         Never lazy-stop this agent. A lane may pin itself.
@@ -268,6 +286,35 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         }
         "pending" if rest.len() == 1 && rest[0] == "--prompt" => {
             Ok(Command::Pending(PendingAction::Prompt))
+        }
+        "import-lane-state" => {
+            let (mut write, mut json, mut since, mut park) = (false, false, None, Vec::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--write" => write = true,
+                    "--json" => json = true,
+                    "--since" => since = Some(it.next().ok_or("--since needs a duration")?.clone()),
+                    "--park" => {
+                        park = it
+                            .next()
+                            .ok_or("--park needs a list of names")?
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                    other => {
+                        return Err(format!("unknown argument to import-lane-state: {other:?}"))
+                    }
+                }
+            }
+            Ok(Command::ImportLaneState {
+                write,
+                json,
+                since,
+                park,
+            })
         }
         "install-task" => {
             let (mut register, mut remove, mut exe) = (false, false, None);
@@ -432,6 +479,38 @@ mod tests {
 
     fn p(args: &[&str]) -> Result<Command, String> {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn import_lane_state_defaults_to_a_dry_run_and_parses_its_flags() {
+        assert_eq!(
+            p(&["import-lane-state"]),
+            Ok(Command::ImportLaneState {
+                write: false,
+                json: false,
+                since: None,
+                park: vec![]
+            })
+        );
+        assert_eq!(
+            p(&[
+                "import-lane-state",
+                "--write",
+                "--json",
+                "--since",
+                "12h",
+                "--park",
+                "a, b,,c"
+            ]),
+            Ok(Command::ImportLaneState {
+                write: true,
+                json: true,
+                since: Some("12h".into()),
+                park: vec!["a".into(), "b".into(), "c".into()]
+            })
+        );
+        assert!(p(&["import-lane-state", "--since"]).is_err());
+        assert!(p(&["import-lane-state", "--bogus"]).is_err());
     }
 
     #[test]
