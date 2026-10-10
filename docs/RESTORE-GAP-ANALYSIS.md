@@ -31,7 +31,9 @@ wiring reaches it), **missing**. Size S/M/L is relative, as in `MILESTONES.md`.
 | R11 | "Restore on reboot: yes/no" per agent | **built**, unused | intent `park` / `unpark` (`src/cli.rs:342`, `:383`); `plan.rs` skips every non-`Wanted` agent with reason `NotWanted` (test `closed_and_lazy_agents_are_never_candidates...`). No new field needed; what is missing is **someone running `park`** once, and an import (R3) that can set it | S | no (his choice of which lanes) |
 | R12 | Filter out non-project sessions | **built** for the plan; **missing** for an import | plan refuses a cwd that is missing or outside the portfolio root (`plan.rs` test `cwd_must_exist_and_be_under_the_portfolio_root`, `:1395`). Census of `.lane-state` below: 1 of 16 recent files is outside the root (`synapse-restarttest-lane`, cwd under `AppData`). The importer must filter before it writes | in R3 | no |
 | R13 | Two sessions in one cwd and one role | **built for agentlife**, lost for any `.lane-state` import | agentlife keys a record by name + cwd and rejoins a stopped one (`hook.rs:169-205`, rule 3), so `auth-framework` and `auth-framework-deps` are two records. `.lane-state` is one file per **role**, so a second session in the same role overwrites the first: only one of the two can ever be imported. The `deps` session (private local patches) is invisible to R3 | n/a | **yes**: which session is the lane, and do the patches survive a reboot? (his files, not ours) |
-| R14 | The launch must not inherit a lane's role | **missing, newly found** | see section 3 | S | no |
+| R14 | The launch must not inherit a lane's role | **missing in both launchers, newly found** | section 3. `crates/lane-restart/src/relaunch.rs:462` `spawn_launch` and `src/launch.rs:255` `RealSpawner::prepare` each strip only `SESSION_IDENTITY_ENV_VARS` (ten names; `LANE_ROLE` is not among them) and set no role. The PM's `C:\Projects	ools\launch-lane.ps1` already does `$env:LANE_ROLE = $Role`, which is the behaviour both must have | S + S (two crates, one test each) | no |
+| R18 | Each lane returns in the permission mode it had; none is raised; only the PM is bypass | **built**, one gap | `plan.rs:rebuild` carries the observed (else recorded) `--permission-mode` and `--dangerously-skip-permissions` through, emits nothing when none was recorded (claude's own default, never higher), and **refuses, not downgrades,** `bypassPermissions` for a non-PM entry (`Reason::BypassNotPm`, tests at `plan.rs:1085-1113`). A mode outside `KNOWN_MODES` (`default`, `acceptEdits`, `auto`, `bypassPermissions`) is kept and flagged `mode-needs-a-person`. **Gap:** the rule is "carried, never raised", but a lane recorded as `auto` is restored as `auto` only if its record has the mode: records filled from `hook SessionStart` can carry none (the payload lacks `permission_mode`, `crates/lane-state/src/claude_proc.rs:68`), and the import (PR 2) must take it from the `.lane-state` file's `permission_mode`, else a lane falls back to `default`, which is safe but is not what it had. The **PM** is not started by a lane: the logon task or a person starts it, and it is restored in its recorded `bypassPermissions` | S (in PR 2) | no: a rule he has already given (2026-10-10, relayed by the PM) |
+| R19 | agentlife itself publishable | **blocked on a publish** | the workspace is 0.11.3; `cargo info lane-state` prints **0.11.1** on crates.io (read 2026-10-10), and `lane-state` 0.11.3 is unpublished, as is `lane-restart`. agentlife depends on `lane-state` by path + version, which a `cargo publish` of agentlife resolves to the crates.io `0.11.3` that does not exist yet. Not needed to run the restore from a built binary; needed to ship it | none here | **yes** (the PM brings the publish) |
 | R15 | Resolve program paths for a task's environment | **likely fine, unverified** | defaults are bare `lane-restart`, `claude`, `wt` (`config.rs:196-197`); on this box `Get-Command` finds `C:\Projects\.claude-hooks\lane-restart.exe`, `C:\Users\cires\.local\bin\claude.exe` and `WindowsApps\wt.exe` on the user PATH. A task runs with the user's PATH, but I could not prove it without running one | canary | no |
 | R16 | Installed host is the one agentlife is built for | **unverified** | on disk `lane-restart.exe` reports `0.7.1`; this workspace's crate is 0.11.x. `host` is what answers the dev-channels dialog (the PM saw no human typed). Nothing in agentlife pins a host version | S | no |
 | R17 | The agentlife binary installed at a fixed path | **missing** | no `agentlife.exe` in `.claude-hooks`; no release build in the shared tree (`ls target/release/agentlife.exe`: not found). The task and hooks both point at `C:/Projects/.claude-hooks/agentlife.exe` (`HOOK-INSTALL.md`) | S | no (install by rename is built, `src/install.rs`) |
@@ -83,6 +85,21 @@ has not been written since 2026-10-09T23:23Z. Consequences:
   and sets `AGENTLIFE_AGENT_ID` only (`src/launch.rs:175`). It would repeat this from a shell that has
   `LANE_ROLE` set. A restore run **by the logon task** would not (the task has no such variable), a run by
   a person from a lane's shell would. The launcher must set `LANE_ROLE` per entry or remove it.
+* **`lane-restart` itself has the same leak, and it is the more serious one**: `spawn_launch`
+  (`crates/lane-restart/src/relaunch.rs:462`) is what `lane-restart --self` and `--role <x>` use to put a
+  lane back, and it calls `strip_session_identity_env` and nothing else. A lane restarted by a **peer**
+  (the PM running `--role x`) therefore starts with the PM's `LANE_ROLE` and writes the PM's role file, not
+  its own. The requirement: `spawn_launch` sets `LANE_ROLE=<spec.role>` on the child (`wt.exe` and the
+  `conhost.exe` fallback both; `spec.role` is already in scope). Size S: two `env` calls and one test
+  beside `strip_session_identity_env_removes_every_listed_var` (`relaunch.rs:796`) that builds both
+  commands with `LANE_ROLE=pm` set in the *spawner* and asserts the child's env says the launched role,
+  mutation-tested by deleting the `env` call (the mutant compiles). `--self` is unaffected (a lane's own
+  `LANE_ROLE` equals its role), which is why this was not seen before a peer launched twelve lanes.
+  **Fix lives in `crates/lane-restart`, in this repo (it was imported in 0.11.1); it needs a version and
+  a publish of `lane-restart`**, so it is PR 1 below, with its own CHANGELOG entry.
+* The PM's `launch-lane.ps1` already carries the fix in script form (`$env:LANE_ROLE = $Role` with the
+  comment "else the spawner's LANE_ROLE is inherited and every lane writes pm.json"): that is the method
+  that worked on 2026-10-10 and the behaviour to port.
 
 ## 4. Shortest path: "reboot, log in, the fleet returns with one Hello approval"
 
@@ -91,12 +108,15 @@ Order is chosen so nothing acts on a real lane before the last step.
 
 | PR | delivers | rides | gate |
 |---|---|---|---|
-| 1 | **Launcher env**: set `LANE_ROLE=<role>` (or remove it) per launched entry; test that a spawned child sees the intended value and never the spawner's (`src/launch.rs`, the existing `both_commands_strip_the_session_identity...` test is the model) | 0.11.4 | CI |
+| 1 | **Launcher env, both launchers** (R14): `LANE_ROLE=<role>` on the child in `lane-restart`'s `spawn_launch` and in agentlife's `RealSpawner::prepare`; a test in each that the child sees the intended role and never the spawner's (models: `strip_session_identity_env_removes_every_listed_var`, and agentlife's `both_commands_strip_the_session_identity...`) | 0.11.4 | CI both legs |
 | 2 | **`agentlife import-lane-state`** (R3, R11, R12): read-only on `.lane-state`; `--since 48h` (default), cwd must exist under the portfolio root, one record per `(name, cwd)` with the newest file winning, skip names in a deny list (`*restarttest*`), `--park a,b,c` sets intent closed; dry-run is the default and prints what it would write and what it skipped with why; writes only `<home>/agents`. Records get a new `Origin::Imported` | 0.11.5 | CI; one real dry-run on this box, output pasted into the PR |
 | 3 | **Consent wiring** (R6, section 2): trait re-shaped, `user-request = "0.11.1"`, `installed()` returns the real backend; fake updated to the new shape; mutation tests on spend-before-run and on the freshness bound | **0.12.0** (library API change) | CI both legs; a test against a temp store via `USER_REQUEST_DIR` (debug builds only) |
 | 4 | **`restore` runs**: answer -> `spend_approval` -> `execute`; caller guard (R10: a lane caller is refused); report to `<home>/reports`; `pending --prompt` shows the agent list then asks (R7, pending the ruling) | 0.12.1 | CI; real run on stand-ins only (the M3b fake `claude`) |
 | 5 | **Install** (R2, R8, R17): release binary to `.claude-hooks` by rename; `install-task --register`; hook entries on **one** lane per `HOOK-INSTALL.md` | no version (operations) | **CireSnave**: approves settings and the task |
 | 6 | **Canary** (R9, R15, R16): one reboot-less rehearsal, then one real reboot, section 5 | no version | **CireSnave present** |
+
+R18's gap (carrying `permission_mode` from `.lane-state`) rides PR 2, with a test that an imported `auto`
+lane yields `--permission-mode auto` and an imported `bypassPermissions` non-PM yields `BypassNotPm`.
 
 PR 1 and 2 are independent of consent and can start now. PR 3 touches the only security surface and
 should be gated by OverMind's review of the wiring. Nothing here requires the hooks (R2): the import
@@ -126,6 +146,32 @@ required for the second reboot, not the first.
    whether a reboot lost uncommitted work there, and no restore can bring it back.
 9. The Hello prompt text as a person sees it for a restore (R7); I read the crate's template, I did
    not render it.
+
+## 5b. A racy test that bears on pacing: `twelve_real_stand_ins_are_paced_pm_first_...`
+
+`tests/launch_e2e.rs:563` (`assert_eq!(plan.entries.len(), 12, ...)`) failed once on the Windows leg of
+this very PR and passed on a rerun of the failed job, with **no code change** (this PR touches one doc):
+
+| attempt | run | Windows job | result |
+|---|---|---|---|
+| 1 | 38058093026 | 114230572025 | **failed**: `assertion left == right failed: []`, 11 entries where 12 were registered; the message printed `plan.excluded`, which was empty |
+| 2 | 38058093026 | 114232535770 | passed (Ubuntu leg passed on both attempts) |
+
+So it is racy, not fixed: it stays in this list as a flaky test and is **not** skipped. The facts: a
+registered, gone stand-in was dropped from `entries` without appearing in `excluded`. The only code paths
+that do that are *alive* (`plan.rs:356`, an agent whose process is alive is never in a plan and is
+counted in `running_now`) and *held* (`plan.rs:476`, over `max_running`). Neither is printed by the
+assertion, so which one it was **is not known from the log**. The leading hypothesis, unconfirmed: a
+stand-in's pid was recycled by the next stand-in started in the same whole second (identity is pid plus
+start time in whole seconds, the known limit already documented at `launch_e2e.rs` near the
+`RestoreLock` test, which hit it on "2 of 6 attempts" on this runner), so the dead record read as
+alive. What it implies for restore pacing: an agent that **looks alive** is silently skipped, not
+reported as failed, so a restore could finish "clean" with a lane missing. After a reboot this cannot
+happen across boots (start times differ), but **within one restore run**, batches start many processes
+quickly, and a recycled pid can alias a just-gone record. Two requirements follow, both S:
+(1) the post-run report must list every `Wanted` agent that was not started **with the reason** (alive,
+held, excluded), so a skipped lane is visible; (2) the test's assertion message should print `held` and
+`running_now` too, so the next failure names its cause. Neither is done here (docs only).
 
 ## 6. What this document does not claim
 
