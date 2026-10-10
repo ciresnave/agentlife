@@ -2,6 +2,22 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.0
+
+- **Breaking (library API):** the `Consent` trait takes the shape of `user-request` 0.11.1's store
+  (RESTORE-GAP-ANALYSIS section 2, PR 3a). `spend_one_use(&mut self, kind, subject, &Requester)`
+  returns `Result<String, String>`, the id spent; `Err` means nothing was spent and the restore must
+  not run. A new `approved_at(kind, subject, &Requester)` reads when the approval was given, so
+  freshness is still judged before the spend. `consent::Spent` and `consent::SpendError` are gone; a new
+  `consent::Requester` carries who asks, supplied by the caller.
+- `pending::spend_approval` takes a `&Requester`. A restore request's subject is now exactly
+  `plan <64 lowercase hex>` (`consent::restore_plan_subject`, `parse_restore_plan_subject`), as the
+  real crate requires; it used to be `restore N agents` (the count is still in the summary).
+- The fake enforces the same: it refuses a restore-plan subject that is not `plan <hash>` or names
+  another plan than the bound hash, and finds an approval by kind, subject and requester role.
+- No real backend yet: `consent::installed()` still reports that none is installed, no dependency was
+  added, and nothing a person sees or approves changed.
+
 ## 0.11.5
 
 - New `agentlife import-lane-state [--write] [--json] [--since 48h] [--park a,b]`: seeds the registry

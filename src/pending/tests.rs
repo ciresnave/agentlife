@@ -11,6 +11,16 @@ fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap()
 }
 
+fn agentlife() -> Requester {
+    Requester {
+        role: ROLE.into(),
+        session_id: String::new(),
+        claude_pid: 4242,
+        claude_start_secs: 1_700_000_000,
+        managed: false,
+    }
+}
+
 fn entry(id: &str, mode: &str) -> Entry {
     Entry {
         agent_id: id.into(),
@@ -93,12 +103,24 @@ impl Consent for ForwardConsent<'_> {
     fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String> {
         self.0.lock().unwrap().resolve(asking, outcome)
     }
+    fn approved_at(
+        &mut self,
+        kind: crate::consent::Kind,
+        subject: &str,
+        requester: &Requester,
+    ) -> Result<DateTime<Utc>, String> {
+        self.0.lock().unwrap().approved_at(kind, subject, requester)
+    }
     fn spend_one_use(
         &mut self,
-        id: &str,
-        bound_hash: &str,
-    ) -> Result<crate::consent::Spent, crate::consent::SpendError> {
-        self.0.lock().unwrap().spend_one_use(id, bound_hash)
+        kind: crate::consent::Kind,
+        subject: &str,
+        requester: &Requester,
+    ) -> Result<String, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .spend_one_use(kind, subject, requester)
     }
     fn withdraw(&mut self, id: &str) -> Result<bool, String> {
         self.0.lock().unwrap().withdraw(id)
@@ -570,9 +592,11 @@ fn an_approval_is_spent_on_first_use_and_the_second_is_refused() {
     let mut r = rig();
     let p = plan_with(&["a", "b"], "default");
     let rec = approved(&mut r, &p);
-    let frozen = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap();
+    let frozen =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap();
     assert_eq!(frozen.plan, p);
-    let again = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    let again =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap_err();
     assert!(again.contains("already spent"), "{again}");
 }
 
@@ -583,7 +607,7 @@ fn a_request_for_a_plan_with_an_unspent_approval_is_refused_until_it_is_spent() 
     let rec = approved(&mut r, &p);
     let e = create(&r.home, &mut r.consent, &p, "again", t0()).unwrap_err();
     assert!(e.contains("unspent"), "{e}");
-    spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap();
+    spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap();
     create(&r.home, &mut r.consent, &p, "again", t0()).unwrap();
 }
 
@@ -605,7 +629,8 @@ fn a_changed_plan_voids_the_request_unasked_so_there_is_nothing_to_spend() {
     .unwrap();
     assert!(matches!(out, Answered::Voided { .. }), "{out:?}");
     assert_eq!(prompt.asked.get(), 0);
-    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    let e =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap_err();
     assert!(e.contains("not approved"), "{e}");
 }
 
@@ -615,10 +640,12 @@ fn an_approval_older_than_five_minutes_is_refused_and_spent() {
     let p = plan_with(&["a"], "default");
     let rec = approved(&mut r, &p);
     let late = t0() + chrono::Duration::seconds(APPROVAL_FRESH_SECS + 1);
-    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, late).unwrap_err();
+    let e =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, late).unwrap_err();
     assert!(e.contains("freshness"), "{e}");
     // spent by the refusal: it cannot be retried inside the window either
-    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    let e =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap_err();
     assert!(e.contains("already spent"), "{e}");
 }
 
@@ -628,7 +655,7 @@ fn an_approval_exactly_five_minutes_old_is_still_good() {
     let p = plan_with(&["a"], "default");
     let rec = approved(&mut r, &p);
     let edge = t0() + chrono::Duration::seconds(APPROVAL_FRESH_SECS);
-    assert!(spend_approval(&r.home, &mut r.consent, &rec.pending_id, edge).is_ok());
+    assert!(spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, edge).is_ok());
 }
 
 #[test]
@@ -636,6 +663,119 @@ fn an_unapproved_or_open_request_cannot_be_spent() {
     let mut r = rig();
     let p = plan_with(&["a"], "default");
     let rec = made(&mut r, &p);
-    let e = spend_approval(&r.home, &mut r.consent, &rec.pending_id, t0()).unwrap_err();
+    let e =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap_err();
     assert!(e.contains("not been approved"), "{e}");
+}
+
+#[test]
+fn the_request_is_bound_to_the_crates_plan_subject_not_a_summary_line() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = made(&mut r, &p);
+    let subject = crate::consent::restore_plan_subject(&p.hash).unwrap();
+    assert_eq!(subject, format!("plan {}", p.hash));
+    // the fake holds the request under that subject: approving and spending it by subject works
+    let prompt = Scripted::new(Outcome::Approved);
+    answer(&r.home, &mut r.consent, &prompt, &rec.pending_id, &p, t0()).unwrap();
+    let at = r
+        .consent
+        .approved_at(Kind::RestorePlan, &subject, &agentlife())
+        .unwrap();
+    assert_eq!(at, t0());
+}
+
+#[test]
+fn another_requester_cannot_spend_an_approval_and_it_stays_unspent() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let rec = approved(&mut r, &p);
+    let intruder = Requester {
+        role: "overmind".into(),
+        ..agentlife()
+    };
+    let e = spend_approval(&r.home, &mut r.consent, &intruder, &rec.pending_id, t0()).unwrap_err();
+    assert!(e.contains("not spending"), "{e}");
+    // nothing was spent: the rightful requester still can
+    spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap();
+}
+
+#[test]
+fn an_approval_for_another_plan_is_not_found_by_this_plans_subject() {
+    let mut r = rig();
+    let other = plan_with(&["a", "b"], "default");
+    let other_rec = approved(&mut r, &other);
+    let p = plan_with(&["a"], "default");
+    let subject = crate::consent::restore_plan_subject(&p.hash).unwrap();
+    let e = r
+        .consent
+        .spend_one_use(Kind::RestorePlan, &subject, &agentlife())
+        .unwrap_err();
+    assert!(e.contains("no approval"), "{e}");
+    // the other plan's approval is untouched
+    spend_approval(
+        &r.home,
+        &mut r.consent,
+        &agentlife(),
+        &other_rec.pending_id,
+        t0(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_plan_subject_is_exactly_plan_and_sixty_four_lowercase_hex() {
+    use crate::consent::{parse_restore_plan_subject, restore_plan_subject};
+    let h = "ab".repeat(32);
+    let s = restore_plan_subject(&h).unwrap();
+    assert_eq!(s, format!("plan {h}"));
+    assert_eq!(parse_restore_plan_subject(&s).unwrap(), h);
+    for bad in [
+        "ab".repeat(31),
+        "ab".repeat(33),
+        "AB".repeat(32),
+        "zz".repeat(32),
+        String::new(),
+    ] {
+        assert!(restore_plan_subject(&bad).is_err(), "{bad}");
+    }
+    for bad in [
+        h.clone(),
+        format!("Plan {h}"),
+        format!("plan  {h}"),
+        format!("plan {h} "),
+        "restore 1 agents".to_string(),
+    ] {
+        assert!(parse_restore_plan_subject(&bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_fake_refuses_a_restore_request_whose_subject_is_not_the_plan() {
+    let mut r = rig();
+    let p = plan_with(&["a"], "default");
+    let mut req = Request {
+        kind: Kind::RestorePlan,
+        role: ROLE.into(),
+        subject: "restore 1 agents".into(),
+        summary: "s".into(),
+        reason: "r".into(),
+    };
+    let e = r.consent.submit(&req, &Grant::OneUse, &p.hash).unwrap_err();
+    assert!(e.contains("plan <hash>"), "{e}");
+    req.subject = format!("plan {}", "0".repeat(64));
+    let e = r.consent.submit(&req, &Grant::OneUse, &p.hash).unwrap_err();
+    assert!(e.contains("different plan"), "{e}");
+}
+
+#[test]
+fn the_no_backend_spends_nothing() {
+    let mut c = NoBackend;
+    let subject = crate::consent::restore_plan_subject(&"0".repeat(64)).unwrap();
+    assert!(c
+        .spend_one_use(Kind::RestorePlan, &subject, &agentlife())
+        .is_err());
+    assert!(c
+        .approved_at(Kind::RestorePlan, &subject, &agentlife())
+        .is_err());
 }

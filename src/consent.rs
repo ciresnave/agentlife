@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Consent (M4): the shape of OverMind's `user-request` 0.8.0 durable-pending API, as a trait.
+//! Consent (M4): the shape of OverMind's `user-request` durable-pending API, as a trait.
 //!
 //! **Why a trait and not the crate.** `user-request` is not on crates.io (measured 2026-10-08,
 //! `cargo info user-request`: not found), and CireSnave's Sources rule forbids a path or `git =`
@@ -20,6 +20,9 @@
 //! * **Cancel closes the request** (CireSnave: "cancel refuses"). Only `TimedOut` and `Unavailable`
 //!   leave it pending, and `TimedOut` starts a cooldown.
 //! * `withdraw` ends a request; a prompt already up can no longer be approved.
+//! * `spend_one_use(kind, subject, requester)` is the crate's shape (`Store::spend_one_use`): it
+//!   returns the id it spent, or `Err` when **nothing** was spent, and the action must then not run.
+//!   The approval is found by what it covers (kind, subject) and who asked, never by a request id.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,6 +43,42 @@ pub struct Request {
     pub subject: String,
     pub summary: String,
     pub reason: String,
+}
+
+/// Who is asking, as the process table shows it. The caller supplies it: `user-request` 0.11.1 has no
+/// constructor from the process table. agentlife is not a registered lane, so `managed` is `false`,
+/// `session_id` is empty and the prompt says "NOT a registered lane".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Requester {
+    pub role: String,
+    pub session_id: String,
+    pub claude_pid: u32,
+    pub claude_start_secs: u64,
+    pub managed: bool,
+}
+
+const PLAN_SUBJECT_PREFIX: &str = "plan ";
+const PLAN_HASH_LEN: usize = 64;
+
+/// The only subject a [`Kind::RestorePlan`] request may carry: `plan <hash>`, the plan's SHA-256 in
+/// lowercase hex. The real crate refuses anything else, so the fake does too.
+pub fn restore_plan_subject(hash: &str) -> Result<String, String> {
+    if hash.len() != PLAN_HASH_LEN || !hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(format!(
+            "a plan hash is {PLAN_HASH_LEN} lowercase hex digits; got {} characters",
+            hash.chars().count()
+        ));
+    }
+    Ok(format!("{PLAN_SUBJECT_PREFIX}{hash}"))
+}
+
+/// The hash inside a `plan <hash>` subject, or why the subject is not one.
+pub fn parse_restore_plan_subject(subject: &str) -> Result<String, String> {
+    let hash = subject
+        .strip_prefix(PLAN_SUBJECT_PREFIX)
+        .ok_or_else(|| "a restore-plan subject is `plan <hash>`".to_string())?;
+    restore_plan_subject(hash).map(|_| hash.to_string())
 }
 
 /// How long an approval lasts. Plan consent is [`Grant::OneUse`] (CireSnave: "One-shot."): an approval
@@ -86,36 +125,6 @@ pub enum Resolved {
     Closed,
     /// Not answered: the request is still pending.
     StillPending,
-}
-
-/// What spending a one-use approval returns. The store never expires an unspent approval, so the
-/// requester judges freshness from `approved_at` itself (`pending::APPROVAL_FRESH_SECS`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Spent {
-    pub approved_at: DateTime<Utc>,
-    pub bound_hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpendError {
-    /// Nothing was approved under that id.
-    NoApproval,
-    /// Already spent: an approval is used once.
-    AlreadySpent,
-    /// The approval is for a different plan; it is left unspent.
-    Stale,
-    Unavailable(String),
-}
-
-impl std::fmt::Display for SpendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SpendError::NoApproval => write!(f, "no approval exists for that request"),
-            SpendError::AlreadySpent => write!(f, "that approval was already spent"),
-            SpendError::Stale => write!(f, "the approval is for a different plan"),
-            SpendError::Unavailable(why) => write!(f, "consent is unavailable: {why}"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,10 +179,25 @@ pub trait Consent {
     fn submit(&mut self, req: &Request, grant: &Grant, bound_hash: &str) -> Result<String, String>;
     fn begin_answer(&mut self, id: &str, bound_hash: &str) -> Result<Asking, AnswerError>;
     fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String>;
-    /// Spends the one-use approval of request `id`, **before** the action it covers; the action runs
-    /// only on `Ok`. Spent is durable (and audited, in the real store). `bound_hash` is the plan held
-    /// now; a different one is refused and leaves the approval unspent.
-    fn spend_one_use(&mut self, id: &str, bound_hash: &str) -> Result<Spent, SpendError>;
+    /// When the unspent one-use approval for `(kind, subject, requester)` was given. `Err` says why
+    /// there is none (never approved, or already spent). Read it **before** [`Consent::spend_one_use`]:
+    /// the store never expires an approval, so freshness is the requester's to judge
+    /// (`pending::APPROVAL_FRESH_SECS`).
+    fn approved_at(
+        &mut self,
+        kind: Kind,
+        subject: &str,
+        requester: &Requester,
+    ) -> Result<DateTime<Utc>, String>;
+    /// Spends the one-use approval for `(kind, subject, requester)` **before** the action it covers,
+    /// and returns the id it spent. `Err` means nothing was spent and the action must not run. Spent
+    /// is durable (and audited, in the real store).
+    fn spend_one_use(
+        &mut self,
+        kind: Kind,
+        subject: &str,
+        requester: &Requester,
+    ) -> Result<String, String>;
     /// `false` when there was no such request.
     fn withdraw(&mut self, id: &str) -> Result<bool, String>;
     fn pending_ids(&self) -> Result<Vec<String>, String>;
@@ -216,8 +240,11 @@ impl Consent for NoBackend {
     fn resolve(&mut self, _: &Asking, _: Outcome) -> Result<Resolved, String> {
         Err(NO_BACKEND.into())
     }
-    fn spend_one_use(&mut self, _: &str, _: &str) -> Result<Spent, SpendError> {
-        Err(SpendError::Unavailable(NO_BACKEND.into()))
+    fn approved_at(&mut self, _: Kind, _: &str, _: &Requester) -> Result<DateTime<Utc>, String> {
+        Err(NO_BACKEND.into())
+    }
+    fn spend_one_use(&mut self, _: Kind, _: &str, _: &Requester) -> Result<String, String> {
+        Err(NO_BACKEND.into())
     }
     fn withdraw(&mut self, _: &str) -> Result<bool, String> {
         Err(NO_BACKEND.into())
@@ -259,6 +286,8 @@ pub mod fake {
     }
 
     struct Approval {
+        kind: Kind,
+        subject: String,
         role: String,
         bound_hash: String,
         approved_at: DateTime<Utc>,
@@ -328,6 +357,31 @@ pub mod fake {
             }
         }
 
+        /// The id of the unspent approval covering `(kind, subject)` for `requester`'s role, or why
+        /// there is none. The oldest unspent one is used.
+        fn unspent_for(
+            &self,
+            kind: Kind,
+            subject: &str,
+            requester: &Requester,
+        ) -> Result<String, String> {
+            let role = requester.role.trim().to_lowercase();
+            let mut spent = false;
+            for (id, a) in &self.approvals {
+                if a.kind == kind && a.subject == subject && a.role == role {
+                    if !a.spent {
+                        return Ok(id.clone());
+                    }
+                    spent = true;
+                }
+            }
+            Err(if spent {
+                "that approval was already spent".to_string()
+            } else {
+                "no approval exists for that request".to_string()
+            })
+        }
+
         pub fn is_pending(&self, id: &str) -> bool {
             self.records.contains_key(id)
         }
@@ -342,6 +396,13 @@ pub mod fake {
         ) -> Result<String, String> {
             if bound_hash.is_empty() || bound_hash.chars().any(char::is_control) {
                 return Err("bound_hash must be plain and non-empty".into());
+            }
+            // The real crate binds a restore-plan request to its subject: `plan <hash>`, nothing else.
+            if req.kind == Kind::RestorePlan {
+                let in_subject = parse_restore_plan_subject(&req.subject)?;
+                if in_subject != bound_hash {
+                    return Err("the subject names a different plan than the bound hash".into());
+                }
             }
             if self.approvals.values().any(|a| {
                 !a.spent && a.bound_hash == bound_hash && a.role == req.role.trim().to_lowercase()
@@ -432,6 +493,8 @@ pub mod fake {
                     self.approvals.insert(
                         asking.pending_id.clone(),
                         Approval {
+                            kind: asking.request.kind,
+                            subject: asking.request.subject.clone(),
                             role: asking.request.role.trim().to_lowercase(),
                             bound_hash: asking.bound_hash.clone(),
                             approved_at: now,
@@ -460,19 +523,25 @@ pub mod fake {
             }
         }
 
-        fn spend_one_use(&mut self, id: &str, bound_hash: &str) -> Result<Spent, SpendError> {
-            let a = self.approvals.get_mut(id).ok_or(SpendError::NoApproval)?;
-            if a.spent {
-                return Err(SpendError::AlreadySpent);
-            }
-            if a.bound_hash != bound_hash {
-                return Err(SpendError::Stale);
-            }
-            a.spent = true;
-            Ok(Spent {
-                approved_at: a.approved_at,
-                bound_hash: a.bound_hash.clone(),
-            })
+        fn approved_at(
+            &mut self,
+            kind: Kind,
+            subject: &str,
+            requester: &Requester,
+        ) -> Result<DateTime<Utc>, String> {
+            let id = self.unspent_for(kind, subject, requester)?;
+            Ok(self.approvals[&id].approved_at)
+        }
+
+        fn spend_one_use(
+            &mut self,
+            kind: Kind,
+            subject: &str,
+            requester: &Requester,
+        ) -> Result<String, String> {
+            let id = self.unspent_for(kind, subject, requester)?;
+            self.approvals.get_mut(&id).expect("just found").spent = true;
+            Ok(id)
         }
 
         fn withdraw(&mut self, id: &str) -> Result<bool, String> {
