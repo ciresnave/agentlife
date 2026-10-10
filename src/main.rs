@@ -65,6 +65,12 @@ fn main() -> ExitCode {
             flags,
         }) => run_restore(dry_run, json, from_logon, only, priority, flags),
         Ok(Command::Pending(action)) => run_pending(action),
+        Ok(Command::ImportLaneState {
+            write,
+            json,
+            since,
+            park,
+        }) => run_import(write, json, since, park),
         Ok(Command::InstallTask {
             register,
             remove,
@@ -545,6 +551,120 @@ fn run_list(json: bool, all: bool) -> ExitCode {
     }
     for (path, why) in &listing.problems {
         eprintln!("agentlife list: could not use {}: {why}", path.display());
+    }
+    ExitCode::SUCCESS
+}
+
+/// `agentlife import-lane-state`: dry run unless `--write`; reads `.lane-state`, never writes it.
+fn run_import(write: bool, json: bool, since: Option<String>, park: Vec<String>) -> ExitCode {
+    use agentlife::import;
+    let app = match app("import-lane-state") {
+        Ok(a) => a,
+        Err(c) => return c,
+    };
+    let fail = |e: String| {
+        eprintln!("agentlife import-lane-state: {e}");
+        ExitCode::FAILURE
+    };
+    let since = match since.as_deref().map(import::parse_since) {
+        Some(Ok(d)) => d,
+        Some(Err(e)) => return fail(e),
+        None => chrono::Duration::hours(import::DEFAULT_SINCE_HOURS),
+    };
+    let dir = std::path::Path::new(&app.cfg.lane_state_dir);
+    let (states, unparsed) = match import::read_states(dir) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("cannot read {}: {e}", dir.display())),
+    };
+    let existing = match app.registry.list() {
+        Ok(l) => l.records,
+        Err(e) => return fail(e.to_string()),
+    };
+    let outcome = import::decide(&import::Inputs {
+        states: &states,
+        unparsed: &unparsed,
+        existing: &existing,
+        cfg: &app.cfg,
+        now: chrono::Utc::now(),
+        since,
+        park: &park,
+        cwd_exists: &|p| std::path::Path::new(p).is_dir(),
+    });
+    let written = if write {
+        match import::write(&app.registry, &outcome) {
+            Ok(n) => n,
+            Err(e) => return fail(e.to_string()),
+        }
+    } else {
+        0
+    };
+    if write {
+        for imp in &outcome.imports {
+            let _ = app.journal.append(
+                "imported",
+                Some(imp.record.agent_id.as_str()),
+                serde_json::json!({
+                    "role": imp.role,
+                    "name": imp.record.name,
+                    "cwd": imp.record.launch_cwd,
+                    "permission_mode": imp.record.permission_mode,
+                    "intent": imp.record.intent,
+                }),
+            );
+        }
+    }
+    if json {
+        let v = serde_json::json!({
+            "wrote": write,
+            "written": written,
+            "since_hours": since.num_hours(),
+            "imports": outcome.imports.iter().map(|i| serde_json::json!({
+                "role": i.role,
+                "agent_id": i.record.agent_id,
+                "name": i.record.name,
+                "cwd": i.record.launch_cwd,
+                "permission_mode": i.record.permission_mode,
+                "parked": !matches!(i.record.intent, agentlife::registry::Intent::Wanted),
+            })).collect::<Vec<_>>(),
+            "skipped": outcome.skipped,
+            "unmatched_park": outcome.unmatched_park,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
+        );
+    } else {
+        println!(
+            "{} of {} files in {}{}",
+            outcome.imports.len(),
+            states.len() + unparsed.len(),
+            dir.display(),
+            if write {
+                ""
+            } else {
+                "  (dry run: nothing written; --write to import)"
+            }
+        );
+        for i in &outcome.imports {
+            println!(
+                "{} {:<26} mode={:<18} {}{}",
+                if write { "imported" } else { "would import" },
+                i.record.name.as_deref().unwrap_or("-"),
+                i.record.permission_mode.as_deref().unwrap_or("-"),
+                i.record.launch_cwd,
+                if matches!(i.record.intent, agentlife::registry::Intent::Wanted) {
+                    ""
+                } else {
+                    "  [parked]"
+                }
+            );
+        }
+        for s in &outcome.skipped {
+            println!("skipped  {:<26} {:?}: {}", s.role, s.reason, s.detail);
+        }
+        for p in &outcome.unmatched_park {
+            println!("--park {p:?} matched no imported agent");
+        }
     }
     ExitCode::SUCCESS
 }
