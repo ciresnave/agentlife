@@ -72,9 +72,15 @@ returns none).
 * **Grant:** `Grant::OneUse`: no duration, never `Forever`. The request is bound to ONE frozen plan
   (`subject` "plan <hash>", `bound_hash` = the plan hash); a changed plan voids it unasked; a request
   restored after a restart re-prompts; Cancel closes it.
-* **Spend before running:** `pending::spend_approval` calls `Consent::spend_one_use` (the crate's
-  `Store::spend_one_use`) and returns the frozen plan **only on `Ok`**. The restore must run only on that
-  `Ok`. A second approval or request for a plan with an unspent approval is refused by the store.
+* **Spend before running:** `pending::spend_approval` calls `Consent::approved_at` then
+  `Consent::spend_one_use(kind, subject, requester)` (the crate's `Store::find` and
+  `Store::spend_one_use`, 0.11.1) and returns the frozen plan **only on `Ok`**. The restore must run only
+  on that `Ok`; `Err` means nothing was spent. The approval is found by what it covers (`RestorePlan`,
+  subject `plan <hash>` built by `consent::restore_plan_subject`, never by hand) and who asked: another
+  requester's role finds nothing and spends nothing. The caller supplies the `Requester` (no
+  process-table constructor exists in 0.11.1); agentlife's is role `agentlife`, empty `session_id`, its own
+  pid and start time, `managed: false`. A second approval or request for a plan with an unspent approval is
+  refused by the store.
 * **Freshness is agentlife's:** the crate never expires an unspent approval, so `spend_approval` refuses an
   approval whose `approved_at` is **older than 5 minutes** (`pending::APPROVAL_FRESH_SECS`; PM ruling
   2026-10-08). The refused approval is spent all the same: ask again. An `approved_at` more than 60 s in the

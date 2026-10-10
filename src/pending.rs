@@ -16,7 +16,10 @@
 //! `--dry-run` still refuses. Tests drive these functions with [`consent::fake::FakeConsent`].
 
 use crate::atomic::{is_temp_name, write_atomic};
-use crate::consent::{self, AnswerError, Consent, Grant, Kind, Prompt, Request, Resolved, Voided};
+use crate::consent::{
+    self, restore_plan_subject, AnswerError, Consent, Grant, Kind, Prompt, Request, Requester,
+    Resolved, Voided,
+};
 use crate::home::Home;
 use crate::lock::{FileLock, DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_STALE_AFTER};
 use crate::plan::{self, Frozen, Plan};
@@ -222,7 +225,7 @@ pub fn create(
     let req = Request {
         kind: Kind::RestorePlan,
         role: ROLE.into(),
-        subject: format!("restore {} agents", plan.entries.len()),
+        subject: restore_plan_subject(&plan.hash)?,
         summary: format!(
             "start {} agents (plan {})",
             plan.entries.len(),
@@ -437,6 +440,7 @@ pub fn answer(
 pub fn spend_approval(
     home: &Home,
     consent: &mut dyn Consent,
+    requester: &Requester,
     id: &str,
     now: DateTime<Utc>,
 ) -> Result<Frozen, String> {
@@ -458,10 +462,15 @@ pub fn spend_approval(
             frozen.plan.hash, rec.plan_hash
         ));
     }
-    let spent = consent
-        .spend_one_use(id, &frozen.plan.hash)
+    // The subject is built from the frozen plan's hash, so an approval for another plan cannot match.
+    let subject = restore_plan_subject(&frozen.plan.hash)?;
+    let approved_at = consent
+        .approved_at(Kind::RestorePlan, &subject, requester)
         .map_err(|e| format!("not spending {id}: {e}"))?;
-    let age = (now - spent.approved_at).num_seconds();
+    consent
+        .spend_one_use(Kind::RestorePlan, &subject, requester)
+        .map_err(|e| format!("not spending {id}: {e}"))?;
+    let age = (now - approved_at).num_seconds();
     if !(-60..=APPROVAL_FRESH_SECS).contains(&age) {
         return Err(format!(
             "the approval of {id} is {age} s old, outside the {APPROVAL_FRESH_SECS} s freshness window; it was spent and refused: ask again"
