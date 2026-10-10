@@ -540,7 +540,7 @@ fn no_backend_stores_nothing_and_approves_nothing() {
     let home = Home::new(dir.path()).unwrap();
     let p = plan_with(&["a"], "default");
     let err = create(&home, &mut NoBackend, &p, "x", t0()).unwrap_err();
-    assert!(err.contains("not published"), "{err}");
+    assert!(err.contains("no consent backend"), "{err}");
     assert!(list(&home).0.is_empty());
     assert!(!home.plans_dir().exists(), "nothing was frozen either");
 }
@@ -685,19 +685,30 @@ fn the_request_is_bound_to_the_crates_plan_subject_not_a_summary_line() {
     assert_eq!(at, t0());
 }
 
+/// `RestorePlan` is `Scope::AnyRequester` in `user-request`: the plan hash is the binding, not the
+/// process (a restore after a reboot is a new process). So the requester does not narrow an approval,
+/// and the fake must not pretend it does. The approval is spent once whoever spends it.
 #[test]
-fn another_requester_cannot_spend_an_approval_and_it_stays_unspent() {
+fn a_restore_plan_approval_is_matched_by_its_plan_not_by_who_spends_it() {
     let mut r = rig();
     let p = plan_with(&["a"], "default");
     let rec = approved(&mut r, &p);
-    let intruder = Requester {
-        role: "overmind".into(),
+    let later_process = Requester {
+        claude_pid: 9999,
+        claude_start_secs: 1_800_000_000,
         ..agentlife()
     };
-    let e = spend_approval(&r.home, &mut r.consent, &intruder, &rec.pending_id, t0()).unwrap_err();
-    assert!(e.contains("not spending"), "{e}");
-    // nothing was spent: the rightful requester still can
-    spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap();
+    spend_approval(
+        &r.home,
+        &mut r.consent,
+        &later_process,
+        &rec.pending_id,
+        t0(),
+    )
+    .unwrap();
+    let e =
+        spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, t0()).unwrap_err();
+    assert!(e.contains("not spending"), "spent once: {e}");
 }
 
 #[test]

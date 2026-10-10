@@ -241,8 +241,8 @@ fn run_restore(
     ExitCode::SUCCESS
 }
 
-/// `agentlife pending`. Listing and showing only read. Approving and discarding need the consent
-/// backend, which this build does not have: they say so first and change nothing.
+/// `agentlife pending`. Listing and showing only read. Discarding withdraws the request from the
+/// shared `user-request` store; approving is not wired to the prompt yet and says so.
 fn run_pending(action: PendingAction) -> ExitCode {
     let fail = |e: String| {
         eprintln!("agentlife pending: {e}");
