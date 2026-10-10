@@ -165,7 +165,7 @@ fn test_fixture_names_and_files_without_launch_args_are_skipped() {
 fn one_record_per_name_and_directory_and_the_newest_file_wins() {
     let mut a = state("auth", "C:/Projects/auth", Some("auto"), 5);
     a.name = Some("auth".into());
-    let mut b = state("auth-2", "C:/Projects/Auth/", Some("default"), 1);
+    let mut b = state("auth-2", "C:/Projects/auth/", Some("default"), 1);
     b.name = Some("AUTH".into());
     let r = run(vec![a, b]);
     assert_eq!(imported(&r), ["auth-2"]);
@@ -188,7 +188,7 @@ fn the_same_name_in_two_directories_is_two_records() {
 fn a_name_already_in_the_registry_is_not_imported_again() {
     let mut existing = AgentRecord::new(
         AgentId::new("a-1").unwrap(),
-        "C:\\Projects\\overmind",
+        "C:\\Projects\\OverMind",
         hours_ago(30),
     );
     existing.name = Some("OverMind".into());
