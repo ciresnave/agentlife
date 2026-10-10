@@ -42,7 +42,8 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub kind: Kind,
-    /// Who asks, by role. The real crate takes this from the process table, never an argument.
+    /// Who asks, by role. The caller supplies it (see `Requester`); `user-request` 0.11.1 has no
+    /// process-table constructor.
     pub role: String,
     pub subject: String,
     pub summary: String,

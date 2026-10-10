@@ -111,6 +111,9 @@ contract behind the `Consent` trait (at that change the crate was not yet on cra
   approval whose `approved_at` is **older than 5 minutes** (`pending::APPROVAL_FRESH_SECS`; PM ruling
   2026-10-08). The refused approval is spent all the same: ask again. An `approved_at` more than 60 s in the
   future is refused too. Exactly 5 minutes is accepted.
+* **`HelloPrompt` must stay the ONLY production `Prompt`.** agentlife fabricates the `Approval` from the
+  `Outcome` a `Prompt` returns, so any `Prompt` that returns `Approved` grants. Never add another in
+  production code.
 * **Registered lane:** the prompt reads "agentlife (pid N) - NOT a registered lane" unless OverMind's
   registry lists agentlife as a lane. That registration is outside this repo (asked of the PM).
 * The 30-minute window below is superseded; the rest of that section (what an approval covers, who asks)
@@ -128,7 +131,7 @@ cover: any other plan (a changed plan voids the request, unasked), a mode wider 
 (`bypassPermissions` stays PM-only and refused elsewhere), stopping or parking anything, or later wakes.
 Standing permission to launch (an hour, a day, forever) is the separate M5 grant and is not this kind.
 
-**Who asks.** Role `agentlife`, taken from the process table by the crate, run by the logon task, the unlock
+**Who asks.** Role `agentlife`, supplied by agentlife (the crate has no process-table constructor), run by the logon task, the unlock
 trigger or a person at a terminal with no `claude` ancestor. Restore is not meant to be run by a lane; agentlife's own refusal of an agent caller for `restore` is not built yet.
 
 **Shortest window that works.** One-shot is enough. The requester executes in the same process right after

@@ -32,7 +32,9 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   `plan <64 lowercase hex>` (`consent::restore_plan_subject`, `parse_restore_plan_subject`), as the
   real crate requires; it used to be `restore N agents` (the count is still in the summary).
 - The fake enforces the same: it refuses a restore-plan subject that is not `plan <hash>` or names
-  another plan than the bound hash, and finds an approval by kind, subject and requester role.
+  another plan than the bound hash. (It also said the fake finds an approval by requester role; that
+  was wrong for `RestorePlan`, a `Scope::AnyRequester` kind, and was retracted in 0.12.1: the plan hash
+  is the binding, not who spends.)
 - No real backend yet: `consent::installed()` still reports that none is installed, no dependency was
   added, and nothing a person sees or approves changed.
 
