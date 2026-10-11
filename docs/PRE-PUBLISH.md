@@ -18,6 +18,22 @@ The workspace has one version number (`Cargo.toml`, `[workspace.package]`), so a
 `lane-state` 0.11.1 on crates.io is the OverMind-era publish; main's `lane-state` is a later line (0.12.x),
 which will be its first publish from this repository.
 
+### Who owns `lane-state` on crates.io
+
+`lane-state` 0.11.1 was published on 2026-10-09 from the OverMind repository line (its crates.io
+repository field is `ciresnave/OverMind`). Publishing a later version publishes to **that same crate**, so
+whoever publishes must hold a token for an owner of it. Read from
+`https://crates.io/api/v1/crates/lane-state/owners` on 2026-10-11, verbatim:
+
+```
+{"users":[{"kind":"user","id":156881,"login":"ciresnave","url":"https://github.com/ciresnave","name":"CireSnave","avatar":"...","github_username_matches":true}]}
+```
+
+One owner, the user `ciresnave` (CireSnave), and no team. CireSnave is therefore already the owner, and
+**he is the only one who can publish `lane-state`**; any other account, including the `ciresnave-bot`
+account lanes use for git, would be refused unless he adds it as an owner. `lane-restart` and `agentlife`
+do not exist yet, so whoever publishes them first becomes their sole owner.
+
 ### Which consent-crate version agentlife depends on
 
 agentlife depends on **`user-request` = 0.11.1** (`Cargo.toml`: `user-request = "0.11.1"`; `Cargo.lock`

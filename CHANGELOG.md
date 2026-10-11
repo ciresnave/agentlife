@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.7
+
+- **CI: `actions/checkout` re-pinned to the current major** (v7.0.1, full SHA read from upstream). The
+  other two pins (`dtolnay/rust-toolchain` stable, `cargo-deny-action` v2.1.1) were already the newest.
+  `docs/PRE-PUBLISH.md` now records who owns `lane-state` on crates.io.
+
 ## 0.12.6
 
 - **`docs/PRE-PUBLISH.md`**: the checklist for the unpublished crates (`lane-state`, `lane-restart`,
