@@ -124,6 +124,10 @@ USAGE:
         --timeout, default 600 s) until it provably has, then ends exactly that process. Without
         --yes it only prints what it would do. A lane cannot stop itself yet. A pinned agent (the PM,
         or one pinned by hand) needs --confirm with its name. <agent> is an id or a name.
+        NOTE: this ends the process WITHOUT writing the lane's launch spec first, so it does not keep
+        lane-restart's rule that a lane is suspended only if it can be started again. The PM stops a
+        running lane with `lane-restart stop --role <role> --reason <text>`, which writes the spec,
+        then kills, then marks it suspended (RESTART-TOOL-DESIGN.md 14.3).
 
     agentlife restore --dry-run [--json] [--only a,b] [--priority a,b] [--batch N] [--delay S]
                       [--max-running N] [--tabs-per-window N] [--free-ram-floor GB]
@@ -878,6 +882,8 @@ mod tests {
             "waiting",
             "hook.log",
             "AGENTLIFE_HOME",
+            // park|stop says it bypasses the spec-first rule and names the PM's way
+            "lane-restart stop --role <role> --reason <text>",
         ] {
             assert!(USAGE.contains(word), "{word}");
         }
