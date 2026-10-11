@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.9
+
+- **Design: `RESTART-TOOL-DESIGN.md` section 14**, `lane-stop` / `lane-start` with `lane-restart` as the
+  wrapper over them (PM task, CireSnave 2026-10-11). Proposal only: no code, nothing published. Acked by
+  the PM 2026-10-11; the code PRs follow its section 14.13.
+
 ## 0.12.8
 
 - **`persistant` 0.4.1 -> 0.4.4** (latest on crates.io; standing dependency rule). No code change.

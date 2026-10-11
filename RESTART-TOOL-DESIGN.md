@@ -1115,3 +1115,275 @@ three real steps, in order:
 **`--self` acts for real immediately** - no confirmation flag needed, since you're the same process
 making the request (§3). Pass `--dry-run` explicitly first if you want to sanity-check the exact
 command before the first time you actually use it on yourself.
+
+## 14. `lane-stop` and `lane-start`; `lane-restart` becomes the wrapper (DESIGN, 2026-10-11, not built)
+
+**Status: PROPOSAL for PM ack. No code in this PR.** Task from the PM, quoting CireSnave 2026-10-11:
+AgentLife owns agent lifecycle tooling (create / suspend / shut down); `lane-restart` should be a wrapper
+over `lane-stop` + `lane-start` that **saves the old launch parameters at stop and restarts with the
+correct ones**. Everything below was read at `origin/main` 455b068 (0.12.8) unless it says otherwise.
+
+**The invariant (PM's, adopted verbatim):** *a lane may be suspended only if it can be started again.*
+`lane-stop` refuses unless it has durably written a complete launch spec **before** it touches the process.
+
+### 14.1 What exists today (measured, so the design builds on it and not on a guess)
+
+- **Both halves are already library functions.** `crates/lane-restart/src/stop.rs::stop_lane` (verified
+  kill, settle, clock read) and `launch.rs::{LaunchSpec, prepare_launch, launch_and_wait}` (checks, spawn,
+  liveness). `relaunch::kill_and_relaunch_with` is literally `prepare_launch`, `stop_lane`, spawn,
+  `wait_for_liveness` (ARCHITECTURE-LAYERS-SPEC 8b is cited in those files). **What is missing is a CLI and a
+  durable spec**: `main.rs` exposes only `--role R [--self] [--dry-run] [--yes]`, `state`, `assert-idle`,
+  `host`, `approvals`, `models`.
+- **A restart's "parameters" are re-derived from `.lane-state/<role>.json` at the moment of the restart**
+  (`LaunchSpec::from(&LaneState)`), and that file is rewritten by hooks. It is a *liveness* record, not a
+  launch record: it has no value for "never run", and its `launch_args` is "always fresh, never preserved"
+  by design (`state.rs`).
+- **The stale refusal.** `authorize::identify` refuses when `now - updated_at > STALE_STATE_AFTER` (120 s)
+  *before* it asks whether the process is alive; `Refusal::StaleStateFile` is the only answer for a dead
+  lane, so a stopped lane has no launch path. Measured 2026-10-11 ~19:15Z (positive control, same method and clock: `agentlife.json`
+  records pid 21272, which is alive): `baracuda.json` records pid 19184, **not alive**,
+  `updated_by_event: PreToolUse`, `busy: true`, `updated_at` 17:34:25Z. That is a lane that ended
+  mid-turn, with no `Stop`, no HANDOFF assertion and no spec: *crashed*, not suspended. `restart.log`
+  line 18:54:01Z is the refusal this PM task quotes.
+- **"PM only" is a convention today, not a check.** `authorize::decide` for `Target::Other` verifies the
+  *target* (identity, idle, shells) and never the *caller*; `requested_by` is `"pm"` merely because
+  `--self` was absent. Only `--self` compares the caller's claude pid with the state file's. §3's "no lane
+  may restart a different lane" is therefore enforced by the lanes' own discipline plus `--yes`.
+- **Three launch/stop implementations exist**: `lane-restart` (above), `agentlife`'s own
+  `src/launch.rs` + `src/down.rs` (park/stop with a wrap-up request, readiness, an `Intent::Closed` mark)
+  and the PM's `tools/launch-lane.ps1` (a PowerShell mirror of `spawn_launch`, with `--model sonnet` and
+  the dev-channels flag hard-coded). `agentlife`'s root crate depends on `lane-state` only, not on
+  `lane-restart`.
+
+### 14.2 Lifecycle states (derived, never stored as truth except `suspended`)
+
+| state | how it is read | start allowed |
+|---|---|---|
+| `running` | spec or state names a pid whose **pid and start time** match a live `claude` | no (already up) |
+| `suspended` | spec `state: "suspended"`, no live matching process | yes, from the spec |
+| `crashed` | process gone, but spec `state` is `running` or `stopping`, or there is only a `.lane-state` file | yes **if** a complete spec exists (written at the last launch, 14.4) or was imported (14.9); else refused with the import command |
+| `never-run` | no spec, no state file; the role is known only to the registry | yes via `agentlife create` (14.5), never by guess |
+| `unknown` | spec unreadable, malformed or from a newer schema | no; named, never defaulted |
+
+Liveness is decided from the process table (pid + start time), **never from the age of a file**: age says
+only that no hook has fired, and an idle live lane fires none. The 120 s staleness check keeps one job: a
+*stop* of a live process needs fresh evidence of who it is (§2), and a stale-but-alive lane is answered
+"alive, hooks silent: ask it to wrap up", not "stale".
+
+### 14.3 `lane-stop --role R` (suspends)
+
+Allowed callers: **the PM, or the lane itself (`--self`)**. A self-stop ends the caller's own session; with
+`start` PM-only, a lane that suspends itself waits for the PM. (Open question O2.)
+
+Preconditions, all or refuse, in this order; none touches the process:
+
+1. **Caller** (14.8) is the PM, or the recorded process of R for `--self`.
+2. **HANDOFF written:** the lane's HANDOFF file exists and its mtime is later than the session's start and
+   no later than the `assert-idle` claim. Its path and mtime go into the spec. No HANDOFF, no stop; there
+   is deliberately no override flag.
+3. **Idle asserted:** today's §1a gate unchanged (`busy: false`, `subagents_running: 0`,
+   `no_background_shells: true`, no live shell below the process) for another lane; `--self` keeps its
+   no-idle-check rule from §3 but still requires the HANDOFF.
+4. **Identity** verified exactly as `authorize::identify` does (pid, start time, cwd, transcript).
+5. **A launch spec that `prepare_launch` accepts** is *built* from the live lane (14.4), validated (role and
+   name identifiers, no `;` in any element, a non-Opus model), and **written durably**: temp file in the
+   same directory, `fsync`, atomic rename to `.lane-state/<role>.launch.json` with `state: "stopping"`,
+   then read back and compared field by field. A read-back mismatch is a refusal.
+
+Only then: `stop_lane` (the existing verified kill). After the process is confirmed gone, the spec is
+rewritten to `state: "suspended"` (same atomic write) and one ledger line appended (14.7). Exit codes: `0`
+stopped and suspended; `1` refused (the refusal names which precondition); `4` the process was killed but
+the final `suspended` write or ledger append failed (the spec from step 5 is still complete, 14.6).
+
+### 14.4 The launch spec: `C:/Projects/.lane-state/<role>.launch.json`
+
+An **allowlist serialisation of a `LaunchSpec`**, never a copy of the argv (a raw argv can hold a token or
+an `--mcp-config` path). Fields: `schema` (1), `role`, `name`, `cwd`, `model` (the string that will be
+passed, an explicit Sonnet or Haiku), `permission_mode`, `remote_control`, `launch_args` (only what
+`extra_launch_args` already allows, the `ALLOWED_LAUNCH_ARG_FLAGS` table in `relaunch.rs`), `handoff_path`,
+`handoff_mtime`, `state` (`running|stopping|suspended`), `written_at`, `written_by` (`pm|self|launch`),
+`stopped_session_id`, `stopped_pid_start_secs`, `stop_reason` (free text from the lane or PM, capped at
+200 characters, control characters refused), `tool_version`. **Never**: environment values, any argv
+element not on the allowlist, anything from a hook payload other than the fields above.
+
+Two compatibility constraints found in the readers of that directory (all at 455b068):
+
+- It must **not deserialize as a `LaneState`**: `lane_state_writer::all_states` and `import::read_states`
+  take every `*.json` stem as a role and try `LaneState`. So the spec carries no top-level `session_id` or
+  `pid` (hence `stopped_session_id`, `stopped_pid_start_secs`), and `pm-status.py` keeps skipping it (it skips any file without
+  `pid`). A test asserts `state::load(dir, "<role>.launch")` is
+  `Malformed`. `valid_identifier` forbids `.` in roles, so no role can collide with the `<role>.launch` stem.
+- `import::read_states` reports a non-state file in its "bad" list rather than dropping it; with one spec
+  per lane that would be permanent noise. Proposal: it, `models_report` and `all_states` skip `*.launch.json`
+  explicitly (three one-line changes, in the code PRs). **`tools/lane_models.py` is not safe as it stands**: it keeps
+  any JSON object with a `role` key and prints a row, so each spec would appear there as a second row for
+  its lane (a one-line `.launch.json` skip, PM-owned; not harmful, but a duplicate).
+
+**Written at launch too, not only at stop.** `lane-start` writes the spec with `state: "running"` once the
+session is confirmed live, and every later `lane-stop` re-derives it. That is what gives a *crashed* lane
+(the baracuda case) a launch path without an earlier stop: the last launch's spec is the recovery record.
+
+### 14.5 `lane-start --role R --reason <text> [--model sonnet|haiku]`
+
+PM-only (14.8). Refuses without `--reason` (non-empty after trimming, 200 characters, no control
+characters): a launch costs tokens and must name its work. The reason goes to the ledger and **not** into
+the lane's prompt: it would be one more element for the `wt.exe` `;` hazard, and the lane learns its task
+from its HANDOFF and a `[TASK]`, as today.
+
+Source of the spec, first that applies: (a) `<role>.launch.json`, any state except `running` with a live
+process; (b) for a role never run, an `agentlife create` record (below). With neither: refused, naming
+`agentlife create` and `lane-restart specs import` (14.9).
+
+- **Model.** `--model` accepts only `sonnet` or `haiku`; absent means `sonnet`, and the argv always carries
+  the explicit `--model`. A spec whose model is Opus, unknown or unset is **replaced** by `sonnet` and the
+  ledger says `model-pinned:<was>`; a request for Opus is refused. Today `LANE_RESTART_ALLOW_OPUS=1`
+  overrides `prepare_launch`; **`lane-start` ignores it** (CireSnave: *"I can't afford Opus."*; O3).
+- **Permission mode.** PM's rule is `--permission-mode auto`. `pm.json` records `bypassPermissions`; the
+  roster rules (ROSTER-SCHEMA §Validation 4) allowed that for `pm` only. Proposal: `auto` for every role
+  and a PM start of role `pm` refused-and-reported rather than silently downgraded (O1).
+- **Startup dialogs** go through the existing path unchanged: `host_wrapped_argv`, then the user's
+  approvals (§12). `lane-start` adds no new way to answer a dialog.
+- **Prompt:** unchanged, `read <role> HANDOFF and continue`; the agentlife launcher's no-HANDOFF variant
+  stays where it is.
+- **Never-run roles.** There is no new `roles.json`: a third store would drift. The registry already holds
+  `launch_cwd`, `name`, `role` per agent (`registry.rs::AgentRecord`) and agentlife owns *create*. So
+  `agentlife create --role R --cwd <dir>` (PM or a person; a later PR) writes the registry record and a
+  spec with `state: "suspended"`, `written_by: "create"`, so `lane-start` has one thing to read and never
+  consults the registry itself (which would make `lane-restart` depend on `agentlife`).
+
+### 14.6 What a crash leaves behind
+
+The order is *complete spec durable, then kill, then mark suspended*, so there is no point at which a
+killed lane has no spec.
+
+| crash point | on disk | process | reads as | recovery |
+|---|---|---|---|---|
+| before 14.3 step 5 finishes | temp file, maybe; prior spec (or none) | alive | `running` | none needed; temp files named `*.launch.json.tmp-*` are ignored and swept on the next write |
+| after rename, before kill | spec `stopping` | alive | `running` (liveness wins) | re-run `lane-stop` |
+| after kill, before `suspended` | spec `stopping` | gone | `crashed`, startable (the spec was complete before the kill) | `lane-start`, or `lane-stop` finishes the mark |
+| after `suspended`, before ledger | spec `suspended` | gone | `suspended` | ledger gap is reported by `status` as `suspended, no ledger line` |
+| power loss mid-rename | old or new file, never half (same-volume rename) | any | per file | as above |
+
+The invariant therefore holds at every point: *an ended lane with a spec that `prepare_launch` accepts*, or
+the process still alive.
+
+### 14.7 `lane-restart` as the wrapper, and the ledger
+
+`lane-restart --role R [--self] [--dry-run] [--yes]` = the preconditions of 14.3 (with its own HANDOFF
+requirement unchanged: a restart already needs `assert-idle`), `lane-stop`'s spec write and verified kill,
+then `lane-start` from **the spec just written** (not from the state file), then the existing liveness
+wait and tab close. Exit codes unchanged: `0` progress confirmed, `2` awaiting a human at a dialog, `1`
+refused or failed. `--self` keeps working: stop and start run in the same tool process, which is not the
+claude it kills. `--dry-run` prints the spec it *would* write and the argv it would launch.
+
+**Ledger.** Extend the `restart.log` JSON line additively (`skip_serializing_if` on each): `kind`
+(`stop|start|restart`), `caller_role`, `model`, `reason`. Existing lines and existing readers are
+unaffected (a reader that ignores unknown keys; **the readers of `restart.log` outside this repo were not
+enumerated**, which the PM should do before the code PR). `requested_by` becomes the *verified* caller
+(14.8), where today it is a label.
+
+### 14.8 Who is the caller
+
+`lane-start` and `lane-stop` (non-self) must be run by the PM *session*. All lanes authenticate to GitHub
+as `ciresnave-bot`, so identity cannot come from credentials. Reuse what `--self` already does: walk from
+this process to its `claude` ancestor (`lane_state_writer::claude_parent_pid`), find the `.lane-state` file
+whose recorded `pid` and start time equal it, and require that file's role to be `pm`. That is pid-based,
+not environment-based, so a lane cannot claim `LANE_ROLE=pm` from a child process. Limits, stated: a lane
+that edits `.lane-state/pm.json` can forge it (same-user filesystem; the state files are not signed), and a
+lane that can run `wt.exe` can already launch a session without this tool; this closes the *accidental* and
+*prompt-injected* paths, not a hostile local user. The tool's own `--help` says so.
+
+### 14.9 Migration of the existing `.lane-state` files (49 `*.json` there on 2026-10-11, not all lane states)
+
+Nothing is rewritten in place. `lane-restart specs import [--role R] [--dry-run]` (PM-only, read-only on
+`.lane-state/<role>.json`) builds `<role>.launch.json` from a lane's state file for each role whose spec is
+absent, `written_by: "import"`, `state: "crashed"` if the pid is dead else `"running"`, **only if**
+`prepare_launch` accepts it; the rest are listed with the reason (`no launch_args`, `cwd missing`, an
+unreadable file). It never overwrites an existing spec. Hooks keep writing `<role>.json` unchanged; during
+the transition both exist, and **`lane-start` trusts only the spec**. An imported spec's `launch_args` came
+from the OS-read argv of the last launch, which is the best evidence there is, but it is *labelled*
+imported so the first real `lane-stop` or `lane-start` replaces it with a verified one.
+
+### 14.10 `tools/pm-status.py` (PM-owned; this PR does not touch it)
+
+What it needs from `lane-restart`:
+
+- **`lane-restart status [--json]`**: read-only; per role, `state` (14.2), `since`, `by`, `stop_reason`,
+  `handoff_path`, `spec: complete|imported|missing|invalid`, and, for `suspended` and `crashed` roles,
+  `start_command` (the literal `lane-restart start --role R --reason "<task>" `). Schema versioned
+  (`schema: 1`).
+- Or, with no new subcommand, the documented spec file in 14.4 read directly. It can: `pm-status.py` already
+  tolerates unknown files. The subcommand is preferred because the *liveness* join (pid + start time against
+  the process table) is the part a Python script re-implements wrongly: it checks a pid only, and a recycled
+  pid reads as `running`.
+- Today `lanes()` computes `dead` and never prints it; "suspended lanes with the start command" is a new
+  line in the status block, not a rewrite.
+
+### 14.11 Consolidation with OverMind's copy: AgentLife as the single source
+
+Facts: OverMind carries a copy of `crates/lane-restart` (PM-verified byte-identical, `host.rs` `cmp`-equal at
+OverMind 04aa5d2; this session did not repeat that comparison) and its own `RESTART-TOOL-DESIGN.md`.
+CireSnave's rule (*"None of our projects should depend on something by its relative placement on my
+laptop..."*) forbids a path dependency. So:
+
+1. **AgentLife publishes `lane-state` then `lane-restart`** (a CireSnave decision: the publish needs his
+   crates.io token; `lane-state` 0.11.1 is the only one up, and `lane-restart` has a path-plus-version
+   dependency on it, `docs/PRE-PUBLISH.md`).
+2. OverMind then depends on `lane-restart = "<ver>"` from crates.io, deletes its copy, and its design doc
+   becomes a pointer to this one. The binary OverMind builds today is the same program; only the
+   source of the code changes.
+3. **Until published, the copy is a liability and not a fork.** Nothing in this design is back-ported to
+   OverMind, and OverMind's copy is not edited (task constraint). The PM should treat any behaviour change
+   in OverMind's `lane-restart` source as stopped until step 2.
+4. **The design document**: this file is the surviving one. OverMind's keeps §1 to §13 as history with a
+   banner, in OverMind's own PR; that repo is not touched from here.
+
+Risk: until step 1, a second copy cannot drift only if nobody edits it; the check is `cmp -s` of the
+crate's `src/` between the two repos at each merge, which the PM's sweep can run at no token cost.
+
+### 14.12 Test plan
+
+Unit (fakes, as `stop.rs` does today) and real-process (the `tests/` stand-in `claude`, never the real
+lane, never `agentlife restore` against the real store):
+
+1. **The invariant, by mutation (required by the task).** The mutant removes the spec write from
+   `lane-stop` and must make `lane_stop_never_kills_without_a_complete_spec_on_disk` fail: the test drives
+   a fake `SystemFacts` that records `kill`, and asserts at the moment of the kill that the spec file exists,
+   parses, and passes `prepare_launch`. The mutation is applied by an anchored textual replace with
+   `assert count == 1`, and the harness prints that the mutant compiled and that it, not the build, failed
+   the test. A second mutant swaps *write* and *kill* order and must fail the same test.
+2. A failing spec write (read-only directory, full disk fake) leaves the process untouched and exits `1`.
+3. Each row of 14.6 as a test with a crash injected by a fake that panics at that step.
+4. `lane-start`: refuses without `--reason`; refuses Opus and ignores `LANE_RESTART_ALLOW_OPUS`; pins an
+   unset model to `sonnet` and logs `model-pinned`; refuses a non-PM caller (positive control: the PM
+   caller passes the same inputs); refuses a `;` in `cwd`, in `name` and in the stored `launch_args`.
+5. A spec built from an argv containing a secret-shaped `--mcp-config` or an unknown flag does not persist
+   it (the allowlist test, with the dropped flag asserted absent from the file bytes).
+6. The 4775 s case: a dead lane with a spec of age 4775 s is startable; a *live* lane with a 4775 s state
+   file is refused with the "alive, hooks silent" message and not killed.
+7. Each Rust reader of `.lane-state` (`all_states`, `read_states`, `models_report`) given a directory that
+   holds a `*.launch.json` ignores it; `pm-status.py` and `lane_models.py` get a fixture run in their own
+   (PM-owned) change.
+8. `lane-restart` wrapper: same three exit codes; `--self` from a stand-in lane ends that process and starts
+   the new one from the spec, and a mutant that starts from the state file instead fails.
+9. Windows and Linux legs, as every PR here (clippy on both targets).
+
+### 14.13 PR sequence after this one (each needs the PM's ack and a version allocation)
+
+1. `launch.json` type, atomic write, read-back, the `*.launch.json` skips, `status`, and the invariant
+   test with its mutant (no behaviour change to restart yet).
+2. `lane-stop` and `lane-start`, caller check, `--reason`, ledger fields.
+3. `lane-restart` as the wrapper; `specs import`.
+4. `agentlife` consumes them (`park`/`stop`/`restore`), retiring `src/down.rs`'s own kill and
+   `tools/launch-lane.ps1`.
+5. Publication and OverMind's cut-over: CireSnave's, not a lane's.
+
+### 14.14 Questions for CireSnave (through the PM), with a recommendation each
+
+- **O1 permission mode.** `--permission-mode auto` for every role, including the PM (whose live session is
+  `bypassPermissions`)? *Recommend:* auto for lanes; PM refused-and-reported by `lane-start` so it is
+  started by a person, not downgraded unseen.
+- **O2 self-suspend.** May a lane `lane-stop --self` (leave and wait for the PM)? *Recommend:* yes; its HANDOFF
+  gate is the same as a restart's and the PM's start is the guard.
+- **O3 the Opus override.** Remove `LANE_RESTART_ALLOW_OPUS` from the start path entirely? *Recommend:* yes.
+- **O4 first publish** of `lane-state` and `lane-restart` (14.11): his decision and his token.
