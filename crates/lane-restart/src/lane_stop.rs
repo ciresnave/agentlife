@@ -137,6 +137,23 @@ pub struct StopPlan {
     pub will_act: bool,
 }
 
+/// 14.3 step 1 / 14.8: acting on ANOTHER lane (`self_target == false`) is the PM session's alone,
+/// established by process ancestry, never by `LANE_ROLE` or a flag. `--self` is checked by
+/// `authorize::decide` instead (the caller's claude must be the recorded process). Shared by
+/// `stop` and by the restart of another lane, so the two cannot disagree about who the PM is.
+pub fn require_pm_for_other(
+    self_target: bool,
+    caller: Result<String, CallerError>,
+) -> Result<(), StopRefusal> {
+    if self_target {
+        return Ok(());
+    }
+    match caller {
+        Ok(role) if role == PM_ROLE => Ok(()),
+        other => Err(StopRefusal::NotPm(other)),
+    }
+}
+
 /// The HANDOFF precondition (14.3 step 2). `idle_claimed_at` is `None` for `--self`: a lane that
 /// stops itself writes its HANDOFF and stops in one go, so there is no earlier claim to compare.
 pub fn check_handoff(
@@ -184,12 +201,7 @@ pub fn plan_stop(
         return Err(StopRefusal::PmRole);
     }
     validate_reason(req.reason).map_err(StopRefusal::Reason)?;
-    if !req.self_stop {
-        match caller {
-            Ok(role) if role == PM_ROLE => {}
-            other => return Err(StopRefusal::NotPm(other)),
-        }
-    }
+    require_pm_for_other(req.self_stop, caller)?;
     let target = if req.self_stop {
         Target::Myself {
             role: req.role.to_string(),
@@ -623,6 +635,27 @@ mod tests {
             "{r:?}"
         );
         assert!(l.borrow().is_empty(), "no fact was needed to refuse");
+    }
+
+    /// The rule the restart of another lane shares with `stop` (design 14.8). Positive control:
+    /// the PM passes, and `--self` is not this check's business.
+    #[test]
+    fn only_the_pm_session_may_act_on_another_lane() {
+        assert!(require_pm_for_other(false, Ok("pm".into())).is_ok());
+        assert!(require_pm_for_other(true, Err(CallerError::NoClaudeAncestor)).is_ok());
+        for caller in [
+            Ok("synapse".to_string()),
+            Err(CallerError::NoClaudeAncestor),
+            Err(CallerError::Unrecognised(7)),
+        ] {
+            assert!(
+                matches!(
+                    require_pm_for_other(false, caller),
+                    Err(StopRefusal::NotPm(_))
+                ),
+                "a non-PM caller was let through"
+            );
+        }
     }
 
     #[test]
