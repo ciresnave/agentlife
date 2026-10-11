@@ -289,6 +289,14 @@ pub fn read_states(dir: &Path) -> std::io::Result<StateFiles> {
         let Some(stem) = path.file_stem().and_then(|x| x.to_str()) else {
             continue;
         };
+        // a launch spec (`<role>.launch.json`) is not a lane state, and not a malformed one
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".launch.json"))
+        {
+            continue;
+        }
         let stem = stem.to_string();
         let parsed = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())

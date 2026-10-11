@@ -64,6 +64,9 @@ fn all_states(state_dir: &Path) -> Vec<(String, LaneState)> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
+            if crate::spec::is_spec_file_name(&name) {
+                return None;
+            }
             let role = name.strip_suffix(".json")?.to_string();
             let state = crate::state::load(state_dir, &role).ok()?;
             Some((role, state))

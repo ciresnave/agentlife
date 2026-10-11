@@ -2,6 +2,22 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.10
+
+- **A restart writes the lane's launch spec before it kills anything** (RESTART-TOOL-DESIGN.md 14, PR 1).
+  `C:/Projects/.lane-state/<role>.launch.json`: an allowlist serialisation of how the lane is launched
+  (never the raw argv; inline-JSON `--mcp-config` / `--settings` are refused, not stored), written to a temp
+  file, `sync_all`'d, renamed and read back. `kill_and_relaunch` refuses with `SpecNotWritten` when it
+  cannot, and marks the spec `running` after a confirmed start, so a lane that later ends has a launch path.
+  Invariant: a lane may be stopped only if it can be started again.
+- **`lane-restart status [--json]`**: read-only; each role `running` / `suspended` / `crashed` /
+  `never_run` / `unknown`, whether its spec is complete, whether it is startable. Liveness is the process
+  table's (pid and start time), never a file's age.
+- The `*.launch.json` files are skipped by `lane_state_writer::all_states`, `relaunch::models_report` and
+  agentlife's `import::read_states` (they are not lane states).
+- New public API: `lane_restart::spec`, `relaunch::kill_and_relaunch_persisting`,
+  `RelaunchError::SpecNotWritten`. `kill_and_relaunch` and `kill_and_relaunch_with` keep their signatures.
+
 ## 0.12.9
 
 - **Design: `RESTART-TOOL-DESIGN.md` section 14**, `lane-stop` / `lane-start` with `lane-restart` as the

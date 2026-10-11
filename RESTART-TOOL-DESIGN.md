@@ -1326,9 +1326,10 @@ OverMind 04aa5d2; this session did not repeat that comparison) and its own `REST
 CireSnave's rule (*"None of our projects should depend on something by its relative placement on my
 laptop..."*) forbids a path dependency. So:
 
-1. **AgentLife publishes `lane-state` then `lane-restart`** (a CireSnave decision: the publish needs his
-   crates.io token; `lane-state` 0.11.1 is the only one up, and `lane-restart` has a path-plus-version
-   dependency on it, `docs/PRE-PUBLISH.md`).
+1. **AgentLife publishes `lane-state` then `lane-restart`**, by the PM under its standing publish
+   authority (CIRESNAVE-EXPECTATIONS 6.11: dry run, dependency order, each version read back from
+   crates.io; no token is passed around). `lane-state` 0.11.1 is the only one up, and `lane-restart` has a
+   path-plus-version dependency on it (`docs/PRE-PUBLISH.md`).
 2. OverMind then depends on `lane-restart = "<ver>"` from crates.io, deletes its copy, and its design doc
    becomes a pointer to this one. The binary OverMind builds today is the same program; only the
    source of the code changes.
@@ -1376,7 +1377,15 @@ lane, never `agentlife restore` against the real store):
 3. `lane-restart` as the wrapper; `specs import`.
 4. `agentlife` consumes them (`park`/`stop`/`restore`), retiring `src/down.rs`'s own kill and
    `tools/launch-lane.ps1`.
-5. Publication and OverMind's cut-over: CireSnave's, not a lane's.
+5. Publication (the PM's, 6.11) and OverMind's cut-over (a later PM task).
+
+**Status (2026-10-11):** step 1 is `lane-restart status`, `spec.rs` (`<role>.launch.json`: atomic,
+read back, complete-or-refused) and the stop-path write inside `kill_and_relaunch`, with the
+`*.launch.json` skips in the three Rust readers. A restart now refuses (`SpecNotWritten`) when the spec
+cannot be written, before anything is killed. **Not in step 1**, by the PM's scope: the `lane-stop` /
+`lane-start` commands, `specs import` (so a lane that crashed before its first launch under this build,
+such as baracuda on 2026-10-11, shows `crashed`, `spec=missing`, `startable=false` until step 3 or its next
+launch writes one), the caller check and the ledger fields.
 
 ### 14.14 Questions for CireSnave (through the PM), with a recommendation each
 
@@ -1387,3 +1396,7 @@ lane, never `agentlife restore` against the real store):
   gate is the same as a restart's and the PM's start is the guard.
 - **O3 the Opus override.** Remove `LANE_RESTART_ALLOW_OPUS` from the start path entirely? *Recommend:* yes.
 - **O4 first publish** of `lane-state` and `lane-restart` (14.11): his decision and his token.
+
+**Answered, PM, 2026-10-11:** O1 `auto` for every lane, `lane-start` of role `pm` refused-and-reported
+(the PM is started by a person); O2 yes, `lane-stop --self` is allowed; O3 yes, no Opus override on the
+start path; O4 the publish is the PM's, under 6.11.
