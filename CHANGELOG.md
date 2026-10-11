@@ -2,6 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.5
+
+- **`agentlife doctor [--exe <path>]`** (R16, R17): read-only. Reports the installed `lane-restart` host
+  (the configured `host_program`, resolved as a task would) and the `agentlife.exe` at the hook path
+  (`C:/Projects/.claude-hooks/agentlife.exe`) with the version each reports against this build's, as OK,
+  MISMATCH, MISSING or UNREADABLE; exits non-zero unless both are OK; installs nothing.
+
 ## 0.12.4
 
 - **CI hardening.** A `deny` job (`cargo deny check advisories licenses bans sources`, `deny.toml`: a licence

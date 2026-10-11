@@ -69,6 +69,10 @@ pub enum Command {
         since: Option<String>,
         park: Vec<String>,
     },
+    /// `agentlife doctor`: read-only check of the installed host and hook binary (R16, R17).
+    Doctor {
+        exe: Option<String>,
+    },
     Version,
     Help,
 }
@@ -142,6 +146,13 @@ USAGE:
         shows the agent list, asks, and on approval runs the plan at once (an approval is good for 5
         minutes); `pending --prompt` does the same for every open request, stopping at the first run.
         Both refuse an agent session.
+
+    agentlife doctor [--exe <path>]
+        Read-only. Reports the installed lane-restart host (the configured host_program, resolved as a
+        task would) and the agentlife.exe at the path the hooks use (default
+        C:/Projects/.claude-hooks/agentlife.exe) with the version each reports, against the version
+        this build requires: OK, MISMATCH, MISSING or UNREADABLE for each. Exits non-zero unless both
+        are OK. Installs nothing.
 
     agentlife restore --from-logon
     agentlife pending --prompt
@@ -319,6 +330,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 since,
                 park,
             })
+        }
+        "doctor" => {
+            let mut exe = None;
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--exe" => exe = Some(it.next().ok_or("--exe needs a path")?.clone()),
+                    other => return Err(format!("unknown argument to doctor: {other:?}")),
+                }
+            }
+            Ok(Command::Doctor { exe })
         }
         "install-task" => {
             let (mut register, mut remove, mut exe) = (false, false, None);
@@ -679,6 +701,19 @@ mod tests {
         assert!(p(&["install-task", "--register", "--remove"]).is_err());
         assert!(p(&["install-task", "--exe"]).is_err());
         assert!(p(&["install-task", "--now"]).is_err());
+    }
+
+    #[test]
+    fn doctor_takes_only_an_exe_path() {
+        assert_eq!(p(&["doctor"]), Ok(Command::Doctor { exe: None }));
+        assert_eq!(
+            p(&["doctor", "--exe", "C:/a/agentlife.exe"]),
+            Ok(Command::Doctor {
+                exe: Some("C:/a/agentlife.exe".into())
+            })
+        );
+        assert!(p(&["doctor", "--exe"]).is_err());
+        assert!(p(&["doctor", "--fix"]).is_err());
     }
 
     #[test]
