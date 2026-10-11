@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.4
+
+- **CI hardening.** A `deny` job (`cargo deny check advisories licenses bans sources`, `deny.toml`: a licence
+  allow list read from `cargo deny list`, crates.io as the only source, wildcard requirements denied), and
+  every action pinned to a full commit SHA read from its upstream repository.
+
 ## 0.12.2
 
 - **`agentlife restore` runs.** Without `--dry-run` it freezes the plan, prints the agent list, asks the
