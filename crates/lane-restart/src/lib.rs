@@ -17,6 +17,7 @@ pub mod authorize;
 pub mod handlers;
 pub mod host;
 pub mod lane_state_writer;
+pub mod lane_stop;
 pub mod launch;
 pub mod log;
 pub mod notify;

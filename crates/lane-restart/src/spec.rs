@@ -134,7 +134,7 @@ pub struct SpecInputs<'a> {
 const INLINE_CAPABLE_FLAGS: &[&str] = &["--mcp-config", "--settings"];
 
 /// The HANDOFF file the lane writes: `<cwd>/HANDOFF.md`, else `<cwd>/<ROLE>-HANDOFF.md`.
-fn find_handoff(cwd: &str, role: &str) -> Option<(String, DateTime<Utc>)> {
+pub fn find_handoff(cwd: &str, role: &str) -> Option<(String, DateTime<Utc>)> {
     let upper = role.to_ascii_uppercase();
     [
         Path::new(cwd).join("HANDOFF.md"),
