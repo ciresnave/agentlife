@@ -284,20 +284,25 @@ pub struct Deps<'a> {
 /// `PATH` (with `.exe` on Windows). Used only for the preflight: a **spawn** failure is what really
 /// decides.
 pub fn program_exists(name: &str) -> bool {
+    resolve_program(name).is_some()
+}
+
+/// The file `name` names: a path as a path, a bare name the first place on `PATH` it is found.
+pub fn resolve_program(name: &str) -> Option<PathBuf> {
     let p = Path::new(name);
     if p.components().count() > 1 || p.is_absolute() {
-        return p.is_file();
+        return p.is_file().then(|| p.to_path_buf());
     }
     let exts: &[&str] = if cfg!(windows) {
         &["", ".exe", ".cmd"]
     } else {
         &[""]
     };
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| {
-            exts.iter()
-                .any(|e| dir.join(format!("{name}{e}")).is_file())
-        })
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).find_map(|dir| {
+        exts.iter()
+            .map(|e| dir.join(format!("{name}{e}")))
+            .find(|f| f.is_file())
     })
 }
 

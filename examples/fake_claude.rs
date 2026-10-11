@@ -103,12 +103,14 @@ fn main() {
             .append(true)
             .open(log)
         {
-            let _ = writeln!(
-                f,
-                "agent_id={} identity={}",
+            // One `write_all` of the whole line: `writeln!` on a bare `File` is several writes, and
+            // two fakes started together interleave them (a flaky launch_e2e on CI).
+            let line = format!(
+                "agent_id={} identity={}\n",
                 std::env::var("AGENTLIFE_AGENT_ID").unwrap_or_else(|_| "-".into()),
                 present.join(",")
             );
+            let _ = f.write_all(line.as_bytes());
         }
     }
 

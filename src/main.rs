@@ -76,6 +76,7 @@ fn main() -> ExitCode {
             remove,
             exe,
         }) => run_install_task(register, remove, exe),
+        Ok(Command::Doctor { exe }) => run_doctor(exe),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
             ExitCode::FAILURE
@@ -605,6 +606,72 @@ fn wait_for_logon_preconditions() -> Result<(), String> {
 }
 
 /// `agentlife install-task`. Prints by default; `--register` / `--remove` call `schtasks`.
+/// R16 and R17: reads the installed host and hook binary, changes nothing.
+fn run_doctor(exe: Option<String>) -> ExitCode {
+    use agentlife::doctor;
+    let home = match Home::from_env() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("agentlife doctor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cfg = match Config::load(&home, Layer::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("agentlife doctor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let resolve = |name: &str| agentlife::restore::resolve_program(name);
+    let version_line = |p: &std::path::Path| -> Result<String, String> {
+        let mut child = std::process::Command::new(p)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match child.try_wait().map_err(|e| e.to_string())? {
+                Some(status) if status.success() => break,
+                Some(status) => return Err(format!("exited with {status}")),
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("did not answer --version within 10 s".into());
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        let mut text = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut text);
+        }
+        text.lines()
+            .next()
+            .map(str::to_string)
+            .ok_or_else(|| "printed nothing".to_string())
+    };
+    let hook_exe = exe.as_deref().unwrap_or(doctor::HOOK_EXE);
+    let lines = doctor::run(
+        &cfg.host_program,
+        hook_exe,
+        agentlife::version(),
+        &doctor::Probe {
+            resolve: &resolve,
+            version_line: &version_line,
+        },
+    );
+    print!("{}", doctor::render(&lines));
+    if doctor::all_ok(&lines) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCode {
     if (register || remove) && !cfg!(windows) {
         eprintln!("agentlife install-task: Task Scheduler exists only on Windows");

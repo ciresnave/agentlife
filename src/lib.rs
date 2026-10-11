@@ -17,6 +17,7 @@ pub mod clock;
 pub mod config;
 pub mod consent;
 pub mod control;
+pub mod doctor;
 pub mod down;
 pub mod home;
 pub mod hook;
