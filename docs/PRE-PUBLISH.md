@@ -25,10 +25,20 @@ resolves `0.11.1`). That is also the **newest** `user-request` on crates.io (max
 2026-10-09, repository `ciresnave/consent`). It is a crates.io dependency, not a path or git one, so the
 publish does not wait on it. agentlife needs rust 1.95 for it, and the workspace already requires that.
 
-Not the consent crate, but read in the same pass: `persistant` is `0.4.1` in `Cargo.lock` and in
-`Cargo.toml`'s `"0.4.1"` requirement, while crates.io has **0.4.4**. CireSnave's standing rule is every
-dependency on its latest version; `cargo update -p persistant` is a change of its own (its own PR, its own gate),
-and it should land **before** a publish, not after.
+### Version drift to resolve before publish
+
+CireSnave's standing rule: *"I want all of my projects' dependencies on their most
+recent versions at all times."* Measured at `01640b1`, against the crates.io API and the sparse index
+(`index.crates.io/pe/rs/persistant`), both read 2026-10-11 and agreeing:
+
+| Dependency | In `Cargo.lock` | Newest on crates.io | Drift |
+|---|---|---|---|
+| `user-request` (the consent crate) | 0.11.1 | 0.11.1 | none |
+| `persistant` | **0.4.1** | **0.4.4** | yes; `Cargo.toml` says `"0.4.1"`, which cargo reads as `^0.4.1`, so `cargo update -p persistant` takes it |
+
+`cargo update -p persistant` is a change of its own (its own PR, its own gate) and it lands **before** a
+publish, not after. Re-read the newest version at the publish commit: it moves (a relayed figure of 0.4.7
+did not match the index at the time of writing, so verify rather than copy).
 
 ## What must be true
 
@@ -39,7 +49,7 @@ and it should land **before** a publish, not after.
    number (the latter is what `cargo package` writes into the dependents).
 3. **The version is not on crates.io.** A published version cannot be replaced, only yanked. `lane-state`
    must be **above 0.11.1**; main already is.
-4. **Dependencies are the latest crates.io versions** (the `persistant` note above) and **none is a path or
+4. **Dependencies are the latest crates.io versions** (the drift table above) and **none is a path or
    git dependency** except the workspace's own `lane-state`, which cargo rewrites to a version.
 5. **The packages build from their own tarballs.** `cargo package --workspace` is the evidence below.
 6. **The tag and the publish commit are the same commit**, and the tree is clean (`git status --porcelain`
