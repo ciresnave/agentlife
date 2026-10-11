@@ -1,0 +1,351 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! `lane-restart specs import` - RESTART-TOOL-DESIGN.md 14.9: build `<role>.launch.json` from a
+//! lane's `.lane-state/<role>.json` for each role that has no spec, so a lane that ended before
+//! it ever launched under a build that writes specs (baracuda, 2026-10-11) becomes startable.
+//!
+//! Read-only on every state file. Never overwrites an existing spec (even an unreadable one:
+//! that is somebody's evidence). A spec is written only if it is complete, which is to say only
+//! if `prepare_launch` would accept it; the rest are listed with the reason, never dropped.
+//!
+//! An imported spec is labelled `written_by: "import"`: its `launch_args` came from the OS-read
+//! argv of the lane's last launch, the best evidence there is, and the first real stop or start
+//! replaces it with a verified one.
+
+use crate::facts::SystemFacts;
+use crate::launch::LaunchSpec;
+use crate::relaunch::{resolve_launch_model, valid_identifier};
+use crate::spec::{self, SpecInputs, SpecState};
+use crate::state;
+use chrono::{DateTime, Utc};
+use std::path::Path;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// Written, in this state.
+    Written(SpecState),
+    /// `--dry-run`: would be written, in this state.
+    WouldWrite(SpecState),
+    /// A spec file is already there. Left exactly as it is.
+    AlreadyHasSpec,
+    /// Not importable; the reason is the whole answer.
+    Refused(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ImportRow {
+    pub role: String,
+    pub outcome: ImportOutcome,
+}
+
+fn roles_in(dir: &Path) -> Vec<String> {
+    let mut roles = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if spec::is_spec_file_name(&name) {
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            // only files that really are lane states: `status` already lists the others
+            if valid_identifier(stem) && state::load(dir, stem).is_ok() {
+                roles.push(stem.to_string());
+            }
+        }
+    }
+    roles.sort();
+    roles
+}
+
+fn import_one(
+    dir: &Path,
+    role: &str,
+    facts: &dyn SystemFacts,
+    policy_default: &str,
+    dry_run: bool,
+    now: DateTime<Utc>,
+) -> ImportOutcome {
+    if dir.join(format!("{role}{}", spec::FILE_SUFFIX)).exists() {
+        return ImportOutcome::AlreadyHasSpec;
+    }
+    let st = match state::load(dir, role) {
+        Ok(s) => s,
+        Err(e) => return ImportOutcome::Refused(e.to_string()),
+    };
+    if st.launch_args.as_ref().is_none_or(Vec::is_empty) {
+        return ImportOutcome::Refused(
+            "no launch_args recorded: how this lane was launched is unknown, and is not guessed"
+                .to_string(),
+        );
+    }
+    if !Path::new(&st.cwd).is_dir() {
+        return ImportOutcome::Refused(format!("cwd missing: {}", st.cwd));
+    }
+    // Opus is refused, not replaced: an import records what was; `lane-start` is what pins.
+    let model = match resolve_launch_model(st.launch_args.as_ref(), policy_default, false) {
+        Ok(m) => m,
+        Err(e) => return ImportOutcome::Refused(e.to_string()),
+    };
+    let spec_state = if spec::state_process_is_live(&st, facts) {
+        SpecState::Running
+    } else {
+        SpecState::Crashed
+    };
+    let launch = LaunchSpec::from(&st);
+    let file = match spec::build(&SpecInputs {
+        launch: &launch,
+        model: &model,
+        session_id: Some(&st.session_id),
+        pid_start_secs: st.pid_start_secs,
+        state: spec_state,
+        written_by: "import",
+        now,
+    }) {
+        Ok(f) => f,
+        Err(e) => return ImportOutcome::Refused(e.to_string()),
+    };
+    if let Err(e) = file.check() {
+        return ImportOutcome::Refused(e.to_string());
+    }
+    if dry_run {
+        return ImportOutcome::WouldWrite(spec_state);
+    }
+    match spec::write_atomic(dir, &file) {
+        Ok(()) => ImportOutcome::Written(spec_state),
+        Err(e) => ImportOutcome::Refused(e.to_string()),
+    }
+}
+
+/// One row per role with a lane state file (or just `only_role`).
+pub fn import_specs(
+    dir: &Path,
+    only_role: Option<&str>,
+    facts: &dyn SystemFacts,
+    policy_default: &str,
+    dry_run: bool,
+    now: DateTime<Utc>,
+) -> Vec<ImportRow> {
+    let roles = match only_role {
+        Some(r) => vec![r.to_string()],
+        None => roles_in(dir),
+    };
+    roles
+        .into_iter()
+        .map(|role| {
+            let outcome = if !valid_identifier(&role) {
+                ImportOutcome::Refused(format!("not a plain role identifier: {role:?}"))
+            } else {
+                import_one(dir, &role, facts, policy_default, dry_run, now)
+            };
+            ImportRow { role, outcome }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{role_status, Lifecycle};
+    use crate::testing::{log, state_at, RecordingFacts};
+    use tempfile::tempdir;
+
+    fn args(v: &[&str]) -> Option<Vec<String>> {
+        Some(v.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// A state file for `role`, launched from `cwd`, in the shape the hooks write it.
+    fn state_file(dir: &Path, role: &str, cwd: &Path, pid: u32, launch_args: Option<Vec<String>>) {
+        let mut st = state_at(role, "dead-session", "PreToolUse");
+        st.pid = pid;
+        st.pid_start_secs = Some(100);
+        st.cwd = cwd.to_string_lossy().into_owned();
+        st.launch_args = launch_args;
+        std::fs::write(
+            dir.join(format!("{role}.json")),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn baracuda_args() -> Option<Vec<String>> {
+        args(&[
+            "claude.exe",
+            "--dangerously-load-development-channels",
+            "server:claude-peers",
+            "--model",
+            "sonnet",
+        ])
+    }
+
+    fn run(d: &Path, role: Option<&str>, dry: bool) -> Vec<ImportRow> {
+        let facts = RecordingFacts::new(&log());
+        import_specs(d, role, &facts, "sonnet", dry, Utc::now())
+    }
+
+    #[test]
+    fn a_dead_lane_with_launch_args_becomes_a_crashed_startable_spec() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(d.path(), "baracuda", cwd.path(), 19184, baracuda_args());
+        let rows = run(d.path(), None, false);
+        assert_eq!(
+            rows,
+            vec![ImportRow {
+                role: "baracuda".into(),
+                outcome: ImportOutcome::Written(SpecState::Crashed)
+            }]
+        );
+        let s = spec::read(d.path(), "baracuda").unwrap();
+        assert_eq!(s.written_by, "import");
+        assert_eq!(s.state, SpecState::Crashed);
+        assert_eq!(
+            s.launch_args,
+            vec![
+                "--dangerously-load-development-channels",
+                "server:claude-peers"
+            ]
+        );
+        // the point of the whole command: it is startable now, and the state file is untouched
+        let st = role_status(d.path(), "baracuda", &RecordingFacts::new(&log()));
+        assert_eq!((st.state, st.startable), (Lifecycle::Crashed, true));
+    }
+
+    #[test]
+    fn a_live_lane_is_imported_as_running() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(d.path(), "agentlife", cwd.path(), 55, baracuda_args());
+        let mut facts = RecordingFacts::new(&log());
+        facts.live_pid = Some((55, 100));
+        let rows = import_specs(d.path(), None, &facts, "sonnet", false, Utc::now());
+        assert_eq!(rows[0].outcome, ImportOutcome::Written(SpecState::Running));
+    }
+
+    #[test]
+    fn an_existing_spec_is_never_overwritten_not_even_an_unreadable_one() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(d.path(), "baracuda", cwd.path(), 1, baracuda_args());
+        let existing = d.path().join("baracuda.launch.json");
+        std::fs::write(&existing, "not json, somebody's evidence").unwrap();
+        let rows = run(d.path(), None, false);
+        assert_eq!(rows[0].outcome, ImportOutcome::AlreadyHasSpec);
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "not json, somebody's evidence"
+        );
+    }
+
+    #[test]
+    fn no_launch_args_is_listed_with_the_reason_and_nothing_is_written() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(d.path(), "pm", cwd.path(), 1, None);
+        let rows = run(d.path(), None, false);
+        let ImportOutcome::Refused(why) = &rows[0].outcome else {
+            panic!("{rows:?}")
+        };
+        assert!(why.contains("no launch_args"), "{why}");
+        assert!(!d.path().join("pm.launch.json").exists());
+    }
+
+    #[test]
+    fn a_missing_cwd_is_listed_not_written() {
+        let d = tempdir().unwrap();
+        let gone = d.path().join("no-such-dir");
+        state_file(d.path(), "baracuda", &gone, 1, baracuda_args());
+        let rows = run(d.path(), None, false);
+        let ImportOutcome::Refused(why) = &rows[0].outcome else {
+            panic!("{rows:?}")
+        };
+        assert!(why.contains("cwd missing"), "{why}");
+    }
+
+    /// An Opus pin is refused at import, not rewritten into a spec that says Sonnet.
+    #[test]
+    fn an_opus_launch_is_listed_not_laundered_into_a_sonnet_spec() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(
+            d.path(),
+            "baracuda",
+            cwd.path(),
+            1,
+            args(&["claude.exe", "--model", "claude-opus-5-5"]),
+        );
+        let rows = run(d.path(), None, false);
+        assert!(
+            matches!(rows[0].outcome, ImportOutcome::Refused(_)),
+            "{rows:?}"
+        );
+        assert!(!d.path().join("baracuda.launch.json").exists());
+    }
+
+    #[test]
+    fn inline_mcp_json_is_listed_and_never_stored() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(
+            d.path(),
+            "baracuda",
+            cwd.path(),
+            1,
+            args(&[
+                "claude.exe",
+                "--mcp-config",
+                r#"{"env":{"TOKEN":"s3cr3t"}}"#,
+            ]),
+        );
+        let rows = run(d.path(), None, false);
+        assert!(
+            matches!(rows[0].outcome, ImportOutcome::Refused(_)),
+            "{rows:?}"
+        );
+        assert!(!d.path().join("baracuda.launch.json").exists());
+    }
+
+    #[test]
+    fn a_dry_run_reports_and_writes_nothing() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(d.path(), "baracuda", cwd.path(), 1, baracuda_args());
+        let rows = run(d.path(), None, true);
+        assert_eq!(
+            rows[0].outcome,
+            ImportOutcome::WouldWrite(SpecState::Crashed)
+        );
+        assert!(!d.path().join("baracuda.launch.json").exists());
+    }
+
+    #[test]
+    fn only_the_named_role_is_imported() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        state_file(d.path(), "baracuda", cwd.path(), 1, baracuda_args());
+        state_file(d.path(), "other", cwd.path(), 2, baracuda_args());
+        let rows = run(d.path(), Some("baracuda"), false);
+        assert_eq!(rows.len(), 1);
+        assert!(d.path().join("baracuda.launch.json").exists());
+        assert!(!d.path().join("other.launch.json").exists());
+    }
+
+    #[test]
+    fn files_that_are_not_lane_states_are_not_roles() {
+        let d = tempdir().unwrap();
+        std::fs::write(d.path().join("hf-config.json"), "{}").unwrap();
+        std::fs::write(d.path().join("model-policy.json"), r#"{"model":"haiku"}"#).unwrap();
+        assert_eq!(run(d.path(), None, false), vec![]);
+    }
+
+    #[test]
+    fn a_named_role_with_no_state_file_is_listed() {
+        let d = tempdir().unwrap();
+        let rows = run(d.path(), Some("ghost"), false);
+        assert!(
+            matches!(rows[0].outcome, ImportOutcome::Refused(_)),
+            "{rows:?}"
+        );
+    }
+}

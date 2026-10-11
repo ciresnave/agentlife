@@ -1,0 +1,855 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! `lane-restart start` - RESTART-TOOL-DESIGN.md 14.5 and 14.8: start a lane that is not
+//! running, from its launch spec (`<role>.launch.json`), and write the spec back as `running`
+//! once the session is confirmed live.
+//!
+//! The decision is separate from the effect so the refusals are testable without a window:
+//! `plan_start` reads the disk and the process table and either refuses or returns the exact
+//! launch; `execute_start` spawns it and waits.
+//!
+//! Three rules that are the point of the module:
+//! * **PM only, by process, not by claim** (`caller_role`): the caller's `claude` ancestor must
+//!   be the recorded pid and start time of `pm`'s state file. `LANE_ROLE` is never consulted.
+//! * **Never Opus** (CireSnave, 2026-10-08: "I can't afford Opus."): the model is `sonnet` or
+//!   `haiku`; `LANE_RESTART_ALLOW_OPUS` is deliberately not read on this path.
+//! * **Start only a lane that is not running**, and recognise the NEW session as the one that
+//!   is not the dead session recorded in the lane's state file (which is stale, not new).
+
+use crate::facts::SystemFacts;
+use crate::launch::{launch_and_wait_with, prepare_launch, LaunchSpec, LivenessTiming, SpawnFn};
+use crate::relaunch::{valid_identifier, RelaunchError, RelaunchOutcome, StateReader};
+use crate::spec::{self, role_status, Lifecycle, SpecError, SpecFile, SpecState, SpecStore};
+use crate::state;
+use std::path::Path;
+use std::time::Duration;
+
+/// The longest `--reason`, in characters (14.5).
+pub const REASON_MAX_CHARS: usize = 200;
+
+/// The permission mode every started lane gets (the PM's answer to O1, 2026-10-11).
+pub const START_PERMISSION_MODE: &str = "auto";
+
+/// The role that a start may not target (the PM is started by a person; O1).
+pub const PM_ROLE: &str = "pm";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallerError {
+    /// No `claude` ancestor could be established for this process.
+    NoClaudeAncestor,
+    /// The ancestor is a live `claude`, but no lane state file records that pid and start time.
+    Unrecognised(u32),
+    /// More than one state file claims the pid: refuse rather than choose.
+    Ambiguous(u32),
+}
+
+impl std::fmt::Display for CallerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallerError::NoClaudeAncestor => {
+                write!(f, "this command is not running under a claude session")
+            }
+            CallerError::Unrecognised(pid) => write!(
+                f,
+                "claude pid {pid} is not recorded by any lane state file (pid and start time)"
+            ),
+            CallerError::Ambiguous(pid) => {
+                write!(f, "more than one lane state file records claude pid {pid}")
+            }
+        }
+    }
+}
+
+/// The role whose session is running this command: the lane state file whose recorded pid AND
+/// start time equal the caller's `claude` ancestor (14.8). Pid-based, never environment-based,
+/// so a lane cannot claim to be the PM by setting `LANE_ROLE` in a child process.
+///
+/// Limit, stated: a lane that edits `.lane-state/pm.json` can forge this (same user, unsigned
+/// files). It closes the accidental and the prompt-injected path, not a hostile local user.
+pub fn caller_role(
+    dir: &Path,
+    claude_pid: Option<u32>,
+    facts: &dyn SystemFacts,
+) -> Result<String, CallerError> {
+    let pid = claude_pid.ok_or(CallerError::NoClaudeAncestor)?;
+    let mut found: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if spec::is_spec_file_name(&name) {
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if !valid_identifier(stem) {
+                continue;
+            }
+            let Ok(st) = state::load(dir, stem) else {
+                continue;
+            };
+            if st.role == stem && st.pid == pid && spec::state_process_is_live(&st, facts) {
+                found.push(stem.to_string());
+            }
+        }
+    }
+    match found.len() {
+        0 => Err(CallerError::Unrecognised(pid)),
+        1 => Ok(found.remove(0)),
+        _ => Err(CallerError::Ambiguous(pid)),
+    }
+}
+
+/// `--reason`: non-empty after trimming, at most 200 characters, no control characters (14.5).
+/// A launch costs tokens and must name its work.
+pub fn validate_reason(reason: &str) -> Result<String, &'static str> {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Err("--reason is required and must not be empty");
+    }
+    if trimmed.chars().count() > REASON_MAX_CHARS {
+        return Err("--reason is longer than 200 characters");
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("--reason must not contain control characters");
+    }
+    Ok(trimmed.to_string())
+}
+
+/// `--model`: only `sonnet` or `haiku` may be requested (14.5).
+pub fn validate_model_request(model: &str) -> Result<&'static str, String> {
+    match model {
+        "sonnet" => Ok("sonnet"),
+        "haiku" => Ok("haiku"),
+        other => Err(other.to_string()),
+    }
+}
+
+pub struct StartRequest<'a> {
+    pub role: &'a str,
+    pub reason: &'a str,
+    /// `--model`, as typed.
+    pub model: Option<&'a str>,
+}
+
+#[derive(Debug)]
+pub enum StartRefusal {
+    /// The caller is not the PM session; carries what was established about it.
+    NotPm(Result<String, CallerError>),
+    /// A start of role `pm` is refused-and-reported: the PM is started by a person (O1).
+    PmRole,
+    InvalidRole(String),
+    Reason(&'static str),
+    /// A model other than `sonnet` or `haiku` was requested; an Opus request lands here too.
+    Model(String),
+    /// No spec, so no way to know how to launch this lane: never guessed.
+    NoSpec(String),
+    SpecUnusable(String),
+    AlreadyRunning,
+    Launch(RelaunchError),
+}
+
+impl std::fmt::Display for StartRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartRefusal::NotPm(Ok(role)) => write!(
+                f,
+                "only the PM session may start a lane; this command is running under {role:?}"
+            ),
+            StartRefusal::NotPm(Err(e)) => write!(
+                f,
+                "only the PM session may start a lane, and the caller could not be verified: {e}"
+            ),
+            StartRefusal::PmRole => write!(
+                f,
+                "the PM is started by a person, not by lane-restart (it runs in \
+                 bypassPermissions, which a start would silently downgrade)"
+            ),
+            StartRefusal::InvalidRole(r) => write!(f, "not a plain role identifier: {r:?}"),
+            StartRefusal::Reason(why) => write!(f, "{why}"),
+            StartRefusal::Model(m) => write!(
+                f,
+                "--model accepts only sonnet or haiku, not {m:?} (CireSnave: \"I can't afford Opus.\")"
+            ),
+            StartRefusal::NoSpec(why) => write!(
+                f,
+                "no launch spec to start from ({why}); run `lane-restart specs import` to build one \
+                 from the lane's last state file"
+            ),
+            StartRefusal::SpecUnusable(why) => write!(f, "the launch spec cannot be started: {why}"),
+            StartRefusal::AlreadyRunning => write!(
+                f,
+                "the lane is already running (a live claude matches its recorded pid and start time)"
+            ),
+            StartRefusal::Launch(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// A start that passed every check: nothing has been spawned yet.
+#[derive(Debug, Clone)]
+pub struct StartPlan {
+    /// What a launch reads: model in the argv, permission mode `auto`.
+    pub launch: LaunchSpec,
+    /// The model the argv carries.
+    pub model: String,
+    /// The model this start replaced, when the spec's was Opus, unknown or unset.
+    pub pinned_from: Option<String>,
+    pub argv: Vec<String>,
+    pub carries_dev_channels_flag: bool,
+    /// The session recorded by the lane's last state file: dead, and not to be mistaken for the
+    /// new one when the launch is watched for progress.
+    pub previous_session: Option<String>,
+    /// The spec as it will be written back (`running`) once the session is confirmed.
+    pub spec: SpecFile,
+}
+
+/// Every check, in the order of 14.5; nothing is spawned or written.
+pub fn plan_start(
+    dir: &Path,
+    req: &StartRequest,
+    caller: Result<String, CallerError>,
+    facts: &dyn SystemFacts,
+) -> Result<StartPlan, StartRefusal> {
+    match caller {
+        Ok(role) if role == PM_ROLE => {}
+        other => return Err(StartRefusal::NotPm(other)),
+    }
+    if !valid_identifier(req.role) {
+        return Err(StartRefusal::InvalidRole(req.role.to_string()));
+    }
+    if req.role == PM_ROLE {
+        return Err(StartRefusal::PmRole);
+    }
+    validate_reason(req.reason).map_err(StartRefusal::Reason)?;
+    let requested = match req.model {
+        Some(m) => Some(validate_model_request(m).map_err(StartRefusal::Model)?),
+        None => None,
+    };
+
+    let status = role_status(dir, req.role, facts);
+    if status.state == Lifecycle::Running {
+        return Err(StartRefusal::AlreadyRunning);
+    }
+    let from_disk = match spec::read(dir, req.role) {
+        Ok(s) => s,
+        Err(SpecError::NotFound(p)) => return Err(StartRefusal::NoSpec(p)),
+        Err(e) => return Err(StartRefusal::SpecUnusable(e.to_string())),
+    };
+    // An explicit request wins; else the spec's own model, replaced when it is not an explicit
+    // Sonnet or Haiku. `LANE_RESTART_ALLOW_OPUS` is never read here.
+    let mut effective = from_disk.clone();
+    let pinned_from = match requested {
+        Some(m) => {
+            effective.model = m.to_string();
+            None
+        }
+        None => {
+            let (p, was) = from_disk.pinned();
+            effective.model = p.model;
+            was
+        }
+    };
+    effective.permission_mode = Some(START_PERMISSION_MODE.to_string());
+    let launch = effective.launch_spec();
+    let prepared =
+        prepare_launch(&launch, &effective.model, false).map_err(StartRefusal::Launch)?;
+    let previous_session = state::load(dir, req.role).ok().map(|s| s.session_id);
+    Ok(StartPlan {
+        model: effective.model.clone(),
+        pinned_from,
+        argv: prepared.argv,
+        carries_dev_channels_flag: prepared.carries_dev_channels_flag,
+        previous_session,
+        launch,
+        spec: effective,
+    })
+}
+
+/// What `execute_start` achieved.
+#[derive(Debug)]
+pub struct StartResult {
+    pub outcome: RelaunchOutcome,
+    /// Set when the lane is up but its spec could not be marked `running`: the previous spec is
+    /// still complete, so nothing is lost, but the ledger should say so.
+    pub spec_warning: Option<String>,
+}
+
+/// Spawns the launch and waits for real progress, then writes the spec back as `running`
+/// (`written_by: "launch"`). NO kill: a start never stops anything.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_start(
+    plan: &StartPlan,
+    facts: &dyn SystemFacts,
+    state_reader: &dyn StateReader,
+    specs: &dyn SpecStore,
+    timing: &LivenessTiming,
+    spawn: &SpawnFn,
+    sleep: &mut dyn FnMut(Duration),
+    on_awaiting: &mut dyn FnMut(),
+) -> Result<StartResult, RelaunchError> {
+    let outcome = launch_and_wait_with(
+        facts,
+        state_reader,
+        &plan.launch,
+        plan.previous_session.as_deref(),
+        timing,
+        &plan.model,
+        false,
+        spawn,
+        sleep,
+        on_awaiting,
+    )?;
+    let mut running = plan.spec.clone();
+    running.state = SpecState::Running;
+    running.written_by = "launch".to_string();
+    running.written_at = facts.now();
+    running.stopped_session_id = None;
+    running.stopped_pid_start_secs = None;
+    running.tool_version = env!("CARGO_PKG_VERSION").to_string();
+    let spec_warning = specs.write(&running).err().map(|e| e.to_string());
+    Ok(StartResult {
+        outcome,
+        spec_warning,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{build, write_atomic, DirSpecStore, SpecInputs};
+    use crate::testing::{log, state_at, RecordingFacts, ScriptedReader};
+    use chrono::{TimeZone, Utc};
+    use tempfile::tempdir;
+
+    const PM_PID: u32 = 900;
+    const PM_START: u64 = 5000;
+
+    fn launch(role: &str) -> LaunchSpec {
+        LaunchSpec {
+            role: role.to_string(),
+            name: role.to_string(),
+            cwd: "C:/Projects/x".to_string(),
+            permission_mode: Some("bypassPermissions".to_string()),
+            remote_control: false,
+            launch_args: Some(
+                [
+                    "claude.exe",
+                    "--model",
+                    "sonnet",
+                    "--dangerously-load-development-channels",
+                    "server:claude-peers",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
+        }
+    }
+
+    fn write_spec(dir: &Path, role: &str, model: &str, st: SpecState) {
+        let l = launch(role);
+        let mut s = build(&SpecInputs {
+            launch: &l,
+            model: "sonnet",
+            session_id: Some("old-session"),
+            pid_start_secs: Some(1),
+            state: st,
+            written_by: "import",
+            now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
+        })
+        .unwrap();
+        // the model may be anything the file says; `write_atomic` is strict, so write raw
+        s.model = model.to_string();
+        let path = dir.join(format!("{role}.launch.json"));
+        std::fs::write(path, serde_json::to_vec_pretty(&s).unwrap()).unwrap();
+    }
+
+    fn write_state(dir: &Path, role: &str, pid: u32, start: Option<u64>, session: &str) {
+        let mut st = state_at(role, session, "PreToolUse");
+        st.pid = pid;
+        st.pid_start_secs = start;
+        st.busy = true;
+        std::fs::write(
+            dir.join(format!("{role}.json")),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The PM is alive as `PM_PID`; the lane's own pid is dead.
+    fn world() -> (tempfile::TempDir, RecordingFacts) {
+        let d = tempdir().unwrap();
+        write_state(d.path(), "pm", PM_PID, Some(PM_START), "pm-session");
+        let l = log();
+        let mut facts = RecordingFacts::new(&l);
+        facts.live_pid = Some((PM_PID, PM_START));
+        (d, facts)
+    }
+
+    fn pm_caller(dir: &Path, facts: &RecordingFacts) -> Result<String, CallerError> {
+        caller_role(dir, Some(PM_PID), facts)
+    }
+
+    fn req(role: &str) -> StartRequest<'_> {
+        StartRequest {
+            role,
+            reason: "resume after the 17:34Z crash",
+            model: None,
+        }
+    }
+
+    // ---- caller ----------------------------------------------------------------------------
+
+    #[test]
+    fn the_caller_is_the_role_whose_state_file_records_the_claude_ancestor() {
+        let (d, facts) = world();
+        assert_eq!(pm_caller(d.path(), &facts), Ok("pm".to_string()));
+    }
+
+    /// Positive control above; here the pid is a claude but belongs to no state file.
+    #[test]
+    fn an_unrecorded_claude_is_not_a_known_caller() {
+        let (d, facts) = world();
+        assert_eq!(
+            caller_role(d.path(), Some(1234), &facts),
+            Err(CallerError::Unrecognised(1234))
+        );
+    }
+
+    #[test]
+    fn no_claude_ancestor_is_no_caller() {
+        let (d, facts) = world();
+        assert_eq!(
+            caller_role(d.path(), None, &facts),
+            Err(CallerError::NoClaudeAncestor)
+        );
+    }
+
+    /// The pid is the PM's but the process at that pid started at another time: a recycled pid.
+    #[test]
+    fn a_recycled_pid_is_not_the_pm() {
+        let (d, mut facts) = world();
+        facts.live_pid = Some((PM_PID, PM_START + 77));
+        assert_eq!(
+            caller_role(d.path(), Some(PM_PID), &facts),
+            Err(CallerError::Unrecognised(PM_PID))
+        );
+    }
+
+    #[test]
+    fn two_state_files_claiming_one_pid_are_refused_not_chosen_between() {
+        let (d, facts) = world();
+        write_state(d.path(), "agentlife", PM_PID, Some(PM_START), "s");
+        assert_eq!(
+            caller_role(d.path(), Some(PM_PID), &facts),
+            Err(CallerError::Ambiguous(PM_PID))
+        );
+    }
+
+    #[test]
+    fn a_launch_spec_in_the_directory_is_never_a_caller() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        assert_eq!(pm_caller(d.path(), &facts), Ok("pm".to_string()));
+    }
+
+    // ---- reason / model --------------------------------------------------------------------
+
+    #[test]
+    fn a_reason_must_be_present_short_and_free_of_control_characters() {
+        assert_eq!(
+            validate_reason("  resume baracuda  ").unwrap(),
+            "resume baracuda"
+        );
+        assert!(validate_reason("").is_err());
+        assert!(validate_reason("   \t ").is_err());
+        assert!(validate_reason("a\nb").is_err());
+        assert!(validate_reason(&"x".repeat(200)).is_ok());
+        assert!(validate_reason(&"x".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn only_sonnet_and_haiku_may_be_requested() {
+        assert_eq!(validate_model_request("sonnet"), Ok("sonnet"));
+        assert_eq!(validate_model_request("haiku"), Ok("haiku"));
+        assert!(validate_model_request("opus").is_err());
+        assert!(validate_model_request("claude-opus-5-5").is_err());
+        assert!(validate_model_request("").is_err());
+    }
+
+    // ---- plan_start ------------------------------------------------------------------------
+
+    #[test]
+    fn a_suspended_lane_is_planned_with_auto_permission_and_the_specs_flags() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let p = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        let a = &p.argv;
+        let i = a.iter().position(|x| x == "--permission-mode").unwrap();
+        assert_eq!(a[i + 1], "auto", "{a:?}");
+        let m = a.iter().position(|x| x == "--model").unwrap();
+        assert_eq!(a[m + 1], "sonnet");
+        assert!(a.contains(&"--dangerously-load-development-channels".to_string()));
+        assert!(p.carries_dev_channels_flag);
+        assert_eq!(p.pinned_from, None);
+        assert_eq!(a[1], "read baracuda HANDOFF and continue");
+    }
+
+    /// The bypassPermissions the spec recorded is replaced, never carried to a start.
+    #[test]
+    fn the_recorded_bypass_permission_mode_is_not_launched() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let p = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        assert!(!p.argv.iter().any(|a| a.contains("bypass")), "{:?}", p.argv);
+    }
+
+    #[test]
+    fn a_non_pm_caller_is_refused_and_a_pm_caller_passes_the_same_inputs() {
+        let (d, facts) = world();
+        write_state(d.path(), "agentlife", 77, Some(1), "s");
+        let mut f = RecordingFacts::new(&log());
+        f.live_pid = Some((77, 1));
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let as_lane = caller_role(d.path(), Some(77), &f);
+        assert_eq!(as_lane, Ok("agentlife".to_string()));
+        let refused = plan_start(d.path(), &req("baracuda"), as_lane, &f);
+        assert!(matches!(refused, Err(StartRefusal::NotPm(Ok(ref r))) if r == "agentlife"));
+        // control: the PM, same directory, same request
+        assert!(plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_unverifiable_caller_is_refused() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            Err(CallerError::NoClaudeAncestor),
+            &facts,
+        );
+        assert!(matches!(r, Err(StartRefusal::NotPm(Err(_)))));
+    }
+
+    #[test]
+    fn starting_the_pm_is_refused_and_reported() {
+        let (d, facts) = world();
+        write_spec(d.path(), "pm", "sonnet", SpecState::Suspended);
+        let r = plan_start(d.path(), &req("pm"), pm_caller(d.path(), &facts), &facts);
+        assert!(matches!(r, Err(StartRefusal::PmRole)), "{r:?}");
+    }
+
+    #[test]
+    fn a_missing_or_blank_reason_refuses_before_the_spec_is_read() {
+        let (d, facts) = world();
+        // no spec on disk at all: the reason refusal must come first, not NoSpec
+        let mut r = req("baracuda");
+        r.reason = "  ";
+        let out = plan_start(d.path(), &r, pm_caller(d.path(), &facts), &facts);
+        assert!(matches!(out, Err(StartRefusal::Reason(_))), "{out:?}");
+    }
+
+    #[test]
+    fn an_opus_request_is_refused() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let mut r = req("baracuda");
+        r.model = Some("opus");
+        let out = plan_start(d.path(), &r, pm_caller(d.path(), &facts), &facts);
+        assert!(matches!(out, Err(StartRefusal::Model(_))), "{out:?}");
+    }
+
+    /// A spec whose model is Opus is launched on sonnet, and says what it replaced.
+    #[test]
+    fn an_opus_spec_is_pinned_to_sonnet_and_the_replacement_is_reported() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "claude-opus-5-5", SpecState::Crashed);
+        let p = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        assert_eq!(p.model, "sonnet");
+        assert_eq!(p.pinned_from.as_deref(), Some("claude-opus-5-5"));
+        assert!(!p
+            .argv
+            .iter()
+            .any(|a| a.to_ascii_lowercase().contains("opus")));
+    }
+
+    #[test]
+    fn an_explicit_haiku_request_is_used() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let mut r = req("baracuda");
+        r.model = Some("haiku");
+        let p = plan_start(d.path(), &r, pm_caller(d.path(), &facts), &facts).unwrap();
+        assert_eq!(p.model, "haiku");
+        assert_eq!(p.pinned_from, None);
+    }
+
+    #[test]
+    fn a_lane_with_no_spec_is_refused_naming_specs_import() {
+        let (d, facts) = world();
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        );
+        let Err(StartRefusal::NoSpec(_)) = r else {
+            panic!("{r:?}")
+        };
+        assert!(r.unwrap_err().to_string().contains("specs import"));
+    }
+
+    #[test]
+    fn a_running_lane_is_not_started_twice() {
+        let (d, mut facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Running);
+        write_state(d.path(), "baracuda", 55, Some(100), "live-session");
+        facts.live_pid = Some((55, 100));
+        // the PM is not the live pid any more in this facts; the caller is passed verified
+        let r = plan_start(d.path(), &req("baracuda"), Ok("pm".to_string()), &facts);
+        assert!(matches!(r, Err(StartRefusal::AlreadyRunning)), "{r:?}");
+    }
+
+    /// The 4775 s case: the dead lane's state file is hours old and says nothing about being
+    /// startable; its spec is the way back, whatever the file's age.
+    #[test]
+    fn a_crashed_lane_with_an_ancient_state_file_is_startable() {
+        let (d, facts) = world();
+        let mut st = state_at("baracuda", "dead-session", "PreToolUse");
+        st.pid = 19184;
+        st.busy = true;
+        st.updated_at = Utc::now() - chrono::Duration::seconds(4775);
+        std::fs::write(
+            d.path().join("baracuda.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Running);
+        let p = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        assert_eq!(p.previous_session.as_deref(), Some("dead-session"));
+    }
+
+    #[test]
+    fn a_semicolon_in_the_specs_cwd_is_refused_before_anything_is_spawned() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let path = d.path().join("baracuda.launch.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["cwd"] = "C:/a;b".into();
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        );
+        assert!(
+            matches!(
+                r,
+                Err(StartRefusal::Launch(RelaunchError::UnsafeArgument(_)))
+            ),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_newer_schema_spec_is_not_started() {
+        let (d, facts) = world();
+        std::fs::write(
+            d.path().join("baracuda.launch.json"),
+            r#"{"schema": 9, "role": "baracuda"}"#,
+        )
+        .unwrap();
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        );
+        assert!(matches!(r, Err(StartRefusal::SpecUnusable(_))), "{r:?}");
+    }
+
+    // ---- execute_start ---------------------------------------------------------------------
+
+    /// The dead session's own later events must not read as the new session coming up.
+    #[test]
+    fn the_dead_sessions_state_does_not_count_as_the_new_session() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Crashed);
+        write_state(d.path(), "baracuda", 19184, Some(1), "dead-session");
+        let plan = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        let l = log();
+        let mut f = RecordingFacts::new(&l);
+        f.alive = false;
+        // the reader keeps returning the DEAD session at an event past SessionStart
+        let reader = ScriptedReader::new(
+            &l,
+            vec![Some(state_at("baracuda", "dead-session", "PreToolUse"))],
+        );
+        let short = LivenessTiming {
+            progress_timeout: Duration::from_secs(2),
+            total_timeout: Duration::from_secs(5),
+            poll_interval: Duration::from_secs(1),
+        };
+        let out = execute_start(
+            &plan,
+            &f,
+            &reader,
+            &DirSpecStore {
+                dir: d.path().to_path_buf(),
+            },
+            &short,
+            &|_, _| Ok(()),
+            &mut |_| {},
+            &mut || {},
+        );
+        assert!(
+            matches!(out, Err(RelaunchError::SessionNeverProcessedPrompt)),
+            "{out:?}"
+        );
+        // and the spec was NOT marked running
+        assert_eq!(
+            spec::read(d.path(), "baracuda").unwrap().state,
+            SpecState::Crashed
+        );
+    }
+
+    #[test]
+    fn a_confirmed_start_writes_the_spec_back_as_running_by_launch() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "claude-opus-5-5", SpecState::Crashed);
+        let plan = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        let l = log();
+        let f = RecordingFacts::new(&l);
+        let reader = ScriptedReader::new(
+            &l,
+            vec![Some(state_at(
+                "baracuda",
+                "new-session",
+                "UserPromptSubmit",
+            ))],
+        );
+        let r = execute_start(
+            &plan,
+            &f,
+            &reader,
+            &DirSpecStore {
+                dir: d.path().to_path_buf(),
+            },
+            &LivenessTiming::default(),
+            &|_, _| Ok(()),
+            &mut |_| {},
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(r.outcome, RelaunchOutcome::Relaunched);
+        assert_eq!(r.spec_warning, None);
+        let s = spec::read(d.path(), "baracuda").unwrap();
+        assert_eq!(s.state, SpecState::Running);
+        assert_eq!(s.written_by, "launch");
+        assert_eq!(s.model, "sonnet", "the pinned model is what is recorded");
+        assert_eq!(s.permission_mode.as_deref(), Some("auto"));
+        // a start never kills
+        assert!(
+            !l.borrow().iter().any(|e| e.starts_with("kill")),
+            "{:?}",
+            l.borrow()
+        );
+    }
+
+    #[test]
+    fn a_spawn_failure_leaves_the_spec_as_it_was() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let plan = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        )
+        .unwrap();
+        let l = log();
+        let f = RecordingFacts::new(&l);
+        let reader = ScriptedReader::new(&l, vec![None]);
+        let out = execute_start(
+            &plan,
+            &f,
+            &reader,
+            &DirSpecStore {
+                dir: d.path().to_path_buf(),
+            },
+            &LivenessTiming::default(),
+            &|_, _| Err(RelaunchError::Spawn("no wt".into())),
+            &mut |_| {},
+            &mut || {},
+        );
+        assert!(matches!(out, Err(RelaunchError::Spawn(_))));
+        assert_eq!(
+            spec::read(d.path(), "baracuda").unwrap().state,
+            SpecState::Suspended
+        );
+    }
+
+    #[test]
+    fn a_complete_spec_round_trips_through_plan_and_the_atomic_write() {
+        // control for the raw writes above: a strict write of the same shape is accepted
+        let d = tempdir().unwrap();
+        let l = launch("baracuda");
+        let s = build(&SpecInputs {
+            launch: &l,
+            model: "sonnet",
+            session_id: None,
+            pid_start_secs: None,
+            state: SpecState::Suspended,
+            written_by: "import",
+            now: Utc::now(),
+        })
+        .unwrap();
+        write_atomic(d.path(), &s).unwrap();
+        assert_eq!(spec::read(d.path(), "baracuda").unwrap(), s);
+    }
+}

@@ -24,6 +24,19 @@ pub struct Entry<'a> {
     /// `claude --resume ...`).
     pub outcome: String,
     pub acted: bool,
+    /// RESTART-TOOL-DESIGN.md 14.7: added additively, so lines written before them (and readers
+    /// that ignore unknown keys) are unaffected. `stop`, `start`, `restart` or `import`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'a str>,
+    /// The verified role of the caller (14.8), when it could be established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_role: Option<&'a str>,
+    /// The model a start passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<&'a str>,
+    /// Why a lane was started (required by `lane-start`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -63,7 +76,41 @@ mod tests {
             role,
             outcome: outcome.to_string(),
             acted,
+            kind: None,
+            caller_role: None,
+            model: None,
+            reason: None,
         }
+    }
+
+    /// Lines written before the 14.7 fields must not grow them: a reader that treats an unknown
+    /// key as an error would otherwise break on every old-style entry.
+    #[test]
+    fn an_entry_without_the_new_fields_serialises_exactly_as_before() {
+        let line = serde_json::to_value(sample("overmind", "x", false)).unwrap();
+        let keys: Vec<&str> = line
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for k in ["kind", "caller_role", "model", "reason"] {
+            assert!(!keys.contains(&k), "{k} serialised when None: {keys:?}");
+        }
+    }
+
+    #[test]
+    fn the_start_fields_are_written_when_set() {
+        let mut e = sample("baracuda", "started", true);
+        e.kind = Some("start");
+        e.caller_role = Some("pm");
+        e.model = Some("sonnet");
+        e.reason = Some("resume after crash");
+        let v = serde_json::to_value(e).unwrap();
+        assert_eq!(v["kind"], "start");
+        assert_eq!(v["caller_role"], "pm");
+        assert_eq!(v["model"], "sonnet");
+        assert_eq!(v["reason"], "resume after crash");
     }
 
     #[test]
