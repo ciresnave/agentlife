@@ -2,6 +2,15 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.12
+
+- **`lane-restart host` no longer abandons its helper threads.** The PTY reader sat blocked in `ReadFile` for the
+  rest of the process and the resize thread, which owns the ConPTY master, never ended at all, so the pseudo
+  console was never closed. The resize thread now stops when the child has exited; dropping the master closes
+  the ConPTY and ends the reader, which the host waits for (3 s bound). `HostOutcome` gains
+  `abandoned_threads`: the helpers still running at return, by name (a blocked outer stdin read cannot be
+  cancelled through a generic `Read` and is reported as `outer-input`). Behaviour on the wire is unchanged.
+
 ## 0.12.11
 
 - **`lane-restart start --role R --reason <text> [--model sonnet|haiku] [--dry-run]`**

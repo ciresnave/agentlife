@@ -191,6 +191,38 @@ pub fn check_and_inject(
 
 pub struct HostOutcome {
     pub child_exit_code: Option<u32>,
+    /// Helper threads that were still running when the host returned, by
+    /// name. Empty means every thread this run started has ended. A name
+    /// here is a measured fact about this run, not a guess: see
+    /// `LiveFlag`.
+    pub abandoned_threads: Vec<&'static str>,
+}
+
+/// How long the host waits, after the child has exited and the ConPTY has
+/// been closed, for the PTY reader thread to see end-of-file and end.
+const READER_END_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// True while a helper thread is running. The thread owns the `LiveFlag`
+/// and clears the shared bool when the closure returns (or unwinds), so
+/// the host can read back whether a thread really ended, instead of
+/// assuming it did.
+struct LiveFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl LiveFlag {
+    fn new() -> (LiveFlag, Arc<std::sync::atomic::AtomicBool>) {
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        (LiveFlag(Arc::clone(&alive)), alive)
+    }
+}
+
+impl Drop for LiveFlag {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn is_alive(flag: &Arc<std::sync::atomic::AtomicBool>) -> bool {
+    flag.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Runs the real relay: opens a ConPTY sized `(cols, rows)`, spawns
@@ -300,10 +332,12 @@ fn run_with_handlers_and_window(
     // never receives anything, the child can sit blocked on its own CPR
     // forever with a blank screen. `on_raw_io` records every read here so
     // a stuck run shows whether this thread ever received a single byte.
+    let (input_flag, input_alive) = LiveFlag::new();
     {
         let pty_writer = Arc::clone(&pty_writer);
         let on_raw_io = Arc::clone(&on_raw_io);
         std::thread::spawn(move || {
+            let _alive = input_flag;
             let mut buf = [0u8; 4096];
             loop {
                 match outer_input.read(&mut buf) {
@@ -325,24 +359,35 @@ fn run_with_handlers_and_window(
     // Best-effort resize forwarding: poll our own inherited console size
     // and forward changes to the ConPTY. Never fatal if it fails - the
     // relay itself doesn't depend on it.
-    {
+    // ⚠️ This thread OWNS the pty master, so the ConPTY stays open for as
+    // long as it runs. It ends when the host drops `stop_resize` (or sends
+    // on it), which is what lets the master close - and the reader below
+    // see end-of-file - once the child is gone.
+    let (stop_resize, stop_resize_rx) = std::sync::mpsc::channel::<()>();
+    let (resize_flag, resize_alive) = LiveFlag::new();
+    let resize_thread = {
         let master_for_resize = pair.master;
         let mut last = (cols, rows);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(500));
-            if let Some((c, r)) = current_console_size() {
-                if (c, r) != last {
-                    let _ = master_for_resize.resize(PtySize {
-                        rows: r,
-                        cols: c,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
-                    last = (c, r);
+        std::thread::spawn(move || {
+            let _alive = resize_flag;
+            // Ends on a stop message or when the host drops the sender.
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stop_resize_rx.recv_timeout(Duration::from_millis(500))
+            {
+                if let Some((c, r)) = current_console_size() {
+                    if (c, r) != last {
+                        let _ = master_for_resize.resize(PtySize {
+                            rows: r,
+                            cols: c,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                        last = (c, r);
+                    }
                 }
             }
-        });
-    }
+        })
+    };
 
     // ⚠️ THE CPR-BLOCKING INVESTIGATION'S OTHER FINDING (2026-09-18,
     // scratch-probe iteration 4): ConPTY can keep its own internal
@@ -352,14 +397,17 @@ fn run_with_handlers_and_window(
     // case. Fixed the same way the probe was: the blocking read lives on
     // its own thread, sending chunks over a channel; this thread polls
     // that channel with a short timeout and separately checks
-    // `child.try_wait()` for the real exit signal, abandoning (never
-    // joining) the reader thread once the child is confirmed gone - it may
-    // still be stuck in `ReadFile` forever, and that's fine to leave
-    // behind for the rest of the process's own life.
+    // `child.try_wait()` for the real exit signal. Once the child is gone
+    // the pty master is dropped (see the resize thread), which closes the
+    // ConPTY and ends the reader's `ReadFile`; the host waits a bounded
+    // `READER_END_TIMEOUT` for that and reports (never hides) a reader that
+    // is still blocked, in `HostOutcome::abandoned_threads`.
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (reader_flag, reader_alive) = LiveFlag::new();
     {
         let on_raw_io = Arc::clone(&on_raw_io);
         std::thread::spawn(move || {
+            let _alive = reader_flag;
             let mut buf = [0u8; 4096];
             loop {
                 match pty_reader.read(&mut buf) {
@@ -433,13 +481,35 @@ fn run_with_handlers_and_window(
     }
 
     let status = child.wait().ok();
+
+    // Teardown. The resize thread owns the pty master: stop it, and its
+    // exit closes the ConPTY, which is what ends the reader's blocking
+    // read. Then give the reader a bounded time to say so; whatever is
+    // still running after that is reported, never silently left.
+    drop(stop_resize);
+    let _ = resize_thread.join();
+    let deadline = Instant::now() + READER_END_TIMEOUT;
+    while is_alive(&reader_alive) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     // Joined so the process can't exit mid-ask. The relay has stopped by
     // now, so waiting here stalls nothing.
     if let Some(t) = unhandled_thread {
         let _ = t.join();
     }
+    let mut abandoned_threads = Vec::new();
+    if is_alive(&reader_alive) {
+        abandoned_threads.push("pty-reader");
+    }
+    if is_alive(&input_alive) {
+        abandoned_threads.push("outer-input");
+    }
+    if is_alive(&resize_alive) {
+        abandoned_threads.push("resize");
+    }
     Ok(HostOutcome {
         child_exit_code: status.and_then(|s| s.exit_code().into()),
+        abandoned_threads,
     })
 }
 
@@ -1034,6 +1104,74 @@ mod tests {
             "real child output must reach the outer side - got {text:?}"
         );
         assert!(outcome.child_exit_code.is_some());
+    }
+
+    /// The PTY reader used to be abandoned in `ReadFile`, and the resize
+    /// thread (which owns the pty master) never ended at all. Read back,
+    /// per run, that no helper thread this run started is still alive.
+    #[cfg(windows)]
+    #[test]
+    fn no_helper_thread_outlives_a_host_run() {
+        for run in 0..3 {
+            let child_argv = vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo LEAK_PROBE".to_string(),
+            ];
+            let outcome = run_with_handlers(
+                "overmind",
+                &child_argv,
+                Vec::new(),
+                80,
+                25,
+                Cursor::new(b"[1;1R".to_vec()),
+                std::io::sink(),
+                |_| {},
+                |_| {},
+            )
+            .expect("run_with_handlers failed");
+            assert!(
+                outcome.abandoned_threads.is_empty(),
+                "run {run}: helper threads still alive after return: {:?}",
+                outcome.abandoned_threads
+            );
+        }
+    }
+
+    /// An outer input that is still blocked cannot be cancelled through a
+    /// generic `Read`; the host must say so rather than report a clean run.
+    /// Positive control for `no_helper_thread_outlives_a_host_run`: the
+    /// same run, with one thread deliberately kept alive.
+    #[cfg(windows)]
+    #[test]
+    fn a_blocked_outer_input_is_reported_as_abandoned() {
+        let (keep_open, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        // Preloaded with the terminal's CPR reply (ConPTY holds the child's
+        // output until it gets one), then blocks for good.
+        let outer_input = ChanReader {
+            rx,
+            pending: b"[1;1R".to_vec(),
+            pos: 0,
+        };
+        let child_argv = vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo LEAK_PROBE".to_string(),
+        ];
+        let outcome = run_with_handlers(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            outer_input,
+            std::io::sink(),
+            |_| {},
+            |_| {},
+        )
+        .expect("run_with_handlers failed");
+        assert_eq!(outcome.abandoned_threads, vec!["outer-input"]);
+        drop(keep_open);
     }
 
     #[cfg(windows)]
