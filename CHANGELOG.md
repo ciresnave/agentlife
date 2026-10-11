@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.14
+
+- **Restarting another lane is the PM session's alone, as `stop` is** (the PM's ruling of 2026-10-11, RESTART-TOOL-
+  DESIGN.md 14.7 / 14.8). `lane-restart --role R` without `--self` is refused unless the caller's `claude`
+  session is the one `pm`'s state file records (pid and start time; `LANE_ROLE` is not consulted), and the
+  refusal is logged and happens before anything about the target is read, a dry run included. `--self` is
+  unchanged. Before this, a restart of another lane was labelled `pm` in `restart.log` whoever ran it; all 475
+  lines in `restart.log` at 2026-10-11 20:25Z carry `self` (453) or `pm` (22), so the log cannot show whether any
+  `pm` line was a non-PM caller (the label was never checked), only that no other role was ever recorded.
+  Breaking for anything that restarts another lane from outside the PM session, such as a person at a plain
+  terminal, which has no `claude` ancestor to verify.
+- `lane_stop::require_pm_for_other` is the one check `stop` and the restart share.
+
 ## 0.12.13
 
 - **`lane-restart stop --role R --reason <text> [--self] [--dry-run] [--yes]`** (RESTART-TOOL-DESIGN.md 14.3,
