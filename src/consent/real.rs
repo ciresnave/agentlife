@@ -69,6 +69,16 @@ fn to_ur_requester(r: &Requester) -> ur::Requester {
     }
 }
 
+fn from_ur_requester(r: &ur::Requester) -> Requester {
+    Requester {
+        role: r.role.clone(),
+        session_id: r.session_id.clone(),
+        claude_pid: r.claude_pid,
+        claude_start_secs: r.claude_start_secs,
+        managed: r.managed,
+    }
+}
+
 fn to_ur_grant(g: &Grant) -> ur::Grant {
     match g {
         Grant::OneUse => ur::Grant::OneUse,
@@ -212,6 +222,7 @@ impl Consent for UserRequestBackend {
         };
         match store.begin_answer(id, bound_hash, &AuditOnly) {
             Ok(a) => Ok(Asking {
+                requester: from_ur_requester(&a.request.requester),
                 pending_id: a.pending_id,
                 request: Request {
                     kind: from_ur_kind(a.request.kind).map_err(AnswerError::Unavailable)?,
@@ -328,19 +339,21 @@ impl Consent for UserRequestBackend {
     }
 }
 
-/// Asks the person through `user-request`'s own channel (Windows Hello). `requester` is who the
-/// prompt names: this process.
+/// Asks the person through `user-request`'s own channel (Windows Hello). The prompt names the
+/// requester **stored with the pending request** (`Asking::requester`), never this process.
 pub struct HelloPrompt {
-    pub requester: Requester,
     pub wait: Duration,
 }
 
 impl HelloPrompt {
-    pub fn new(requester: Requester) -> Self {
-        Self {
-            requester,
-            wait: PROMPT_WAIT,
-        }
+    pub fn new() -> Self {
+        Self { wait: PROMPT_WAIT }
+    }
+}
+
+impl Default for HelloPrompt {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -366,6 +379,11 @@ fn hello_disabled_for_tests() -> bool {
     cfg!(debug_assertions) && std::env::var_os(NO_HELLO_ENV).is_some_and(|v| !v.is_empty())
 }
 
+/// The request the Hello dialog shows: the stored record's requester, not this process's.
+pub(crate) fn hello_request(asking: &Asking) -> ur::Request {
+    to_ur_request(&asking.request, &asking.requester)
+}
+
 impl Prompt for HelloPrompt {
     fn ask(&self, asking: &Asking) -> Outcome {
         use ur::Channel;
@@ -373,7 +391,7 @@ impl Prompt for HelloPrompt {
             return Outcome::Unavailable;
         }
         let channel = ur::HelloChannel::new(ur::hello::HelloConsent::default());
-        let req = to_ur_request(&asking.request, &self.requester);
+        let req = hello_request(asking);
         outcome_from_channel(&channel.present(&req, &to_ur_grant(&asking.grant), self.wait))
     }
 }
