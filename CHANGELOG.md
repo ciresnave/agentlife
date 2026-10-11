@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.15
+
+- **PR 4 of RESTART-TOOL-DESIGN.md 14.13, the PM's option C: documentation only.** `agentlife park|stop`'s help
+  and `src/down.rs`'s module docs now say that it ends the process without writing the lane's launch spec, so it
+  does not keep `lane-restart stop`'s rule that a lane is suspended only if it can be started again, and that
+  the PM stops a running lane with `lane-restart stop`. No behaviour changed.
+- **Not done, and why:** refusing `park|stop`'s kill when no complete spec exists needs `lane_restart::spec`; the
+  root crate depends on `lane-state` only, and `restore` launches from the registry, not the spec. A person-
+  caller path for `lane-restart stop|start` was not specified (14.8: the PM session's alone), so agentlife does
+  not call them.
+- `tools/launch-lane.ps1` (the PM's) is named only in prose here (CHANGELOG, RESTART-TOOL-DESIGN.md,
+  docs/RESTORE-GAP-ANALYSIS.md); no code, script or build step in this repository invokes it.
+
 ## 0.12.14
 
 - **Restarting another lane is the PM session's alone, as `stop` is** (the PM's ruling of 2026-10-11, RESTART-TOOL-

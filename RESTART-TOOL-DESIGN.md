@@ -1405,6 +1405,14 @@ file's `updated_at` (the idle gate already requires `no_background_shells`, whic
 now launches from the spec it wrote, and `requested_by` is the verified caller. **Not built:** refusing a restart of
 another lane by a non-PM caller (it is recorded, not refused: PM's call), PR 4.
 
+**Status (PR 4, 0.12.15), the PM's ruling "option C" (2026-10-11):** no code change to `down.rs`'s kill or to the launch
+path. `tools/launch-lane.ps1` is not referenced by any code, script or build step in this repository (`git grep -i
+launch-lane` at `eeefe08`: CHANGELOG, this document and `docs/RESTORE-GAP-ANALYSIS.md`, all prose); the PM deletes it.
+Why not more: a person-caller path for `stop`/`start` was not specified (14.8 makes them the PM session's alone), and
+consuming `lane-restart` from the root crate is either an unpublished dependency or a shell-out. `agentlife park|stop`
+keeps its person-only consent and now says in its help and module docs that it bypasses the spec-first invariant.
+A refusal of its kill when no complete spec exists needs `lane_restart::spec`, which the root crate does not depend on.
+
 ### 14.14 Questions for CireSnave (through the PM), with a recommendation each
 
 - **O1 permission mode.** `--permission-mode auto` for every role, including the PM (whose live session is

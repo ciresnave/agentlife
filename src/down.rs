@@ -19,6 +19,15 @@
 //! 6. **Record the intent, then stop**: `Closed` and a `closed` journal entry are written *before*
 //!    the process is touched, the identity is re-read immediately before the kill, and if the kill
 //!    fails or the process does not go, the intent is **put back** and the failure journalled.
+//!
+//! **This is not `lane-restart stop`, and it does not keep that command's invariant.** A lane is
+//! suspended by `lane-restart stop` only after its complete launch spec (`<role>.launch.json`) is
+//! written and read back (RESTART-TOOL-DESIGN.md 14.3); the kill here does not write or check one.
+//! agentlife's own way back is the registry record that `restore` launches from, not that spec. The
+//! PM stops a running lane with `lane-restart stop`; a person's `agentlife park|stop` is the
+//! graceful, person-consented path described above. Making this kill refuse when no complete spec
+//! exists needs `lane_restart::spec` (this crate depends on `lane-state` only), so it is not done
+//! here: see the 0.12.15 CHANGELOG entry.
 
 use crate::caller::Caller;
 use crate::clock::Clock;
