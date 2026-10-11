@@ -1387,6 +1387,15 @@ cannot be written, before anything is killed. **Not in step 1**, by the PM's sco
 such as baracuda on 2026-10-11, shows `crashed`, `spec=missing`, `startable=false` until step 3 or its next
 launch writes one), the caller check and the ledger fields.
 
+**Status (PR 2, 0.12.11):** `lane-restart start` (14.5, PM only by process ancestry, `--reason` required, never
+Opus, permission mode `auto`, role `pm` refused) and `lane-restart specs import` (14.9) are built; `restart.log` lines
+gain `kind`, `caller_role`, `model`, `reason`. Two things the design did not say and the code had to decide: the
+dead session recorded in the lane's state file is passed to the liveness wait as the *previous* session (otherwise its
+own `PreToolUse` reads as the new session coming up), and an import **refuses** an Opus launch rather than rewriting
+it, because the replacement by `sonnet` belongs to `start`, where the ledger records `model-pinned:<was>`. The
+`SpecState` enum gained `crashed` (the imported-dead case 14.9 names). **Not built yet:** `lane-stop`, the wrapper,
+the `host.rs` reader-thread fix.
+
 ### 14.14 Questions for CireSnave (through the PM), with a recommendation each
 
 - **O1 permission mode.** `--permission-mode auto` for every role, including the PM (whose live session is

@@ -11,6 +11,7 @@ use lane_restart::facts::SysinfoFacts;
 use lane_restart::lane_state_writer::{self, RealParentProcess};
 use lane_restart::log;
 use lane_restart::relaunch;
+use lane_restart::start;
 use lane_restart::tab_close;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -52,6 +53,7 @@ enum ArgError {
     RoleRequired,
     Unknown(String),
     MissingChildArgv,
+    MissingValue(&'static str),
 }
 
 impl std::fmt::Display for ArgError {
@@ -63,6 +65,7 @@ impl std::fmt::Display for ArgError {
             ArgError::MissingChildArgv => {
                 write!(f, "expected `-- <child argv...>` after --role <name>")
             }
+            ArgError::MissingValue(flag) => write!(f, "{flag} requires a value"),
         }
     }
 }
@@ -290,6 +293,270 @@ fn run_status_cmd(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct StartArgs {
+    role: String,
+    reason: String,
+    model: Option<String>,
+    dry_run: bool,
+}
+
+/// `start --role R --reason <text> [--model sonnet|haiku] [--dry-run]`. A missing `--reason` is
+/// not an argument error: it reaches `start::validate_reason`, so there is one message for it.
+fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
+    let mut role = None;
+    let mut reason = String::new();
+    let mut model = None;
+    let mut dry_run = false;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            "--reason" => {
+                reason = iter
+                    .next()
+                    .ok_or(ArgError::MissingValue("--reason"))?
+                    .clone()
+            }
+            "--model" => {
+                model = Some(
+                    iter.next()
+                        .ok_or(ArgError::MissingValue("--model"))?
+                        .clone(),
+                )
+            }
+            "--dry-run" => dry_run = true,
+            other => return Err(ArgError::Unknown(other.to_string())),
+        }
+    }
+    Ok(StartArgs {
+        role: role.ok_or(ArgError::RoleRequired)?,
+        reason,
+        model,
+        dry_run,
+    })
+}
+
+/// `specs import [--role R] [--dry-run]` -> `(role, dry_run)`.
+fn parse_specs_import_args(rest: &[String]) -> Result<(Option<String>, bool), ArgError> {
+    let mut role = None;
+    let mut dry_run = false;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            "--dry-run" => dry_run = true,
+            other => return Err(ArgError::Unknown(other.to_string())),
+        }
+    }
+    Ok((role, dry_run))
+}
+
+/// The role whose `claude` session is running this command, verified by pid and start time
+/// (RESTART-TOOL-DESIGN.md 14.8), never by `LANE_ROLE`.
+fn verified_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
+    let pid =
+        lane_state_writer::claude_parent_pid(std::process::id(), &RealParentProcess::new()).ok();
+    start::caller_role(&state_dir(), pid, facts)
+}
+
+/// `lane-restart start --role R --reason <text> [--model sonnet|haiku] [--dry-run]` - 14.5.
+fn run_start_cmd(args: StartArgs) -> ExitCode {
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    let reason_for_log: String = args
+        .reason
+        .trim()
+        .chars()
+        .take(start::REASON_MAX_CHARS)
+        .collect();
+    let ledger = |model: Option<&str>, outcome: &str, acted: bool| {
+        log_ledger(
+            &requested_by,
+            &args.role,
+            "start",
+            caller_role.as_deref(),
+            model,
+            Some(&reason_for_log),
+            outcome,
+            acted,
+        );
+    };
+    let req = start::StartRequest {
+        role: &args.role,
+        reason: &args.reason,
+        model: args.model.as_deref(),
+    };
+    let plan = match start::plan_start(&state_dir(), &req, caller, &facts) {
+        Ok(p) => p,
+        Err(refusal) => {
+            eprintln!("lane-restart start: refused - {refusal}");
+            ledger(None, &format!("refused: {refusal}"), false);
+            return ExitCode::FAILURE;
+        }
+    };
+    let pin_note = plan
+        .pinned_from
+        .as_deref()
+        .map(|was| format!(" model-pinned:{was}"))
+        .unwrap_or_default();
+    if args.dry_run {
+        let cmdline: Vec<String> = plan
+            .argv
+            .iter()
+            .map(|a| {
+                if a.contains(' ') {
+                    format!("{a:?}")
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
+        println!(
+            "lane-restart start: DRY RUN - would launch {} via wt.exe (conhost.exe fallback), \
+             hosted by `lane-restart host --role {} -- {}`, in {}{pin_note}",
+            plan.launch.role,
+            plan.launch.role,
+            cmdline.join(" "),
+            plan.launch.cwd
+        );
+        ledger(
+            Some(&plan.model),
+            &format!("dry run - no action taken{pin_note}"),
+            false,
+        );
+        return ExitCode::SUCCESS;
+    }
+    eprintln!(
+        "lane-restart start: launching {} on {}...",
+        args.role, plan.model
+    );
+    let state_dir_path = state_dir();
+    let state_reader = relaunch::RealStateReader {
+        state_dir: &state_dir_path,
+    };
+    let role_for_notice = plan.launch.role.clone();
+    let mut on_awaiting = || print_status_json("awaiting_confirmation", &role_for_notice);
+    let result = start::execute_start(
+        &plan,
+        &facts,
+        &state_reader,
+        &lane_restart::spec::DirSpecStore {
+            dir: state_dir_path.clone(),
+        },
+        &lane_restart::launch::LivenessTiming::default(),
+        &relaunch::spawn_launch,
+        &mut std::thread::sleep,
+        &mut on_awaiting,
+    );
+    match result {
+        Ok(done) => {
+            let warn = done
+                .spec_warning
+                .as_deref()
+                .map(|w| format!("; the launch spec could not be marked running: {w}"))
+                .unwrap_or_default();
+            let (what, exit) = match done.outcome {
+                relaunch::RelaunchOutcome::Relaunched => (
+                    "started a fresh session (continuity via HANDOFF only)",
+                    ExitCode::SUCCESS,
+                ),
+                relaunch::RelaunchOutcome::AwaitingConfirmation => (
+                    "started; awaiting human confirmation at the dev-channels dialog",
+                    ExitCode::from(2),
+                ),
+            };
+            ledger(Some(&plan.model), &format!("{what}{pin_note}{warn}"), true);
+            exit
+        }
+        Err(e) => {
+            eprintln!("lane-restart start: {e}");
+            ledger(
+                Some(&plan.model),
+                &format!("action failed: {e}{pin_note}"),
+                false,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `lane-restart specs import [--role R] [--dry-run]` - 14.9. PM only.
+fn run_specs_import_cmd(role: Option<String>, dry_run: bool) -> ExitCode {
+    use lane_restart::spec_import::{import_specs, ImportOutcome};
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    let target = role.clone().unwrap_or_else(|| "*".to_string());
+    if caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may import specs; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may import specs, and the caller could not be verified: {e}"
+            ),
+        };
+        eprintln!("lane-restart specs import: refused - {why}");
+        log_ledger(
+            &requested_by,
+            &target,
+            "import",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    let rows = import_specs(
+        &state_dir(),
+        role.as_deref(),
+        &facts,
+        &relaunch::policy_default_model(&state_dir()),
+        dry_run,
+        chrono::Utc::now(),
+    );
+    let mut refused_named = false;
+    for r in &rows {
+        match &r.outcome {
+            ImportOutcome::Written(s) => {
+                println!("{}\twritten\tstate={s:?}", r.role);
+                log_ledger(
+                    &requested_by,
+                    &r.role,
+                    "import",
+                    caller_role.as_deref(),
+                    None,
+                    None,
+                    &format!("imported a launch spec from the lane state file (state={s:?})"),
+                    true,
+                );
+            }
+            ImportOutcome::WouldWrite(s) => println!("{}\twould write\tstate={s:?}", r.role),
+            ImportOutcome::AlreadyHasSpec => {
+                println!("{}\tskipped\ta launch spec already exists", r.role)
+            }
+            ImportOutcome::Refused(why) => {
+                println!("{}\trefused\t{why}", r.role);
+                refused_named |= role.is_some();
+            }
+        }
+    }
+    println!("({} role(s) considered)", rows.len());
+    if refused_named {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
     let mut role = None;
     let mut iter = rest.iter();
@@ -350,6 +617,26 @@ USAGE:
         restart's kill and at a confirmed launch) is complete, and whether it can
         be started again from it. RESTART-TOOL-DESIGN.md section 14.
 
+    lane-restart start --role <name> --reason <text> [--model sonnet|haiku] [--dry-run]
+        Start a lane that is not running, from its launch spec
+        (<role>.launch.json), and write the spec back as running once the
+        session is confirmed. PM ONLY: the caller's claude session must be
+        the pid and start time recorded by pm's state file (a lane cannot
+        claim it with LANE_ROLE; a lane that edits pm.json can forge it -
+        this closes the accidental and prompt-injected paths, not a hostile
+        local user). --reason is required (<= 200 chars, no control
+        characters) and goes to restart.log, not into the prompt. The model
+        is sonnet or haiku (default: the spec's, else sonnet); Opus is
+        refused and LANE_RESTART_ALLOW_OPUS is not read. The permission mode
+        is always auto. Starting role pm is refused: it is started by a
+        person. Exit codes as a restart: 0, 2 (awaiting the dialog), 1.
+
+    lane-restart specs import [--role <name>] [--dry-run]
+        PM only. For every lane state file with no launch spec, build
+        <role>.launch.json from its recorded launch_args, labelled
+        written_by=import, only if the spec is complete; the rest are listed
+        with the reason. Never overwrites a spec; never edits a state file.
+
     lane-restart models
         Read-only: list each lane's recorded model and flag Opus. A relaunch
         pins `--model` from the original launch's explicit --model, else
@@ -395,6 +682,32 @@ fn main() -> ExitCode {
                 [flag] if flag == "--json" => run_status_cmd(true),
                 _ => {
                     eprintln!("lane-restart status: expected `status [--json]`");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "start" {
+            return match parse_start_args(rest) {
+                Ok(a) => run_start_cmd(a),
+                Err(e) => {
+                    eprintln!("lane-restart start: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "specs" {
+            return match rest.split_first() {
+                Some((sub, tail)) if sub == "import" => match parse_specs_import_args(tail) {
+                    Ok((role, dry_run)) => run_specs_import_cmd(role, dry_run),
+                    Err(e) => {
+                        eprintln!("lane-restart specs import: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
+                _ => {
+                    eprintln!(
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run]`"
+                    );
                     ExitCode::FAILURE
                 }
             };
@@ -653,13 +966,42 @@ fn print_status_json(outcome: &str, role: &str) {
     println!("{line}");
 }
 
+/// A restart-path ledger line (`kind: restart`).
 fn log_outcome(requested_by: &str, role: &str, outcome: &str, acted: bool) {
+    log_ledger(
+        requested_by,
+        role,
+        "restart",
+        None,
+        None,
+        None,
+        outcome,
+        acted,
+    );
+}
+
+/// One `restart.log` line with the 14.7 fields.
+#[allow(clippy::too_many_arguments)]
+fn log_ledger(
+    requested_by: &str,
+    role: &str,
+    kind: &str,
+    caller_role: Option<&str>,
+    model: Option<&str>,
+    reason: Option<&str>,
+    outcome: &str,
+    acted: bool,
+) {
     let entry = log::Entry {
         timestamp: chrono::Utc::now(),
         requested_by,
         role,
         outcome: outcome.to_string(),
         acted,
+        kind: Some(kind),
+        caller_role,
+        model,
+        reason,
     };
     if let Err(e) = log::append(&log_path(), &entry) {
         eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");
@@ -743,6 +1085,77 @@ mod cli_tests {
             "AwaitingConfirmation must be distinguishable from Relaunched"
         );
         assert_eq!(code, ExitCode::from(2));
+    }
+
+    // -- start / specs import ------------------------------------------ //
+
+    #[test]
+    fn start_args_carry_role_reason_model_and_dry_run() {
+        assert_eq!(
+            parse_start_args(&strs(&[
+                "--role",
+                "baracuda",
+                "--reason",
+                "resume after crash",
+                "--model",
+                "haiku",
+                "--dry-run"
+            ])),
+            Ok(StartArgs {
+                role: "baracuda".into(),
+                reason: "resume after crash".into(),
+                model: Some("haiku".into()),
+                dry_run: true,
+            })
+        );
+    }
+
+    /// The reason is validated by `start::validate_reason`, once, so a missing one reaches it
+    /// as an empty string rather than failing here with a second message.
+    #[test]
+    fn start_without_a_reason_parses_to_an_empty_reason() {
+        let a = parse_start_args(&strs(&["--role", "baracuda"])).unwrap();
+        assert_eq!(a.reason, "");
+        assert!(start::validate_reason(&a.reason).is_err());
+    }
+
+    #[test]
+    fn start_requires_a_role_and_values_for_its_flags() {
+        assert_eq!(
+            parse_start_args(&strs(&["--reason", "x"])),
+            Err(ArgError::RoleRequired)
+        );
+        assert_eq!(
+            parse_start_args(&strs(&["--role", "a", "--reason"])),
+            Err(ArgError::MissingValue("--reason"))
+        );
+        assert_eq!(
+            parse_start_args(&strs(&["--role", "a", "--model"])),
+            Err(ArgError::MissingValue("--model"))
+        );
+        assert_eq!(
+            parse_start_args(&strs(&["--role", "a", "--bogus"])),
+            Err(ArgError::Unknown("--bogus".into()))
+        );
+    }
+
+    #[test]
+    fn specs_import_args_are_role_and_dry_run() {
+        assert_eq!(parse_specs_import_args(&[]), Ok((None, false)));
+        assert_eq!(
+            parse_specs_import_args(&strs(&["--role", "baracuda", "--dry-run"])),
+            Ok((Some("baracuda".into()), true))
+        );
+        assert_eq!(
+            parse_specs_import_args(&strs(&["--yes"])),
+            Err(ArgError::Unknown("--yes".into()))
+        );
+    }
+
+    #[test]
+    fn usage_text_documents_start_and_specs_import() {
+        assert!(USAGE.contains("lane-restart start --role"));
+        assert!(USAGE.contains("lane-restart specs import"));
     }
 
     // -- parse_host_args ---------------------------------------------- //

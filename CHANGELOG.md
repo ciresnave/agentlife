@@ -2,6 +2,29 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.11
+
+- **`lane-restart start --role R --reason <text> [--model sonnet|haiku] [--dry-run]`**
+  (RESTART-TOOL-DESIGN.md 14.5, PR 2). Starts a lane that is not running, from its launch spec, and writes the
+  spec back as `running` once the session is confirmed. **PM only, by process**: the caller's `claude`
+  ancestor must be the pid and start time recorded by `pm`'s state file (`LANE_ROLE` is never consulted).
+  `--reason` is required (<= 200 characters, no control characters) and goes to the ledger, not the prompt.
+  The model is `sonnet` or `haiku`; an Opus request is refused, a spec whose model is Opus, unknown or unset
+  is launched on `sonnet` and the ledger says `model-pinned:<was>`, and `LANE_RESTART_ALLOW_OPUS` is not read.
+  The permission mode is always `auto`; a start of role `pm` is refused and reported. The dead session's own
+  state file is never mistaken for the new session coming up.
+- **`lane-restart specs import [--role R] [--dry-run]`** (14.9, PM only): builds `<role>.launch.json` from a
+  lane's state file for each role with no spec, labelled `written_by: "import"`, only when the spec is
+  complete. The rest are listed with the reason; an existing spec is never overwritten and no state file is
+  edited. This is what makes a lane that crashed before it ever launched under a spec-writing build (baracuda,
+  2026-10-11) startable.
+- `restart.log` lines gain `kind`, `caller_role`, `model` and `reason`, each omitted when unset, so existing
+  lines and readers are unaffected. Restart-path lines now carry `kind: "restart"`.
+- New public API: `lane_restart::start`, `lane_restart::spec_import`, `spec::pin_model`,
+  `SpecFile::pinned`, `SpecState::Crashed`, `log::Entry::{kind, caller_role, model, reason}`.
+- Not in this change (PR 3 onward): `lane-stop`, the `lane-restart` wrapper over stop + start, and the
+  reader-thread fix in `host.rs`.
+
 ## 0.12.10
 
 - **A restart writes the lane's launch spec before it kills anything** (RESTART-TOOL-DESIGN.md 14, PR 1).

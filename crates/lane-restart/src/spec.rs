@@ -46,6 +46,9 @@ pub enum SpecState {
     Stopping,
     /// The process is confirmed gone and the spec is the way back.
     Suspended,
+    /// Imported from a lane state whose process was already gone (`specs import`): the lane
+    /// ended without a stop, and this is its last known launch.
+    Crashed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +205,16 @@ impl SpecFile {
         }
     }
 
+    /// The spec with the model `lane-start` would launch: an explicit Sonnet or Haiku stays,
+    /// anything else (Opus, unknown, unset) becomes `sonnet`. The second value is the model it
+    /// replaced, for the ledger.
+    pub fn pinned(&self) -> (SpecFile, Option<String>) {
+        let (model, was) = pin_model(&self.model);
+        let mut s = self.clone();
+        s.model = model;
+        (s, was)
+    }
+
     /// Complete means: `prepare_launch` accepts it (plain role and name, a non-Opus explicit
     /// model, no `;` in any element). Opus is never allowed here.
     pub fn check(&self) -> Result<PreparedLaunch, SpecError> {
@@ -213,6 +226,18 @@ impl SpecFile {
         }
         prepare_launch(&self.launch_spec(), &self.model, false)
             .map_err(|e: RelaunchError| SpecError::Incomplete(e.to_string()))
+    }
+}
+
+/// CireSnave, 2026-10-08: "I can't afford Opus." Only an explicit Sonnet or Haiku is launched;
+/// everything else is replaced by `sonnet`, and the replaced value is returned.
+pub fn pin_model(model: &str) -> (String, Option<String>) {
+    let lower = model.to_ascii_lowercase();
+    let ok = !lower.contains("opus") && (lower.contains("sonnet") || lower.contains("haiku"));
+    if ok {
+        (model.to_string(), None)
+    } else {
+        ("sonnet".to_string(), Some(model.to_string()))
     }
 }
 
@@ -363,7 +388,7 @@ pub struct RoleStatus {
 /// Is the process a state file names still the same live `claude`? Pid AND start time; a pid
 /// whose start time was never recorded counts as alive if a claude holds it (never start a second
 /// copy on a doubt).
-fn state_process_is_live(st: &state::LaneState, facts: &dyn SystemFacts) -> bool {
+pub(crate) fn state_process_is_live(st: &state::LaneState, facts: &dyn SystemFacts) -> bool {
     if !facts.is_alive_claude_process(st.pid) {
         return false;
     }
@@ -395,7 +420,9 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         Ok(s) => {
             out.since = Some(s.written_at);
             out.stop_reason = s.stop_reason.clone();
-            match s.check() {
+            // `lane-start` replaces an Opus, unknown or unset model by `sonnet` (14.5), so the
+            // spec is startable when it is complete with that replacement applied.
+            match s.pinned().0.check() {
                 Ok(_) => out.spec = SpecStatus::Complete,
                 Err(e) => {
                     out.spec = SpecStatus::Invalid;
@@ -422,7 +449,9 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
     }
     match (spec_state, &lane_state) {
         (Some(SpecState::Suspended), _) => out.state = Lifecycle::Suspended,
-        (Some(SpecState::Running | SpecState::Stopping), _) => out.state = Lifecycle::Crashed,
+        (Some(SpecState::Running | SpecState::Stopping | SpecState::Crashed), _) => {
+            out.state = Lifecycle::Crashed
+        }
         (None, Ok(st)) => {
             out.state = Lifecycle::Crashed;
             out.since = Some(st.updated_at);
