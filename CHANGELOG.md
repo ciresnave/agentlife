@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.8
+
+- **`persistant` 0.4.1 -> 0.4.4** (latest on crates.io; standing dependency rule). No code change.
+
 ## 0.12.7
 
 - **CI: `actions/checkout` re-pinned to the current major** (v7.0.1, full SHA read from upstream). The

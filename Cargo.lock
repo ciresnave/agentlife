@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentlife"
-version = "0.12.7"
+version = "0.12.8"
 dependencies = [
  "chrono",
  "lane-state",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.12.7"
+version = "0.12.8"
 dependencies = [
  "chrono",
  "lane-state",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.12.7"
+version = "0.12.8"
 dependencies = [
  "chrono",
  "serde",
@@ -821,9 +821,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persistant"
-version = "0.4.1"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee7d20c2db338778835a844a2558ae456529ac105e0101785a9224d733097bde"
+checksum = "63cb27da472a620f76c876a9f992611837196fb06f5a8f6a62deab5e95667d59"
 dependencies = [
  "opendal",
  "serde",
