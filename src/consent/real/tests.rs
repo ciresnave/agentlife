@@ -490,6 +490,45 @@ fn a_store_that_cannot_be_unprotected_fails_closed_everywhere() {
     assert!(b.pending_ids().unwrap().is_empty());
 }
 
+/// #33: the dialog names the requester stored with the pending request, not this process (after a
+/// reboot the two differ).
+#[test]
+fn the_prompt_names_the_stored_requester_not_this_process() {
+    let mut stored = me();
+    stored.claude_pid = me().claude_pid.wrapping_add(7777);
+    stored.claude_start_secs = me().claude_start_secs.wrapping_add(1);
+    let asking = Asking {
+        pending_id: "p1".into(),
+        request: request_for(&hash('1')),
+        grant: Grant::OneUse,
+        bound_hash: hash('1'),
+        reservation: "r".into(),
+        requester: stored.clone(),
+    };
+    let shown = super::hello_request(&asking).requester;
+    assert_eq!(shown.claude_pid, stored.claude_pid);
+    assert_eq!(shown.claude_start_secs, stored.claude_start_secs);
+    assert_ne!(shown.claude_pid, me().claude_pid);
+}
+
+/// After a reboot a new process answers: `begin_answer` still hands back the requester recorded at
+/// submit, so the dialog names who asked, not who answers.
+#[test]
+fn begin_answer_returns_the_requester_recorded_at_submit_not_the_answering_process() {
+    let mut r = rig();
+    let h = hash('4');
+    let id = submit(&mut r.backend, &h);
+    let later = Requester {
+        claude_pid: 9999,
+        claude_start_secs: 1_800_000_000,
+        ..me()
+    };
+    let mut second = backend_in(r.dir.path(), later.clone());
+    let asking = second.begin_answer(&id, &h).unwrap();
+    assert_eq!(asking.requester, me());
+    assert_ne!(asking.requester, later);
+}
+
 /// Process-global environment: one test touches it, under this lock.
 static ENV: Mutex<()> = Mutex::new(());
 
@@ -508,8 +547,9 @@ fn hello_is_never_shown_when_the_debug_switch_is_set_and_the_answer_is_unavailab
         grant: Grant::OneUse,
         bound_hash: hash('1'),
         reservation: "r".into(),
+        requester: me(),
     };
-    let out = HelloPrompt::new(me()).ask(&asking);
+    let out = HelloPrompt::new().ask(&asking);
     std::env::remove_var(super::NO_HELLO_ENV);
     assert_eq!(out, Outcome::Unavailable);
 }
