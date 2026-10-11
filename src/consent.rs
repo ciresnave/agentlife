@@ -107,6 +107,9 @@ pub struct Asking {
     pub grant: Grant,
     pub bound_hash: String,
     pub reservation: String,
+    /// Who asked, **as recorded with the pending request**: this is who the prompt names, not the
+    /// process that happens to be answering (after a reboot the two differ).
+    pub requester: Requester,
 }
 
 /// How the person's answer came out.
@@ -474,6 +477,13 @@ pub mod fake {
                 grant: r.grant.clone(),
                 bound_hash: r.bound_hash.clone(),
                 reservation,
+                requester: Requester {
+                    role: r.request.role.clone(),
+                    session_id: String::new(),
+                    claude_pid: 0,
+                    claude_start_secs: 0,
+                    managed: false,
+                },
             })
         }
 

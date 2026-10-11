@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.3
+
+- **The Hello prompt names who asked (#33).** `Asking` now carries the requester stored with the pending
+  record, and the dialog shows that, not this process's: after a reboot the person saw the new pid while the
+  grant kept the old one. `HelloPrompt::new()` no longer takes a requester.
+
 ## 0.12.2
 
 - **`agentlife restore` runs.** Without `--dry-run` it freezes the plan, prints the agent list, asks the

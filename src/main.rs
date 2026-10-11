@@ -284,7 +284,7 @@ fn run_with_runtime(
         Ok(r) => r,
         Err(e) => return fail(e),
     };
-    let prompt = HelloPrompt::new(requester.clone());
+    let prompt = HelloPrompt::new();
     let procs = ProcIndex::new(home.procs_dir());
     let caller = caller::detect(&RealEnv::new(), &procs);
     let table = SysinfoTable;
