@@ -968,14 +968,28 @@ fn main() -> ExitCode {
     // this), not a label chosen by the absence of `--self`. A caller that cannot be verified is
     // recorded as "unverified"; a restart of another lane is still not refused on it (the
     // `--yes` + idle checks are unchanged), so the ledger is where a non-PM caller shows up.
-    let caller_role = (!args.target_self)
-        .then(|| verified_caller(&facts).ok())
-        .flatten();
+    let caller = (!args.target_self).then(|| verified_caller(&facts));
+    let caller_role = caller.as_ref().and_then(|c| c.as_ref().ok().cloned());
     let requested_by: &str = if args.target_self {
         "self"
     } else {
         caller_role.as_deref().unwrap_or("unverified")
     };
+    // RESTART-TOOL-DESIGN.md 14.7 / 14.8, the PM's ruling of 2026-10-11: restarting ANOTHER lane
+    // is the PM session's alone, the same rule as `stop`. Refused (and logged) before anything
+    // about the target is read, even for a dry run.
+    if let Some(caller) = caller {
+        if let Err(refusal) = lane_stop::require_pm_for_other(false, caller) {
+            eprintln!("lane-restart: refused - {refusal}");
+            log_outcome(
+                requested_by,
+                &args.role,
+                &format!("refused: {refusal}"),
+                false,
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     let req = authorize::Request {
         target,
         confirmed: args.confirmed,
