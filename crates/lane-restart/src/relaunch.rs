@@ -671,10 +671,9 @@ pub fn kill_and_relaunch_persisting(
 ) -> Result<RelaunchOutcome, RelaunchError> {
     let spec = LaunchSpec::from(state);
     // every check runs BEFORE anything is killed
-    let PreparedLaunch {
-        argv,
-        carries_dev_channels_flag,
-    } = prepare_launch(&spec, policy_default, allow_opus)?;
+    // Checked here, before anything is written or killed; the launch itself comes from the
+    // spec below.
+    prepare_launch(&spec, policy_default, allow_opus)?;
     let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, allow_opus)?;
     let spec_inputs = |spec_state: SpecState, stopped: bool| spec::SpecInputs {
         launch: &spec,
@@ -690,8 +689,17 @@ pub fn kill_and_relaunch_persisting(
     specs
         .write(&stopping)
         .map_err(|e| RelaunchError::SpecNotWritten(e.to_string()))?;
+    // RESTART-TOOL-DESIGN.md 14.7: the new session starts from THE SPEC JUST WRITTEN (and read
+    // back by the store), not from the state file it was derived from, so a `lane-stop` then a
+    // `lane-start` and this restart launch the same thing. Prepared BEFORE the kill: a spec that
+    // would not launch must not cost a running lane.
+    let from_spec = stopping.launch_spec();
+    let PreparedLaunch {
+        argv,
+        carries_dev_channels_flag,
+    } = prepare_launch(&from_spec, &stopping.model, false)?;
     let stopped = stop_lane(facts, state.pid, identity, sleep)?;
-    spawn(&spec, &argv)?;
+    spawn(&from_spec, &argv)?;
     let outcome = wait_for_liveness(
         facts,
         state_reader,

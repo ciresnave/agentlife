@@ -310,6 +310,57 @@ mod tests {
         assert_eq!(*l.borrow(), vec!["spec Stopping"], "no kill, no spawn");
     }
 
+    /// RESTART-TOOL-DESIGN.md 14.7 / 14.12 item 8: a restart launches from THE SPEC IT JUST
+    /// WROTE, not from the state file. The state carries a flag the spec's allowlist drops; the
+    /// launch must not. Mutation target: spawn `LaunchSpec::from(state)` again and this fails.
+    #[test]
+    fn a_restart_launches_from_the_spec_it_just_wrote_not_from_the_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        let store = DirSpecStore {
+            dir: dir.path().to_path_buf(),
+        };
+        let mut st = state_at("overmind", "old", "Stop");
+        st.launch_args = Some(vec![
+            "claude".into(),
+            "--model".into(),
+            "sonnet".into(),
+            "--not-on-the-allowlist".into(),
+            "carries-something".into(),
+        ]);
+        let reader = ScriptedReader::new(&l, vec![Some(state_at("overmind", "new", "PreToolUse"))]);
+        let spawned: std::rc::Rc<std::cell::RefCell<Option<crate::launch::LaunchSpec>>> =
+            Default::default();
+        let sp = std::rc::Rc::clone(&spawned);
+        let out = kill_and_relaunch_persisting(
+            &facts,
+            &reader,
+            &st,
+            &identity(),
+            "sonnet",
+            false,
+            &store,
+            &move |spec, _| {
+                *sp.borrow_mut() = Some(spec.clone());
+                Ok(())
+            },
+            &mut |_| {},
+            &mut || {},
+        );
+        assert_eq!(out.unwrap(), RelaunchOutcome::Relaunched);
+        let spawned = spawned.borrow().clone().expect("nothing was spawned");
+        let args = spawned.launch_args.clone().unwrap();
+        assert!(
+            !args.iter().any(|a| a.contains("not-on-the-allowlist")),
+            "the launch carried a flag the spec dropped: {args:?}"
+        );
+        // And it is exactly what the spec on disk would launch (positive control: the spec
+        // file is the stopping spec's successor, same launch parameters).
+        let on_disk = spec::read(dir.path(), "overmind").unwrap();
+        assert_eq!(spawned, on_disk.launch_spec());
+    }
+
     #[test]
     fn a_launch_that_would_be_refused_writes_no_spec_and_kills_nothing() {
         let l = log();

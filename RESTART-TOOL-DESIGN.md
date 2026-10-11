@@ -1393,8 +1393,17 @@ gain `kind`, `caller_role`, `model`, `reason`. Two things the design did not say
 dead session recorded in the lane's state file is passed to the liveness wait as the *previous* session (otherwise its
 own `PreToolUse` reads as the new session coming up), and an import **refuses** an Opus launch rather than rewriting
 it, because the replacement by `sonnet` belongs to `start`, where the ledger records `model-pinned:<was>`. The
-`SpecState` enum gained `crashed` (the imported-dead case 14.9 names). **Not built yet:** `lane-stop`, the wrapper,
-the `host.rs` reader-thread fix.
+`SpecState` enum gained `crashed` (the imported-dead case 14.9 names). At PR 2 `lane-stop`, the wrapper and the
+`host.rs` reader-thread fix were not built; the first two are PR 3 below and the last is 0.12.12.
+
+**Status (PR 3, 0.12.13):** `lane-restart stop` (14.3) is built as designed: caller PM-by-ancestry or `--self`, HANDOFF
+precondition, the spec written and read back before the kill, `suspended` after, exit 4 for the final write. Decisions
+the design left open: a stop of role `pm` is refused (the invariant: `start` refuses `pm`, so it could not come back);
+an Opus or unknown model is replaced by `sonnet` in the spec rather than refusing the stop (an Opus lane must stay
+stoppable, and the replacement is in the ledger); for another lane, the idle claim bounding the HANDOFF is the state
+file's `updated_at` (the idle gate already requires `no_background_shells`, which any later turn clears). The wrapper
+now launches from the spec it wrote, and `requested_by` is the verified caller. **Not built:** refusing a restart of
+another lane by a non-PM caller (it is recorded, not refused: PM's call), PR 4.
 
 ### 14.14 Questions for CireSnave (through the PM), with a recommendation each
 

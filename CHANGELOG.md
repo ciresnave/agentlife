@@ -2,6 +2,31 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.13
+
+- **`lane-restart stop --role R --reason <text> [--self] [--dry-run] [--yes]`** (RESTART-TOOL-DESIGN.md 14.3,
+  PR 3). Suspends a lane in a fixed order: every check, then the complete launch spec written durably and read
+  back (`state: stopping`), then the verified kill, then the spec marked `suspended`. A lane is stopped only if
+  it can be started again, so a spec that cannot be written leaves the process untouched. Another lane's stop is
+  **PM only, by process** (the same ancestry check as `start`), needs the lane to be idle, and is a dry run
+  without `--yes`; `--self` stops the calling lane. A HANDOFF is required, with no override: it must exist, be
+  newer than the session being stopped, and (for another lane) not newer than the lane's idle assertion. Role
+  `pm` is refused, because `start` refuses it and a suspended PM would have no way back. A lane on Opus (or an
+  unknown model) is suspended with its model replaced by `sonnet`, and the ledger says `model-pinned:<was>`.
+  Exit codes: 0 stopped and suspended, 1 refused or failed, 4 stopped but the `suspended` mark could not be
+  written (the earlier spec is complete, so the lane stays startable).
+- **A restart now launches from the spec it just wrote**, read back by the store, not from the state file it was
+  derived from (14.7), and prepares that launch before the kill. A launch flag the spec's allowlist drops is
+  therefore no longer carried into a restarted session.
+- **`restart.log` `requested_by` is the verified caller** for a restart of another lane: the role whose `claude`
+  session ran the command, or `unverified`, where it used to be the label `pm` whenever `--self` was absent.
+  `caller_role` is set alongside it. A restart of another lane is not refused on it: the idle checks and `--yes`
+  are unchanged.
+- New public API: `lane_restart::lane_stop::{plan_stop, build_stop_plan, execute_stop, check_handoff,
+  StopRequest, StopPlan, StopRefusal, StopError, StopDone}`; `spec::find_handoff` is public.
+- Not in this change: PR 4 (agentlife's `park`/`stop`/`restore` consuming these, retiring `src/down.rs`'s kill
+  and `tools/launch-lane.ps1`).
+
 ## 0.12.12
 
 - **`lane-restart host` no longer abandons its helper threads.** The PTY reader sat blocked in `ReadFile` for the

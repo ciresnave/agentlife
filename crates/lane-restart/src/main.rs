@@ -9,6 +9,7 @@
 use lane_restart::authorize::{self, Target};
 use lane_restart::facts::SysinfoFacts;
 use lane_restart::lane_state_writer::{self, RealParentProcess};
+use lane_restart::lane_stop;
 use lane_restart::log;
 use lane_restart::relaunch;
 use lane_restart::start;
@@ -485,6 +486,186 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct StopArgs {
+    role: String,
+    reason: String,
+    target_self: bool,
+    dry_run: bool,
+    confirmed: bool,
+}
+
+/// `stop --role R --reason <text> [--self] [--dry-run] [--yes]`. As with `start`, a missing
+/// `--reason` reaches `start::validate_reason`, so there is one message for it.
+fn parse_stop_args(rest: &[String]) -> Result<StopArgs, ArgError> {
+    let mut role = None;
+    let mut reason = String::new();
+    let (mut target_self, mut dry_run, mut confirmed) = (false, false, false);
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            "--reason" => {
+                reason = iter
+                    .next()
+                    .ok_or(ArgError::MissingValue("--reason"))?
+                    .clone()
+            }
+            "--self" => target_self = true,
+            "--dry-run" => dry_run = true,
+            "--yes" => confirmed = true,
+            other => return Err(ArgError::Unknown(other.to_string())),
+        }
+    }
+    Ok(StopArgs {
+        role: role.ok_or(ArgError::RoleRequired)?,
+        reason,
+        target_self,
+        dry_run,
+        confirmed,
+    })
+}
+
+/// `lane-restart stop --role R --reason <text> [--self] [--dry-run] [--yes]` - 14.3. Suspends a
+/// lane: the complete spec first, then the verified kill, then the spec marked `suspended`.
+/// Exit codes: 0 stopped and suspended, 1 refused or failed, 4 killed but the `suspended` mark
+/// could not be written (the earlier spec is complete, so the lane is still startable).
+fn run_stop_cmd(args: StopArgs) -> ExitCode {
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let claude_pid =
+        lane_state_writer::claude_parent_pid(std::process::id(), &RealParentProcess::new()).ok();
+    let caller = start::caller_role(&state_dir(), claude_pid, &facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = if args.target_self {
+        "self".to_string()
+    } else {
+        caller_role
+            .clone()
+            .unwrap_or_else(|| "unverified".to_string())
+    };
+    let reason_for_log: String = args
+        .reason
+        .trim()
+        .chars()
+        .take(start::REASON_MAX_CHARS)
+        .collect();
+    let ledger = |model: Option<&str>, outcome: &str, acted: bool| {
+        log_ledger(
+            &requested_by,
+            &args.role,
+            "stop",
+            caller_role.as_deref(),
+            model,
+            Some(&reason_for_log),
+            outcome,
+            acted,
+        );
+    };
+    let req = lane_stop::StopRequest {
+        role: &args.role,
+        reason: &args.reason,
+        self_stop: args.target_self,
+        caller_claude_pid: claude_pid,
+        confirmed: args.confirmed,
+        dry_run: args.dry_run,
+    };
+    let state_dir_path = state_dir();
+    let plan = match lane_stop::plan_stop(
+        &state_dir_path,
+        &req,
+        caller,
+        &facts,
+        &relaunch::policy_default_model(&state_dir_path),
+    ) {
+        Ok(p) => p,
+        Err(refusal) => {
+            eprintln!("lane-restart stop: refused - {refusal}");
+            ledger(None, &format!("refused: {refusal}"), false);
+            return ExitCode::FAILURE;
+        }
+    };
+    let pin_note = plan
+        .pinned_from
+        .as_deref()
+        .map(|was| format!(" model-pinned:{was}"))
+        .unwrap_or_default();
+    if !plan.will_act {
+        println!(
+            "lane-restart stop: DRY RUN - would write the launch spec for {} (model {}, HANDOFF {}), \
+             then kill pid {} and mark the spec suspended{pin_note}",
+            plan.state.role, plan.stopping.model, plan.handoff_path, plan.state.pid
+        );
+        ledger(
+            Some(&plan.stopping.model),
+            &format!("dry run - no action taken{pin_note}"),
+            false,
+        );
+        return ExitCode::SUCCESS;
+    }
+    eprintln!(
+        "lane-restart stop: writing the launch spec, then stopping {} (pid {})...",
+        plan.state.role, plan.state.pid
+    );
+    // Captured while claude is still alive: after the kill its parent link is gone.
+    let leftover_shell = tab_close::capture(&facts, plan.state.pid, &plan.identity);
+    let result = lane_stop::execute_stop(
+        &plan,
+        &facts,
+        &lane_restart::spec::DirSpecStore {
+            dir: state_dir_path.clone(),
+        },
+        &mut std::thread::sleep,
+    );
+    match result {
+        Ok(done) => {
+            let warn = done
+                .spec_warning
+                .as_deref()
+                .map(|w| format!("; the launch spec could not be marked suspended: {w}"))
+                .unwrap_or_default();
+            let exit = if done.spec_warning.is_some() {
+                ExitCode::from(4)
+            } else {
+                ExitCode::SUCCESS
+            };
+            ledger(
+                Some(&plan.stopping.model),
+                &format!(
+                    "stopped pid {}; launch spec {}{pin_note}{warn}",
+                    plan.state.pid,
+                    if done.spec_warning.is_some() {
+                        "left as stopping (startable)"
+                    } else {
+                        "suspended"
+                    }
+                ),
+                true,
+            );
+            // The tab closes LAST: on `--self` this process may share the tab's console.
+            close_leftover_tab(
+                &facts,
+                "stop",
+                &requested_by,
+                &args.role,
+                leftover_shell,
+                true,
+                plan.state.pid,
+                &plan.identity,
+            );
+            exit
+        }
+        Err(e) => {
+            eprintln!("lane-restart stop: {e}");
+            ledger(
+                Some(&plan.stopping.model),
+                &format!("action failed: {e}{pin_note}"),
+                false,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// `lane-restart specs import [--role R] [--dry-run]` - 14.9. PM only.
 fn run_specs_import_cmd(role: Option<String>, dry_run: bool) -> ExitCode {
     use lane_restart::spec_import::{import_specs, ImportOutcome};
@@ -631,6 +812,18 @@ USAGE:
         is always auto. Starting role pm is refused: it is started by a
         person. Exit codes as a restart: 0, 2 (awaiting the dialog), 1.
 
+    lane-restart stop --role <name> --reason <text> [--self] [--dry-run] [--yes]
+        Suspend a lane. The complete launch spec (<role>.launch.json) is
+        written durably and read back BEFORE the process is touched, then the
+        verified kill, then the spec is marked suspended: a lane is stopped
+        only if it can be started again. Needs a HANDOFF written during the
+        lane's session (and not after it asserted idle); there is no
+        override. Another lane: PM only (same process-ancestry check as
+        start), idle, and --yes to act for real, otherwise a dry run. --self
+        stops the calling lane. Role pm is refused. --reason as for start.
+        Exit codes: 0 stopped and suspended; 1 refused or failed; 4 stopped,
+        but the suspended mark could not be written (still startable).
+
     lane-restart specs import [--role <name>] [--dry-run]
         PM only. For every lane state file with no launch spec, build
         <role>.launch.json from its recorded launch_args, labelled
@@ -691,6 +884,15 @@ fn main() -> ExitCode {
                 Ok(a) => run_start_cmd(a),
                 Err(e) => {
                     eprintln!("lane-restart start: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "stop" {
+            return match parse_stop_args(rest) {
+                Ok(a) => run_stop_cmd(a),
+                Err(e) => {
+                    eprintln!("lane-restart stop: {e}");
                     ExitCode::FAILURE
                 }
             };
@@ -760,9 +962,20 @@ fn main() -> ExitCode {
             role: args.role.clone(),
         }
     };
-    let requested_by = if args.target_self { "self" } else { "pm" };
 
     let facts = SysinfoFacts::new(claude_config_dir());
+    // 14.7 / 14.8: `requested_by` is the VERIFIED caller (the role whose claude session ran
+    // this), not a label chosen by the absence of `--self`. A caller that cannot be verified is
+    // recorded as "unverified"; a restart of another lane is still not refused on it (the
+    // `--yes` + idle checks are unchanged), so the ledger is where a non-PM caller shows up.
+    let caller_role = (!args.target_self)
+        .then(|| verified_caller(&facts).ok())
+        .flatten();
+    let requested_by: &str = if args.target_self {
+        "self"
+    } else {
+        caller_role.as_deref().unwrap_or("unverified")
+    };
     let req = authorize::Request {
         target,
         confirmed: args.confirmed,
@@ -890,6 +1103,7 @@ fn main() -> ExitCode {
             };
             close_leftover_tab(
                 &facts,
+                "restart",
                 requested_by,
                 &args.role,
                 leftover_shell,
@@ -906,8 +1120,10 @@ fn main() -> ExitCode {
 /// claude is killed (`tab_close.rs`). Only after a relaunch that acted - after a failed one the
 /// tab stays, so a human has a prompt to relaunch from. Every outcome is logged, and a closed
 /// shell is logged BEFORE the kill, in case closing the tab takes this process with it.
+#[allow(clippy::too_many_arguments)]
 fn close_leftover_tab(
     facts: &SysinfoFacts,
+    kind: &str,
     requested_by: &str,
     role: &str,
     leftover_shell: Result<tab_close::ShellCandidate, tab_close::LeftAlone>,
@@ -920,7 +1136,8 @@ fn close_leftover_tab(
             return Err(tab_close::LeftAlone::RelaunchFailed);
         }
         tab_close::close(facts, &shell, killed_pid, killed_identity, &mut |shell| {
-            log_outcome(
+            log_kind(
+                kind,
                 requested_by,
                 role,
                 &format!("closing the leftover tab: terminating shell {shell}"),
@@ -929,7 +1146,8 @@ fn close_leftover_tab(
         })
     });
     if let Err(why) = result {
-        log_outcome(
+        log_kind(
+            kind,
             requested_by,
             role,
             &format!("leftover tab's shell left alone: {why}"),
@@ -968,11 +1186,19 @@ fn print_status_json(outcome: &str, role: &str) {
 
 /// A restart-path ledger line (`kind: restart`).
 fn log_outcome(requested_by: &str, role: &str, outcome: &str, acted: bool) {
+    log_kind("restart", requested_by, role, outcome, acted);
+}
+
+/// A ledger line of `kind`, with `caller_role` set whenever `requested_by` is a verified role
+/// (that is, neither the `--self` label nor "unverified").
+fn log_kind(kind: &str, requested_by: &str, role: &str, outcome: &str, acted: bool) {
+    let caller_role =
+        (requested_by != "self" && requested_by != "unverified").then_some(requested_by);
     log_ledger(
         requested_by,
         role,
-        "restart",
-        None,
+        kind,
+        caller_role,
         None,
         None,
         outcome,
@@ -1140,6 +1366,43 @@ mod cli_tests {
     }
 
     #[test]
+    fn stop_args_are_role_reason_self_dry_run_and_yes() {
+        assert_eq!(
+            parse_stop_args(&strs(&[
+                "--role",
+                "baracuda",
+                "--reason",
+                "end of shift",
+                "--self",
+                "--dry-run",
+                "--yes",
+            ])),
+            Ok(StopArgs {
+                role: "baracuda".into(),
+                reason: "end of shift".into(),
+                target_self: true,
+                dry_run: true,
+                confirmed: true,
+            })
+        );
+        let a = parse_stop_args(&strs(&["--role", "baracuda"])).unwrap();
+        assert_eq!(a.reason, "", "a missing reason reaches validate_reason");
+        assert!(!a.target_self && !a.dry_run && !a.confirmed);
+        assert_eq!(
+            parse_stop_args(&strs(&["--reason", "x"])),
+            Err(ArgError::RoleRequired)
+        );
+        assert_eq!(
+            parse_stop_args(&strs(&["--role", "a", "--reason"])),
+            Err(ArgError::MissingValue("--reason"))
+        );
+        assert_eq!(
+            parse_stop_args(&strs(&["--role", "a", "--model", "sonnet"])),
+            Err(ArgError::Unknown("--model".into()))
+        );
+    }
+
+    #[test]
     fn specs_import_args_are_role_and_dry_run() {
         assert_eq!(parse_specs_import_args(&[]), Ok((None, false)));
         assert_eq!(
@@ -1154,6 +1417,7 @@ mod cli_tests {
 
     #[test]
     fn usage_text_documents_start_and_specs_import() {
+        assert!(USAGE.contains("lane-restart stop --role"));
         assert!(USAGE.contains("lane-restart start --role"));
         assert!(USAGE.contains("lane-restart specs import"));
     }
