@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.6
+
+- **`docs/PRE-PUBLISH.md`**: the checklist for the unpublished crates (`lane-state`, `lane-restart`,
+  `agentlife`): what must be true, the `cargo package` evidence, dependency order, version drift, and what
+  only CireSnave decides. Nothing is published.
+
 ## 0.12.5
 
 - **`agentlife doctor [--exe <path>]`** (R16, R17): read-only. Reports the installed `lane-restart` host
