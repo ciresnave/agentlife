@@ -183,6 +183,181 @@ mod tests {
         assert_eq!(*l.borrow(), vec!["kill 4242 start=99"]);
     }
 
+    // -- a stop needs a spec on disk first (RESTART-TOOL-DESIGN.md 14.3) --------
+
+    use crate::relaunch::kill_and_relaunch_persisting;
+    use crate::spec::{self, DirSpecStore, SpecError, SpecFile, SpecState, SpecStore};
+
+    /// Logs each write into the shared ordered log.
+    struct LoggingStore {
+        log: crate::testing::Log,
+        fail: bool,
+    }
+
+    impl SpecStore for LoggingStore {
+        fn write(&self, s: &SpecFile) -> Result<(), SpecError> {
+            self.log.borrow_mut().push(format!("spec {:?}", s.state));
+            if self.fail {
+                Err(SpecError::Write("disk full".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn persisting_restart(
+        facts: &RecordingFacts,
+        l: &crate::testing::Log,
+        state: &crate::state::LaneState,
+        specs: &dyn SpecStore,
+        policy_default: &str,
+    ) -> Result<RelaunchOutcome, RelaunchError> {
+        let reader = ScriptedReader::new(
+            l,
+            vec![Some(state_at(&state.role, "new", "UserPromptSubmit"))],
+        );
+        let log = std::rc::Rc::clone(l);
+        kill_and_relaunch_persisting(
+            facts,
+            &reader,
+            state,
+            &identity(),
+            policy_default,
+            false,
+            specs,
+            &move |spec, argv| {
+                log.borrow_mut()
+                    .push(format!("spawn {} {}", spec.role, argv[0]));
+                Ok(())
+            },
+            &mut |_| {},
+            &mut || {},
+        )
+    }
+
+    #[test]
+    fn a_restart_writes_the_spec_stopping_before_the_kill_and_running_after_the_start() {
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        let store = LoggingStore {
+            log: std::rc::Rc::clone(&l),
+            fail: false,
+        };
+        let st = state_at("overmind", "old", "Stop");
+        assert_eq!(
+            persisting_restart(&facts, &l, &st, &store, "sonnet").unwrap(),
+            RelaunchOutcome::Relaunched
+        );
+        assert_eq!(
+            *l.borrow(),
+            vec![
+                "spec Stopping",
+                "kill 4242 start=99",
+                "now",
+                "spawn overmind claude",
+                "read overmind",
+                "spec Running"
+            ]
+        );
+    }
+
+    /// THE INVARIANT: at the moment of the kill the spec is on disk, parses, is `stopping`, and
+    /// passes `prepare_launch`. Mutation target: remove the `specs.write(&stopping)` call (or move
+    /// it after `stop_lane`) and this fails with "spec must exist at kill".
+    #[test]
+    fn at_the_moment_of_the_kill_a_complete_spec_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = log();
+        let mut facts = RecordingFacts::new(&l);
+        let seen = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (d, s) = (dir.path().to_path_buf(), std::rc::Rc::clone(&seen));
+        facts.on_kill = Some(Box::new(move |_| {
+            let on_disk = spec::read(&d, "overmind").expect("spec must exist at kill");
+            assert_eq!(on_disk.state, SpecState::Stopping);
+            on_disk.check().expect("the spec on disk must be complete");
+            s.set(true);
+        }));
+        let store = DirSpecStore {
+            dir: dir.path().to_path_buf(),
+        };
+        let st = state_at("overmind", "old", "Stop");
+        persisting_restart(&facts, &l, &st, &store, "sonnet").unwrap();
+        assert!(
+            seen.get(),
+            "the kill hook never ran, so nothing was checked"
+        );
+        assert_eq!(
+            spec::read(dir.path(), "overmind").unwrap().state,
+            SpecState::Running,
+            "after a confirmed start the spec reads running"
+        );
+    }
+
+    #[test]
+    fn a_spec_that_cannot_be_written_means_nothing_is_killed() {
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        let store = LoggingStore {
+            log: std::rc::Rc::clone(&l),
+            fail: true,
+        };
+        let st = state_at("overmind", "old", "Stop");
+        let out = persisting_restart(&facts, &l, &st, &store, "sonnet");
+        assert!(
+            matches!(out, Err(RelaunchError::SpecNotWritten(_))),
+            "{out:?}"
+        );
+        assert_eq!(*l.borrow(), vec!["spec Stopping"], "no kill, no spawn");
+    }
+
+    #[test]
+    fn a_launch_that_would_be_refused_writes_no_spec_and_kills_nothing() {
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        let store = LoggingStore {
+            log: std::rc::Rc::clone(&l),
+            fail: false,
+        };
+        let st = state_at("a&calc", "old", "Stop");
+        assert!(matches!(
+            persisting_restart(&facts, &l, &st, &store, "sonnet"),
+            Err(RelaunchError::InvalidIdentifier(_))
+        ));
+        assert!(l.borrow().is_empty(), "touched something: {:?}", l.borrow());
+    }
+
+    #[test]
+    fn a_lane_whose_start_never_comes_up_is_left_with_a_stopping_spec_that_is_startable() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = log();
+        let mut facts = RecordingFacts::new(&l);
+        facts.alive = false;
+        let store = DirSpecStore {
+            dir: dir.path().to_path_buf(),
+        };
+        let st = state_at("overmind", "old", "Stop");
+        let reader = ScriptedReader::new(&l, vec![Some(state_at("overmind", "old", "Stop"))]);
+        let out = kill_and_relaunch_persisting(
+            &facts,
+            &reader,
+            &st,
+            &identity(),
+            "sonnet",
+            false,
+            &store,
+            &|_, _| Ok(()),
+            &mut |_| {},
+            &mut || {},
+        );
+        assert!(out.is_err());
+        let s = spec::role_status(dir.path(), "overmind", &RecordingFacts::new(&log()));
+        assert_eq!(
+            (s.state, s.startable),
+            (spec::Lifecycle::Crashed, true),
+            "{s:?}"
+        );
+    }
+
     /// The wait of a restart gets what the restart knows: the flag of the argv
     /// about to launch, and the default 15 minute total (here with a fake
     /// sleep, so no real wait).

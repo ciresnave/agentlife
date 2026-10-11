@@ -28,6 +28,12 @@ pub struct RecordingFacts {
     /// `kill_verified` refuses with `IdentityChanged` when true.
     pub kill_refuses: bool,
     pub alive: bool,
+    /// The one live `claude` process, as `(pid, start time)`, for `is_alive_claude_process` and
+    /// `process_identity`. `None`: no such process.
+    pub live_pid: Option<(u32, u64)>,
+    /// Runs inside `kill_verified`, before it answers: lets a test look at the world at the
+    /// moment of the kill.
+    pub on_kill: Option<Box<dyn Fn(u32)>>,
 }
 
 impl RecordingFacts {
@@ -37,13 +43,15 @@ impl RecordingFacts {
             now: Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap(),
             kill_refuses: false,
             alive: true,
+            live_pid: None,
+            on_kill: None,
         }
     }
 }
 
 impl SystemFacts for RecordingFacts {
-    fn is_alive_claude_process(&self, _: u32) -> bool {
-        unreachable!("not asked")
+    fn is_alive_claude_process(&self, pid: u32) -> bool {
+        self.live_pid.is_some_and(|(p, _)| p == pid)
     }
     fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
         unreachable!("not asked")
@@ -58,10 +66,18 @@ impl SystemFacts for RecordingFacts {
         self.log.borrow_mut().push("now".into());
         self.now
     }
-    fn process_identity(&self, _: u32) -> Option<ProcessIdentity> {
-        unreachable!("not asked")
+    fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
+        self.live_pid
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, start)| ProcessIdentity {
+                start_time_secs: start,
+                exe: None,
+            })
     }
     fn kill_verified(&self, pid: u32, expected: &ProcessIdentity) -> Result<(), KillError> {
+        if let Some(hook) = &self.on_kill {
+            hook(pid);
+        }
         self.log
             .borrow_mut()
             .push(format!("kill {pid} start={}", expected.start_time_secs));

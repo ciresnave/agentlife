@@ -21,6 +21,7 @@ pub mod launch;
 pub mod log;
 pub mod notify;
 pub mod relaunch;
+pub mod spec;
 pub mod stop;
 pub mod tab_close;
 #[cfg(test)]

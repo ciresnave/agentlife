@@ -375,6 +375,24 @@ fn reading_a_directory_returns_lane_files_and_reports_the_rest() {
 }
 
 #[test]
+fn a_launch_spec_is_neither_a_lane_state_nor_a_reported_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = serde_json::to_string(&state("overmind", "C:/Projects/OverMind", None, 1)).unwrap();
+    std::fs::write(dir.path().join("overmind.json"), good).unwrap();
+    std::fs::write(
+        dir.path().join("overmind.launch.json"),
+        r#"{"schema":1,"role":"overmind"}"#,
+    )
+    .unwrap();
+    let (good, bad) = read_states(dir.path()).unwrap();
+    assert_eq!(good.len(), 1);
+    assert!(
+        bad.is_empty(),
+        "a spec was reported as a bad state: {bad:?}"
+    );
+}
+
+#[test]
 fn writing_creates_one_record_each_and_a_second_import_finds_them() {
     let dir = tempfile::tempdir().unwrap();
     let reg = Registry::new(dir.path().join("agents"));

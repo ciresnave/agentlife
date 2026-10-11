@@ -11,6 +11,7 @@ use crate::launch::{
     launch_argv, prepare_launch, wait_for_liveness, LaunchSpec, LivenessTiming, PreparedLaunch,
     SpawnFn,
 };
+use crate::spec::{self, DirSpecStore, NoSpecStore, SpecState, SpecStore};
 use crate::state::LaneState;
 use crate::stop::stop_lane;
 
@@ -54,6 +55,9 @@ pub enum RelaunchError {
     /// CireSnave, 2026-10-08: "I can't afford Opus." The resolved model
     /// id names Opus and no override was given.
     OpusRefused(String),
+    /// RESTART-TOOL-DESIGN.md 14: the launch spec could not be written, complete and read back,
+    /// so the lane was NOT stopped - a lane may be stopped only if it can be started again.
+    SpecNotWritten(String),
 }
 
 /// What `kill_and_relaunch` actually achieved - `Relaunched` is the
@@ -98,6 +102,11 @@ impl std::fmt::Display for RelaunchError {
             RelaunchError::SessionNeverProcessedPrompt => {
                 write!(f, "relaunch FAILED: session never processed its prompt")
             }
+            RelaunchError::SpecNotWritten(why) => write!(
+                f,
+                "refusing to stop - the launch spec could not be written, so the lane could \
+                 not be started again: {why}"
+            ),
             RelaunchError::OpusRefused(model) => write!(
                 f,
                 "refusing to relaunch on model {model:?} (an Opus model); set \
@@ -442,6 +451,13 @@ pub fn models_report(state_dir: &std::path::Path) -> String {
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(spec::is_spec_file_name)
+            {
+                continue;
+            }
             let Some(role) = path.file_stem().and_then(|x| x.to_str()) else {
                 continue;
             };
@@ -603,10 +619,9 @@ fn prepare(spec: &LaunchSpec) -> Result<PreparedLaunch, RelaunchError> {
     )
 }
 
-/// `kill_and_relaunch` with its spawn, sleep and policy injected so the ORDER is
-/// testable: every check, then the stop (`stop::stop_lane`), then the start
-/// (`launch::wait_for_liveness` after the spawn). A restart is `lane-stop`
-/// then `lane-start` (spec 8b) plus what only a restart needs.
+/// `kill_and_relaunch_persisting` without a spec store: persists nothing. For callers that
+/// inject their own spawn (tests, a batch restore); the real restart is `kill_and_relaunch`,
+/// which persists.
 #[allow(clippy::too_many_arguments)]
 pub fn kill_and_relaunch_with(
     facts: &dyn SystemFacts,
@@ -619,15 +634,65 @@ pub fn kill_and_relaunch_with(
     sleep: &mut dyn FnMut(std::time::Duration),
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<RelaunchOutcome, RelaunchError> {
+    kill_and_relaunch_persisting(
+        facts,
+        state_reader,
+        state,
+        identity,
+        policy_default,
+        allow_opus,
+        &NoSpecStore,
+        spawn,
+        sleep,
+        on_awaiting,
+    )
+}
+
+/// `kill_and_relaunch` with its spawn, sleep, policy and spec store injected so the ORDER is
+/// testable: every check, then **the launch spec written, complete and read back**
+/// (RESTART-TOOL-DESIGN.md 14.3), then the stop (`stop::stop_lane`), then the start
+/// (`launch::wait_for_liveness` after the spawn), then the spec marked `running`. A restart is
+/// `lane-stop` then `lane-start` (spec 8b) plus what only a restart needs.
+///
+/// The spec write is before the kill and its failure refuses the restart: that ordering IS the
+/// invariant (a lane may be stopped only if it can be started again).
+#[allow(clippy::too_many_arguments)]
+pub fn kill_and_relaunch_persisting(
+    facts: &dyn SystemFacts,
+    state_reader: &dyn StateReader,
+    state: &LaneState,
+    identity: &ProcessIdentity,
+    policy_default: &str,
+    allow_opus: bool,
+    specs: &dyn SpecStore,
+    spawn: &SpawnFn,
+    sleep: &mut dyn FnMut(std::time::Duration),
+    on_awaiting: &mut dyn FnMut(),
+) -> Result<RelaunchOutcome, RelaunchError> {
     let spec = LaunchSpec::from(state);
     // every check runs BEFORE anything is killed
     let PreparedLaunch {
         argv,
         carries_dev_channels_flag,
     } = prepare_launch(&spec, policy_default, allow_opus)?;
+    let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, allow_opus)?;
+    let spec_inputs = |spec_state: SpecState, stopped: bool| spec::SpecInputs {
+        launch: &spec,
+        model: &model,
+        session_id: stopped.then_some(state.session_id.as_str()),
+        pid_start_secs: stopped.then_some(identity.start_time_secs),
+        state: spec_state,
+        written_by: "restart",
+        now: chrono::Utc::now(),
+    };
+    let stopping = spec::build(&spec_inputs(SpecState::Stopping, true))
+        .map_err(|e| RelaunchError::SpecNotWritten(e.to_string()))?;
+    specs
+        .write(&stopping)
+        .map_err(|e| RelaunchError::SpecNotWritten(e.to_string()))?;
     let stopped = stop_lane(facts, state.pid, identity, sleep)?;
     spawn(&spec, &argv)?;
-    wait_for_liveness(
+    let outcome = wait_for_liveness(
         facts,
         state_reader,
         &state.cwd,
@@ -638,7 +703,18 @@ pub fn kill_and_relaunch_with(
         &LivenessTiming::default(),
         sleep,
         on_awaiting,
-    )
+    )?;
+    // The lane is up with these parameters. Best effort: a failure here leaves the `stopping`
+    // spec, which is complete and reads as `crashed` if the new session later ends.
+    let running = spec::build(&spec_inputs(SpecState::Running, false))
+        .map_err(|e| e.to_string())
+        .and_then(|s| specs.write(&s).map_err(|e| e.to_string()));
+    if let Err(why) = running {
+        eprintln!(
+            "lane-restart: the lane is up, but its launch spec could not be marked running: {why}"
+        );
+    }
+    Ok(outcome)
 }
 
 pub fn kill_and_relaunch(
@@ -648,13 +724,16 @@ pub fn kill_and_relaunch(
     identity: &ProcessIdentity,
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<RelaunchOutcome, RelaunchError> {
-    kill_and_relaunch_with(
+    kill_and_relaunch_persisting(
         facts,
         state_reader,
         state,
         identity,
         &policy_default_model(&crate::state_dir()),
         allow_opus_from_env(),
+        &DirSpecStore {
+            dir: crate::state_dir(),
+        },
         &spawn_launch,
         &mut std::thread::sleep,
         on_awaiting,

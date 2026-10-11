@@ -249,6 +249,47 @@ fn run_approvals_cmd(role: Option<String>) -> ExitCode {
     }
 }
 
+/// `lane-restart status [--json]` - RESTART-TOOL-DESIGN.md 14.2 / 14.10. Read-only: for every
+/// role with a lane state or a launch spec, whether it is running, suspended, crashed or never
+/// run, and whether it can be started again from its spec. Liveness is the process table's
+/// (pid and start time), never a file's age.
+fn run_status_cmd(json: bool) -> ExitCode {
+    use lane_restart::spec;
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let report = spec::status_all(&state_dir(), &facts);
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("lane-restart status: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    for r in &report.roles {
+        println!(
+            "{}\t{:?}\tspec={:?}\tstartable={}{}",
+            r.role,
+            r.state,
+            r.spec,
+            r.startable,
+            r.detail
+                .as_deref()
+                .map(|d| format!("\t{d}"))
+                .unwrap_or_default()
+        );
+    }
+    if !report.skipped.is_empty() {
+        println!(
+            "({} other file(s) in the state directory are neither a lane state nor a launch spec: {})",
+            report.skipped.len(),
+            report.skipped.join(", ")
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
     let mut role = None;
     let mut iter = rest.iter();
@@ -303,6 +344,12 @@ USAGE:
         (from that repo's default branch only) and list every active and
         refused one, exactly as `host` would load them.
 
+    lane-restart status [--json]
+        Read-only: each role's state (running, suspended, crashed, never_run,
+        unknown), whether its launch spec (<role>.launch.json, written before a
+        restart's kill and at a confirmed launch) is complete, and whether it can
+        be started again from it. RESTART-TOOL-DESIGN.md section 14.
+
     lane-restart models
         Read-only: list each lane's recorded model and flag Opus. A relaunch
         pins `--model` from the original launch's explicit --model, else
@@ -338,6 +385,16 @@ fn main() -> ExitCode {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "status" {
+            return match rest {
+                [] => run_status_cmd(false),
+                [flag] if flag == "--json" => run_status_cmd(true),
+                _ => {
+                    eprintln!("lane-restart status: expected `status [--json]`");
                     ExitCode::FAILURE
                 }
             };
