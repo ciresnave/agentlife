@@ -198,6 +198,86 @@ fn close(
     save(home, rec)
 }
 
+/// The longest "why" the Hello prompt is given (characters). `user-request` clips at 300; this is the
+/// tighter ceiling the PM set (2026-10-12), so a person reads all of it.
+pub const WHY_MAX_CHARS: usize = 200;
+const WHY_REASON_CHARS: usize = 60;
+const WHY_NAME_CHARS: usize = 24;
+
+/// Text a person will read in a prompt, made safe to show: control characters, bidi controls and
+/// whitespace runs become one space, and it is clipped to `max` characters with `…`.
+pub fn clean_for_prompt(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in s.chars() {
+        let bidi = matches!(
+            c,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}'
+        );
+        if c.is_control() || c.is_whitespace() || bidi {
+            gap = !out.is_empty();
+        } else {
+            if gap {
+                out.push(' ');
+                gap = false;
+            }
+            out.push(c);
+        }
+    }
+    if out.chars().count() > max {
+        let mut clipped: String = out.chars().take(max.saturating_sub(1)).collect();
+        clipped.push('\u{2026}');
+        return clipped;
+    }
+    out
+}
+
+/// The fourth thing a person is shown with a restore: *why the request is being made*
+/// (CireSnave 2026-10-12: "four things, all prompts"). The requester's own words, then the lanes and
+/// the plan's hash prefix, **all taken from the one plan that is hashed and frozen**, so the text
+/// cannot describe a different plan from the one approved, and it changes whenever the plan does
+/// (the hash prefix comes last and is never clipped). At most [`WHY_MAX_CHARS`] characters.
+pub fn restore_why(requested: &str, plan: &Plan) -> String {
+    let said = clean_for_prompt(requested, WHY_REASON_CHARS);
+    let tail = format!(" | plan {}", &plan.hash[..12.min(plan.hash.len())]);
+    let n = plan.entries.len();
+    let prefix = format!(" | {n} lane{}: ", if n == 1 { "" } else { "s" });
+    let used = said.chars().count() + prefix.chars().count() + tail.chars().count();
+    let budget = WHY_MAX_CHARS.saturating_sub(used);
+    let names: Vec<String> = plan
+        .entries
+        .iter()
+        .map(|e| clean_for_prompt(&e.title, WHY_NAME_CHARS))
+        .collect();
+    let mut list = String::new();
+    let mut shown = 0;
+    for (i, name) in names.iter().enumerate() {
+        let sep = if shown == 0 { 0 } else { 2 };
+        let more = names.len() - i - 1;
+        let reserve = if more == 0 {
+            0
+        } else {
+            format!(", +{more} more").chars().count()
+        };
+        if list.chars().count() + sep + name.chars().count() + reserve > budget {
+            break;
+        }
+        if shown > 0 {
+            list.push_str(", ");
+        }
+        list.push_str(name);
+        shown += 1;
+    }
+    if shown < names.len() {
+        if shown > 0 {
+            list.push_str(", ");
+        }
+        list.push_str(&format!("+{} more", names.len() - shown));
+    }
+    let why = format!("{said}{prefix}{list}{tail}");
+    why.strip_prefix(" | ").map(str::to_string).unwrap_or(why)
+}
+
 /// Freezes `plan`, records a consent request bound to its hash, and writes the pending record.
 /// Asking the same plan again returns the record it already has. Nothing is shown to anyone.
 pub fn create(
@@ -230,7 +310,7 @@ pub fn create(
             plan.entries.len(),
             &plan.hash[..12.min(plan.hash.len())]
         ),
-        reason: reason.into(),
+        reason: restore_why(reason, plan),
     };
     let id = consent.submit(&req, &plan_consent_grant(), &plan.hash)?;
     if let Ok(existing) = load(home, &id) {

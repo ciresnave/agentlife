@@ -790,3 +790,85 @@ fn the_no_backend_spends_nothing() {
         .approved_at(Kind::RestorePlan, &subject, &agentlife())
         .is_err());
 }
+
+/// What the person is shown as the request's reason, read back from the consent store.
+fn shown_why(r: &mut Rig, p: &Plan) -> String {
+    let rec = made(r, p);
+    r.consent
+        .begin_answer(&rec.pending_id, &p.hash)
+        .unwrap()
+        .request
+        .reason
+}
+
+#[test]
+fn the_why_the_person_is_shown_has_the_reason_the_lanes_and_the_plan_prefix() {
+    let mut r = rig();
+    let p = plan_with(&["alpha", "beta"], "default");
+    let why = shown_why(&mut r, &p);
+    assert_eq!(
+        why,
+        format!(
+            "after the update | 2 lanes: alpha, beta | plan {}",
+            &p.hash[..12]
+        )
+    );
+}
+
+#[test]
+fn the_why_changes_whenever_the_plan_does() {
+    let mut r = rig();
+    let a = plan_with(&["alpha", "beta"], "default");
+    // same lanes, different content: the hash differs, and so must the text
+    let b = plan_with(&["alpha", "beta"], "acceptEdits");
+    // different lanes
+    let c = plan_with(&["alpha"], "default");
+    assert_ne!(a.hash, b.hash);
+    let (wa, wb, wc) = (
+        shown_why(&mut r, &a),
+        shown_why(&mut r, &b),
+        shown_why(&mut r, &c),
+    );
+    assert_ne!(wa, wb, "same lanes, different plan");
+    assert_ne!(wa, wc);
+    assert_ne!(wb, wc);
+}
+
+#[test]
+fn the_why_is_capped_strips_control_characters_and_keeps_the_hash_prefix() {
+    let ids: Vec<String> = (0..60)
+        .map(|i| format!("lane-with-a-long-name-{i}"))
+        .collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let p = plan_with(&refs, "default");
+    let nasty = "seed\u{1b}[31m the\nprod\u{0}db\u{202e}\t   now ".repeat(20);
+    let why = restore_why(&nasty, &p);
+    assert!(
+        why.chars().count() <= WHY_MAX_CHARS,
+        "{}",
+        why.chars().count()
+    );
+    assert!(
+        !why.chars()
+            .any(|c| c.is_control() || ('\u{202a}'..='\u{202e}').contains(&c)),
+        "{why:?}"
+    );
+    assert!(
+        why.ends_with(&format!(" | plan {}", &p.hash[..12])),
+        "{why}"
+    );
+    assert!(why.contains(" | 60 lanes: "), "{why}");
+    assert!(
+        why.contains(" more"),
+        "the lanes that did not fit are counted: {why}"
+    );
+}
+
+#[test]
+fn an_empty_reason_still_names_the_lanes() {
+    let p = plan_with(&["alpha"], "default");
+    assert_eq!(
+        restore_why("  \n ", &p),
+        format!("1 lane: alpha | plan {}", &p.hash[..12])
+    );
+}
