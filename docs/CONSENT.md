@@ -113,10 +113,15 @@ request made with `restore --only` or `--priority` is voided unasked there (the 
 named); run `restore` again with the same flags.
 
 **What a person sees is not the consent.** The terminal list is printed by agentlife; the Hello prompt
-itself is the crate's three lines and names **only the plan hash** (`Wants: restore lanes: plan <hash>`).
-A restore started by the **logon task** therefore shows the person **no agent list** at the moment they
-answer: they approve a hash. Until `user-request` puts the summary in its own prompt (asked of OverMind,
-2026-10-10), that is the honest state, and a person at a terminal is the only one who sees the list first.
+itself is the crate's lines: **who / what / duration**, and, from the `user-request` release that adds
+it, a fourth, **`Reason given:`** (CireSnave 2026-10-12: *"four things, all prompts"*; the fourth is "why the
+request is being made"). `what` names the plan by hash (`Wants: restore lanes: plan <hash>`).
+
+**The why is the requester's claim, not a vouched line.** agentlife puts it in `Request.reason`
+(`pending::restore_why`): the requester's own words (cleaned, at most 60 characters), then the lane count and
+lane titles, then `plan <first 12 of the hash>`, all read from the **same frozen plan that is hashed**, at most
+200 characters, control and bidi characters stripped, the hash prefix never clipped. So it changes whenever the
+plan does, and a logon-task restore shows the person which lanes they are approving, not only a hash.
 
 ## One-shot wiring (the `RestorePlan` kind merged: OverMind#131, `user-request` 0.10.0)
 

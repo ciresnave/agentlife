@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.12.16
+
+- **The approval prompt's fourth thing: why (board 173, CireSnave 2026-10-12: *"four things, all prompts"*).**
+  A restore's `Request.reason` is now `pending::restore_why`: the requester's words (cleaned, at most 60
+  characters), `N lanes: <titles>`, and `plan <hash12>`, built from the same frozen plan as the hash, capped at
+  200 characters with control and bidi characters stripped. It changes whenever the plan changes. The Hello
+  channel shows it as `Reason given:` once `user-request` ships that line (OverMind); the wire field is the
+  existing `Request.reason`. The stored pending record keeps the requester's own text. Supersedes the "three
+  things" of decisions 134/150 and the logon-task caveat in `docs/CONSENT.md`.
+- Nothing is wired to a logon task and no live start/stop was run.
+
 ## 0.12.15
 
 - **PR 4 of RESTART-TOOL-DESIGN.md 14.13, the PM's option C: documentation only.** `agentlife park|stop`'s help
