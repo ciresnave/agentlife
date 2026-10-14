@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## Unreleased (Linux port P4; the PM allocates the number at gate)
+
+- **`lane-restart host` on unix** (`docs/PORT-LINUX-PLAN.md`, slice P4). No change on Windows.
+  - A raw-mode guard on the host's stdin (`rustix::termios`): a real tty goes raw (no line buffering or echo, so
+    the terminal's cursor-position reply reaches the child) and its original mode is restored on every exit path,
+    panic unwind included. A pipe, a file or a test's fake stdin is left alone. This is the unix counterpart of the
+    Windows `ENABLE_VIRTUAL_TERMINAL_INPUT` fix.
+  - `current_console_size()` reads the tty size (`TIOCGWINSZ`) instead of returning `None`, so the PTY is no longer
+    always 80x25 on Linux and resize forwarding fires (the existing 500 ms poll; no SIGWINCH handler yet).
+  - The 11 real-PTY host tests that were `cfg(windows)` now run on both OSes with an `sh -c` child on unix; three new
+    tests exercise the guard and the size against a real pty. New dependency: `rustix` 1.1.5 (`termios`, `stdio`),
+    unix only.
+
 ## 0.14.27
 
 - **Linux port, slices P0 to P2** (`docs/PORT-LINUX-PLAN.md`, merged in #78 without a bump; PM-allocated number).

@@ -606,6 +606,7 @@ dependencies = [
  "chrono",
  "lane-state",
  "portable-pty",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
