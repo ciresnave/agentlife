@@ -1413,6 +1413,12 @@ consuming `lane-restart` from the root crate is either an unpublished dependency
 keeps its person-only consent and now says in its help and module docs that it bypasses the spec-first invariant.
 A refusal of its kill when no complete spec exists needs `lane_restart::spec`, which the root crate does not depend on.
 
+**Status (0.13.0), the PM's task of 2026-10-13:** `agentlife park|stop` of a running lane now requires the lane's
+complete `<role>.launch.json` before it asks anything and again before it records the intent, and marks the spec
+`suspended` after the kill (`down.rs`, via `lane_restart::spec`; `agentlife` depends on the published `lane-restart`).
+This closes the "bypasses the spec-first invariant" note of 0.12.15 for agentlife's own kill. It does not write a spec:
+a lane with none is refused and pointed at `lane-restart specs import`.
+
 ### 14.14 Questions for CireSnave (through the PM), with a recommendation each
 
 - **O1 permission mode.** `--permission-mode auto` for every role, including the PM (whose live session is

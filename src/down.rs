@@ -20,14 +20,14 @@
 //!    the process is touched, the identity is re-read immediately before the kill, and if the kill
 //!    fails or the process does not go, the intent is **put back** and the failure journalled.
 //!
-//! **This is not `lane-restart stop`, and it does not keep that command's invariant.** A lane is
-//! suspended by `lane-restart stop` only after its complete launch spec (`<role>.launch.json`) is
-//! written and read back (RESTART-TOOL-DESIGN.md 14.3); the kill here does not write or check one.
-//! agentlife's own way back is the registry record that `restore` launches from, not that spec. The
-//! PM stops a running lane with `lane-restart stop`; a person's `agentlife park|stop` is the
-//! graceful, person-consented path described above. Making this kill refuse when no complete spec
-//! exists needs `lane_restart::spec` (this crate depends on `lane-state` only), so it is not done
-//! here: see the 0.12.15 CHANGELOG entry.
+//! **A lane is stopped only if it can be started again** (RESTART-TOOL-DESIGN.md 14.3). This is not
+//! `lane-restart stop`, and it does not write the spec; it **requires** one. Before it asks the lane
+//! anything, and again immediately before the intent is recorded, the lane's `<role>.launch.json`
+//! must exist and pass `lane_restart::spec::SpecFile::check` (complete, a non-Opus explicit model).
+//! Without one nothing is asked, recorded or killed, and the refusal names the way to get one (the
+//! PM's `lane-restart specs import`, or the lane's next launch under a spec-writing build). After
+//! the process is gone the spec is marked `suspended`, best effort: a failure there is journalled
+//! and leaves the earlier complete spec in place, so the lane stays startable.
 
 use crate::caller::Caller;
 use crate::clock::Clock;
@@ -71,6 +71,11 @@ pub trait Facts {
     fn lane_state(&self, session_id: &str) -> Option<LaneStateView>;
     /// The candidate HANDOFF paths, and the newest one that exists.
     fn handoff(&self, rec: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, DateTime<Utc>)>);
+    /// `Ok` only if `role` has a complete launch spec on disk, one a `lane-restart start` would
+    /// accept. The `Err` says why not.
+    fn launch_spec(&self, role: &str) -> Result<(), String>;
+    /// Marks the role's spec `suspended` once the process is gone (best effort).
+    fn mark_suspended(&self, role: &str, reason: &str) -> Result<(), String>;
 }
 
 pub struct FsFacts<'a> {
@@ -87,6 +92,36 @@ impl Facts for FsFacts<'_> {
         let newest = readiness::newest_mtime(&candidates);
         (candidates, newest)
     }
+
+    fn launch_spec(&self, role: &str) -> Result<(), String> {
+        let spec =
+            lane_restart::spec::read(self.lane_state_dir, role).map_err(|e| e.to_string())?;
+        spec.check().map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn mark_suspended(&self, role: &str, reason: &str) -> Result<(), String> {
+        let mut spec =
+            lane_restart::spec::read(self.lane_state_dir, role).map_err(|e| e.to_string())?;
+        spec.state = lane_restart::spec::SpecState::Suspended;
+        spec.stop_reason = Some(reason.to_string());
+        lane_restart::spec::write_atomic(self.lane_state_dir, &spec).map_err(|e| e.to_string())
+    }
+}
+
+/// The role whose launch spec this agent is started from: the self-claimed `LANE_ROLE`, else the
+/// last component of the directory it was launched in (the same fallback the lane's state file
+/// uses). `None` when neither is usable, which can never have a spec.
+fn spec_role(rec: &AgentRecord) -> Option<String> {
+    let claimed = rec.role.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    let leaf = || {
+        rec.launch_cwd
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+    };
+    claimed.or_else(leaf).map(str::to_string)
 }
 
 pub struct SysinfoTerminator;
@@ -184,6 +219,12 @@ pub enum DownError {
     },
     /// The pid is held by a different process now; nothing was stopped.
     IdentityChanged(String),
+    /// The lane has no complete launch spec, so it could not be started again. Nothing was
+    /// asked, recorded or stopped.
+    NotResumable {
+        role: String,
+        why: String,
+    },
     /// The stop failed; the intent was put back.
     StopFailed(String),
     Registry(String),
@@ -216,6 +257,10 @@ impl fmt::Display for DownError {
                 blockers.join("\n  - ")
             ),
             DownError::IdentityChanged(why) => write!(f, "nothing was stopped: {why}"),
+            DownError::NotResumable { role, why } => write!(
+                f,
+                "nothing was done: a lane is stopped only if it can be started again, and {role} has no usable launch spec ({why}).                  The PM can write one from its state file with `lane-restart specs import --role {role}`"
+            ),
             DownError::StopFailed(why) => write!(f, "the stop failed and the intent was put back: {why}"),
             DownError::Registry(e) => write!(f, "{e}"),
         }
@@ -301,6 +346,18 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
             return Err(DownError::NeedsConfirmation { expected });
         }
     }
+
+    // 1b. The way back: a lane is stopped only if it can be started again (14.3).
+    let role = spec_role(&rec).ok_or_else(|| DownError::NotResumable {
+        role: rec.agent_id.to_string(),
+        why: "neither a role nor a launch directory is recorded".into(),
+    })?;
+    d.facts
+        .launch_spec(&role)
+        .map_err(|why| DownError::NotResumable {
+            role: role.clone(),
+            why,
+        })?;
 
     // 2. What exactly would be stopped.
     let identity = session_identity(&rec)?;
@@ -408,6 +465,15 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
         (d.sleep)(r.poll);
     };
 
+    // 5b. The spec was there when we asked; it must still be there now, before anything is
+    // recorded or ended (the wait can be long).
+    d.facts
+        .launch_spec(&role)
+        .map_err(|why| DownError::NotResumable {
+            role: role.clone(),
+            why,
+        })?;
+
     // 6. Record the intent FIRST, then stop exactly that process.
     let now = d.clock.now();
     let mut applied = false;
@@ -491,10 +557,22 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
         put_back(&why);
         return Err(DownError::StopFailed(why));
     }
+    let marked = d.facts.mark_suspended(
+        &role,
+        &format!(
+            "agentlife {}: {by}",
+            if r.how == ClosedHow::Parked {
+                "park"
+            } else {
+                "stop"
+            }
+        ),
+    );
     let _ = d.journal.append(
         "stopped",
         Some(rec.agent_id.as_str()),
-        json!({"pid": identity.pid, "waited_secs": waited.as_secs()}),
+        json!({"pid": identity.pid, "waited_secs": waited.as_secs(), "role": role,
+               "spec_suspended": marked.is_ok(), "spec_error": marked.err()}),
     );
     Ok(Outcome::Stopped {
         pid: identity.pid,
@@ -585,6 +663,11 @@ mod tests {
         clock: Arc<TClock>,
         ready_after_polls: Option<u32>,
         polls: RefCell<u32>,
+        /// `launch_spec` fails from this call on (0 = the first look; 1 = the look just before
+        /// the intent is recorded). `None`: a complete spec is always there.
+        spec_fails_from_call: Option<u32>,
+        spec_calls: RefCell<u32>,
+        log: Arc<Mutex<Vec<String>>>,
     }
     impl Facts for Facts_ {
         fn lane_state(&self, session_id: &str) -> Option<LaneStateView> {
@@ -607,6 +690,18 @@ mod tests {
                 .is_some_and(|n| *self.polls.borrow() > n);
             let p = PathBuf::from("C:/x/HANDOFF.md");
             (vec![p.clone()], ready.then(|| (p, self.clock.now())))
+        }
+        fn launch_spec(&self, role: &str) -> Result<(), String> {
+            let n = *self.spec_calls.borrow();
+            *self.spec_calls.borrow_mut() += 1;
+            match self.spec_fails_from_call {
+                Some(from) if n >= from => Err(format!("no launch spec for {role}")),
+                _ => Ok(()),
+            }
+        }
+        fn mark_suspended(&self, role: &str, _: &str) -> Result<(), String> {
+            self.log.lock().unwrap().push(format!("suspended {role}"));
+            Ok(())
         }
     }
 
@@ -682,6 +777,7 @@ mod tests {
         kill: Result<(), KillError>,
         gone_after_checks: u32,
         alive: Vec<(u32, u64)>,
+        spec_fails_from_call: Option<u32>,
     }
 
     impl Default for Scenario {
@@ -698,6 +794,7 @@ mod tests {
                 kill: Ok(()),
                 gone_after_checks: 1,
                 alive: vec![(100, 5000)],
+                spec_fails_from_call: None,
             }
         }
     }
@@ -732,6 +829,9 @@ mod tests {
             clock: rig.clock.clone(),
             ready_after_polls: sc.ready_after_polls,
             polls: RefCell::new(0),
+            spec_fails_from_call: sc.spec_fails_from_call,
+            spec_calls: RefCell::new(0),
+            log: rig.log.clone(),
         };
         let term = Term {
             log: rig.log.clone(),
@@ -809,6 +909,124 @@ mod tests {
     }
 
     #[test]
+    fn a_lane_without_a_launch_spec_is_not_asked_recorded_or_stopped() {
+        let (caller, _) = person();
+        let rig = rig(&[target()]);
+        let ran = go(
+            &rig,
+            Scenario {
+                spec_fails_from_call: Some(0),
+                ..Scenario::default()
+            },
+            &caller,
+            None,
+            true,
+            None,
+            ClosedHow::Parked,
+            60,
+        );
+        assert!(
+            matches!(&ran.result, Err(DownError::NotResumable { why, .. }) if why.contains("no launch spec")),
+            "{:?}",
+            ran.result
+        );
+        assert!(ran.sent.is_empty(), "the lane was asked: {:?}", ran.sent);
+        assert!(
+            ran.kills.is_empty(),
+            "something was stopped: {:?}",
+            ran.kills
+        );
+        assert_eq!(intent(&rig), Intent::Wanted);
+        // Positive control: the same rig and inputs with a spec present stops the lane.
+        let rig2 = self::rig(&[target()]);
+        let ok = go(
+            &rig2,
+            Scenario::default(),
+            &caller,
+            None,
+            true,
+            None,
+            ClosedHow::Parked,
+            60,
+        );
+        assert!(
+            matches!(ok.result, Ok(Outcome::Stopped { .. })),
+            "{:?}",
+            ok.result
+        );
+    }
+
+    #[test]
+    fn a_spec_that_vanishes_while_waiting_stops_before_anything_is_recorded() {
+        let (caller, _) = person();
+        let rig = rig(&[target()]);
+        let ran = go(
+            &rig,
+            Scenario {
+                spec_fails_from_call: Some(1),
+                ..Scenario::default()
+            },
+            &caller,
+            None,
+            true,
+            None,
+            ClosedHow::Parked,
+            60,
+        );
+        assert!(
+            matches!(ran.result, Err(DownError::NotResumable { .. })),
+            "{:?}",
+            ran.result
+        );
+        assert!(
+            ran.kills.is_empty(),
+            "something was stopped: {:?}",
+            ran.kills
+        );
+        assert_eq!(intent(&rig), Intent::Wanted);
+    }
+
+    #[test]
+    fn a_stopped_lane_has_its_spec_marked_suspended() {
+        let (caller, _) = person();
+        let rig = rig(&[target()]);
+        let ran = go(
+            &rig,
+            Scenario::default(),
+            &caller,
+            None,
+            true,
+            None,
+            ClosedHow::Exited,
+            60,
+        );
+        assert!(
+            matches!(ran.result, Ok(Outcome::Stopped { .. })),
+            "{:?}",
+            ran.result
+        );
+        assert!(
+            ran.kills.iter().any(|l| l.starts_with("suspended ")),
+            "{:?}",
+            ran.kills
+        );
+    }
+
+    #[test]
+    fn the_spec_role_is_the_claimed_role_else_the_launch_directory_leaf() {
+        let mut r = target();
+        r.role = Some("  auth  ".into());
+        assert_eq!(spec_role(&r).as_deref(), Some("auth"));
+        r.role = None;
+        r.launch_cwd = "C:\\Projects\\agentlife\\".into();
+        assert_eq!(spec_role(&r).as_deref(), Some("agentlife"));
+        r.launch_cwd = "C:/Projects/synapse".into();
+        assert_eq!(spec_role(&r).as_deref(), Some("synapse"));
+        r.launch_cwd = "".into();
+        assert_eq!(spec_role(&r), None);
+    }
+
+    #[test]
     fn without_yes_it_prints_the_plan_and_does_nothing() {
         let rig = rig(&[target(), pm_record()]);
         let (c, rec) = person();
@@ -877,8 +1095,8 @@ mod tests {
         );
         assert_eq!(
             ran.kills,
-            ["kill pid 100 start 5000"],
-            "exactly one kill, of exactly that process"
+            ["kill pid 100 start 5000", "suspended x"],
+            "exactly one kill, of exactly that process, then the spec marked suspended"
         );
         assert!(
             matches!(intent(&rig), Intent::Closed { how: ClosedHow::Parked, ref by, .. } if by == "person")
@@ -921,6 +1139,9 @@ mod tests {
             clock: rig.clock.clone(),
             ready_after_polls: Some(0),
             polls: RefCell::new(0),
+            spec_fails_from_call: None,
+            spec_calls: RefCell::new(0),
+            log: rig.log.clone(),
         };
         let peek = Peek {
             rig: &rig,
