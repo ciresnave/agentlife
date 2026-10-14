@@ -291,17 +291,28 @@ fn run_status_cmd(json: bool) -> ExitCode {
     println!("{}", lane_restart::disk::status_line(&state_dir()));
     for r in &report.roles {
         println!(
-            "{}\t{:?}\tspec={:?}\tstartable={}\t{}{}",
+            "{}\t{:?}\tspec={:?}\tstartable={}\t{}{}{}",
             r.role,
             r.state,
             r.spec,
             r.startable,
             match &r.activity {
+                Some(a) if a.idle => format!("idle=true quiet={}s", a.quiet_secs),
                 Some(a) => format!(
-                    "idle={} busy={} subagents={}",
-                    a.idle, a.busy, a.subagents_running
+                    "idle=false({}) quiet={}s",
+                    a.idle_blockers.join("+"),
+                    a.quiet_secs
                 ),
                 None => "idle=-".to_string(),
+            },
+            match &r.handoff {
+                Some(h) => format!(
+                    "\thandoff={}B/{}B{}",
+                    h.bytes,
+                    h.ceiling,
+                    if h.over { " OVER" } else { "" }
+                ),
+                None => "\thandoff=none".to_string(),
             },
             r.detail
                 .as_deref()
@@ -888,9 +899,10 @@ fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
 /// `ledger [--role R] [--kind K] [--since T] [--acted|--refused] [--last N] [--json]`.
 fn parse_ledger_args(
     rest: &[String],
-) -> Result<(lane_restart::ledger::Filter, bool, Option<String>), String> {
+) -> Result<(lane_restart::ledger::Filter, bool, Option<String>, bool), String> {
     let mut f = lane_restart::ledger::Filter::default();
     let mut json = false;
+    let mut by_lane = false;
     let mut since_raw = None;
     let mut iter = rest.iter();
     let value = |name: &str, it: &mut std::slice::Iter<String>| {
@@ -913,10 +925,11 @@ fn parse_ledger_args(
                 );
             }
             "--json" => json = true,
+            "--by-lane" => by_lane = true,
             other => return Err(format!("unrecognised argument: {other}")),
         }
     }
-    Ok((f, json, since_raw))
+    Ok((f, json, since_raw, by_lane))
 }
 
 /// `lane-restart ledger` - read-only: prints `restart.log` filtered. Writes nothing.
@@ -924,6 +937,7 @@ fn run_ledger_cmd(
     mut f: lane_restart::ledger::Filter,
     json: bool,
     since: Option<String>,
+    by_lane: bool,
 ) -> ExitCode {
     use lane_restart::ledger;
     if let Some(s) = since {
@@ -943,6 +957,10 @@ fn run_ledger_cmd(
         }
     };
     let shown = ledger::select(&read.rows, &f);
+    if by_lane {
+        print!("{}", ledger::render_by_lane(&shown, read.rows.len()));
+        return ExitCode::SUCCESS;
+    }
     if json {
         for r in &shown {
             match serde_json::to_string(r) {
@@ -1074,7 +1092,7 @@ USAGE:
         with the reason. First and last lines say whether anything moved.
 
     lane-restart ledger [--role <name>] [--kind <kind>] [--since <time|30m|2h|1d>]
-                        [--acted | --refused] [--last <n>] [--json]
+                        [--acted | --refused] [--last <n>] [--json | --by-lane]
         Read-only: prints restart.log, oldest first: time, role, kind
         (restart if the line predates kinds), who asked (and the verified
         caller if it differs), acted or refused, and the outcome. A line that
@@ -1174,7 +1192,7 @@ fn main() -> ExitCode {
         }
         if first == "ledger" {
             return match parse_ledger_args(rest) {
-                Ok((f, json, since)) => run_ledger_cmd(f, json, since),
+                Ok((f, json, since, by_lane)) => run_ledger_cmd(f, json, since, by_lane),
                 Err(e) => {
                     eprintln!("lane-restart ledger: {e}");
                     ExitCode::FAILURE
@@ -1722,7 +1740,7 @@ mod cli_tests {
 
     #[test]
     fn ledger_args_parse_filters_and_refuse_the_unknown() {
-        let (f, json, since) = parse_ledger_args(&strs(&[
+        let (f, json, since, by_lane) = parse_ledger_args(&strs(&[
             "--role",
             "a",
             "--kind",
@@ -1738,6 +1756,9 @@ mod cli_tests {
         assert_eq!(f.role.as_deref(), Some("a"));
         assert_eq!(f.kind.as_deref(), Some("start"));
         assert_eq!((f.acted, f.last, json), (Some(false), Some(5), true));
+        assert!(!by_lane);
+        let (_, _, _, by_lane) = parse_ledger_args(&strs(&["--by-lane"])).unwrap();
+        assert!(by_lane);
         assert_eq!(since.as_deref(), Some("2h"));
         assert!(parse_ledger_args(&strs(&["--last", "x"])).is_err());
         assert!(parse_ledger_args(&strs(&["--role"])).is_err());

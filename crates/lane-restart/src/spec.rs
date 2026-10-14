@@ -391,6 +391,19 @@ pub struct RoleStatus {
     /// killed mid-turn cannot read as busy. Absent for every other role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Activity>,
+    /// Size of the role's HANDOFF file against its ceiling (8 KB lane, 20 KB PM), read from the
+    /// role's recorded cwd. `None` when no cwd is known or there is no such file: "none", never
+    /// 0 bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<HandoffSize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HandoffSize {
+    pub path: String,
+    pub bytes: u64,
+    pub ceiling: u64,
+    pub over: bool,
 }
 
 /// The lane's own record of its activity (`LaneState`), raw, plus the one idle verdict.
@@ -405,6 +418,24 @@ pub struct Activity {
     /// `LaneState::is_idle`: not busy, no subagents, shells asserted absent. It does NOT include
     /// the PM's fourth term, "no unread TASK", which no state file records.
     pub idle: bool,
+    /// Which terms of `idle` fail (empty when `idle`); see `LaneState::idle_blockers`.
+    pub idle_blockers: Vec<String>,
+    /// Seconds since the lane's hooks last wrote this record, at the time of the read. A live,
+    /// not-busy process with a large value is the quiet stall no hook event announces. No
+    /// threshold is applied here: the number is the whole claim.
+    pub quiet_secs: i64,
+}
+
+fn handoff_size(cwd: &str, role: &str) -> Option<HandoffSize> {
+    let (path, _) = find_handoff(cwd, role)?;
+    let bytes = std::fs::metadata(&path).ok()?.len();
+    let ceiling = crate::handoff_lint::ceiling(role);
+    Some(HandoffSize {
+        path,
+        bytes,
+        ceiling,
+        over: bytes > ceiling,
+    })
 }
 
 /// Is the process a state file names still the same live `claude`? Pid AND start time; a pid
@@ -433,6 +464,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         detail: None,
         model: None,
         activity: None,
+        handoff: None,
     };
     let lane_state = state::load(dir, role);
     let live = lane_state
@@ -447,14 +479,22 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 updated_at: st.updated_at,
                 updated_by_event: st.updated_by_event.clone(),
                 idle: st.is_idle(),
+                idle_blockers: st.idle_blockers(),
+                quiet_secs: (facts.now() - st.updated_at).num_seconds().max(0),
             });
         }
+    }
+    if let Ok(st) = &lane_state {
+        out.handoff = handoff_size(&st.cwd, role);
     }
     let spec = read(dir, role);
     let mut spec_state = None;
     match &spec {
         Ok(s) => {
             out.since = Some(s.written_at);
+            if out.handoff.is_none() {
+                out.handoff = handoff_size(&s.cwd, role);
+            }
             out.stop_reason = s.stop_reason.clone();
             out.model = Some(s.model.clone());
             // `lane-start` replaces an Opus, unknown or unset model by `sonnet` (14.5), so the
@@ -998,6 +1038,57 @@ mod tests {
                 .unwrap();
             assert!(!a.idle, "busy={busy} subs={subs} shells={shells:?}");
         }
+    }
+
+    #[test]
+    fn a_not_idle_live_role_names_the_failing_terms_and_how_long_it_has_been_quiet() {
+        let d = tempdir().unwrap();
+        let mut st = crate::testing::state_at("baracuda", "s", "Stop");
+        st.pid = 55;
+        st.pid_start_secs = Some(100);
+        st.no_background_shells = None;
+        st.updated_at = Utc::now() - chrono::Duration::seconds(7200);
+        std::fs::write(
+            d.path().join("baracuda.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        let a = role_status(d.path(), "baracuda", &facts_with_live(55, 100))
+            .activity
+            .unwrap();
+        assert_eq!(a.idle_blockers, ["shells_never_asserted"]);
+        assert!(!a.idle);
+        // `RecordingFacts::now` is its own clock: the age is only ever non-negative and >= 7200
+        // when that clock is at or after the write, which `Utc::now()` is.
+        assert!(a.quiet_secs >= 0, "{}", a.quiet_secs);
+    }
+
+    #[test]
+    fn handoff_size_is_read_from_the_recorded_cwd_and_absence_is_none_not_zero() {
+        let d = tempdir().unwrap();
+        let cwd = tempdir().unwrap();
+        let mut st = crate::testing::state_at("baracuda", "s", "Stop");
+        st.pid = 55;
+        st.cwd = cwd.path().to_string_lossy().into_owned();
+        std::fs::write(
+            d.path().join("baracuda.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            role_status(d.path(), "baracuda", &dead_facts()).handoff,
+            None
+        );
+        std::fs::write(cwd.path().join("HANDOFF.md"), "a".repeat(9000)).unwrap();
+        let h = role_status(d.path(), "baracuda", &dead_facts())
+            .handoff
+            .unwrap();
+        assert_eq!((h.bytes, h.ceiling, h.over), (9000, 8192, true));
+        std::fs::write(cwd.path().join("HANDOFF.md"), "a".repeat(100)).unwrap();
+        let h = role_status(d.path(), "baracuda", &dead_facts())
+            .handoff
+            .unwrap();
+        assert_eq!((h.bytes, h.over), (100, false));
     }
 
     /// A lane killed mid-turn leaves busy=true on disk; its process is gone, so nothing is reported.

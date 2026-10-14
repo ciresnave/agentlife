@@ -71,7 +71,26 @@ impl LaneState {
     /// must read it from somewhere else. Both `status` and the restart gate (`authorize.rs`) call
     /// this, so they cannot disagree.
     pub fn is_idle(&self) -> bool {
-        !self.busy && self.subagents_running == 0 && self.no_background_shells == Some(true)
+        self.idle_blockers().is_empty()
+    }
+
+    /// Which terms of [`LaneState::is_idle`] fail, by name; empty exactly when it holds. "Never
+    /// asserted" and "asserted false" are named apart, because only the first is the lane's to
+    /// fix by writing its HANDOFF and running `assert-idle`.
+    pub fn idle_blockers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.busy {
+            out.push("busy".to_string());
+        }
+        if self.subagents_running > 0 {
+            out.push(format!("subagents_running={}", self.subagents_running));
+        }
+        match self.no_background_shells {
+            Some(true) => {}
+            Some(false) => out.push("background_shells_asserted_present".to_string()),
+            None => out.push("shells_never_asserted".to_string()),
+        }
+        out
     }
 }
 
@@ -142,9 +161,16 @@ mod tests {
         let mut s = idle.clone();
         s.no_background_shells = Some(false);
         assert!(!s.is_idle());
+        assert_eq!(s.idle_blockers(), ["background_shells_asserted_present"]);
         let mut s = idle;
         s.no_background_shells = None;
         assert!(!s.is_idle(), "never asserted is not idle");
+        s.busy = true;
+        s.subagents_running = 2;
+        assert_eq!(
+            s.idle_blockers(),
+            ["busy", "subagents_running=2", "shells_never_asserted"]
+        );
     }
 
     #[test]
