@@ -47,7 +47,10 @@ fn a_watcher_sees_the_lane_and_cannot_type_into_it() {
         .spawn()
         .expect("start the host");
 
-    let sock = state.join("lane-state").join("watch").join("host-p6btest.sock");
+    let sock = state
+        .join("lane-state")
+        .join("watch")
+        .join("host-p6btest.sock");
     wait_for("the watch socket", 15, || sock.exists());
 
     // 1. the watcher sees the lane's screen
@@ -65,9 +68,17 @@ fn a_watcher_sees_the_lane_and_cannot_type_into_it() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut buf = [0u8; 256];
     while !String::from_utf8_lossy(&seen).contains("VISIBLE_P6B") {
-        assert!(Instant::now() < deadline, "no screen: {:?}", String::from_utf8_lossy(&seen));
+        assert!(
+            Instant::now() < deadline,
+            "no screen: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
         let n = out.read(&mut buf).unwrap();
-        assert!(n > 0, "watcher closed: {:?}", String::from_utf8_lossy(&seen));
+        assert!(
+            n > 0,
+            "watcher closed: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
         seen.extend_from_slice(&buf[..n]);
     }
 
@@ -118,7 +129,10 @@ fn the_same_lane_records_a_byte_sent_through_the_hosts_own_stdin() {
     wait_for("the byte to be recorded", 15, || {
         let _ = stdin.write_all(b"Y");
         let _ = stdin.flush();
-        got.exists() && std::fs::metadata(&got).map(|m| m.len() >= 1).unwrap_or(false)
+        got.exists()
+            && std::fs::metadata(&got)
+                .map(|m| m.len() >= 1)
+                .unwrap_or(false)
     });
     drop(stdin);
     let _ = host.kill();
