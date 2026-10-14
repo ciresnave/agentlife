@@ -16,6 +16,7 @@ pub mod approvals;
 pub mod authorize;
 pub mod disk;
 pub mod handlers;
+pub mod handoff_lint;
 pub mod host;
 pub mod lane_state_writer;
 pub mod lane_stop;

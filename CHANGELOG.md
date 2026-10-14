@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.12
+
+- **`lane-restart assert-idle` warns when the HANDOFF is over its ceiling** (ROADMAP slice item 3, PM ruling
+  2026-10-14: warn only, because refusing could block a mandatory restart). The ceiling is
+  `CIRESNAVE-EXPECTATIONS.md` section 2.3c step 5: **8 KB for a lane's HANDOFF, 20 KB for the PM's**, measured in
+  bytes (`wc -c`), "KB" read as 1024 bytes. The warning names the file, its size and the ceiling, goes to stderr
+  and leaves the exit code alone. A missing HANDOFF is silent here (`stop` already refuses that).
+
 ## 0.14.11
 
 - **`lane-restart status` says which roles still have no complete launch spec, and why** (ROADMAP slice item 5).
@@ -11,6 +19,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   launch_args (not importable)`, `no lane state and no launch spec`. In `--json` the same is `coverage:
   {total, complete, gaps: [{why, roles}]}` (additive; `schema` stays 1). Every incomplete role is in exactly one
   gap. The reasons mirror what `specs import` checks (launch_args, cwd), read without writing anything.
+
 
 ## 0.14.10
 
