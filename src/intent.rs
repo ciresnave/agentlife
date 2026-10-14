@@ -224,8 +224,9 @@ pub fn reconcile(
 
 // ---- the real shutdown marker: the System event log ------------------------------------------
 
-/// Reads Event 1074 / 6006 from the System log through `wevtutil` (Windows only; elsewhere there is
-/// no marker and ambiguous cases become candidates).
+/// The shutdown marker of this OS: Event 1074 / 6006 from the System log through `wevtutil` on
+/// Windows, the previous boot's closing journal entries through `journalctl` on Linux. Anywhere
+/// else, or when the OS cannot be read, there is no marker and ambiguous cases become candidates.
 pub struct EventLogMarker;
 
 /// `(event id, time)` for every `<Event>` in `wevtutil qe ... /f:xml` output.
@@ -261,6 +262,36 @@ pub fn pick_shutdown(
     latest(1074).or_else(|| latest(6006))
 }
 
+/// The newest entry at or before `boot` that says the previous boot shut down cleanly, from
+/// `journalctl --boot=-1 --output=short-unix --reverse` text (newest first). A crash and a power
+/// cut leave none of these lines, so they read as no marker, which is the point.
+///
+/// Recognised, because systemd writes them on an orderly shutdown: PID 1's `Shutting down.`, anything
+/// from `systemd-shutdown`, and journald's `Journal stopped`.
+pub fn pick_journal_shutdown(text: &str, boot: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    text.lines().find_map(|line| {
+        // `<secs>.<micros> <host> <ident>[<pid>]: <message>`
+        let mut parts = line.splitn(4, ' ');
+        let stamp = parts.next()?;
+        let _host = parts.next()?;
+        let ident = parts.next()?;
+        let message = parts.next()?;
+        let clean = message.trim() == "Shutting down."
+            || ident.starts_with("systemd-shutdown")
+            || message.contains("Journal stopped");
+        if !clean {
+            return None;
+        }
+        // integer parsing: a float would turn `.9` into `.900000095`
+        let (secs, frac) = stamp.split_once('.').unwrap_or((stamp, ""));
+        let secs: i64 = secs.parse().ok()?;
+        let digits: String = frac.chars().take(6).collect();
+        let micros: u32 = format!("{digits:0<6}").parse().ok()?;
+        let when = Utc.timestamp_opt(secs, micros * 1000).single()?;
+        (when <= boot).then_some(when)
+    })
+}
+
 impl ShutdownMarker for EventLogMarker {
     fn latest_before(&self, boot: DateTime<Utc>) -> Option<DateTime<Utc>> {
         #[cfg(windows)]
@@ -281,7 +312,26 @@ impl ShutdownMarker for EventLogMarker {
             }
             pick_shutdown(&parse_events(&String::from_utf8_lossy(&out.stdout)), boot)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            // `--boot=-1`: the boot before this one. Exits non-zero when the journal is not
+            // persistent (there is no earlier boot to read), and then there is no marker.
+            let out = std::process::Command::new("journalctl")
+                .args([
+                    "--boot=-1",
+                    "--no-pager",
+                    "--output=short-unix",
+                    "--reverse",
+                    "--lines=300",
+                ])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            pick_journal_shutdown(&String::from_utf8_lossy(&out.stdout), boot)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = boot;
             None
@@ -755,6 +805,55 @@ mod tests {
         assert!(texts
             .iter()
             .any(|x| x.contains("closed on purpose (logout, 2026-10-06 18:00Z)")));
+    }
+
+    const JOURNAL: &str = "1791631069.500000 box systemd-journald[300]: Journal stopped
+1791631069.400000 box systemd-shutdown[1]: Sending SIGTERM to remaining processes...
+1791631068.900000 box systemd[1]: Shutting down.
+1791631060.000000 box sshd[900]: Received disconnect
+";
+
+    #[test]
+    fn a_clean_shutdown_is_read_from_the_previous_boots_closing_entries() {
+        let boot = Utc.timestamp_opt(1791631200, 0).unwrap();
+        // the newest recognised line wins (the journal text is newest-first)
+        assert_eq!(
+            pick_journal_shutdown(JOURNAL, boot),
+            Some(Utc.timestamp_opt(1791631069, 500_000_000).unwrap())
+        );
+    }
+
+    /// A crash leaves the previous boot's journal ending in ordinary entries: no marker.
+    #[test]
+    fn a_boot_that_ended_in_ordinary_entries_has_no_shutdown_marker() {
+        let boot = Utc.timestamp_opt(1791631200, 0).unwrap();
+        let crash = "1791631060.000000 box sshd[900]: Received disconnect
+                     1791631050.000000 box kernel: eth0: link up
+";
+        assert_eq!(pick_journal_shutdown(crash, boot), None);
+        // control: the same parser finds the marker once the closing line is there
+        assert!(pick_journal_shutdown(&format!("{JOURNAL}{crash}"), boot).is_some());
+    }
+
+    /// A marker after this boot began is not a shutdown that preceded it.
+    #[test]
+    fn a_marker_after_the_boot_is_ignored() {
+        let early = Utc.timestamp_opt(1791631000, 0).unwrap();
+        assert_eq!(pick_journal_shutdown(JOURNAL, early), None);
+    }
+
+    #[test]
+    fn garbage_lines_are_skipped_not_fatal() {
+        let boot = Utc.timestamp_opt(1791631200, 0).unwrap();
+        let text = "-- Journal begins --
+not a line
+
+1791631068.9 b systemd[1]: Shutting down.
+";
+        assert_eq!(
+            pick_journal_shutdown(text, boot),
+            Some(Utc.timestamp_opt(1791631068, 900_000_000).unwrap())
+        );
     }
 
     #[test]

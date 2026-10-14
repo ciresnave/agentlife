@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.31
+
+- **Shutdown marker on Linux** (`docs/PORT-LINUX-PLAN.md`, P9). The reboot-vs-crash classifier (`intent`) had a
+  marker only on Windows (`wevtutil`, events 1074/6006); elsewhere every ambiguous case became a candidate. On Linux
+  it now reads the previous boot's closing journal entries (`journalctl --boot=-1 --output=short-unix --reverse`) and
+  takes the newest `Shutting down.`, `systemd-shutdown` or `Journal stopped` line at or before this boot began. A
+  crash or power cut leaves none, so it reads as no marker, and so does a journal that is not persistent
+  (`journalctl` exits non-zero) or a host without systemd: the safe default is unchanged. `pick_journal_shutdown`
+  is pure and tested on both OSes. **Not verified against a real journal** (the only Linux available here has no
+  systemd); the ubuntu CI leg runs the parser, not `journalctl`.
+
 ## 0.14.30
 
 - docs only (PM-allocated). `docs/PORT-LINUX-PLAN.md`: updated for the Q1 (direct host first, tmux later, no
