@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (Linux port P4; the PM allocates the number at gate)
+## 0.14.28
 
 - **`lane-restart host` on unix** (`docs/PORT-LINUX-PLAN.md`, slice P4). No change on Windows.
   - A raw-mode guard on the host's stdin (`rustix::termios`): a real tty goes raw (no line buffering or echo, so
