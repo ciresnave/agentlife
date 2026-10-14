@@ -1,14 +1,29 @@
 # pin-plan
 
-Read-only planner for SUP-008 (pin `uses:` references to commit SHAs). It writes nothing.
+Planner for SUP-008 (pin `uses:` references to commit SHAs). It writes nothing into any repo.
 
 ```
-pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all]
+pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all] [--emit-patch DIR]
 ```
 
 Per repo under the root it lists every `uses:` that is a mutable tag or branch, with the commit SHA the
 current ref names (pin to this and nothing changes), the latest release's tag and SHA, and the Node runtime
 the action declares now and at that release (`node20 -> node24`, node20 and older flagged).
+
+## `--emit-patch DIR`
+
+Writes one `DIR/<repo>.patch` per repo that has something to pin: a unified diff, against that repo's
+`origin/main` text, that `git apply` takes. Each mutable ref becomes **the SHA it names now** (so behaviour
+does not change) with the old ref left as a comment (`uses: actions/checkout@<sha> # v4`; an existing trailing
+comment follows: `# v4 - note`). Line endings are kept. Nothing is written into a repository, and a `DIR`
+inside one is refused before anything is created. References that could not be resolved (or have no `@ref`)
+are not patched and are counted in the totals. The PM routes each patch to its repo's lane; this tool opens
+no PR.
+
+## Dogfood
+
+`tests/own_workflows.rs` fails when any workflow or action file in this repo's index holds a mutable ref, or a
+pinned ref with no comment naming its tag.
 
 ## Reconciling counts
 
