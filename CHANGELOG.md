@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.18
+
+- `status --quiet-over <secs>` (opt-in; no default, nothing enforced): marks each **live** role whose last hook
+  write is older than `<secs>` as `QUIET>Ns` in text, and sets `activity.quiet_over` (and the report's
+  `quiet_over_secs`) in `--json`. Without the flag the output is byte-for-byte what 0.14.17 printed. The PM's
+  recommended value is **120**, a recommendation and not a default: a lane inside one long tool call is also
+  quiet, so the mark is a prompt to look, not a stall verdict.
+
 ## 0.14.17
 
 - `status` and `specs import` label a role whose recorded cwd is inside another role's cwd: `status` text
