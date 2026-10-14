@@ -281,12 +281,13 @@ fn quiet_mark(a: &lane_restart::spec::Activity, quiet_over: Option<i64>) -> Stri
 
 /// `status [--json] [--quiet-over <secs>]` arguments, any order. The threshold is a positive
 /// whole number of seconds; no default is applied (the flag is opt-in).
-fn parse_status_args(args: &[String]) -> Result<(bool, Option<i64>), String> {
-    let (mut json, mut quiet) = (false, None);
+fn parse_status_args(args: &[String]) -> Result<(bool, Option<i64>, bool), String> {
+    let (mut json, mut quiet, mut peers) = (false, None, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--json" => json = true,
+            "--peers" => peers = true,
             "--quiet-over" => {
                 let v = it.next().ok_or("--quiet-over needs a number of seconds")?;
                 let n: i64 =
@@ -300,19 +301,48 @@ fn parse_status_args(args: &[String]) -> Result<(bool, Option<i64>), String> {
             other => return Err(format!("unexpected argument {other:?}")),
         }
     }
-    Ok((json, quiet))
+    Ok((json, quiet, peers))
+}
+
+fn peers_text(p: &lane_restart::peers_join::RolePeers) -> String {
+    use lane_restart::peers_join::RolePeers;
+    match p {
+        RolePeers::Unknown(u) => u.clone(),
+        RolePeers::Peers(v) if v.is_empty() => "-".to_string(),
+        RolePeers::Peers(v) => v
+            .iter()
+            .map(|p| match &p.summary {
+                Some(s) => format!("{} {s:?}", p.id),
+                None => p.id.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
 }
 
 /// `lane-restart status [--json]` - RESTART-TOOL-DESIGN.md 14.2 / 14.10. Read-only: for every
 /// role with a lane state or a launch spec, whether it is running, suspended, crashed or never
 /// run, and whether it can be started again from its spec. Liveness is the process table's
 /// (pid and start time), never a file's age.
-fn run_status_cmd(json: bool, quiet_over: Option<i64>) -> ExitCode {
+fn run_status_cmd(json: bool, quiet_over: Option<i64>, with_peers: bool) -> ExitCode {
     use lane_restart::spec;
     let facts = SysinfoFacts::new(claude_config_dir());
     let mut report = spec::status_all(&state_dir(), &facts);
     if let Some(secs) = quiet_over {
         report.mark_quiet_over(secs);
+    }
+    if with_peers {
+        let parents = RealParentProcess::new();
+        lane_restart::peers_join::annotate(
+            &mut report,
+            &state_dir(),
+            &facts,
+            &|pid| {
+                lane_restart::lane_state_writer::ParentProcess::parent_of(&parents, pid)
+                    .map(|p| p.0)
+            },
+            lane_restart::notify::list_all(lane_restart::notify::broker_addr()),
+        );
     }
     if json {
         // The JSON shape is unchanged; the disk line goes to stderr so a reader of stdout is not
@@ -367,6 +397,25 @@ fn run_status_cmd(json: bool, quiet_over: Option<i64>) -> ExitCode {
                 .map(|d| format!("\t{d}"))
                 .unwrap_or_default()
         );
+        if let Some(p) = &r.peers {
+            println!("  peers: {}", peers_text(p));
+        }
+    }
+    if let Some(e) = &report.peers_error {
+        println!("(peers: the broker could not be read, so every role is unknown: {e})");
+    }
+    if let Some(un) = &report.peers_unmatched {
+        for u in un {
+            println!(
+                "unmatched peer {} in {}: no role's live claude is its parent{}",
+                u.id,
+                u.cwd,
+                u.summary
+                    .as_deref()
+                    .map(|s| format!(" - {s:?}"))
+                    .unwrap_or_default()
+            );
+        }
     }
     let cov = &report.coverage;
     println!(
@@ -1231,7 +1280,7 @@ USAGE:
         (from that repo's default branch only) and list every active and
         refused one, exactly as `host` would load them.
 
-    lane-restart status [--json] [--quiet-over <secs>]
+    lane-restart status [--json] [--quiet-over <secs>] [--peers]
         --quiet-over marks (QUIET>Ns; activity.quiet_over in JSON) each live
         role whose last hook write is older than <secs>. Opt-in, nothing is
         enforced and there is no default; the PM's recommended value is 120.
@@ -1239,6 +1288,10 @@ USAGE:
         unknown), whether its launch spec (<role>.launch.json, written before a
         restart's kill and at a confirmed launch) is complete, and whether it can
         be started again from it. RESTART-TOOL-DESIGN.md section 14.
+        --peers adds, per role, the claude-peers sessions whose helper's PARENT is that
+        role's live claude (never joined by cwd), the sessions no role claims, and a
+        truncated summary. Read-only; a broker that cannot be read is
+        unknown for every role, never absent.
 
     lane-restart start --role <name> --reason <text> [--model sonnet|haiku] [--dry-run]
         Start a lane that is not running, from its launch spec
@@ -1342,10 +1395,10 @@ fn main() -> ExitCode {
         }
         if first == "status" {
             return match parse_status_args(rest) {
-                Ok((json, quiet_over)) => run_status_cmd(json, quiet_over),
+                Ok((json, quiet_over, peers)) => run_status_cmd(json, quiet_over, peers),
                 Err(e) => {
                     eprintln!(
-                        "lane-restart status: {e}; expected `status [--json] [--quiet-over <secs>]`"
+                        "lane-restart status: {e}; expected `status [--json] [--quiet-over <secs>] [--peers]`"
                     );
                     ExitCode::FAILURE
                 }
@@ -1782,11 +1835,18 @@ mod cli_tests {
 
     #[test]
     fn status_args_take_json_and_an_optional_positive_quiet_over_in_any_order() {
-        assert_eq!(parse_status_args(&strs(&[])), Ok((false, None)));
-        assert_eq!(parse_status_args(&strs(&["--json"])), Ok((true, None)));
+        assert_eq!(parse_status_args(&strs(&[])), Ok((false, None, false)));
+        assert_eq!(
+            parse_status_args(&strs(&["--json"])),
+            Ok((true, None, false))
+        );
         assert_eq!(
             parse_status_args(&strs(&["--quiet-over", "120", "--json"])),
-            Ok((true, Some(120)))
+            Ok((true, Some(120), false))
+        );
+        assert_eq!(
+            parse_status_args(&strs(&["--peers", "--json"])),
+            Ok((true, None, true))
         );
         for bad in [
             &["--quiet-over"][..],

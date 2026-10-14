@@ -403,6 +403,10 @@ pub struct RoleStatus {
     /// it too, which is why it cannot be a refusal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nested_in: Option<String>,
+    /// Only with `status --peers`: the broker peers whose helper's parent is this role's live
+    /// `claude`, or `"unknown"` when the broker could not be read. Absent without the flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers: Option<crate::peers_join::RolePeers>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -478,6 +482,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         activity: None,
         handoff: None,
         nested_in: None,
+        peers: None,
     };
     let lane_state = state::load(dir, role);
     let live = lane_state
@@ -573,6 +578,12 @@ pub struct StatusReport {
     /// when the flag was not given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quiet_over_secs: Option<i64>,
+    /// Only with `status --peers`: peers whose helper's parent is no role's live `claude`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers_unmatched: Option<Vec<crate::peers_join::UnmatchedPeer>>,
+    /// Only with `status --peers`: why the broker could not be read (every role is then `unknown`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peers_error: Option<String>,
 }
 
 impl StatusReport {
@@ -826,6 +837,8 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
         disk: crate::disk::status(dir),
         coverage,
         quiet_over_secs: None,
+        peers_unmatched: None,
+        peers_error: None,
     }
 }
 
@@ -1432,5 +1445,72 @@ mod tests {
             ]
         );
         assert_eq!(r.skipped, vec!["hf-config.json"]);
+    }
+
+    fn peer_row(id: &str, pid: u32) -> crate::notify::Peer {
+        crate::notify::Peer {
+            id: id.into(),
+            cwd: "C:/x".into(),
+            pid,
+            summary: Some("hi".into()),
+            last_seen: None,
+        }
+    }
+
+    #[test]
+    fn peers_join_a_live_role_by_pid_and_leave_a_dead_roles_session_unmatched() {
+        let d = tempdir().unwrap();
+        lane_state_file(d.path(), "live", 55, Some(100));
+        lane_state_file(d.path(), "dead", 66, Some(100));
+        let facts = facts_with_live(55, 100);
+        let mut r = status_all(d.path(), &facts);
+        // Without the flag nothing about peers is in the JSON.
+        let plain = serde_json::to_string(&r).unwrap();
+        assert!(!plain.contains("peers"), "{plain}");
+        crate::peers_join::annotate(
+            &mut r,
+            d.path(),
+            &facts,
+            &|pid| match pid {
+                11 => Some(55),
+                22 => Some(66),
+                _ => None,
+            },
+            Ok(vec![peer_row("p1", 11), peer_row("p2", 22)]),
+        );
+        let by: std::collections::BTreeMap<_, _> =
+            r.roles.iter().map(|s| (s.role.as_str(), s)).collect();
+        match by["live"].peers.as_ref().unwrap() {
+            crate::peers_join::RolePeers::Peers(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].id, "p1");
+            }
+            other => panic!("{other:?}"),
+        }
+        match by["dead"].peers.as_ref().unwrap() {
+            crate::peers_join::RolePeers::Peers(v) => assert!(v.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let un = r.peers_unmatched.as_ref().unwrap();
+        assert_eq!(un.len(), 1);
+        assert_eq!(un[0].id, "p2");
+        assert!(r.peers_error.is_none());
+    }
+
+    #[test]
+    fn an_unreadable_broker_is_unknown_for_every_role_never_no_peer() {
+        let d = tempdir().unwrap();
+        lane_state_file(d.path(), "live", 55, Some(100));
+        let facts = facts_with_live(55, 100);
+        let mut r = status_all(d.path(), &facts);
+        crate::peers_join::annotate(&mut r, d.path(), &facts, &|_| None, Err("down".into()));
+        assert_eq!(
+            r.roles[0].peers,
+            Some(crate::peers_join::RolePeers::unknown())
+        );
+        assert_eq!(r.peers_error.as_deref(), Some("down"));
+        assert!(r.peers_unmatched.is_none());
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""peers":"unknown""#), "{json}");
     }
 }

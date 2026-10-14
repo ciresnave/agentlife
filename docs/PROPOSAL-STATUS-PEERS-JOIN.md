@@ -1,7 +1,9 @@
 # Proposal: `lane-restart status --peers` (slice 3 (a)3)
 
-**Status: proposal only, nothing implemented.** PM task 2026-10-14: write what is joined, what it reads, what
-it would cost, what it needs from the PM. Read at `origin/main` = `bbd842d` (0.14.20). The versions are the PM's.
+**Status: built in 0.14.23** (PM rulings 2026-10-14: go; opt-in, read-only and soft-failing is enough; extend
+`notify::Peer` and add `list_all` in `lane-restart/notify.rs`, no dependency onto `agentlife`; summary printed only
+under `--peers`, truncated, never in the default JSON). The proposal as written follows; the measurements are at the end.
+PM task 2026-10-14: write what is joined, what it reads, what it would cost, what it needs from the PM. Read at `origin/main` = `bbd842d` (0.14.20). The versions are the PM's.
 
 ## The problem, as observed
 
@@ -72,3 +74,21 @@ It writes nothing and needs no PM authorisation: it is as read-only as `status` 
 
 Messaging a lane from `status`; acting on an unmatched peer; reconciling a `Crashed` role automatically.
 Those are decisions, not a reader.
+
+## Measurements (read-only, 2026-10-14 ~14:55Z, origin/main `a14c5e9`, broker `127.0.0.1:7899`)
+
+Method: `POST /list-peers` (machine scope), then each peer's helper pid -> parent -> grandparent from the
+process table (CIM `Win32_Process`), and each state file's recorded pid under `C:\Projects\.lane-state`
+(29 state files carried a pid).
+
+- **Peer count: 18** at ~17 lanes plus this one.
+- **Helper's parent is a `claude.exe`: 18 of 18, and each parent pid equals exactly one state file's pid**
+  (18 of 18 joined by pid). Nothing was joined by cwd.
+- **Relaunched-tab shape: 18 of 18 `claude.exe` have `lane-restart.exe` as their parent and `WindowsTerminal.exe`
+  above that**, i.e. all 18 are the host-relaunched shape. I did not separate "relaunched by `--self`" from
+  "started by `lane-restart start`": both put the host above `claude`, so this does not discriminate them.
+- **Built tool against the real broker**: `status --peers --json`: 31 roles, 18 with a peer, 0 unmatched, no
+  error; the plain `status --json` has no `peers` key. The `synapse-restarttest-lane` row of 12:00Z is now
+  `Crashed` with no peer, and the live session at that cwd is the role `restarttest` (`Running`, joined).
+- **Not measured:** a broker that answers slowly (the timeout is the existing 5 s), and a session whose helper
+  has already exited (it would simply not be in the broker's list).
