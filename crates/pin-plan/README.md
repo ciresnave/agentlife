@@ -26,7 +26,8 @@ no PR.
 commit of the action's latest release (comment = that tag): the way off node20 when the latest release declares
 node24, at the price of a possible major jump (its inputs may differ; CI in the repo is the proof). A *branch*
 ref is kept at its current commit in both modes, since a branch like `dtolnay/rust-toolchain@stable` selects
-behaviour a release tag does not carry. `DIR/ACTIONS.md` is the per-action table (runtime now and at latest,
+behaviour a release tag does not carry; so is every ref of `dtolnay/rust-toolchain` (`@1.85.0` installs that
+toolchain, its `v1` release none). `DIR/ACTIONS.md` is the per-action table (runtime now and at latest,
 major jump, "no node24 release yet" first).
 
 ## Dogfood

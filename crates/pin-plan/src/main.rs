@@ -35,7 +35,8 @@ usage: pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all] [--emit-pat
                  what --emit-patch pins to (default current). `current`: the SHA the ref names now,
                  behaviour unchanged. `latest`: the SHA of the action's latest release tag (a tag
                  ref only; a branch ref is kept at the SHA it names now, because a branch such as
-                 `dtolnay/rust-toolchain@stable` selects behaviour a release tag does not carry).
+                 `dtolnay/rust-toolchain@stable` selects behaviour a release tag does not carry; so is every
+                 ref of dtolnay/rust-toolchain, `@1.85.0` included).
                  DIR/ACTIONS.md lists every action with its runtime now and at latest.
 
 Read-only apart from --emit-patch. Exit 0 when the plan was produced, 1 when a repo could not be read, 2 for bad usage.
@@ -295,6 +296,10 @@ struct Totals {
     info: BTreeMap<String, ActionInfo>,
 }
 
+/// Actions whose ref selects behaviour rather than a version (`dtolnay/rust-toolchain@1.85.0` or
+/// `@stable` installs that toolchain; its `v1` release installs none): never moved to a release tag.
+const SELECTS_BEHAVIOUR: &[&str] = &["dtolnay/rust-toolchain"];
+
 /// What is known about one distinct action (`owner/repo[/path]`) across every repo planned.
 #[derive(Default)]
 struct ActionInfo {
@@ -403,6 +408,14 @@ fn write_actions(
             }
             (Some(l), Some(_)) => format!("same major {l}"),
             _ => "branch ref".into(),
+        };
+        let jump = if i.kept_branch > 0 {
+            format!(
+                "{jump}; {} of {} uses kept at current SHA",
+                i.kept_branch, i.uses
+            )
+        } else {
+            jump
         };
         format!(
             "| `{}` | {} | {} | {} | {} | {} | {} |",
@@ -527,7 +540,9 @@ fn plan_repo(
                     if emit.is_some() {
                         // current: the SHA the ref names right now (no behaviour change). latest:
                         // the latest release's SHA for a tag ref; a branch ref keeps its current SHA.
-                        let want_latest = latest_mode && u.kind == Kind::MutableTag;
+                        let want_latest = latest_mode
+                            && u.kind == Kind::MutableTag
+                            && !SELECTS_BEHAVIOUR.contains(&u.target.as_str());
                         if latest_mode && !want_latest {
                             if let Some(i) = totals.info.get_mut(&u.target) {
                                 i.kept_branch += 1;
