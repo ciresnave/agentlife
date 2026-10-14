@@ -150,6 +150,34 @@ pub fn relay_chunk(
     Ok(())
 }
 
+/// Relays what the reader sends after the main loop has stopped, until the reader ends (its
+/// sender is dropped) or `deadline` passes. Returns how many chunks it relayed. A write error
+/// stops the relay (the outer side is gone) but never panics or hangs the teardown.
+pub fn drain_tail(
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    output_writer: &mut impl Write,
+    parser: &mut vt100::Parser,
+    deadline: Instant,
+) -> usize {
+    let mut relayed = 0;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(chunk) => {
+                if relay_chunk(&chunk, output_writer, parser).is_err() {
+                    return relayed;
+                }
+                relayed += 1;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return relayed,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return relayed;
+                }
+            }
+        }
+    }
+}
+
 /// The parser's current screen content as plain text, newline-joined - what
 /// handler matching (`handlers::find_matching_handler`) is checked against.
 pub fn screen_text(parser: &vt100::Parser) -> String {
@@ -488,10 +516,15 @@ fn run_with_handlers_and_window(
     // still running after that is reported, never silently left.
     drop(stop_resize);
     let _ = resize_thread.join();
-    let deadline = Instant::now() + READER_END_TIMEOUT;
-    while is_alive(&reader_alive) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // Whatever the reader still delivers while the ConPTY closes is the child's last output
+    // (a ConPTY may flush its final frame only when it is closed), so it is relayed here, not
+    // left in a channel nobody reads any more: this wait is also the drain.
+    drain_tail(
+        &rx,
+        &mut outer_output,
+        &mut parser,
+        Instant::now() + READER_END_TIMEOUT,
+    );
     // Joined so the process can't exit mid-ask. The relay has stopped by
     // now, so waiting here stalls nothing.
     if let Some(t) = unhandled_thread {
@@ -767,6 +800,53 @@ mod tests {
     // byte 0 - matching only OBSERVES, it never withholds, delays, or
     // rewrites a single byte, including mouse-mode and alt-screen
     // sequences (not just plain text).
+
+    #[test]
+    fn drain_tail_relays_what_the_reader_sent_after_the_loop_stopped() {
+        // Chunks already queued, then the reader ends (its sender is dropped).
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        tx.send(b"one ".to_vec()).unwrap();
+        tx.send(b"two ".to_vec()).unwrap();
+        tx.send(b"FINAL".to_vec()).unwrap();
+        drop(tx);
+        let mut out = Vec::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        let n = drain_tail(
+            &rx,
+            &mut out,
+            &mut parser,
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!((n, out.as_slice()), (3, &b"one two FINAL"[..]));
+
+        // A chunk that arrives a little later is relayed too (the reader is still going).
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            tx.send(b"LATE".to_vec()).unwrap();
+        });
+        let mut out = Vec::new();
+        let n = drain_tail(
+            &rx,
+            &mut out,
+            &mut parser,
+            Instant::now() + Duration::from_secs(5),
+        );
+        sender.join().unwrap();
+        assert_eq!((n, out.as_slice()), (1, &b"LATE"[..]));
+
+        // A reader that never ends does not hang the teardown: the deadline bounds it.
+        let (_tx_alive, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let started = Instant::now();
+        let n = drain_tail(
+            &rx,
+            &mut Vec::new(),
+            &mut parser,
+            Instant::now() + Duration::from_millis(80),
+        );
+        assert_eq!(n, 0);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
 
     #[test]
     fn relay_chunk_forwards_plain_text_byte_for_byte() {
@@ -1104,6 +1184,52 @@ mod tests {
             "real child output must reach the outer side - got {text:?}"
         );
         assert!(outcome.child_exit_code.is_some());
+    }
+
+    /// The host's last output is not lost to the exit race: whatever the child
+    /// printed last (here with no trailing newline, which a ConPTY may only
+    /// flush when it is closed) has reached the outer side by the time
+    /// `run_with_handlers` returns, with no sleep to cover for it.
+    #[cfg(windows)]
+    #[test]
+    fn the_childs_final_output_reaches_the_outer_side_before_the_host_returns() {
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for run in 0..5 {
+            let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+            let child_argv = vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo FIRST_LINE & <nul set /p =FINAL_TAIL_MARK_4242".to_string(),
+            ];
+            let outcome = run_with_handlers(
+                "overmind",
+                &child_argv,
+                Vec::new(),
+                80,
+                25,
+                Cursor::new(b"[1;1R".to_vec()),
+                SharedVecWriter(Arc::clone(&outer_output)),
+                |_| {},
+                |_| {},
+            )
+            .expect("run_with_handlers failed");
+            let text = String::from_utf8_lossy(&outer_output.lock().unwrap()).to_string();
+            assert!(text.contains("FIRST_LINE"), "run {run}: {text:?}");
+            assert!(
+                text.contains("FINAL_TAIL_MARK_4242"),
+                "run {run}: the child's last output was dropped: {text:?}"
+            );
+            assert!(outcome.child_exit_code.is_some());
+        }
     }
 
     /// The PTY reader used to be abandoned in `ReadFile`, and the resize
