@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.16
+
+- `status`: a role that is not idle says why: `idle=false(busy+shells_never_asserted) quiet=NNNs` and
+  `activity.idle_blockers` in JSON (PM ruling 2026-10-14: a lane that never asserted shell-free is not idle).
+  `quiet_secs` is the age of the lane's last hook write; no threshold is applied, the number is the claim.
+- `status`: HANDOFF size per role against its ceiling (`handoff`: path, bytes, ceiling, over; text
+  `handoff=NB/CB [OVER]`, `handoff=none` when no cwd or no file). Read-only, one `stat` per role, the same file
+  `assert-idle` lints.
+- `ledger --by-lane`: acted and refused counts per target role over the rows the other filters keep.
+
 ## 0.14.15
 
 - `status` and `status --json` carry each **live** role's recorded activity (`activity`: `busy`,

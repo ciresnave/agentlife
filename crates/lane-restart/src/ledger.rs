@@ -117,6 +117,32 @@ pub fn select<'a>(rows: &'a [Row], f: &Filter) -> Vec<&'a Row> {
     out
 }
 
+/// `--by-lane`: per target role, how many of the shown rows acted and how many were refused, one
+/// table sorted by role. Counts the rows `select` kept, so `--since` and `--kind` apply; the
+/// footer says how many of the log's rows that was.
+pub fn render_by_lane(shown: &[&Row], total: usize) -> String {
+    let mut counts: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+    for r in shown {
+        let c = counts.entry(r.role.as_str()).or_default();
+        if r.acted {
+            c.0 += 1;
+        } else {
+            c.1 += 1;
+        }
+    }
+    let mut out = String::from("role\tacted\trefused\n");
+    for (role, (acted, refused)) in &counts {
+        out.push_str(&format!("{role}\t{acted}\t{refused}\n"));
+    }
+    out.push_str(&format!(
+        "({} role(s); {} of {} entries counted)\n",
+        counts.len(),
+        shown.len(),
+        total
+    ));
+    out
+}
+
 /// The text a person reads: one tab-separated row per entry, then a footer that counts what was
 /// shown, what the log holds and what could not be read.
 pub fn render(shown: &[&Row], total: usize, unreadable: &[(usize, String)]) -> String {
@@ -312,5 +338,24 @@ mod tests {
         r[0].caller_role = Some("pm".into());
         let text = render(&select(&r, &Filter::default()), 1, &[]);
         assert!(text.contains("unverified (caller pm)"), "{text}");
+    }
+
+    #[test]
+    fn by_lane_counts_acted_and_refused_per_target_role_over_the_selected_rows() {
+        let read = parse(&sample());
+        let all = select(&read.rows, &Filter::default());
+        assert_eq!(
+            render_by_lane(&all, read.rows.len()),
+            "role\tacted\trefused\na\t3\t0\nb\t0\t1\n(2 role(s); 4 of 4 entries counted)\n"
+        );
+        let f = Filter {
+            kind: Some("start".into()),
+            ..Filter::default()
+        };
+        let some = select(&read.rows, &f);
+        let text = render_by_lane(&some, read.rows.len());
+        assert!(text.contains("b\t0\t1\n"), "{text}");
+        assert!(!text.contains("\na\t"), "{text}");
+        assert!(text.contains("1 of 4 entries counted"), "{text}");
     }
 }
