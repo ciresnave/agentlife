@@ -42,6 +42,7 @@ pub mod select;
 pub mod spec_launch;
 pub mod summary;
 pub mod task;
+pub mod worktrees;
 
 /// The crate version, as one string.
 pub fn version() -> &'static str {

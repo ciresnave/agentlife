@@ -73,6 +73,12 @@ pub enum Command {
     Doctor {
         exe: Option<String>,
     },
+    /// `agentlife worktrees --stale`: registered worktrees whose branch is merged. Read-only.
+    Worktrees {
+        json: bool,
+        root: Option<String>,
+        repos: Vec<String>,
+    },
     Version,
     Help,
 }
@@ -152,6 +158,14 @@ USAGE:
         shows the agent list, asks, and on approval runs the plan at once (an approval is good for 5
         minutes); `pending --prompt` does the same for every open request, stopping at the first run.
         Both refuse an agent session.
+
+    agentlife worktrees --stale [--json] [--root <dir> | --repo <path>...]
+        Which registered git worktrees belong to a branch already merged (a MERGED pull request
+        whose head is the worktree's HEAD, the remote branch gone, the tree clean: CLAUDE.md
+        sections 3 and 4). Prints the `git worktree remove` lines and NEVER removes anything.
+        Uncommitted files are \"stale-dirty\" (ask first); a failed lookup is \"unknown\", never
+        stale. Repos are the --repo paths, else the children of --root (default C:/Projects)
+        with a .git directory. Needs git and gh. Read-only.
 
     agentlife doctor [--exe <path>]
         Read-only. Reports the installed lane-restart host (the configured host_program, resolved as a
@@ -347,6 +361,26 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 }
             }
             Ok(Command::Doctor { exe })
+        }
+        "worktrees" => {
+            let (mut stale, mut json, mut root, mut repos) = (false, false, None, Vec::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--stale" => stale = true,
+                    "--json" => json = true,
+                    "--root" => root = Some(it.next().ok_or("--root needs a directory")?.clone()),
+                    "--repo" => repos.push(it.next().ok_or("--repo needs a path")?.clone()),
+                    other => return Err(format!("unknown argument to worktrees: {other:?}")),
+                }
+            }
+            if !stale {
+                return Err("worktrees: --stale is required (it is the only report)".into());
+            }
+            if root.is_some() && !repos.is_empty() {
+                return Err("worktrees: --root and --repo are exclusive".into());
+            }
+            Ok(Command::Worktrees { json, root, repos })
         }
         "install-task" => {
             let (mut register, mut remove, mut exe) = (false, false, None);
@@ -720,6 +754,24 @@ mod tests {
         );
         assert!(p(&["doctor", "--exe"]).is_err());
         assert!(p(&["doctor", "--fix"]).is_err());
+        assert_eq!(
+            p(&[
+                "worktrees",
+                "--stale",
+                "--json",
+                "--repo",
+                "a",
+                "--repo",
+                "b"
+            ]),
+            Ok(Command::Worktrees {
+                json: true,
+                root: None,
+                repos: vec!["a".into(), "b".into()]
+            })
+        );
+        assert!(p(&["worktrees"]).is_err());
+        assert!(p(&["worktrees", "--stale", "--root", "x", "--repo", "y"]).is_err());
     }
 
     #[test]
