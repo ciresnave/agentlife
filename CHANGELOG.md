@@ -2,6 +2,18 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.26
+
+- Double-launch guard (PM task 2026-10-14; the UniSQL case: a lane did `--self` at 09:03, the PM ran `start --role
+  unisql` at 09:11 while the first host and claude were alive but stuck at a startup dialog, and no state file named
+  either). `lane-restart start` and the restart / `--self` path now REFUSE while the process table holds a
+  `lane-restart host --role <r>` or a claude whose launch arguments carry `--name <r>` (or the spec's own name),
+  even when the state file says crashed, stale or absent; the pids are printed. A restart ignores only its own
+  session and that session's host. An unreadable process table also refuses. `status` marks such a role
+  `duplicate-risk: host pid N, claude pid M` (`duplicate_risk` in `--json`, absent for a normal row) and clears its
+  `startable`. There is no override flag: close the stuck session, then retry. `lane_state::facts::ProcEntry` gains
+  `cmd` (the full command line). The normal restart path is unchanged.
+
 ## 0.14.25
 
 - docs/CI only (PM-allocated, portfolio hygiene from the CodeRipper triage 2026-10-14): `.github/CODEOWNERS`

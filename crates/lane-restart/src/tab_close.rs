@@ -282,6 +282,7 @@ mod tests {
             name: name.to_string(),
             start_time_secs: start,
             exe: Some(PathBuf::from(format!(r"C:\bin\{name}"))),
+            cmd: Vec::new(),
         }
     }
 

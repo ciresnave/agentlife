@@ -34,6 +34,8 @@ pub struct RecordingFacts {
     /// Runs inside `kill_verified`, before it answers: lets a test look at the world at the
     /// moment of the kill.
     pub on_kill: Option<Box<dyn Fn(u32)>>,
+    /// What `process_table` answers (empty by default); an `Err` makes it fail.
+    pub table: Result<Vec<ProcEntry>, String>,
 }
 
 impl RecordingFacts {
@@ -45,6 +47,7 @@ impl RecordingFacts {
             alive: true,
             live_pid: None,
             on_kill: None,
+            table: Ok(Vec::new()),
         }
     }
 }
@@ -94,7 +97,9 @@ impl SystemFacts for RecordingFacts {
         self.alive.then_some(7)
     }
     fn process_table(&self) -> Result<Vec<ProcEntry>, ShellCheckError> {
-        unreachable!("not asked")
+        self.table
+            .clone()
+            .map_err(ShellCheckError::EnumerationFailed)
     }
 }
 

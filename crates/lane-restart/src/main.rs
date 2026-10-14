@@ -304,6 +304,15 @@ fn parse_status_args(args: &[String]) -> Result<(bool, Option<i64>, bool), Strin
     Ok((json, quiet, peers))
 }
 
+/// `\tduplicate-risk: host pid N, claude pid M`, or nothing for a normal row.
+fn duplicate_text(d: &[lane_restart::duplicate::Duplicate]) -> String {
+    if d.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = d.iter().map(ToString::to_string).collect();
+    format!("\tduplicate-risk: {}", list.join(", "))
+}
+
 fn peers_text(p: &lane_restart::peers_join::RolePeers) -> String {
     use lane_restart::peers_join::RolePeers;
     match p {
@@ -331,6 +340,7 @@ fn run_status_cmd(json: bool, quiet_over: Option<i64>, with_peers: bool) -> Exit
     if let Some(secs) = quiet_over {
         report.mark_quiet_over(secs);
     }
+    lane_restart::duplicate::annotate(&mut report, &state_dir(), &facts);
     if with_peers {
         let parents = RealParentProcess::new();
         lane_restart::peers_join::annotate(
@@ -396,10 +406,16 @@ fn run_status_cmd(json: bool, quiet_over: Option<i64>, with_peers: bool) -> Exit
                 .as_deref()
                 .map(|d| format!("\t{d}"))
                 .unwrap_or_default()
+                + &duplicate_text(&r.duplicate_risk)
         );
         if let Some(p) = &r.peers {
             println!("  peers: {}", peers_text(p));
         }
+    }
+    if let Some(e) = &report.duplicate_error {
+        println!(
+            "(duplicate-risk: the process table could not be read, so no role was checked: {e})"
+        );
     }
     if let Some(e) = &report.peers_error {
         println!("(peers: the broker could not be read, so every role is unknown: {e})");
@@ -1306,6 +1322,12 @@ USAGE:
         refused and LANE_RESTART_ALLOW_OPUS is not read. The permission mode
         is always auto. Starting role pm is refused: it is started by a
         person. Exit codes as a restart: 0, 2 (awaiting the dialog), 1.
+        REFUSED (duplicate-risk) while the process table holds a
+        `lane-restart host --role <name>` or a claude named for the role,
+        whatever the state file says; the pids are printed. A restart
+        refuses the same way for any such process other than its own
+        session and that session's host. `status` marks such roles
+        duplicate-risk.
 
     lane-restart stop --role <name> --reason <text> [--self] [--dry-run] [--yes]
         Suspend a lane. The complete launch spec (<role>.launch.json) is
@@ -1566,7 +1588,21 @@ fn main() -> ExitCode {
         dry_run: args.dry_run,
     };
 
-    match authorize::decide(&req, &facts, &state_dir()) {
+    let decision = authorize::decide(&req, &facts, &state_dir());
+    // The target's own session and its host are what this restart replaces; any OTHER host or
+    // claude of the role is a second session the state file may not show (2026-10-14).
+    if let Ok(plan) = &decision {
+        let names = lane_restart::duplicate::role_names(&state_dir(), &role);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        if let Err(refusal) =
+            lane_restart::duplicate::check(&facts, &role, &names, Some(plan.state.pid))
+        {
+            eprintln!("lane-restart: refused - {refusal}");
+            log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
+            return ExitCode::FAILURE;
+        }
+    }
+    match decision {
         Err(refusal) => {
             eprintln!("lane-restart: refused - {refusal}");
             log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
