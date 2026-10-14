@@ -19,6 +19,7 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 | `park`/`stop` of a running lane refused unless the lane can be started again | 0.13.0 (#49) |
 | restore report lists every wanted agent not in a batch, with why | 0.13.1 |
 | `restore` launches from the lane's launch spec, registry as the flagged fallback | 0.14.0 |
+| `host` relays the child's last output after the ConPTY closes (`drain_tail`) | 0.14.1 |
 
 ## Next, in order (nothing below waits on CireSnave or the PM's hands)
 
@@ -26,9 +27,8 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
    0.13.1 (`Report.unstarted`; the flaky test's message now prints `held` and `running_now`).
 2. **`launch_e2e` flake and issue #14** (Linux `start_time` may differ by 1 s between reads): stay unproven
    until a failing log exists; the PM's ruling is to file an issue with the log, not to skip the test.
-3. **`host.rs` main loop drops the final chunk when the child exits** (noted in #44, unfixed): drain `rx`
-   before breaking. Size S; needs a ConPTY test (see the quirk in HANDOFF: the fake outer input must carry the
-   CPR reply).
+3. ~~`host.rs` main loop drops the final chunk when the child exits~~: `drain_tail` in 0.14.1. Not reproduced end to
+   end (see CHANGELOG), so a lane that sees a missing last line should file it with the host log.
 4. ~~One launch description, not two~~: done in 0.14.0 (the PM ruled option A): `restore` launches from the lane's
    complete `<role>.launch.json` when there is one and from the registry otherwise, and each plan entry says which
    (`source`). Remaining from it: nothing writes specs for lanes that have none except `lane-restart specs import`
