@@ -25,6 +25,8 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   has no tags); 213 on node20 or older today (100 are `actions/checkout@v4`). This is a different population
   from CodeRipper's 235 pins in 18 repos: this counts every mutable reference in every repo here.
   The pure parts (classification, scanning, runtime and tag choice) are unit-tested.
+## 0.14.2
+
 - **Disk floor: nothing is launched while `C:` has less than 20 GB free** (PM task, incident 2026-10-14 04:45Z:
   `C:` hit 4 GB and builds failed in six lanes). New `lane_restart::disk` (`FLOOR_BYTES` = 20 GiB; the volume is
   the one holding the lane state directory, picked as the longest mount that is a path prefix, case and slash
