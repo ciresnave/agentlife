@@ -480,6 +480,68 @@ pub struct StatusReport {
     /// Free space on the state volume against the launch floor (added, same schema: a reader that
     /// ignores unknown fields is unaffected).
     pub disk: crate::disk::DiskStatus,
+    /// How many roles have a complete launch spec, and why each of the others does not (added,
+    /// same schema).
+    pub coverage: SpecCoverage,
+}
+
+/// Roles that share one reason for having no complete launch spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecGap {
+    pub why: String,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecCoverage {
+    pub total: usize,
+    pub complete: usize,
+    /// Every role that is not complete appears in exactly one gap; gaps are sorted by reason.
+    pub gaps: Vec<SpecGap>,
+}
+
+/// Why `role` has no complete launch spec, in terms of what `specs import` would do with it
+/// (`import_one`: launch_args recorded, cwd a directory).
+fn gap_reason(dir: &Path, r: &RoleStatus) -> String {
+    if r.spec == SpecStatus::Invalid {
+        return format!(
+            "launch spec invalid: {}",
+            r.detail.as_deref().unwrap_or("unknown")
+        );
+    }
+    match state::load(dir, &r.role) {
+        Err(_) => "no lane state and no launch spec".to_string(),
+        Ok(st) if st.launch_args.as_ref().is_none_or(Vec::is_empty) => {
+            "no launch spec; the state records no launch_args (not importable)".to_string()
+        }
+        Ok(st) if !Path::new(&st.cwd).is_dir() => {
+            "no launch spec; cwd missing (import refuses it: recreate the directory, or `specs retire`)"
+                .to_string()
+        }
+        Ok(_) => "no launch spec; importable with `specs import`".to_string(),
+    }
+}
+
+/// Pure over the report plus a reason per incomplete role.
+pub fn coverage(roles: &[RoleStatus], reason: impl Fn(&RoleStatus) -> String) -> SpecCoverage {
+    let mut by_why: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut complete = 0;
+    for r in roles {
+        if r.spec == SpecStatus::Complete {
+            complete += 1;
+        } else {
+            by_why.entry(reason(r)).or_default().push(r.role.clone());
+        }
+    }
+    SpecCoverage {
+        total: roles.len(),
+        complete,
+        gaps: by_why
+            .into_iter()
+            .map(|(why, roles)| SpecGap { why, roles })
+            .collect(),
+    }
 }
 
 /// Every role with a lane state or a launch spec under `dir`.
@@ -506,11 +568,14 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
         }
     }
     skipped.sort();
+    let roles: Vec<RoleStatus> = roles.iter().map(|r| role_status(dir, r, facts)).collect();
+    let coverage = coverage(&roles, |r| gap_reason(dir, r));
     StatusReport {
         schema: 1,
-        roles: roles.iter().map(|r| role_status(dir, r, facts)).collect(),
+        roles,
         skipped,
         disk: crate::disk::status(dir),
+        coverage,
     }
 }
 
@@ -730,6 +795,63 @@ mod tests {
         let d = tempdir().unwrap();
         let s = role_status(d.path(), "ghost", &dead_facts());
         assert_eq!((s.state, s.startable), (Lifecycle::NeverRun, false));
+    }
+
+    #[test]
+    fn coverage_groups_every_incomplete_role_under_one_reason() {
+        let d = tempdir().unwrap();
+        let alive_dir = tempdir().unwrap();
+        // complete spec
+        write_atomic(d.path(), &built("done", SpecState::Suspended)).unwrap();
+        // state, launch_args, cwd exists: importable
+        let mut st = crate::testing::state_at("imp", "s", "PreToolUse");
+        st.cwd = alive_dir.path().to_string_lossy().into_owned();
+        st.launch_args = Some(vec!["claude.exe".into(), "--model".into(), "sonnet".into()]);
+        std::fs::write(
+            d.path().join("imp.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        // state, launch_args, cwd gone
+        let mut gone = crate::testing::state_at("gone1", "s", "PreToolUse");
+        gone.cwd = alive_dir.path().join("nope").to_string_lossy().into_owned();
+        gone.launch_args = st.launch_args.clone();
+        let mut gone2 = gone.clone();
+        gone2.role = "gone2".into();
+        std::fs::write(
+            d.path().join("gone1.json"),
+            serde_json::to_string(&gone).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("gone2.json"),
+            serde_json::to_string(&gone2).unwrap(),
+        )
+        .unwrap();
+        // state without launch_args
+        let mut bare = crate::testing::state_at("bare", "s", "PreToolUse");
+        bare.cwd = alive_dir.path().to_string_lossy().into_owned();
+        bare.launch_args = None;
+        std::fs::write(
+            d.path().join("bare.json"),
+            serde_json::to_string(&bare).unwrap(),
+        )
+        .unwrap();
+        let r = status_all(d.path(), &dead_facts());
+        let c = &r.coverage;
+        assert_eq!((c.total, c.complete), (5, 1));
+        let find = |needle: &str| {
+            c.gaps
+                .iter()
+                .find(|g| g.why.contains(needle))
+                .unwrap_or_else(|| panic!("no gap containing {needle}: {c:?}"))
+        };
+        assert_eq!(find("cwd missing").roles, vec!["gone1", "gone2"]);
+        assert_eq!(find("importable with").roles, vec!["imp"]);
+        assert_eq!(find("no launch_args").roles, vec!["bare"]);
+        // every incomplete role is in exactly one gap
+        let n: usize = c.gaps.iter().map(|g| g.roles.len()).sum();
+        assert_eq!(n, c.total - c.complete);
     }
 
     #[test]

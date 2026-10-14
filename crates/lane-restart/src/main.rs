@@ -288,6 +288,25 @@ fn run_status_cmd(json: bool) -> ExitCode {
                 .unwrap_or_default()
         );
     }
+    let cov = &report.coverage;
+    println!(
+        "launch specs: {} of {} role(s) have a complete one{}",
+        cov.complete,
+        cov.total,
+        if cov.gaps.is_empty() {
+            ""
+        } else {
+            "; without:"
+        }
+    );
+    for g in &cov.gaps {
+        println!(
+            "  {} role(s): {}: {}",
+            g.roles.len(),
+            g.why,
+            g.roles.join(", ")
+        );
+    }
     if !report.skipped.is_empty() {
         println!(
             "({} other file(s) in the state directory are neither a lane state nor a launch spec: {})",

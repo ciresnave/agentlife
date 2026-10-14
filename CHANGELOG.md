@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.11
+
+- **`lane-restart status` says which roles still have no complete launch spec, and why** (ROADMAP slice item 5).
+  After the human rows: `launch specs: N of M role(s) have a complete one; without:` and one line per reason with
+  the roles under it: `launch spec invalid: ...`, `no launch spec; importable with specs import`, `no launch
+  spec; cwd missing (...recreate the directory, or specs retire)`, `no launch spec; the state records no
+  launch_args (not importable)`, `no lane state and no launch spec`. In `--json` the same is `coverage:
+  {total, complete, gaps: [{why, roles}]}` (additive; `schema` stays 1). Every incomplete role is in exactly one
+  gap. The reasons mirror what `specs import` checks (launch_args, cwd), read without writing anything.
+
 ## 0.14.10
 
 - **`lane-restart ledger`** (read-only; ROADMAP slice item 2): prints `restart.log` oldest first, filtered by
