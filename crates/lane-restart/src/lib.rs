@@ -18,6 +18,7 @@ pub mod disk;
 pub mod handlers;
 pub mod handoff_lint;
 pub mod host;
+pub mod install;
 pub mod lane_state_writer;
 pub mod lane_stop;
 pub mod launch;

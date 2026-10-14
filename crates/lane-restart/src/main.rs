@@ -944,6 +944,145 @@ fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
     }
 }
 
+/// `install --from <exe> [--dry-run]` -> `(exe, dry_run)`.
+fn parse_install_args(rest: &[String]) -> Result<(PathBuf, bool), String> {
+    let mut from = None;
+    let mut dry_run = false;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--from" => {
+                from = Some(PathBuf::from(
+                    iter.next().ok_or("--from needs a path")?.clone(),
+                ))
+            }
+            "--dry-run" => dry_run = true,
+            other => return Err(format!("unexpected argument {other:?}")),
+        }
+    }
+    let from = from.ok_or("--from <exe> is required")?;
+    Ok((from, dry_run))
+}
+
+/// Runs the candidate for real: `--version`, then `status`.
+struct RealProbe;
+
+impl lane_restart::install::Probe for RealProbe {
+    fn version_output(&self, exe: &std::path::Path) -> Result<String, String> {
+        let out = std::process::Command::new(exe)
+            .arg("--version")
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
+        if !out.status.success() {
+            return Err(format!("exited {}", out.status));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn status_ok(&self, exe: &std::path::Path) -> Result<(), String> {
+        let out = std::process::Command::new(exe)
+            .arg("status")
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+}
+
+/// `lane-restart install --from <exe> [--dry-run]` - PM only, even as a dry run.
+fn run_install_cmd(from: PathBuf, dry_run: bool) -> ExitCode {
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    let role = lane_restart::install::EXE_NAME;
+    if caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may install the binary; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may install the binary, and the caller could not be verified: {e}"
+            ),
+        };
+        eprintln!("lane-restart install: refused - {why}");
+        log_ledger(
+            &requested_by,
+            role,
+            "install",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    let hooks = lane_restart::install::hooks_dir();
+    match lane_restart::install::install(&hooks, &from, &RealProbe, dry_run) {
+        Ok(done) => {
+            let kept = done
+                .kept_as
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "nothing was installed before".to_string());
+            if dry_run {
+                println!(
+                    "DRY RUN - nothing written. {} verified: lane-restart {}, sha256 {}; the installed exe would be kept as {kept}",
+                    from.display(),
+                    done.version,
+                    done.sha256
+                );
+            } else {
+                log_ledger(
+                    &requested_by,
+                    role,
+                    "install",
+                    caller_role.as_deref(),
+                    None,
+                    None,
+                    &format!(
+                        "installed {} sha256 {} from {}; previous kept as {kept}",
+                        done.version,
+                        done.sha256,
+                        from.display()
+                    ),
+                    true,
+                );
+                println!(
+                    "INSTALLED lane-restart {} at {}; sha256 {}; the previous exe is {kept}; {} rewritten",
+                    done.version,
+                    hooks.join(lane_restart::install::EXE_NAME).display(),
+                    done.sha256,
+                    hooks.join(lane_restart::install::SHA_NAME).display()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("lane-restart install: {e}");
+            log_ledger(
+                &requested_by,
+                role,
+                "install",
+                caller_role.as_deref(),
+                None,
+                None,
+                &format!("{e}"),
+                false,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// `ledger [--role R] [--kind K] [--since T] [--acted|--refused] [--last N] [--json]`.
 fn parse_ledger_args(
     rest: &[String],
@@ -1144,6 +1283,16 @@ USAGE:
         (resume it with `start`) and a role with a live process are refused
         with the reason. First and last lines say whether anything moved.
 
+    lane-restart install --from <exe> [--dry-run]
+        PM only. Replace C:/Projects/.claude-hooks/lane-restart.exe with a
+        freshly built one. The candidate must run `--version` (first line
+        `lane-restart x.y.z`) and `status` (exit 0) BEFORE anything changes.
+        The installed exe is renamed to lane-restart.exe.bak (the one .bak;
+        the previous .bak is replaced), the candidate is copied in and read
+        back, and lane-restart.sha256 is rewritten and read back. A failure
+        after the rename puts the old exe back. --dry-run verifies and
+        reports, writes nothing.
+
     lane-restart ledger [--role <name>] [--kind <kind>] [--since <time|30m|2h|1d>]
                         [--acted | --refused] [--last <n>] [--json | --by-lane]
         Read-only: prints restart.log, oldest first: time, role, kind
@@ -1239,6 +1388,17 @@ fn main() -> ExitCode {
                 _ => {
                     eprintln!(
                         "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]` or `specs retire --role <name>... [--dry-run]`"
+                    );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "install" {
+            return match parse_install_args(rest) {
+                Ok((from, dry_run)) => run_install_cmd(from, dry_run),
+                Err(e) => {
+                    eprintln!(
+                        "lane-restart install: {e}; expected `install --from <exe> [--dry-run]`"
                     );
                     ExitCode::FAILURE
                 }
@@ -1825,6 +1985,22 @@ mod cli_tests {
             Err(ArgError::Unknown("--all".into()))
         );
         assert!(USAGE.contains("lane-restart specs retire"));
+    }
+
+    #[test]
+    fn install_args_need_from_and_refuse_the_unknown() {
+        assert!(parse_install_args(&[]).is_err());
+        assert_eq!(
+            parse_install_args(&strs(&["--from", "x.exe", "--dry-run"])),
+            Ok((PathBuf::from("x.exe"), true))
+        );
+        assert_eq!(
+            parse_install_args(&strs(&["--from", "x.exe"])),
+            Ok((PathBuf::from("x.exe"), false))
+        );
+        assert!(parse_install_args(&strs(&["--from"])).is_err());
+        assert!(parse_install_args(&strs(&["--from", "x.exe", "--yes"])).is_err());
+        assert!(USAGE.contains("lane-restart install --from"));
     }
 
     #[test]

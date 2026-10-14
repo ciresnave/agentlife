@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.21
+
+- `lane-restart install --from <exe> [--dry-run]` (PM only, even as a dry run; PM ruling 2026-10-14, ROADMAP slice 3
+  row (a)2): installing a new `lane-restart.exe` was a hand ritual that left `.claude-hooks` with 13 `lane-restart*`
+  files and a `lane-restart.sha256` that no longer described the exe. The candidate must run `--version` (first line
+  `lane-restart x.y.z`) and `status` (exit 0) before anything changes. The installed exe is then renamed to the one
+  `lane-restart.exe.bak` (an earlier `.bak` is replaced, so there is only ever one), the candidate is copied in and
+  read back byte for byte, and `lane-restart.sha256` is rewritten (`<hex> *lane-restart.exe`) and read back. A
+  failure after the rename puts the old exe back and says whether that worked. A ledger row of kind `install` is
+  written for every attempt, including a refused non-PM caller. The directory is fixed
+  (`C:/Projects/.claude-hooks`), like the state directory. It does not delete the older `.prev`/`.old*` files: those
+  are the PM's to clear.
+
 ## 0.14.20
 
 - `lane-restart --self` needs no `--role` (PM ruling 2026-10-14): the documented bare form in `CLAUDE.md` and

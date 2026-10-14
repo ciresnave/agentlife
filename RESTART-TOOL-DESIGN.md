@@ -1031,8 +1031,10 @@ It is not a security boundary against a hostile lane.
 
 ### 12.9 The installed binary, `--version`, and `lane-restart approvals`
 
-- **The PM builds the installed `lane-restart.exe` from a clean clone of `main`** (§11.2) and records
-  its SHA-256 at `C:/Projects/.claude-hooks/lane-restart.sha256`.
+- **The PM builds the installed `lane-restart.exe` from a clean clone of `main`** (§11.2) and installs
+  it with `lane-restart install --from <exe>` (PM only): the candidate must pass `--version` and `status`,
+  the old exe is renamed to the one `lane-restart.exe.bak`, the copy is read back, and its SHA-256 is
+  rewritten at `C:/Projects/.claude-hooks/lane-restart.sha256` (`<hex> *lane-restart.exe`) and read back.
 - **`lane-restart --version`** prints the crate version, `embedded approvals: none`, and the configured
   approvals source. It makes no network call.
 - **`lane-restart approvals [--role <name>]`** fetches exactly as the host does. It lists every active
