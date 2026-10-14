@@ -2,6 +2,20 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.1
+
+- **`lane-restart host` relays the child's last output instead of leaving it in the channel** (the quirk noted
+  in 0.12.12 / #44: "host.rs main loop breaks on child exit without draining rx"). After the main loop stops and
+  the ConPTY is closed, the reader can still deliver a final chunk (a ConPTY may flush its last frame only on
+  close); it was sent into a channel nobody read any more. `host::drain_tail` now relays everything the reader
+  sends until it ends or `READER_END_TIMEOUT` passes, and replaces the old "wait for the reader to end" poll.
+  A write error on the outer side stops the relay without hanging the teardown.
+- **Not reproduced end to end:** a real `cmd /c "echo ... & <nul set /p =TAIL"` child never lost its tail on this
+  box (15 runs before the change, 5 per run after), so the new real-child test
+  (`the_childs_final_output_reaches_the_outer_side_before_the_host_returns`) is a regression guard, not the
+  proof. The proof is `drain_tail_relays_what_the_reader_sent_after_the_loop_stopped` (queued chunks, a late chunk,
+  and a reader that never ends), which fails when the relay is removed.
+
 ## 0.14.0
 
 - **`restore` launches a lane from its launch spec when it has a complete one; the registry record is the flagged
