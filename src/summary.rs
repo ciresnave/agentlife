@@ -110,6 +110,21 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
         .collect();
     section(&mut out, "flagged", &flagged, cap);
 
+    // Spec first, registry as the fallback: a lane with no complete launch spec is started from
+    // what the registry recorded, which a person may want to know before approving.
+    let from_registry: Vec<String> = plan
+        .entries
+        .iter()
+        .filter(|e| e.source != crate::plan::SOURCE_SPEC)
+        .map(name)
+        .collect();
+    section(
+        &mut out,
+        "started from the registry record (no complete launch spec)",
+        &from_registry,
+        cap,
+    );
+
     match previous {
         Some(_) => {
             let new: Vec<String> = plan

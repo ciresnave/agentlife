@@ -913,6 +913,7 @@ mod tests {
             mode: None,
             pm,
             flags: vec![],
+            source: "registry".into(),
             dropped_args: vec![],
             batch,
             window: i as u32 / 10,

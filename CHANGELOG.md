@@ -2,6 +2,23 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.0
+
+- **`restore` launches a lane from its launch spec when it has a complete one; the registry record is the flagged
+  fallback** (the PM's ruling "A", 2026-10-14; RESTART-TOOL-DESIGN.md 14, ROADMAP Next 4). A lane's
+  `<role>.launch.json` (written by `lane-restart`, read through `lane_restart::spec`, used only when
+  `SpecFile::check` passes) is turned into a recorded-style argv and given to the **same** rebuild as a
+  registry record: the same allowlist, the explicit Sonnet/Haiku model pin (Opus is replaced, flagged
+  `model-pinned:`), the bypass-is-PM-only refusal, the `;`/control-character refusal, and the portfolio-root and
+  exists checks on the spec's directory. So `restore` and `lane-restart start` describe one launch, and a lane
+  is no longer "not startable" for want of recorded arguments when it has a spec.
+- **`plan::Entry.source`** (`spec` or `registry`) says which one a launch was rebuilt from. It is part of the plan
+  hash, printed as `launch from:` in the plan text, and the approval summary adds a section naming every lane
+  started from the registry. The role is the record's `LANE_ROLE`, else its launch directory's leaf.
+- **Breaking** (second number, pre-1.0): the plan hash changes for every plan, so a frozen or pending plan built
+  by 0.13.x no longer verifies and is re-planned, never approved as is. `plan::Inputs` has a new `specs` field.
+- No spec is written or changed by `restore`; no live start was run.
+
 ## 0.13.1
 
 - **A restore's report names every wanted agent it did not put in a batch, with why** (RESTORE-GAP-ANALYSIS 5b).

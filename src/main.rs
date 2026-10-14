@@ -22,6 +22,7 @@ use agentlife::procindex::ProcIndex;
 use agentlife::registry::{AgentRecord, ClosedHow, Registry};
 use agentlife::run;
 use agentlife::select;
+use agentlife::spec_launch;
 use agentlife::task;
 use std::io::{Read, Write};
 use std::process::ExitCode;
@@ -248,6 +249,7 @@ fn build_plan(
         cwd_exists: &|c| std::path::Path::new(c).is_dir(),
         priority,
         only,
+        specs: &|role| spec_launch::load(std::path::Path::new(&cfg.lane_state_dir), role),
     });
     Ok((p, listing.problems))
 }

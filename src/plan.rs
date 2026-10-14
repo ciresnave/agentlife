@@ -121,12 +121,25 @@ pub struct Entry {
     pub pm: bool,
     /// Things a person should look at (an unknown permission mode, a dropped channel).
     pub flags: Vec<String>,
+    /// What the launch was rebuilt from: [`SOURCE_SPEC`] (the lane's `<role>.launch.json`, the
+    /// preferred way) or [`SOURCE_REGISTRY`] (the recorded launch, the fallback). Part of the hash.
+    #[serde(default = "default_source")]
+    pub source: String,
     /// Recorded arguments that were not passed on, verbatim.
     pub dropped_args: Vec<String>,
     pub batch: u32,
     /// `agentlife-<window>`.
     pub window: u32,
     pub tab: u32,
+}
+
+/// Rebuilt from the lane's launch spec.
+pub const SOURCE_SPEC: &str = "spec";
+/// Rebuilt from the registry's recorded launch (no complete spec).
+pub const SOURCE_REGISTRY: &str = "registry";
+
+fn default_source() -> String {
+    SOURCE_REGISTRY.to_string()
 }
 
 /// An agent that is wanted and ready but not in this run.
@@ -174,6 +187,10 @@ pub struct Inputs<'a> {
     pub priority: &'a [String],
     /// If set, only these names or ids are considered.
     pub only: Option<&'a [String]>,
+    /// The role's complete launch spec, if there is one (`spec_launch::load`). **Spec first, the
+    /// registry as the flagged fallback** (PM ruling 2026-10-14): when this returns a spec the lane
+    /// is rebuilt from it, through the same allowlist, model pin and bypass rule.
+    pub specs: &'a dyn Fn(&str) -> Option<crate::spec_launch::SpecLaunch>,
 }
 
 fn matches_any(rec: &AgentRecord, list: &[String]) -> Option<usize> {
@@ -327,6 +344,10 @@ fn rebuild(
 
 struct Candidate {
     rec: AgentRecord,
+    /// Where the lane is started: the spec's directory, else the record's.
+    cwd: String,
+    /// `spec` or `registry`: what the launch was rebuilt from.
+    source: &'static str,
     rebuilt: Rebuilt,
     pm: bool,
     priority: usize,
@@ -423,34 +444,41 @@ pub fn build(i: &Inputs) -> Plan {
             );
             continue;
         }
-        let Some(args) = r.launch_args.as_ref().filter(|a| !a.is_empty()) else {
-            exclude(
-                r,
-                Reason::NoLaunchArgs,
-                "no recorded launch arguments".into(),
-            );
-            continue;
+        // Spec first (one launch description for `restore` and `lane-restart start`); the registry
+        // record is the fallback, and the entry says which one it was built from.
+        let spec = r.spec_role().and_then(|role| (i.specs)(&role));
+        let (args, cwd, source): (Vec<String>, String, &'static str) = match spec {
+            Some(s) => (s.argv, s.cwd, SOURCE_SPEC),
+            None => match r.launch_args.as_ref().filter(|a| !a.is_empty()) {
+                Some(a) => (a.clone(), r.launch_cwd.clone(), SOURCE_REGISTRY),
+                None => {
+                    exclude(
+                        r,
+                        Reason::NoLaunchArgs,
+                        "no recorded launch arguments and no launch spec".into(),
+                    );
+                    continue;
+                }
+            },
         };
-        if !path_is_under(&r.launch_cwd, &cfg.portfolio_root) {
+        if !path_is_under(&cwd, &cfg.portfolio_root) {
             exclude(
                 r,
                 Reason::CwdOutsideRoot,
-                format!("{} is not under {}", r.launch_cwd, cfg.portfolio_root),
+                format!("{} is not under {}", cwd, cfg.portfolio_root),
             );
             continue;
         }
-        if !(i.cwd_exists)(&r.launch_cwd) {
-            exclude(
-                r,
-                Reason::CwdMissing,
-                format!("{} does not exist", r.launch_cwd),
-            );
+        if !(i.cwd_exists)(&cwd) {
+            exclude(r, Reason::CwdMissing, format!("{cwd} does not exist"));
             continue;
         }
         let pm = pin_kind(r, cfg) == Some(PinKind::Rule);
-        match rebuild(args, r.permission_mode.as_deref(), pm) {
+        match rebuild(&args, r.permission_mode.as_deref(), pm) {
             Ok(rebuilt) => candidates.push(Candidate {
                 rec: (*r).clone(),
+                cwd,
+                source,
                 rebuilt,
                 pm,
                 priority: matches_any(r, i.priority).unwrap_or(usize::MAX),
@@ -516,11 +544,12 @@ pub fn build(i: &Inputs) -> Plan {
                 .name
                 .clone()
                 .unwrap_or_else(|| c.rec.agent_id.to_string()),
-            cwd: c.rec.launch_cwd.clone(),
+            cwd: c.cwd.clone(),
             argv: c.rebuilt.argv,
             mode: c.rebuilt.mode,
             pm: c.pm,
             flags: c.rebuilt.flags,
+            source: c.source.to_string(),
             dropped_args: c.rebuilt.dropped,
             batch,
             window: idx as u32 / params.tabs_per_window,
@@ -744,6 +773,7 @@ pub fn render_text(p: &Plan, dry_run: bool) -> String {
             e.cwd,
             e.argv.join(" ")
         );
+        let _ = writeln!(s, "      launch from: {}", e.source);
         for f in &e.flags {
             let _ = writeln!(s, "      ! {f}");
         }
@@ -888,11 +918,124 @@ mod tests {
             cwd_exists: &|_| true,
             priority: &[],
             only: None,
+            specs: &|_| None,
         })
     }
 
     fn names(p: &Plan) -> Vec<String> {
         p.entries.iter().map(|e| e.title.clone()).collect()
+    }
+
+    fn plan_with_specs(
+        records: &[AgentRecord],
+        c: &Config,
+        specs: &dyn Fn(&str) -> Option<crate::spec_launch::SpecLaunch>,
+    ) -> Plan {
+        build(&Inputs {
+            records,
+            table: &none_alive(),
+            cfg: c,
+            free_ram_gb: Some(32.0),
+            cwd_exists: &|_| true,
+            priority: &[],
+            only: None,
+            specs,
+        })
+    }
+
+    fn spec_for(role: &str, extra: &[&str]) -> crate::spec_launch::SpecLaunch {
+        let mut argv: Vec<String> = ["--name", role, "--model", "haiku"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        argv.extend(extra.iter().map(|s| s.to_string()));
+        crate::spec_launch::SpecLaunch {
+            cwd: format!("C:/Projects/{role}"),
+            argv,
+        }
+    }
+
+    #[test]
+    fn a_lane_with_a_spec_is_launched_from_it_and_one_without_is_flagged_registry() {
+        let recs = vec![lane("a-a", "a", 2), lane("a-b", "b", 1)];
+        let p = plan_with_specs(&recs, &cfg(), &|role| {
+            (role == "a").then(|| spec_for("a", &["--remote-control"]))
+        });
+        let a = p.entries.iter().find(|e| e.title == "a").unwrap();
+        let b = p.entries.iter().find(|e| e.title == "b").unwrap();
+        // From the spec: its model (haiku, explicit), its remote-control; the registry record had neither.
+        assert_eq!(
+            a.argv,
+            ["--name", "a", "--model", "haiku", "--remote-control"]
+        );
+        assert_eq!(a.source, SOURCE_SPEC);
+        // From the registry: pinned to sonnet (no recorded model), and says so.
+        assert_eq!(b.argv[..4], ["--name", "b", "--model", "sonnet"]);
+        assert_eq!(b.source, SOURCE_REGISTRY);
+        // The source is part of the plan's hash: a plan built from specs differs from one without.
+        let none = plan_with_specs(&recs, &cfg(), &|_| None);
+        assert_ne!(p.hash, none.hash);
+    }
+
+    #[test]
+    fn a_spec_makes_a_lane_with_no_recorded_arguments_startable() {
+        let mut r = lane("a-a", "a", 1);
+        r.launch_args = None;
+        let without = plan_with_specs(std::slice::from_ref(&r), &cfg(), &|_| None);
+        assert!(without.entries.is_empty());
+        assert_eq!(without.excluded[0].reason, Reason::NoLaunchArgs);
+        // Positive control: the same record, with a spec for its role.
+        let with = plan_with_specs(std::slice::from_ref(&r), &cfg(), &|role| {
+            (role == "a").then(|| spec_for("a", &[]))
+        });
+        assert_eq!(names(&with), ["a"]);
+    }
+
+    #[test]
+    fn a_spec_is_held_to_the_same_rules_as_a_record() {
+        let recs = vec![lane("a-a", "a", 1)];
+        // Opus in a spec is pinned, not launched (the spec reader refuses it first; this is the
+        // planner's own defence).
+        let p = plan_with_specs(&recs, &cfg(), &|_| {
+            Some(crate::spec_launch::SpecLaunch {
+                cwd: "C:/Projects/a".into(),
+                argv: ["--name", "a", "--model", "claude-opus-4"]
+                    .map(String::from)
+                    .to_vec(),
+            })
+        });
+        assert_eq!(p.entries[0].argv[2..4], ["--model", "sonnet"]);
+        assert!(p.entries[0]
+            .flags
+            .iter()
+            .any(|f| f.starts_with("model-pinned:")));
+        // bypassPermissions for a lane that is not the PM is refused, not downgraded.
+        let p = plan_with_specs(&recs, &cfg(), &|_| {
+            Some(spec_for("a", &["--permission-mode", "bypassPermissions"]))
+        });
+        assert!(p.entries.is_empty());
+        assert_eq!(p.excluded[0].reason, Reason::BypassNotPm);
+        // A spec directory outside the portfolio root is refused, whatever the record says.
+        let p = plan_with_specs(&recs, &cfg(), &|_| {
+            Some(crate::spec_launch::SpecLaunch {
+                cwd: "C:/Windows/System32".into(),
+                argv: spec_for("a", &[]).argv,
+            })
+        });
+        assert!(p.entries.is_empty());
+        assert_eq!(p.excluded[0].reason, Reason::CwdOutsideRoot);
+        // A started-in directory that does not exist is refused.
+        let p = build(&Inputs {
+            records: &recs,
+            table: &none_alive(),
+            cfg: &cfg(),
+            free_ram_gb: Some(32.0),
+            cwd_exists: &|_| false,
+            priority: &[],
+            only: None,
+            specs: &|_| Some(spec_for("a", &[])),
+        });
+        assert_eq!(p.excluded[0].reason, Reason::CwdMissing);
     }
 
     #[test]
@@ -948,6 +1091,7 @@ mod tests {
             cwd_exists: &|_| true,
             priority: &["old".to_string(), "mid".to_string()],
             only: None,
+            specs: &|_| None,
         });
         assert_eq!(names(&p), ["pm", "old", "mid", "new"]);
     }
@@ -1061,6 +1205,7 @@ mod tests {
             cwd_exists: &|_| true,
             priority: &[],
             only: None,
+            specs: &|_| None,
         });
         assert!(p.entries.is_empty());
         assert_eq!(p.held.len(), 2);
@@ -1075,6 +1220,7 @@ mod tests {
                 cwd_exists: &|_| true,
                 priority: &[],
                 only: None,
+                specs: &|_| None,
             });
             assert_eq!(p.entries.len(), 2, "{g:?}");
         }
@@ -1407,6 +1553,7 @@ mod tests {
             cwd_exists: &|c| !c.ends_with("/g"),
             priority: &[],
             only: None,
+            specs: &|_| None,
         });
         assert_eq!(names(&p), ["k"]);
         let why: BTreeMap<_, _> = p
@@ -1442,6 +1589,7 @@ mod tests {
             cwd_exists: &|_| true,
             priority: &[],
             only: Some(&["ALPHA".to_string(), "a-z".to_string()]),
+            specs: &|_| None,
         });
         assert_eq!(names(&p), ["gamma", "alpha"]);
         assert_eq!(
@@ -1487,6 +1635,7 @@ mod tests {
             cwd_exists: &|_| true,
             priority: &[],
             only: None,
+            specs: &|_| None,
         });
         assert_eq!(p.hash, h);
         // Anything that changes a launch does.

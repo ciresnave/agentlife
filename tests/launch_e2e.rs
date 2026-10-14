@@ -189,6 +189,7 @@ impl Rig {
             cwd_exists: &|c| Path::new(c).is_dir(),
             priority: &[],
             only: only_names,
+            specs: &|_| None,
         })
     }
 
@@ -794,6 +795,7 @@ fn real_windows_terminal_opens_one_tab_per_agent_in_a_named_window() {
             mode: None,
             pm: false,
             flags: vec![],
+            source: "registry".into(),
             dropped_args: vec![],
             batch: 0,
             window: 0,

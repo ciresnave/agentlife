@@ -29,6 +29,17 @@ plan, **held**, or **excluded** (with a reason). A test asserts no record is eve
 "The PM" is the agent the visible rule names (`pin_roles` and `portfolio_root`). An explicit pin does
 **not** make a lane the PM.
 
+## Spec first, registry as the fallback (0.14.0)
+
+A lane's launch spec (`<role>.launch.json`, written by `lane-restart`; role = the record's `LANE_ROLE`, else its
+launch directory's leaf) is the preferred description of how to start it, so `restore` and `lane-restart start`
+launch the same way. Only a **complete** spec is used (`lane_restart::spec::SpecFile::check`); a missing,
+unreadable or incomplete one falls back to the registry record. The spec becomes a recorded-style argv and goes
+through the rebuild below unchanged, with the **same** rules, and its directory goes through the same
+under-the-root and exists checks. Each entry carries `source` (`spec` or `registry`), which is in the hash, in the
+plan text, and, for `registry`, in the approval summary. A lane with no recorded arguments but a spec is
+startable; without either it is excluded `no_launch_args`.
+
 ## The launch arguments are rebuilt, not replayed
 
 The recorded argv is walked through an allowlist and rebuilt in one canonical order:

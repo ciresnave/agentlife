@@ -191,6 +191,27 @@ pub struct AgentRecord {
 }
 
 impl AgentRecord {
+    /// The role whose launch spec (`<role>.launch.json`) this agent is started from: the
+    /// self-claimed `LANE_ROLE`, else the last component of the directory it was launched in (the
+    /// same fallback the lane's state file uses). `None` when neither is usable, which can never
+    /// have a spec.
+    pub fn spec_role(&self) -> Option<String> {
+        let claimed = self
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        let leaf = || {
+            self.launch_cwd
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+        };
+        claimed.or_else(leaf).map(str::to_string)
+    }
+
     /// A new record with no sessions, `Wanted`, schema [`SCHEMA`].
     pub fn new(
         agent_id: AgentId,
