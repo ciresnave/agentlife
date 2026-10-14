@@ -165,18 +165,26 @@ started); **`emulator` is dropped** (no terminal-emulator support is planned). W
 ### Key at rest (`Protector`)
 
 DPAPI user scope protects against disk copies and backups, **not** against any process running as the user
-(`dpapi.rs` header says so). The honest Linux equivalents have the same property:
+(`dpapi.rs` header says so). The Linux options below differ in the first half of that sentence: the key
+file does **not** survive a copy of the disk (see its row and the correction after the table).
 
 | Option | Survives reboot | Needs | Notes |
 |---|---|---|---|
 | Secret Service via D-Bus (`keyring` crate: gnome-keyring, KWallet) | yes | a running, unlocked session keyring | fails on headless/SSH-only; unlock prompt is a second consent surface |
 | Kernel keyring (`keyctl`, user keyring) | **no** | nothing | good as a cache, not as storage |
 | TPM2-sealed key (`tpm2-tss`, `/dev/tpmrm0`) | yes | TPM, user in `tss` group | strongest at rest; hardware-bound; absent on many VMs |
-| `0600` key file under the state dir | yes | nothing | parity with DPAPI user scope in threat model; weakest against disk copies |
+| `0600` key file under the state dir | yes | nothing | **weaker than DPAPI user scope** (corrected 2026-10-14, see below): the KEK sits beside the store and is copied with it |
 
 Recommendation: a **tiered `Protector`**: TPM2 if present, else Secret Service if reachable, else `0600` file,
 and the chosen tier is written into the store header and printed by `user-request list`, so no tier is silent.
 Do not pick the file tier without saying so.
+
+**Correction (2026-10-14, PM task, from OverMind's own audit in `consent` `docs/LINUX-PORT-DESIGN.md` sections 2
+and 6):** an earlier version of this plan called the file tier "parity with DPAPI user scope". It is not. DPAPI
+user scope keeps the key out of the copied files, so a copy of the disk or a backup does not carry the key; a key
+file in the same state tree is carried by that same copy, and any same-user process can read it. It separates
+users by file permission and nothing more. It is the tier of last resort, shown on every `list`, never hidden.
+Secret Service and TPM2 keep the key out of the copied tree (a same-user process can still ask them to unseal it).
 
 ### Approval channel (the Hello equivalent)
 
@@ -187,7 +195,7 @@ Candidates that can pass it:
 
 | Channel | Answerable by an agent? | Needs |
 |---|---|---|
-| FIDO2/U2F key, user-presence touch (`libfido2`) | no (physical touch) | a security key; works headless |
+| FIDO2/U2F key, user-presence touch (`libfido2`) | no (physical touch). **But a touch proves a person touched the key, not that they read the text**: a key has no screen, so the prompt is shown on a surface a same-user agent may influence (the signature binds request, text hash and a fresh nonce, which defeats replay, not misdirection). Weaker than Hello; OverMind's design asks CireSnave to accept that explicitly | a security key; works headless |
 | `fprintd` fingerprint verify (D-Bus `net.reactivated.Fprint`) | no (biometric) | reader + enrolled finger |
 | polkit authentication agent (password/biometric dialog by a separate agent process) | **uncertain** on X11 (synthetic input), harder on Wayland | desktop session |
 | TPM2 `authValue` PIN on an unseal | no, if the PIN is typed by a person on a path the agent cannot read | TPM + a PIN entry surface (again a UI to secure) |
