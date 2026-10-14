@@ -1523,7 +1523,14 @@ mod tests {
         ))
         .unwrap();
 
-        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        // ConPTY asks the terminal for the cursor position and consumes the answer itself; a unix
+        // pty never asks, so a pre-seeded reply would arrive at the child as typed input and land
+        // in its `read` (CI read, 2026-10-14: `GOT:^[[1;1RINJECTED_REPLY`).
+        let outer_input = Cursor::new(if cfg!(windows) {
+            b"\x1b[1;1R".to_vec()
+        } else {
+            Vec::new()
+        });
         let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
         struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
