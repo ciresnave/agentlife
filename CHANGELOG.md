@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (Linux port P5; the PM numbers it at gate)
+## 0.14.32
 
 - **Unix stop is TERM, grace, KILL to the process group** (`docs/PORT-LINUX-PLAN.md`, P5). `sysinfo`'s `kill()` is
   `SIGKILL` on Linux: no flush, and a lane's shells and helpers were left running. New
