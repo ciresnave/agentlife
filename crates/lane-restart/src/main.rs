@@ -375,6 +375,24 @@ fn parse_specs_import_args(rest: &[String]) -> Result<(Option<String>, bool, boo
     Ok((role, dry_run, verbose))
 }
 
+/// `specs retire --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
+fn parse_specs_retire_args(rest: &[String]) -> Result<(Vec<String>, bool), ArgError> {
+    let mut roles = Vec::new();
+    let mut dry_run = false;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => roles.push(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            "--dry-run" => dry_run = true,
+            other => return Err(ArgError::Unknown(other.to_string())),
+        }
+    }
+    if roles.is_empty() {
+        return Err(ArgError::RoleRequired);
+    }
+    Ok((roles, dry_run))
+}
+
 /// The role whose `claude` session is running this command, verified by pid and start time
 /// (RESTART-TOOL-DESIGN.md 14.8), never by `LANE_ROLE`.
 fn verified_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
@@ -760,6 +778,73 @@ fn run_specs_import_cmd(role: Option<String>, dry_run: bool, verbose: bool) -> E
     }
 }
 
+/// `lane-restart specs retire --role R... [--dry-run]` - PM only. Moves, never deletes.
+fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
+    use lane_restart::spec_retire::{render, retire_roles, RetireOutcome};
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    if caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may retire roles; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may retire roles, and the caller could not be verified: {e}"
+            ),
+        };
+        eprintln!("lane-restart specs retire: refused - {why}");
+        log_ledger(
+            &requested_by,
+            &roles.join(","),
+            "retire",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    let rows = retire_roles(&state_dir(), &roles, &facts, dry_run, chrono::Utc::now());
+    let mut refused = false;
+    for r in &rows {
+        match &r.outcome {
+            RetireOutcome::Moved(files) => log_ledger(
+                &requested_by,
+                &r.role,
+                "retire",
+                caller_role.as_deref(),
+                None,
+                None,
+                &format!("moved {} to retired/", files.join(", ")),
+                true,
+            ),
+            RetireOutcome::WouldMove(_) => {}
+            RetireOutcome::Refused(why) => {
+                refused = true;
+                log_ledger(
+                    &requested_by,
+                    &r.role,
+                    "retire",
+                    caller_role.as_deref(),
+                    None,
+                    None,
+                    &format!("refused: {why}"),
+                    false,
+                );
+            }
+        }
+    }
+    print!("{}", render(&rows, dry_run));
+    if refused {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
     let mut role = None;
     let mut iter = rest.iter();
@@ -855,6 +940,14 @@ USAGE:
         written_by=import, only if the spec is complete; the rest are listed
         with the reason. Never overwrites a spec; never edits a state file.
 
+    lane-restart specs retire --role <name> [--role <name>]... [--dry-run]
+        PM only. For each role whose recorded cwd is not a directory and whose
+        recorded process is not live, MOVE its state file (and launch spec, if
+        any) to <state dir>/retired/<file>.<UTC stamp>; never deletes, never
+        overwrites, reads the move back. Role pm, a role with a directory
+        (resume it with `start`) and a role with a live process are refused
+        with the reason. First and last lines say whether anything moved.
+
     lane-restart models
         Read-only: list each lane's recorded model and flag Opus. A relaunch
         pins `--model` from the original launch's explicit --model, else
@@ -931,9 +1024,16 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 },
+                Some((sub, tail)) if sub == "retire" => match parse_specs_retire_args(tail) {
+                    Ok((roles, dry_run)) => run_specs_retire_cmd(roles, dry_run),
+                    Err(e) => {
+                        eprintln!("lane-restart specs retire: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
                 _ => {
                     eprintln!(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run]`"
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]` or `specs retire --role <name>... [--dry-run]`"
                     );
                     ExitCode::FAILURE
                 }
@@ -1462,6 +1562,20 @@ mod cli_tests {
             parse_specs_import_args(&strs(&["--yes"])),
             Err(ArgError::Unknown("--yes".into()))
         );
+    }
+
+    #[test]
+    fn specs_retire_args_need_a_role_and_repeat() {
+        assert_eq!(parse_specs_retire_args(&[]), Err(ArgError::RoleRequired));
+        assert_eq!(
+            parse_specs_retire_args(&strs(&["--role", "a", "--role", "b", "--dry-run"])),
+            Ok((vec!["a".to_string(), "b".to_string()], true))
+        );
+        assert_eq!(
+            parse_specs_retire_args(&strs(&["--all"])),
+            Err(ArgError::Unknown("--all".into()))
+        );
+        assert!(USAGE.contains("lane-restart specs retire"));
     }
 
     #[test]

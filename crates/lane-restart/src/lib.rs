@@ -25,6 +25,7 @@ pub mod notify;
 pub mod relaunch;
 pub mod spec;
 pub mod spec_import;
+pub mod spec_retire;
 pub mod start;
 pub mod stop;
 pub mod tab_close;
