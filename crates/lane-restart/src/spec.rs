@@ -386,6 +386,25 @@ pub struct RoleStatus {
     /// The model the launch spec records (`None` when there is no readable spec). Opus is shown as
     /// recorded; a start replaces it (see `lane-restart models`).
     pub model: Option<String>,
+    /// What the role's own hooks last recorded, present only when the recorded process is live
+    /// (pid and start time): a dead process's last write says nothing about it now, so a lane
+    /// killed mid-turn cannot read as busy. Absent for every other role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
+}
+
+/// The lane's own record of its activity (`LaneState`), raw, plus the one idle verdict.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Activity {
+    pub busy: bool,
+    pub subagents_running: u32,
+    /// `None`: the lane never asserted it. Not the same as `false`.
+    pub no_background_shells: Option<bool>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by_event: String,
+    /// `LaneState::is_idle`: not busy, no subagents, shells asserted absent. It does NOT include
+    /// the PM's fourth term, "no unread TASK", which no state file records.
+    pub idle: bool,
 }
 
 /// Is the process a state file names still the same live `claude`? Pid AND start time; a pid
@@ -413,11 +432,24 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         stop_reason: None,
         detail: None,
         model: None,
+        activity: None,
     };
     let lane_state = state::load(dir, role);
     let live = lane_state
         .as_ref()
         .is_ok_and(|st| state_process_is_live(st, facts));
+    if live {
+        if let Ok(st) = &lane_state {
+            out.activity = Some(Activity {
+                busy: st.busy,
+                subagents_running: st.subagents_running,
+                no_background_shells: st.no_background_shells,
+                updated_at: st.updated_at,
+                updated_by_event: st.updated_by_event.clone(),
+                idle: st.is_idle(),
+            });
+        }
+    }
     let spec = read(dir, role);
     let mut spec_state = None;
     match &spec {
@@ -922,6 +954,61 @@ mod tests {
         lane_state_file(d.path(), "baracuda", 55, Some(100));
         let s = role_status(d.path(), "baracuda", &facts_with_live(55, 100));
         assert_eq!((s.state, s.startable), (Lifecycle::Running, false));
+    }
+
+    fn write_activity(dir: &Path, busy: bool, subagents: u32, shells: Option<bool>) {
+        let mut st = crate::testing::state_at("baracuda", "s", "PreToolUse");
+        st.pid = 55;
+        st.pid_start_secs = Some(100);
+        st.busy = busy;
+        st.subagents_running = subagents;
+        st.no_background_shells = shells;
+        std::fs::write(
+            dir.join("baracuda.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_live_role_reports_its_recorded_activity_and_the_idle_verdict() {
+        let d = tempdir().unwrap();
+        write_activity(d.path(), false, 0, Some(true));
+        let a = role_status(d.path(), "baracuda", &facts_with_live(55, 100))
+            .activity
+            .expect("live role has activity");
+        assert_eq!(
+            (
+                a.busy,
+                a.subagents_running,
+                a.idle,
+                a.updated_by_event.as_str()
+            ),
+            (false, 0, true, "PreToolUse")
+        );
+        for (busy, subs, shells) in [
+            (true, 0, Some(true)),
+            (false, 2, Some(true)),
+            (false, 0, Some(false)),
+            (false, 0, None),
+        ] {
+            write_activity(d.path(), busy, subs, shells);
+            let a = role_status(d.path(), "baracuda", &facts_with_live(55, 100))
+                .activity
+                .unwrap();
+            assert!(!a.idle, "busy={busy} subs={subs} shells={shells:?}");
+        }
+    }
+
+    /// A lane killed mid-turn leaves busy=true on disk; its process is gone, so nothing is reported.
+    #[test]
+    fn a_dead_process_reports_no_activity_even_if_it_died_busy() {
+        let d = tempdir().unwrap();
+        write_activity(d.path(), true, 3, Some(false));
+        let s = role_status(d.path(), "baracuda", &dead_facts());
+        assert_eq!(s.activity, None);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("activity"), "{json}");
     }
 
     #[test]

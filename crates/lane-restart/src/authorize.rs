@@ -225,6 +225,9 @@ fn idle_and_shell_free(state: &LaneState, facts: &dyn SystemFacts) -> Result<(),
     if state.no_background_shells != Some(true) {
         return Err(Refusal::NoBackgroundShellsClaimMissing(state.role.clone()));
     }
+    // The branches above only name the refusal; `is_idle` is the one predicate `status` prints.
+    // Reaching here must mean it holds, or the two have drifted.
+    debug_assert!(state.is_idle());
     match facts.has_live_shell_descendant(state.pid) {
         Ok(true) => Err(Refusal::LiveShellDetected(state.role.clone())),
         Ok(false) => Ok(()),

@@ -63,6 +63,18 @@ pub struct LaneState {
     pub updated_by_event: String,
 }
 
+impl LaneState {
+    /// THE idle predicate (PM ruling 2026-10-14): not busy, no subagents running, and the lane
+    /// has asserted no background shell is running. `None` for the shell claim is "never
+    /// asserted", which is not idle. A fourth term the ruling names, "no unread TASK", is not
+    /// recorded anywhere in this file, so it is not part of this function: a caller that needs it
+    /// must read it from somewhere else. Both `status` and the restart gate (`authorize.rs`) call
+    /// this, so they cannot disagree.
+    pub fn is_idle(&self) -> bool {
+        !self.busy && self.subagents_running == 0 && self.no_background_shells == Some(true)
+    }
+}
+
 #[derive(Debug)]
 pub enum LoadError {
     NotFound(String),
@@ -113,6 +125,26 @@ mod tests {
             "updated_by_event": "Stop"
         }"#
         .to_string()
+    }
+
+    #[test]
+    fn idle_needs_all_three_recorded_terms() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("overmind.json"), sample_json()).unwrap();
+        let idle = load(dir.path(), "overmind").unwrap();
+        assert!(idle.is_idle());
+        let mut s = idle.clone();
+        s.busy = true;
+        assert!(!s.is_idle());
+        let mut s = idle.clone();
+        s.subagents_running = 1;
+        assert!(!s.is_idle());
+        let mut s = idle.clone();
+        s.no_background_shells = Some(false);
+        assert!(!s.is_idle());
+        let mut s = idle;
+        s.no_background_shells = None;
+        assert!(!s.is_idle(), "never asserted is not idle");
     }
 
     #[test]

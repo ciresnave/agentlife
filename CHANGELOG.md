@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.15
+
+- `status` and `status --json` carry each **live** role's recorded activity (`activity`: `busy`,
+  `subagents_running`, `no_background_shells`, `updated_at`, `updated_by_event`, `idle`). A role whose
+  process is not live has no `activity` key, so a lane killed mid-turn cannot read as busy. Additive: the
+  schema number is unchanged.
+- One named idle predicate, `LaneState::is_idle` (PM ruling 2026-10-14: not busy, no subagents, no background
+  shells asserted). `status` prints it and the restart gate asserts it, so the two cannot disagree. The
+  ruling's fourth term, "no unread TASK", is not recorded in any state file, so it is **not** part of
+  `idle`; a caller that needs it must read it elsewhere.
+
 ## 0.14.14
 
 - Docs only: `docs/ROADMAP.md` gains "Next slice 2" (what the PM's sweep still does by hand: activity fields in
