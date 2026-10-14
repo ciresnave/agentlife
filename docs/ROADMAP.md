@@ -175,6 +175,21 @@ for the PM to rule:
 - **Anything that writes another lane's state or HANDOFF**: items 1 to 4 read only.
 - **Assigning work to idle lanes**: a decision, not a tool; the PM's.
 
+## Linux port (`docs/PORT-LINUX-PLAN.md`, standing direction from CireSnave 2026-10-14)
+
+Built: P0, P1, P2 (0.14.27), P4 (0.14.28). Order and proof per slice are in the plan; this is only what is queued.
+
+| # | item | state |
+|---|---|---|
+| P3' | identity-mismatch diagnostic on Linux (the failing log issue #14 waits for) | proposed, awaiting the PM |
+| P5 | TERM, grace, KILL to the process group (`down`, `lane_stop`) | next |
+| P6 | `TabLauncher` + the direct lane host (`setsid`), `lane-restart attach` over the host's own pty | next |
+| P8 | autostart: `systemd --user` units; an unlock path or a documented "logon only" limit | after P6 |
+| P9 | shutdown marker via `journalctl` / `last -x` | independent |
+| P10 | hook origin and tab-close lists for Linux | after P2 (done) |
+| **tmux viewer** | **a viewer over the direct host. CireSnave 2026-10-14, verbatim: "Direct process first with tmux support on our roadmap to build later." Not started; nothing depends on it** | **LATER** |
+| P12, P13 | `user-request` Linux `Protector` and FIDO2 approval channel (OverMind; the PM routes U1-U8) | upstream |
+
 ## Next slice 3 (proposed 2026-10-14 at `origin/main` = `d396313`, 0.14.18): what is still done by hand, and the OverMind split's last step
 
 PM task 2026-10-14 13:50Z: (a) what lanes and the PM still do by hand around restart/restore/status after

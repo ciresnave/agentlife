@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.30
+
+- docs only (PM-allocated). `docs/PORT-LINUX-PLAN.md`: updated for the Q1 (direct host first, tmux later, no
+  emulator), Q2 and Q3 rulings; P3 replaced by P3' and P11 marked already built; **the key-file tier is corrected
+  from "parity with DPAPI user scope" to weaker than it** (its key sits beside the store and is copied with it;
+  from OverMind's audit in `consent` `docs/LINUX-PORT-DESIGN.md`), and a security-key touch is noted as presence,
+  not reading. `docs/ROADMAP.md`: a Linux port section with the tmux-viewer row, marked later. No code change.
+
 ## 0.14.29
 
 - **Identity-mismatch diagnostic, no change to any decision** (`docs/PORT-LINUX-PLAN.md`, P3'; issue #14 has no
