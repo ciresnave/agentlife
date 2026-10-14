@@ -2,6 +2,15 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.10
+
+- **`lane-restart ledger`** (read-only; ROADMAP slice item 2): prints `restart.log` oldest first, filtered by
+  `--role`, `--kind`, `--since <RFC 3339|30m|2h|1d>`, `--acted`/`--refused`, `--last N`; `--json` prints the rows
+  as JSON lines. A line that is not an entry is counted and named in the footer, never skipped silently; a line
+  written before `kind` existed reads as a restart; unknown keys are ignored. It writes nothing (a missing log is
+  an empty ledger and is not created). Answers "who restarted whom, and what was refused" without reading the
+  file by hand.
+
 ## 0.14.9
 
 - **`lane-restart status --json` carries each role's `model` and the disk floor** (ROADMAP slice item 1). `model`
@@ -9,6 +18,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   `{mount, free_bytes, floor_bytes, below_floor, unknown}` for the state volume; it was a stderr line before, and
   the stderr line stays. Additive: `schema` stays 1 and every existing field is unchanged.
   (The ROADMAP's earlier claim that `status` was human text only was wrong; `--json` has existed since 0.12.10.)
+
 
 ## 0.14.8
 

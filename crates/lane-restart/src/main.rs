@@ -845,6 +845,89 @@ fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
     }
 }
 
+/// `ledger [--role R] [--kind K] [--since T] [--acted|--refused] [--last N] [--json]`.
+fn parse_ledger_args(
+    rest: &[String],
+) -> Result<(lane_restart::ledger::Filter, bool, Option<String>), String> {
+    let mut f = lane_restart::ledger::Filter::default();
+    let mut json = false;
+    let mut since_raw = None;
+    let mut iter = rest.iter();
+    let value = |name: &str, it: &mut std::slice::Iter<String>| {
+        it.next()
+            .cloned()
+            .ok_or_else(|| format!("{name} requires a value"))
+    };
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--role" => f.role = Some(value("--role", &mut iter)?),
+            "--kind" => f.kind = Some(value("--kind", &mut iter)?),
+            "--since" => since_raw = Some(value("--since", &mut iter)?),
+            "--acted" => f.acted = Some(true),
+            "--refused" => f.acted = Some(false),
+            "--last" => {
+                let v = value("--last", &mut iter)?;
+                f.last = Some(
+                    v.parse()
+                        .map_err(|_| format!("--last takes a number: {v:?}"))?,
+                );
+            }
+            "--json" => json = true,
+            other => return Err(format!("unrecognised argument: {other}")),
+        }
+    }
+    Ok((f, json, since_raw))
+}
+
+/// `lane-restart ledger` - read-only: prints `restart.log` filtered. Writes nothing.
+fn run_ledger_cmd(
+    mut f: lane_restart::ledger::Filter,
+    json: bool,
+    since: Option<String>,
+) -> ExitCode {
+    use lane_restart::ledger;
+    if let Some(s) = since {
+        match ledger::parse_since(&s, chrono::Utc::now()) {
+            Ok(t) => f.since = Some(t),
+            Err(e) => {
+                eprintln!("lane-restart ledger: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let read = match ledger::read(&log_path()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("lane-restart ledger: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let shown = ledger::select(&read.rows, &f);
+    if json {
+        for r in &shown {
+            match serde_json::to_string(r) {
+                Ok(l) => println!("{l}"),
+                Err(e) => {
+                    eprintln!("lane-restart ledger: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        eprintln!(
+            "({} of {} entries shown; {} unreadable line(s))",
+            shown.len(),
+            read.rows.len(),
+            read.unreadable.len()
+        );
+    } else {
+        print!(
+            "{}",
+            ledger::render(&shown, read.rows.len(), &read.unreadable)
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
     let mut role = None;
     let mut iter = rest.iter();
@@ -948,6 +1031,14 @@ USAGE:
         (resume it with `start`) and a role with a live process are refused
         with the reason. First and last lines say whether anything moved.
 
+    lane-restart ledger [--role <name>] [--kind <kind>] [--since <time|30m|2h|1d>]
+                        [--acted | --refused] [--last <n>] [--json]
+        Read-only: prints restart.log, oldest first: time, role, kind
+        (restart if the line predates kinds), who asked (and the verified
+        caller if it differs), acted or refused, and the outcome. A line that
+        is not an entry is counted and named in the footer, never skipped
+        silently. Writes nothing.
+
     lane-restart models
         Read-only: list each lane's recorded model and flag Opus. A relaunch
         pins `--model` from the original launch's explicit --model, else
@@ -1035,6 +1126,15 @@ fn main() -> ExitCode {
                     eprintln!(
                         "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]` or `specs retire --role <name>... [--dry-run]`"
                     );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "ledger" {
+            return match parse_ledger_args(rest) {
+                Ok((f, json, since)) => run_ledger_cmd(f, json, since),
+                Err(e) => {
+                    eprintln!("lane-restart ledger: {e}");
                     ExitCode::FAILURE
                 }
             };
@@ -1576,6 +1676,31 @@ mod cli_tests {
             Err(ArgError::Unknown("--all".into()))
         );
         assert!(USAGE.contains("lane-restart specs retire"));
+    }
+
+    #[test]
+    fn ledger_args_parse_filters_and_refuse_the_unknown() {
+        let (f, json, since) = parse_ledger_args(&strs(&[
+            "--role",
+            "a",
+            "--kind",
+            "start",
+            "--refused",
+            "--last",
+            "5",
+            "--since",
+            "2h",
+            "--json",
+        ]))
+        .unwrap();
+        assert_eq!(f.role.as_deref(), Some("a"));
+        assert_eq!(f.kind.as_deref(), Some("start"));
+        assert_eq!((f.acted, f.last, json), (Some(false), Some(5), true));
+        assert_eq!(since.as_deref(), Some("2h"));
+        assert!(parse_ledger_args(&strs(&["--last", "x"])).is_err());
+        assert!(parse_ledger_args(&strs(&["--role"])).is_err());
+        assert!(parse_ledger_args(&strs(&["--all"])).is_err());
+        assert!(USAGE.contains("lane-restart ledger"));
     }
 
     #[test]
