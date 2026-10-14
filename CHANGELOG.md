@@ -2,6 +2,11 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.25
+
+- docs/CI only (PM-allocated, portfolio hygiene from the CodeRipper triage 2026-10-14): `.github/CODEOWNERS`
+  (`* @ciresnave`, WSP-001) and `docs/GLOSSARY.md` (DOC-009). No code change.
+
 ## 0.14.24
 
 - `agentlife worktrees --stale [--json] [--root <dir> | --repo <path>...]` (PM task 2026-10-14, ROADMAP slice 3
