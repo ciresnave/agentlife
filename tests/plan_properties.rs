@@ -173,6 +173,7 @@ fn plan(w: &World, c: &Config, free: Option<f64>) -> Plan {
         cwd_exists: &|p| !w.missing_cwds.contains(p),
         priority: &[],
         only: None,
+        specs: &|_| None,
     })
 }
 

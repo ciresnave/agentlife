@@ -1330,13 +1330,108 @@ fn tree_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 }
 
 #[test]
+fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_one() {
+    let rig = Rig::new();
+    let lane_state = rig.dir.path().join("lane-state");
+    std::fs::create_dir_all(&lane_state).unwrap();
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({
+            "portfolio_root": rig.cwd(),
+            "lane_state_dir": lane_state.display().to_string()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // The stand-in claims a role (LANE_ROLE), so the record names the spec to use.
+    let start = rig.payload("start.json", "SessionStart", "sess-gone", Some("startup"));
+    let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
+    rig.run(LANE_ARGS, &script, &[("LANE_ROLE", "specd")]);
+    assert_eq!(
+        rig.registry().list().unwrap().records.len(),
+        1,
+        "{}",
+        rig.log()
+    );
+
+    // Without a spec: the registry is used.
+    let out = rig.agentlife(&["restore", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["entries"][0]["source"], "registry", "{plan}");
+
+    // With a complete spec for that role, on haiku: the spec is.
+    let spec = lane_restart::spec::SpecFile {
+        schema: lane_restart::spec::SCHEMA,
+        role: "specd".to_string(),
+        name: "e2e-lane".to_string(),
+        cwd: rig.cwd(),
+        model: "haiku".to_string(),
+        permission_mode: Some("auto".to_string()),
+        remote_control: false,
+        launch_args: vec![
+            "--dangerously-load-development-channels".to_string(),
+            "server:claude-peers".to_string(),
+        ],
+        handoff_path: None,
+        handoff_mtime: None,
+        state: lane_restart::spec::SpecState::Suspended,
+        written_at: chrono::Utc::now(),
+        written_by: "test".to_string(),
+        stopped_session_id: None,
+        stopped_pid_start_secs: None,
+        stop_reason: None,
+        tool_version: "test".to_string(),
+    };
+    lane_restart::spec::write_atomic(&lane_state, &spec).unwrap();
+    let out = rig.agentlife(&["restore", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan2: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let e = &plan2["entries"][0];
+    assert_eq!(e["source"], "spec", "{plan2}");
+    assert_eq!(
+        e["argv"],
+        serde_json::json!([
+            "--name",
+            "e2e-lane",
+            "--model",
+            "haiku",
+            "--permission-mode",
+            "auto",
+            "--dangerously-load-development-channels",
+            "server:claude-peers"
+        ]),
+        "{plan2}"
+    );
+    assert_ne!(
+        plan["hash"], plan2["hash"],
+        "the source is part of the plan's hash"
+    );
+    // Nothing was written by either dry run.
+    assert!(!rig.home.join("plans").exists());
+}
+
+#[test]
 fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_nothing() {
     let rig = Rig::new();
     // The portfolio root for this run is the rig directory, so the stand-ins' cwd is inside it.
     std::fs::create_dir_all(&rig.home).unwrap();
     std::fs::write(
         rig.home.join("config.json"),
-        serde_json::json!({ "portfolio_root": rig.cwd() }).to_string(),
+        serde_json::json!({
+            "portfolio_root": rig.cwd(),
+            "lane_state_dir": rig.dir.path().join("no-specs").display().to_string()
+        })
+        .to_string(),
     )
     .unwrap();
 
@@ -1383,6 +1478,10 @@ fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_noth
     assert_eq!(e["name"], "e2e-lane");
     assert_eq!(e["batch"], 0);
     assert_eq!(e["window"], 0);
+    assert_eq!(
+        e["source"], "registry",
+        "no spec exists, so the registry is the fallback"
+    );
     // The argv is REBUILT from the real recorded command line, in the canonical order.
     assert_eq!(
         e["argv"],

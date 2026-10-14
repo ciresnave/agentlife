@@ -108,22 +108,6 @@ impl Facts for FsFacts<'_> {
     }
 }
 
-/// The role whose launch spec this agent is started from: the self-claimed `LANE_ROLE`, else the
-/// last component of the directory it was launched in (the same fallback the lane's state file
-/// uses). `None` when neither is usable, which can never have a spec.
-fn spec_role(rec: &AgentRecord) -> Option<String> {
-    let claimed = rec.role.as_deref().map(str::trim).filter(|r| !r.is_empty());
-    let leaf = || {
-        rec.launch_cwd
-            .trim_end_matches(['/', '\\'])
-            .rsplit(['/', '\\'])
-            .next()
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-    };
-    claimed.or_else(leaf).map(str::to_string)
-}
-
 pub struct SysinfoTerminator;
 
 impl Terminator for SysinfoTerminator {
@@ -348,7 +332,7 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
     }
 
     // 1b. The way back: a lane is stopped only if it can be started again (14.3).
-    let role = spec_role(&rec).ok_or_else(|| DownError::NotResumable {
+    let role = rec.spec_role().ok_or_else(|| DownError::NotResumable {
         role: rec.agent_id.to_string(),
         why: "neither a role nor a launch directory is recorded".into(),
     })?;
@@ -1016,14 +1000,14 @@ mod tests {
     fn the_spec_role_is_the_claimed_role_else_the_launch_directory_leaf() {
         let mut r = target();
         r.role = Some("  auth  ".into());
-        assert_eq!(spec_role(&r).as_deref(), Some("auth"));
+        assert_eq!(r.spec_role().as_deref(), Some("auth"));
         r.role = None;
         r.launch_cwd = "C:\\Projects\\agentlife\\".into();
-        assert_eq!(spec_role(&r).as_deref(), Some("agentlife"));
+        assert_eq!(r.spec_role().as_deref(), Some("agentlife"));
         r.launch_cwd = "C:/Projects/synapse".into();
-        assert_eq!(spec_role(&r).as_deref(), Some("synapse"));
+        assert_eq!(r.spec_role().as_deref(), Some("synapse"));
         r.launch_cwd = "".into();
-        assert_eq!(spec_role(&r), None);
+        assert_eq!(r.spec_role(), None);
     }
 
     #[test]

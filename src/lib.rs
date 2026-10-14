@@ -39,6 +39,7 @@ pub mod registry;
 pub mod restore;
 pub mod run;
 pub mod select;
+pub mod spec_launch;
 pub mod summary;
 pub mod task;
 

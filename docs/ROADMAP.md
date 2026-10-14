@@ -18,6 +18,7 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 | the approval prompt's fourth thing (why) | built, 0.12.16 |
 | `park`/`stop` of a running lane refused unless the lane can be started again | 0.13.0 (#49) |
 | restore report lists every wanted agent not in a batch, with why | 0.13.1 |
+| `restore` launches from the lane's launch spec, registry as the flagged fallback | 0.14.0 |
 
 ## Next, in order (nothing below waits on CireSnave or the PM's hands)
 
@@ -28,11 +29,10 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 3. **`host.rs` main loop drops the final chunk when the child exits** (noted in #44, unfixed): drain `rx`
    before breaking. Size S; needs a ConPTY test (see the quirk in HANDOFF: the fake outer input must carry the
    CPR reply).
-4. **One launch description, not two.** `restore` launches from the registry record; `lane-restart start`
-   launches from `<role>.launch.json`. They agree today only because both rebuild through an allowlist and pin
-   the model. A single resolver (spec first, registry as the fallback) would keep a lane resumable by either
-   path with one set of rules. Needs the PM's ruling on which is authoritative before any code (a design
-   question, not a lane's to settle); size M.
+4. ~~One launch description, not two~~: done in 0.14.0 (the PM ruled option A): `restore` launches from the lane's
+   complete `<role>.launch.json` when there is one and from the registry otherwise, and each plan entry says which
+   (`source`). Remaining from it: nothing writes specs for lanes that have none except `lane-restart specs import`
+   (PM only) and a lane's own next launch, so until the PM runs that import most plans still say `registry`.
 
 ## Waiting on someone else
 

@@ -11,6 +11,7 @@ fn entry(id: &str, mode: Option<&str>) -> Entry {
         mode: mode.map(Into::into),
         pm: false,
         flags: vec![],
+        source: "spec".into(),
         dropped_args: vec![],
         batch: 1,
         window: 1,
@@ -156,4 +157,30 @@ refused by a hard rule (0)"
         "x
 y"
     ));
+}
+
+#[test]
+fn a_lane_started_from_the_registry_is_named_and_one_from_a_spec_is_not() {
+    let mut from_registry = entry("regd", None);
+    from_registry.source = "registry".into();
+    let p = plan(vec![from_registry, entry("specd", None)]);
+    let s = render(&p, None, 10, "p1");
+    assert!(
+        s.contains("started from the registry record (no complete launch spec)"),
+        "{s}"
+    );
+    let lines: Vec<&str> = s.lines().collect();
+    let h = lines
+        .iter()
+        .position(|l| l.contains("started from the registry record"))
+        .unwrap();
+    let body = lines[h + 1];
+    assert!(body.contains("regd"), "{s}");
+    assert!(!body.contains("specd"), "{s}");
+    // Positive control: with every lane from a spec there is no such section.
+    let all_spec = render(&plan(vec![entry("specd", None)]), None, 10, "p1");
+    assert!(
+        !all_spec.contains("started from the registry record"),
+        "{all_spec}"
+    );
 }

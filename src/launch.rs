@@ -427,6 +427,7 @@ mod tests {
             mode: None,
             pm: false,
             flags: vec![],
+            source: "registry".into(),
             dropped_args: vec![],
             batch: 0,
             window,

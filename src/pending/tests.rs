@@ -31,6 +31,7 @@ fn entry(id: &str, mode: &str) -> Entry {
         mode: Some(mode.into()),
         pm: false,
         flags: vec![],
+        source: "registry".into(),
         dropped_args: vec![],
         batch: 1,
         window: 1,

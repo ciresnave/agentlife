@@ -265,6 +265,7 @@ fn plan_for(records: &[AgentRecord], table: &Alive) -> plan::Plan {
         cwd_exists: &|_| true,
         priority: &[],
         only: None,
+        specs: &|_| None,
     })
 }
 
