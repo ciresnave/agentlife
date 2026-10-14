@@ -313,7 +313,11 @@ fn run_status_cmd(json: bool) -> ExitCode {
                     if h.over { " OVER" } else { "" }
                 ),
                 None => "\thandoff=none".to_string(),
-            },
+            } + &r
+                .nested_in
+                .as_deref()
+                .map(|p| format!("\tnested-in={p}"))
+                .unwrap_or_default(),
             r.detail
                 .as_deref()
                 .map(|d| format!("\t{d}"))

@@ -36,6 +36,9 @@ pub enum ImportOutcome {
 pub struct ImportRow {
     pub role: String,
     pub outcome: ImportOutcome,
+    /// The role whose cwd encloses this role's cwd (`spec::nesting`): a label on the row, never a
+    /// reason to refuse. `None` when the role is not inside another role's directory.
+    pub nested_in: Option<String>,
 }
 
 fn roles_in(dir: &Path) -> Vec<String> {
@@ -131,6 +134,7 @@ pub fn import_specs(
         Some(r) => vec![r.to_string()],
         None => roles_in(dir),
     };
+    let nested = spec::nested_roles(dir, &roles_in(dir));
     roles
         .into_iter()
         .map(|role| {
@@ -139,7 +143,12 @@ pub fn import_specs(
             } else {
                 import_one(dir, &role, facts, policy_default, dry_run, now)
             };
-            ImportRow { role, outcome }
+            let nested_in = nested.get(&role).cloned();
+            ImportRow {
+                role,
+                outcome,
+                nested_in,
+            }
         })
         .collect()
 }
@@ -152,6 +161,15 @@ fn reason_key(why: &str) -> &str {
     } else {
         why
     }
+}
+
+/// `\tnested in <role>` for a row whose cwd is inside another role's cwd (a label: the row is
+/// still written, because a legitimate nested lane is indistinguishable by path alone).
+fn nested_label(r: &ImportRow) -> String {
+    r.nested_in
+        .as_deref()
+        .map(|p| format!("\tnested in {p} (its cwd is inside that role's; may not be a lane)"))
+        .unwrap_or_default()
 }
 
 /// The report `specs import` prints. The first and last lines say whether anything was written
@@ -172,11 +190,19 @@ pub fn render(rows: &[ImportRow], dry_run: bool, verbose: bool) -> String {
         match &r.outcome {
             ImportOutcome::Written(s) => {
                 wrote += 1;
-                out.push_str(&format!("{}\twritten\tstate={s:?}\n", r.role));
+                out.push_str(&format!(
+                    "{}\twritten\tstate={s:?}{}\n",
+                    r.role,
+                    nested_label(r)
+                ));
             }
             ImportOutcome::WouldWrite(s) => {
                 would += 1;
-                out.push_str(&format!("{}\twould write\tstate={s:?}\n", r.role));
+                out.push_str(&format!(
+                    "{}\twould write\tstate={s:?}{}\n",
+                    r.role,
+                    nested_label(r)
+                ));
             }
             ImportOutcome::AlreadyHasSpec => {
                 out.push_str(&format!(
@@ -267,7 +293,8 @@ mod tests {
             rows,
             vec![ImportRow {
                 role: "baracuda".into(),
-                outcome: ImportOutcome::Written(SpecState::Crashed)
+                outcome: ImportOutcome::Written(SpecState::Crashed),
+                nested_in: None,
             }]
         );
         let s = spec::read(d.path(), "baracuda").unwrap();
@@ -426,7 +453,36 @@ mod tests {
         ImportRow {
             role: role.into(),
             outcome,
+            nested_in: None,
         }
+    }
+
+    #[test]
+    fn a_nested_role_is_still_written_and_the_row_names_its_parent() {
+        let d = tempdir().unwrap();
+        let outer = tempdir().unwrap();
+        let inner = outer.path().join("apps").join("api");
+        std::fs::create_dir_all(&inner).unwrap();
+        state_file(d.path(), "outer", outer.path(), 19184, baracuda_args());
+        state_file(d.path(), "api", &inner, 19185, baracuda_args());
+        let rows = run(d.path(), None, true);
+        let api = rows.iter().find(|r| r.role == "api").unwrap();
+        let top = rows.iter().find(|r| r.role == "outer").unwrap();
+        assert_eq!(api.nested_in.as_deref(), Some("outer"), "{rows:?}");
+        assert_eq!(top.nested_in, None, "{rows:?}");
+        assert!(
+            matches!(api.outcome, ImportOutcome::WouldWrite(_)),
+            "{rows:?}"
+        );
+        let text = render(&rows, true, false);
+        assert!(
+            text.contains("api\twould write\tstate=Crashed\tnested in outer"),
+            "{text}"
+        );
+        assert!(
+            text.contains("outer\twould write\tstate=Crashed\n"),
+            "{text}"
+        );
     }
 
     fn refused(role: &str, why: &str) -> ImportRow {

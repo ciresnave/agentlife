@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.17
+
+- `status` and `specs import` label a role whose recorded cwd is inside another role's cwd: `status` text
+  `nested-in=<role>` and `nested_in` in JSON; an import row says `nested in <role>`. Report only: it changes
+  neither `startable` nor what import writes, because a worktree under its repo is a legitimate nested lane.
+  Why: a session that `cd`-ed into a sub-directory records the leaf name as its role (nine such roles on
+  2026-10-14). Comparison is case-insensitive, `/` and `\` alike; equal cwds are not nesting.
+
 ## 0.14.16
 
 - `status`: a role that is not idle says why: `idle=false(busy+shells_never_asserted) quiet=NNNs` and
