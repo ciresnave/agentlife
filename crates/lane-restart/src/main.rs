@@ -192,6 +192,63 @@ fn run_host_cmd(role: &str, child_argv: &[String]) -> ExitCode {
     }
 }
 
+/// `lane-restart attach --role <r> --watch` (`docs/PORT-LINUX-PLAN.md`, P6b): the screen of a running
+/// lane host and its live output, read-only. `--watch` is REQUIRED: interactive attach is not built
+/// and not approved (P6c), and a bare `attach` must not look like it will do that. Read-only, so it
+/// is open to any session, like `status`.
+fn run_attach_cmd(rest: &[String]) -> ExitCode {
+    let mut role: Option<String> = None;
+    let mut watch = false;
+    let mut iter = rest.iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--role" => role = iter.next().cloned(),
+            "--watch" => watch = true,
+            other => {
+                eprintln!("lane-restart attach: unexpected argument {other:?}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let Some(role) = role.filter(|r| lane_restart::relaunch::valid_identifier(r)) else {
+        eprintln!("lane-restart attach: --role <name> is required and must be a plain identifier");
+        return ExitCode::FAILURE;
+    };
+    if !watch {
+        eprintln!(concat!(
+            "lane-restart attach: --watch is required. Only read-only watching exists; ",
+            "interactive attach is not built (it is not approved until a threat-model note ",
+            "says how a same-user agent is kept off the socket)."
+        ));
+        return ExitCode::FAILURE;
+    }
+    #[cfg(unix)]
+    {
+        let path = lane_restart::watch::socket_path(&state_dir(), &role);
+        eprintln!(
+            "lane-restart attach: watching {role} (read-only; the host closes this when it ends)"
+        );
+        match lane_restart::watch::connect_and_copy(&path, &mut std::io::stdout()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!(
+                    "lane-restart attach: {}: {e} (is a direct host running for {role}?)",
+                    path.display()
+                );
+                ExitCode::FAILURE
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = role;
+        eprintln!(
+            "lane-restart attach: not available on this OS (a direct lane host, and so its watch              socket, exists only off Windows)"
+        );
+        ExitCode::FAILURE
+    }
+}
+
 /// Parses `--role <name> -- <child argv...>` for the `host` subcommand - a
 /// positional subcommand with its own `--` separator, not `parse_args`'s
 /// restart-CLI flag grammar.
@@ -1313,6 +1370,11 @@ USAGE:
         truncated summary. Read-only; a broker that cannot be read is
         unknown for every role, never absent.
 
+    lane-restart attach --role <name> --watch
+        Read-only: shows the screen of a running direct lane host and then its live
+        output, until the host ends or you press Ctrl-C. Nothing you type reaches the
+        lane. --watch is required; interactive attach does not exist. Linux/unix only.
+
     lane-restart start --role <name> --reason <text> [--model sonnet|haiku] [--dry-run]
         Start a lane that is not running, from its launch spec
         (<role>.launch.json), and write the spec back as running once the
@@ -1504,6 +1566,9 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             };
+        }
+        if first == "attach" {
+            return run_attach_cmd(rest);
         }
         if first == "host" {
             return match parse_host_args(rest) {

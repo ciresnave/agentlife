@@ -372,6 +372,41 @@ fn run_with_handlers_and_window(
     handler_list: Vec<HandlerSpec>,
     cols: u16,
     rows: u16,
+    outer_input: impl Read + Send + 'static,
+    outer_output: impl Write + Send + 'static,
+    on_answered: impl FnMut(HandlerAnswered) + Send + 'static,
+    on_unhandled: impl FnOnce(String) + Send + 'static,
+    startup_window: Duration,
+    on_match_attempt: impl FnMut(&str, &[handlers::MatchReport]) + Send + 'static,
+    on_raw_io: impl Fn(&str, &[u8]) + Send + Sync + 'static,
+) -> std::io::Result<HostOutcome> {
+    run_with_handlers_and_window_watched(
+        role,
+        child_argv,
+        handler_list,
+        cols,
+        rows,
+        outer_input,
+        outer_output,
+        on_answered,
+        on_unhandled,
+        startup_window,
+        on_match_attempt,
+        on_raw_io,
+        None,
+    )
+}
+
+/// The implementation, with a `watch` hub (`crate::watch`, `attach --watch`): when present, the relay
+/// loop answers watchers' requests with the current screen and publishes every chunk to them. It
+/// reads nothing from them. `None` (every test, and Windows) is exactly the relay as it was.
+#[allow(clippy::too_many_arguments)]
+fn run_with_handlers_and_window_watched(
+    role: &str,
+    child_argv: &[String],
+    handler_list: Vec<HandlerSpec>,
+    cols: u16,
+    rows: u16,
     mut outer_input: impl Read + Send + 'static,
     mut outer_output: impl Write + Send + 'static,
     on_answered: impl FnMut(HandlerAnswered) + Send + 'static,
@@ -379,6 +414,7 @@ fn run_with_handlers_and_window(
     startup_window: Duration,
     mut on_match_attempt: impl FnMut(&str, &[handlers::MatchReport]) + Send + 'static,
     on_raw_io: impl Fn(&str, &[u8]) + Send + Sync + 'static,
+    watch: Option<Arc<crate::watch::WatchHub>>,
 ) -> std::io::Result<HostOutcome> {
     let on_raw_io = Arc::new(on_raw_io);
     let pty_system = native_pty_system();
@@ -542,10 +578,18 @@ fn run_with_handlers_and_window(
                 }
             }
         }
+        // Watchers ask between chunks, so the screen they are given is exactly as of the chunks
+        // relayed so far.
+        if let Some(hub) = &watch {
+            hub.service(|| crate::watch::snapshot_of(&parser));
+        }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => {
                 relay_chunk(&chunk, &mut outer_output, &mut parser)?;
                 on_raw_io("relay->outer_stdout", &chunk);
+                if let Some(hub) = &watch {
+                    hub.publish(&chunk);
+                }
                 if still_in_startup_window {
                     let text = screen_text(&parser);
                     if Some(text.as_str()) != last_logged_screen.as_deref() {
@@ -699,7 +743,22 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             screen,
         )
     };
-    run_with_handlers_and_window(
+    // `attach --watch`: a read-only socket (`crate::watch`). Best-effort: a host that cannot bind it
+    // still runs the lane; it only cannot be watched. Stopped, and the socket removed, when this
+    // function returns.
+    let watch_hub = Arc::new(crate::watch::WatchHub::new());
+    #[cfg(unix)]
+    let _watch_server = {
+        let path = crate::watch::socket_path(&crate::state_dir(), role);
+        match crate::watch::serve(Arc::clone(&watch_hub), path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("lane-restart host: watch socket not served: {e}");
+                None
+            }
+        }
+    };
+    run_with_handlers_and_window_watched(
         role,
         child_argv,
         handler_list,
@@ -755,6 +814,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                 ),
             );
         },
+        Some(watch_hub),
     )
 }
 

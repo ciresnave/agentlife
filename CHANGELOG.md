@@ -2,6 +2,18 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.34
+
+- **`lane-restart attach --role <r> --watch`: a read-only view of a running direct lane host** (`docs/PORT-LINUX-PLAN.md`,
+  P6b; approved by the PM 2026-10-14 as the only attach to build). The host serves a unix-domain socket
+  `<state>/watch/host-<role>.sock` (the directory is created `0700` before the socket is bound in it). A watcher is
+  given the current screen (the host's `vt100` model, as of the chunks relayed so far) and then every chunk the child
+  writes, in order. **Nothing flows the other way**: the server has no read path, so the host's own stdin stays the
+  only way into the lane, and a watcher's bytes are ignored. A watcher that falls behind (256 chunks) is dropped; the
+  relay never waits for one. `--watch` is required: a bare `attach` is refused, because interactive attach is not
+  built and not approved (plan row P6c, open: a threat-model note on keeping a same-user agent off the socket is
+  owed). Unix only; the host's behaviour with no watcher is what it was, and Windows is unchanged.
+
 ## 0.14.33
 
 - **A lane starts as a direct process off Windows** (`docs/PORT-LINUX-PLAN.md`, P6a; CireSnave 2026-10-14, verbatim:
