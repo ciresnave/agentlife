@@ -66,6 +66,37 @@ date. Every row is a **proposal for the PM to accept, reorder or strike**; none 
 | 5 | **Specs coverage**: after the PM's `specs import`, report which roles still have no complete spec and why, as one table in `status` | `restore` launches from the spec and falls back to the registry; until imports run most plans say `registry` (item 4 in "Next, in order") | small | the PM's `specs import` (dry run read first) |
 | 6 | **Linux `start_time`** (issue #14) | Parked by the PM until a failing log exists | n/a | a failing log |
 
+### `specs import`: cwd-missing and Crashed roles (PM question 2026-10-14 10:37Z)
+
+What the code does at `0842e3e` (`crates/lane-restart/src/spec_import.rs`, `import_one`), read, not run: a role is
+**refused with its reason** when it has no `launch_args`, when its `cwd` is not a directory (`cwd missing: <path>`),
+when the model resolves to Opus, or when the spec fails its own check; otherwise it is **written**, as `Running`
+if its recorded process is live and as **`Crashed` if not**. So a Crashed role whose `cwd` exists *is* written
+(startable by the PM's `start`); a role that is only Crashed-and-not-written must have been refused for one of the
+reasons above or already have a spec. The 11 "Crashed, not written" roles in the PM's report therefore need their
+printed reason rows read; I have not seen them.
+
+Proposals (PM to rule):
+
+1. **cwd missing: keep listing it, group it.** Dropping a row silently breaks the rule that every refusal is
+   listed (the module header says "never dropped"); a quiet skip would also hide a role whose directory was
+   moved. Instead print the refused rows **grouped by reason**, one line per reason with a count and the role
+   names, so ~30 vanished mlmf worktrees read as one line, not 30. Exit code and the per-role rows stay available
+   (`--verbose`). Small, no behaviour change to what is written.
+2. **cwd missing means prune, never resume.** A spec for a directory that is gone cannot start. The honest
+   outcomes are *recreate the worktree* (then re-import) or *retire the role*. Retiring is an edit to the lane
+   state directory, which `specs import` promises never to make, so it belongs in a **separate PM-only**
+   `lane-restart specs retire --role R [--dry-run]` that **moves** `<role>.json` to `.lane-state/retired/` (never
+   deletes) and writes a ledger row. Not built; needs the PM's ruling that retiring is wanted.
+3. **Crashed with a live cwd: resume, not prune.** It is imported as `Crashed` and is what `start` is for; the
+   PM decides per role, the tool does not auto-start.
+4. **Import must say what it did.** A 2026-10-14 10:36Z run described as `--dry-run` wrote five specs
+   (`persistant`, `safeimage`, `thinkersfoundation`, `thinkersjournal-community`, `restarttest`; each has
+   `written_by: import`, `written_at 10:36:14Z` to `10:36:16Z`). `--dry-run` is parsed and has a test
+   (`a_dry_run_reports_and_writes_nothing`), so that run was a real import or the report mislabelled it. Proposal:
+   print `DRY RUN - nothing written` / `WROTE n spec(s)` as the **first and last line**, so the two cannot be
+   confused in a relayed report.
+
 ### Not proposed, on purpose
 
 - Anything that starts, stops or restarts a running lane from this lane: PM-only by the tool's own check.
