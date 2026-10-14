@@ -19,5 +19,8 @@ vt100 = "0.16.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.5", features = ["termios", "stdio"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"

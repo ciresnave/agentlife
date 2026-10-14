@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentlife"
-version = "0.14.27"
+version = "0.14.28"
 dependencies = [
  "chrono",
  "lane-restart",
@@ -601,11 +601,12 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.14.27"
+version = "0.14.28"
 dependencies = [
  "chrono",
  "lane-state",
  "portable-pty",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -617,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.14.27"
+version = "0.14.28"
 dependencies = [
  "chrono",
  "serde",
@@ -834,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "pin-plan"
-version = "0.14.27"
+version = "0.14.28"
 
 [[package]]
 name = "pin-project-lite"

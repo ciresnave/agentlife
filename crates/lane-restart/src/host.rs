@@ -122,6 +122,62 @@ impl Drop for RawConsoleGuard {
     }
 }
 
+/// The unix counterpart of the guard above (`docs/PORT-LINUX-PLAN.md`, slice P4). A terminal starts
+/// in canonical mode: the line discipline holds input until Enter and echoes it, so the terminal's
+/// own reply to `claude`'s cursor-position query (`ESC[r;cR`, no Enter) would never reach the child.
+/// Same shape as the Windows guard: only a REAL tty is touched (a pipe, a file or a test's fake
+/// stdin is left alone), and the original mode is restored on every exit path, panic unwind
+/// included.
+#[cfg(unix)]
+struct RawConsoleGuard {
+    saved: Option<(std::os::fd::OwnedFd, rustix::termios::Termios)>,
+}
+
+#[cfg(unix)]
+impl RawConsoleGuard {
+    fn enable() -> Self {
+        use std::os::fd::AsFd;
+        Self::enable_on(std::io::stdin().as_fd())
+    }
+
+    fn enable_on(fd: std::os::fd::BorrowedFd<'_>) -> Self {
+        use rustix::termios::{isatty, tcgetattr, tcsetattr, OptionalActions};
+        let none = Self { saved: None };
+        if !isatty(fd) {
+            return none;
+        }
+        let Ok(original) = tcgetattr(fd) else {
+            return none;
+        };
+        let Ok(owned) = fd.try_clone_to_owned() else {
+            return none;
+        };
+        let mut raw = original.clone();
+        raw.make_raw();
+        if tcsetattr(&owned, OptionalActions::Now, &raw).is_err() {
+            return none;
+        }
+        Self {
+            saved: Some((owned, original)),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_active(&self) -> bool {
+        self.saved.is_some()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawConsoleGuard {
+    fn drop(&mut self) {
+        use rustix::termios::{tcsetattr, OptionalActions};
+        if let Some((fd, original)) = &self.saved {
+            let _ = tcsetattr(fd, OptionalActions::Now, original);
+        }
+    }
+}
+
 /// What an automatic answer gets logged with - `restart.log` (§12.4: "log
 /// the automatic answer... with the handler's id and the exact text that
 /// matched").
@@ -609,7 +665,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
 
     // ⚠️ Kept alive for the relay's ENTIRE scope - restored on every exit
     // path via `Drop`, including a panic unwind.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     let _raw_console_guard = RawConsoleGuard::enable();
 
     let (cols, rows) = current_console_size().unwrap_or((80, 25));
@@ -782,7 +838,21 @@ pub fn current_console_size() -> Option<(u16, u16)> {
     }
 }
 
-#[cfg(not(windows))]
+/// The size of the tty on `fd`, or `None` when it is not one (or reports 0x0, as a pty nobody has
+/// sized does).
+#[cfg(unix)]
+fn tty_size_of(fd: std::os::fd::BorrowedFd<'_>) -> Option<(u16, u16)> {
+    let w = rustix::termios::tcgetwinsize(fd).ok()?;
+    (w.ws_col > 0 && w.ws_row > 0).then_some((w.ws_col, w.ws_row))
+}
+
+#[cfg(unix)]
+pub fn current_console_size() -> Option<(u16, u16)> {
+    use std::os::fd::AsFd;
+    tty_size_of(std::io::stdout().as_fd())
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn current_console_size() -> Option<(u16, u16)> {
     None
 }
@@ -790,8 +860,17 @@ pub fn current_console_size() -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(windows)]
     use std::io::Cursor;
+
+    /// The child a host test runs: the Windows `cmd.exe` argv as written, or `sh -c <script>` on
+    /// unix (`docs/PORT-LINUX-PLAN.md`, slice P4).
+    fn platform_child(windows: Vec<String>, unix_script: &str) -> Vec<String> {
+        if cfg!(windows) {
+            windows
+        } else {
+            vec!["sh".to_string(), "-c".to_string(), unix_script.to_string()]
+        }
+    }
 
     // -- relay_chunk: the transparency property itself --------------------- //
     // PM finding, 2026-09-18: the host must be a transparent relay from
@@ -1003,11 +1082,81 @@ mod tests {
     // stdin/stdout happen to be a real console or (as under `cargo test`,
     // usually) redirected.
 
-    #[cfg(windows)]
     #[test]
+    #[cfg(windows)]
     fn raw_console_guard_enable_and_drop_never_panics() {
         let guard = RawConsoleGuard::enable();
         drop(guard);
+    }
+
+    // -- the unix tty guard and size, against a REAL pty -------------------- //
+
+    #[cfg(unix)]
+    fn open_pty_slave(
+        rows: u16,
+        cols: u16,
+    ) -> (Box<dyn portable_pty::MasterPty + Send>, std::fs::File) {
+        use portable_pty::{native_pty_system, PtySize};
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty");
+        let name = pair.master.tty_name().expect("a pty slave has a name");
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+            .expect("open the slave");
+        (pair.master, slave)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_unix_guard_makes_a_real_tty_raw_and_restores_it() {
+        use rustix::termios::{tcgetattr, LocalModes};
+        use std::os::fd::AsFd;
+        let (_master, slave) = open_pty_slave(30, 90);
+        let before = tcgetattr(&slave).unwrap();
+        assert!(
+            before.local_modes.contains(LocalModes::ICANON),
+            "control: a fresh pty starts canonical"
+        );
+        {
+            let guard = RawConsoleGuard::enable_on(slave.as_fd());
+            assert!(guard.is_active());
+            let during = tcgetattr(&slave).unwrap();
+            assert!(!during.local_modes.contains(LocalModes::ICANON));
+            assert!(!during.local_modes.contains(LocalModes::ECHO));
+        }
+        let after = tcgetattr(&slave).unwrap();
+        assert_eq!(after.local_modes, before.local_modes);
+        assert_eq!(after.input_modes, before.input_modes);
+        assert_eq!(after.output_modes, before.output_modes);
+    }
+
+    /// Only a real tty is touched: a regular file (a redirected stdin) is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn the_unix_guard_leaves_a_non_tty_alone() {
+        use std::os::fd::AsFd;
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::fs::File::create(dir.path().join("not-a-tty")).unwrap();
+        assert!(!RawConsoleGuard::enable_on(f.as_fd()).is_active());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_unix_console_size_is_the_ttys_and_none_for_a_non_tty() {
+        use std::os::fd::AsFd;
+        let (_master, slave) = open_pty_slave(30, 90);
+        assert_eq!(tty_size_of(slave.as_fd()), Some((90, 30)));
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::fs::File::create(dir.path().join("not-a-tty")).unwrap();
+        assert_eq!(tty_size_of(f.as_fd()), None);
     }
 
     // -- output-driven CPR round trip: no pre-seeded knowledge -------------- //
@@ -1026,9 +1175,7 @@ mod tests {
 
     /// A `Write` that hands each chunk to a channel - stands in for the
     /// host's own real stdout, observed by the fake terminal thread below.
-    #[cfg(windows)]
     struct ChanWriter(std::sync::mpsc::Sender<Vec<u8>>);
-    #[cfg(windows)]
     impl Write for ChanWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.0
@@ -1044,13 +1191,11 @@ mod tests {
     /// A `Read` fed by a channel - stands in for the host's own real
     /// stdin, written to only by the fake terminal thread below, only once
     /// it has actually observed a CPR request.
-    #[cfg(windows)]
     struct ChanReader {
         rx: std::sync::mpsc::Receiver<Vec<u8>>,
         pending: Vec<u8>,
         pos: usize,
     }
-    #[cfg(windows)]
     impl Read for ChanReader {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.pos >= self.pending.len() {
@@ -1069,7 +1214,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn run_with_handlers_completes_the_cpr_round_trip_driven_only_by_observing_output() {
         // host's real stdout -> what the fake terminal "sees".
@@ -1105,11 +1249,11 @@ mod tests {
             }
         });
 
-        let child_argv = vec![
+        let child_argv = platform_child(vec![
             "cmd.exe".to_string(),
             "/c".to_string(),
             "echo PROBE_MARKER_98765".to_string(),
-        ];
+        ], "stty raw -echo; printf '\\033[6n'; dd bs=1 count=6 >/dev/null 2>&1; echo PROBE_MARKER_98765");
         let outcome = run_with_handlers(
             "overmind",
             &child_argv,
@@ -1135,7 +1279,6 @@ mod tests {
         assert!(outcome.child_exit_code.is_some());
     }
 
-    #[cfg(windows)]
     #[test]
     fn run_with_handlers_hosts_a_real_child_and_relays_its_real_output() {
         // The outer "terminal" (fake, since this test has no real one):
@@ -1157,11 +1300,14 @@ mod tests {
             }
         }
 
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "echo PROBE_MARKER_98765".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo PROBE_MARKER_98765".to_string(),
+            ],
+            "echo PROBE_MARKER_98765",
+        );
         let outcome = run_with_handlers(
             "overmind",
             &child_argv,
@@ -1188,7 +1334,6 @@ mod tests {
     /// printed last (here with no trailing newline, which a ConPTY may only
     /// flush when it is closed) has reached the outer side by the time
     /// `run_with_handlers` returns, with no sleep to cover for it.
-    #[cfg(windows)]
     #[test]
     fn the_childs_final_output_reaches_the_outer_side_before_the_host_returns() {
         struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
@@ -1203,11 +1348,14 @@ mod tests {
         }
         for run in 0..5 {
             let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-            let child_argv = vec![
-                "cmd.exe".to_string(),
-                "/c".to_string(),
-                "echo FIRST_LINE & <nul set /p =FINAL_TAIL_MARK_4242".to_string(),
-            ];
+            let child_argv = platform_child(
+                vec![
+                    "cmd.exe".to_string(),
+                    "/c".to_string(),
+                    "echo FIRST_LINE & <nul set /p =FINAL_TAIL_MARK_4242".to_string(),
+                ],
+                "echo FIRST_LINE; printf FINAL_TAIL_MARK_4242",
+            );
             let outcome = run_with_handlers(
                 "overmind",
                 &child_argv,
@@ -1233,15 +1381,17 @@ mod tests {
     /// The PTY reader used to be abandoned in `ReadFile`, and the resize
     /// thread (which owns the pty master) never ended at all. Read back,
     /// per run, that no helper thread this run started is still alive.
-    #[cfg(windows)]
     #[test]
     fn no_helper_thread_outlives_a_host_run() {
         for run in 0..3 {
-            let child_argv = vec![
-                "cmd.exe".to_string(),
-                "/c".to_string(),
-                "echo LEAK_PROBE".to_string(),
-            ];
+            let child_argv = platform_child(
+                vec![
+                    "cmd.exe".to_string(),
+                    "/c".to_string(),
+                    "echo LEAK_PROBE".to_string(),
+                ],
+                "echo LEAK_PROBE",
+            );
             let outcome = run_with_handlers(
                 "overmind",
                 &child_argv,
@@ -1266,7 +1416,6 @@ mod tests {
     /// generic `Read`; the host must say so rather than report a clean run.
     /// Positive control for `no_helper_thread_outlives_a_host_run`: the
     /// same run, with one thread deliberately kept alive.
-    #[cfg(windows)]
     #[test]
     fn a_blocked_outer_input_is_reported_as_abandoned() {
         let (keep_open, rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -1277,11 +1426,14 @@ mod tests {
             pending: b"[1;1R".to_vec(),
             pos: 0,
         };
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "echo LEAK_PROBE".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo LEAK_PROBE".to_string(),
+            ],
+            "echo LEAK_PROBE",
+        );
         let outcome = run_with_handlers(
             "overmind",
             &child_argv,
@@ -1298,7 +1450,6 @@ mod tests {
         drop(keep_open);
     }
 
-    #[cfg(windows)]
     #[test]
     fn run_with_handlers_spawns_the_child_in_this_processs_own_current_directory() {
         // ⚠️ THE ROOT CAUSE, PM finding 2026-09-19 (real-restart-04:39:56Z):
@@ -1325,7 +1476,10 @@ mod tests {
             }
         }
 
-        let child_argv = vec!["cmd.exe".to_string(), "/c".to_string(), "cd".to_string()];
+        let child_argv = platform_child(
+            vec!["cmd.exe".to_string(), "/c".to_string(), "cd".to_string()],
+            "pwd",
+        );
         run_with_handlers(
             "overmind",
             &child_argv,
@@ -1349,7 +1503,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn run_with_handlers_matches_and_answers_a_real_dialog_from_a_real_child() {
         // A real child that prints something matching a test handler's
@@ -1370,7 +1523,14 @@ mod tests {
         ))
         .unwrap();
 
-        let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
+        // ConPTY asks the terminal for the cursor position and consumes the answer itself; a unix
+        // pty never asks, so a pre-seeded reply would arrive at the child as typed input and land
+        // in its `read` (CI read, 2026-10-14: `GOT:^[[1;1RINJECTED_REPLY`).
+        let outer_input = Cursor::new(if cfg!(windows) {
+            b"\x1b[1;1R".to_vec()
+        } else {
+            Vec::new()
+        });
         let outer_output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
         struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
@@ -1391,12 +1551,15 @@ mod tests {
         // which is still too late inside one `&`-chained command line) plus
         // `!REPLY!` is what makes this actually prove the injected text was
         // received.
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/v:on".to_string(),
-            "/c".to_string(),
-            "echo PROBE_MARKER_98765 & set /p REPLY=waiting: & echo GOT:!REPLY!".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/v:on".to_string(),
+                "/c".to_string(),
+                "echo PROBE_MARKER_98765 & set /p REPLY=waiting: & echo GOT:!REPLY!".to_string(),
+            ],
+            "echo PROBE_MARKER_98765; printf \"waiting: \"; read REPLY; echo GOT:$REPLY",
+        );
         let answered = Arc::new(Mutex::new(Vec::new()));
         let answered_for_cb = Arc::clone(&answered);
 
@@ -1433,7 +1596,6 @@ mod tests {
     // real 60s `STARTUP_WINDOW`) is what makes these fast without waiting
     // it out for real.
 
-    #[cfg(windows)]
     #[test]
     fn on_unhandled_fires_once_with_the_screen_text_when_nothing_ever_matched() {
         let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
@@ -1454,11 +1616,14 @@ mod tests {
         // inject a reply - `choice` is used instead of `set /p` so the
         // child still terminates ON ITS OWN (auto-selects after 2s)
         // rather than blocking forever on input that will never arrive.
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul".to_string(),
+            ],
+            "echo PROBE_MARKER_98765; sleep 2",
+        );
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_for_cb = Arc::clone(&captured);
 
@@ -1496,7 +1661,6 @@ mod tests {
         assert!(outcome.child_exit_code.is_none() || outcome.child_exit_code.is_some());
     }
 
-    #[cfg(windows)]
     #[test]
     fn on_unhandled_never_fires_when_a_handler_matched_during_the_window() {
         let handler: HandlerSpec = serde_json::from_str(&handler_json(
@@ -1520,11 +1684,14 @@ mod tests {
             }
         }
 
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "echo PROBE_MARKER_98765 & set /p REPLY=waiting: & echo done".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo PROBE_MARKER_98765 & set /p REPLY=waiting: & echo done".to_string(),
+            ],
+            "echo PROBE_MARKER_98765; read REPLY; echo done",
+        );
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_for_cb = Arc::clone(&captured);
 
@@ -1556,7 +1723,6 @@ mod tests {
     /// second marker ~2s after the window ends. That marker must reach the
     /// outer terminal WHILE the callback is still blocked - inline on the
     /// relay thread, it can only arrive after the 10s timeout.
-    #[cfg(windows)]
     #[test]
     fn a_blocked_on_unhandled_never_stalls_the_relay() {
         let outer_input = Cursor::new(b"\x1b[1;1R".to_vec());
@@ -1573,11 +1739,15 @@ mod tests {
             }
         }
 
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul & echo AFTER_MARKER_24680".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul & echo AFTER_MARKER_24680"
+                    .to_string(),
+            ],
+            "echo PROBE_MARKER_98765; sleep 2; echo AFTER_MARKER_24680",
+        );
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let callback_returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let returned_for_cb = Arc::clone(&callback_returned);
@@ -1637,14 +1807,16 @@ mod tests {
     /// child that exits while the ask is still in flight must not let the
     /// host return (and the process exit) mid-ask. The callback here
     /// outlives the child by ~2s.
-    #[cfg(windows)]
     #[test]
     fn the_host_waits_for_an_in_flight_on_unhandled_before_returning() {
-        let child_argv = vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "echo PROBE_MARKER_98765 & choice /t 1 /d y >nul".to_string(),
-        ];
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo PROBE_MARKER_98765 & choice /t 1 /d y >nul".to_string(),
+            ],
+            "echo PROBE_MARKER_98765; sleep 1",
+        );
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished_for_cb = Arc::clone(&finished);
 
