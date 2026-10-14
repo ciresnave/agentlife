@@ -2,6 +2,11 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.22
+
+- docs only: `docs/PROPOSAL-STATUS-PEERS-JOIN.md`, the proposal for `lane-restart status --peers` (ROADMAP slice 3
+  (a)3). No code change.
+
 ## 0.14.21
 
 - `lane-restart install --from <exe> [--dry-run]` (PM only, even as a dry run; PM ruling 2026-10-14, ROADMAP slice 3
