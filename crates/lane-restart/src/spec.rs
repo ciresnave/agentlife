@@ -396,6 +396,13 @@ pub struct RoleStatus {
     /// 0 bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<HandoffSize>,
+    /// The role whose recorded cwd contains this role's cwd (the deepest one), when there is one.
+    /// A label only: it never changes `startable` or what `specs import` does. A session that
+    /// `cd`-ed into a sub-directory records the sub-directory's leaf name as its role, so this is
+    /// where such a role stands out; a legitimate nested lane (a worktree under its repo) carries
+    /// it too, which is why it cannot be a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_in: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -465,6 +472,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         model: None,
         activity: None,
         handoff: None,
+        nested_in: None,
     };
     let lane_state = state::load(dir, role);
     let live = lane_state
@@ -616,6 +624,55 @@ pub fn coverage(roles: &[RoleStatus], reason: impl Fn(&RoleStatus) -> String) ->
     }
 }
 
+/// `/`-separated, lower-case, no trailing `/` and no `\\?\` prefix: the form two cwds are compared in
+/// (Windows paths are case-insensitive and the state files mix `\` and `/`).
+fn norm_cwd(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    let p = p.strip_prefix("//?/").unwrap_or(&p);
+    p.trim_end_matches('/').to_lowercase()
+}
+
+/// Pure: for each `(role, cwd)`, the role whose cwd is the deepest proper ancestor directory of
+/// it. Equal cwds are not nesting (two roles in one directory is a different finding), and ties
+/// between equally deep ancestors go to the first role by name. Only roles that are nested appear.
+pub fn nesting(cwds: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
+    let norm: Vec<(&str, String)> = cwds
+        .iter()
+        .map(|(r, c)| (r.as_str(), norm_cwd(c)))
+        .collect();
+    let mut out = std::collections::BTreeMap::new();
+    for (role, cwd) in &norm {
+        if cwd.is_empty() {
+            continue;
+        }
+        let parent = norm
+            .iter()
+            .filter(|(other, oc)| {
+                other != role
+                    && !oc.is_empty()
+                    && oc != cwd
+                    && cwd
+                        .strip_prefix(oc.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0.cmp(a.0)));
+        if let Some((p, _)) = parent {
+            out.insert((*role).to_string(), (*p).to_string());
+        }
+    }
+    out
+}
+
+/// `nesting` over the cwd each of `roles` recorded in its lane state (a role with no readable
+/// state contributes nothing).
+pub fn nested_roles(dir: &Path, roles: &[String]) -> std::collections::BTreeMap<String, String> {
+    let cwds: Vec<(String, String)> = roles
+        .iter()
+        .filter_map(|r| state::load(dir, r).ok().map(|st| (r.clone(), st.cwd)))
+        .collect();
+    nesting(&cwds)
+}
+
 /// Every role with a lane state or a launch spec under `dir`.
 pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
     let mut roles = std::collections::BTreeSet::new();
@@ -640,7 +697,16 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
         }
     }
     skipped.sort();
-    let roles: Vec<RoleStatus> = roles.iter().map(|r| role_status(dir, r, facts)).collect();
+    let names: Vec<String> = roles.iter().cloned().collect();
+    let nested = nested_roles(dir, &names);
+    let roles: Vec<RoleStatus> = roles
+        .iter()
+        .map(|r| {
+            let mut s = role_status(dir, r, facts);
+            s.nested_in = nested.get(r).cloned();
+            s
+        })
+        .collect();
     let coverage = coverage(&roles, |r| gap_reason(dir, r));
     StatusReport {
         schema: 1,
@@ -867,6 +933,26 @@ mod tests {
         let d = tempdir().unwrap();
         let s = role_status(d.path(), "ghost", &dead_facts());
         assert_eq!((s.state, s.startable), (Lifecycle::NeverRun, false));
+    }
+
+    fn pair(r: &str, c: &str) -> (String, String) {
+        (r.to_string(), c.to_string())
+    }
+
+    #[test]
+    fn a_sub_directory_is_nested_in_the_deepest_enclosing_role_and_equal_cwds_are_not() {
+        let m = nesting(&[
+            pair("tj", "C:\\Projects\\ThinkersJournal-Community"),
+            pair("api", "C:/Projects/thinkersjournal-community/apps/api/"),
+            pair("apps", "C:/Projects/ThinkersJournal-Community/apps"),
+            pair("twin", "C:/Projects/ThinkersJournal-Community"),
+            pair("other", "C:/Projects/ThinkersJournal-Community2"),
+        ]);
+        assert_eq!(m.get("api").map(String::as_str), Some("apps"), "{m:?}");
+        assert_eq!(m.get("apps").map(String::as_str), Some("tj"), "{m:?}");
+        // same directory: not nesting; and a sibling prefix without a `/` boundary is not either
+        assert!(!m.contains_key("tj") && !m.contains_key("twin"), "{m:?}");
+        assert!(!m.contains_key("other"), "{m:?}");
     }
 
     #[test]
