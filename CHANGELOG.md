@@ -2,6 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.14
+
+- Docs only: `docs/ROADMAP.md` gains "Next slice 2" (what the PM's sweep still does by hand: activity fields in
+  `status --json`, one named idle predicate, HANDOFF size per role, a staleness mark, a ledger summary) and the
+  measured breakdown of the 30 roles with no launch spec (18 cwd missing, 9 sub-directory leaf names, 3
+  worktree or repo roots) with proposals for retiring or importing them. No code.
+
 ## 0.14.13
 
 - Docs only: `docs/ROADMAP.md` slice item 4 is now a measurement item with its first measurement (this repo at

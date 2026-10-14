@@ -111,6 +111,70 @@ and read the hits (lines 486 to 505, 558 to 566). A request for agentlife that d
 be found by that search, so this slice is a list of what the file says, not a census of what lanes want. Lanes'
 own asks belong in a `[TASK]` or an issue.
 
+## Next slice 2 (proposed 2026-10-14 at `origin/main` = `ad11f58`, 0.14.13): what the PM's sweep still does by hand
+
+Sources, read at the same date: `PORTFOLIO-ROADMAP.md` (the "Idle-lane signal" entry, section 4 "When your board hits
+zero", the session-restart-tool entry) and `CIRESNAVE-EXPECTATIONS.md` 2.3b/2.3c as cited above; the code at
+`ad11f58` (`crates/lane-state/src/state.rs`, `crates/lane-restart/src/spec.rs`, `main.rs`). Slice 1 above is all
+built or closed. Every row is a **proposal for the PM to accept, reorder or strike**; none is started; versions
+are the PM's. This is a list of what those documents and that code show, not a census of what the PM does by
+hand: the PM's own sweep script (`tools/pm-status.py`) is not in this repo and I have not read it.
+
+| # | item | evidence | size | waits on |
+|---|---|---|---|---|
+| 1 | **`status --json` carries each role's activity**, read from its lane-state file: `busy`, `subagents_running`, `no_background_shells`, `updated_at`, `updated_by_event`. Only `busy` and `subagents_running` are reported for a role whose recorded process is live (`state_process_is_live`); a dead process reports none, so a lane killed mid-turn cannot read as busy. Raw fields, no verdict | `LaneState` already records all five (`state.rs`, written by the hooks) and `RoleStatus` exposes none of them (`spec.rs`: role, state, spec, startable, since, stop_reason, detail, model). The PM's idle sweep reads a lane's free-text `set_summary` line, and `PORTFOLIO-ROADMAP.md` section 4 says that "a stale summary is indistinguishable from an idle lane from outside". The hook-written fields are the one idle signal that is not self-reported | small | the PM: does the sweep want these fields, and which "idle" it means (below) |
+| 2 | **An `idle` verdict only if the PM names the rule.** `authorize.rs` already decides "may another lane be restarted" from `busy`, `subagents_running` and `no_background_shells`; `status` could print that same decision as one boolean per role, so the sweep and the restart gate cannot disagree | the roadmap's idle rule is `doing=idle ... waiting=-` on the summary line, a different predicate from the gate's. Two definitions of idle is the defect "a number standing in for a set" names | small | the PM's ruling on which predicate is "idle"; I will not pick it |
+| 3 | **HANDOFF size per role in `status`**: bytes of the role's HANDOFF file against its ceiling (8 KB lane, 20 KB PM), as a column and in `--json` | 0.14.12 warns only the lane itself, at its own `assert-idle`; `PM-HANDOFF.md` reached 321 KB of stacked blocks with nobody measuring it from outside (`PORTFOLIO-ROADMAP.md`, `CIRESNAVE-EXPECTATIONS.md` 2.3c). Read-only, one `stat` per role | small | the file name per role is **unverified**: this lane's is `HANDOFF.md` in its cwd and the PM's is `PM-HANDOFF.md`; I have not read another lane's tree. A role with no such file reports "none", never 0 |
+| 4 | **`status --since` or a staleness mark**: a role recorded `Running` whose `updated_at` is older than a threshold is flagged `quiet for N h` | the sweep's backstop exists "for expired subscriptions and silent stalls" (idle-lane entry); a stall is the one case the hook fields cannot show by themselves, because no event fires | small | the threshold is the PM's; derived from item 1, no new data |
+| 5 | **`ledger --by-lane` summary**: counts of acted and refused rows per role over `--since`, one table | `ledger` (0.14.10) prints rows; the PM's attribution of "who restarted whom" is a count over them. Not built because I have not seen the PM do this count; it may already be a one-liner over `--json` | small | evidence that a table is wanted: drop this row if the PM says no |
+
+### Importing the roles that have no launch spec (PM task 2026-10-14 12:03Z)
+
+**Measured 2026-10-14 ~12:05Z, read-only**: the installed `lane-restart` 0.14.8 `status` (so no coverage
+table) plus a read of every `<role>.json` in `C:/Projects/.lane-state` that has no `<role>.launch.json`, testing
+`launch_args` and `os.path.isdir(cwd)` the way `spec_import::import_one` is described above. I did not run
+`specs import` (PM only). **Population: 30 roles, all `Crashed`, none with a spec** (the same script skips the
+roles that do have one, so it is not counting everything). The PM's relayed "11 Crashed, ~30 cwd missing" is a
+different predicate at an earlier time (after the 10:36Z write of 5); these are the numbers now.
+
+| group | n | roles | what `specs import` would do |
+|---|---|---|---|
+| `cwd` missing | 18 | the `mlmf` worktrees: `codacy-refactor`, `exl2-spec-correction`, `fuel-gap-plan`, `fuel-migration-inventory`, `generation-config-special-tokens`, `gguf-config`, `gguf-type-code`, `hf-tokenizer`, `metadata-entries`, `mlmf-awq`, `mlmf-awq-plan`, `mlmf-exl2`, `mlmf-gguf-arch`, `mlmf-gptq`, `mlmf-gptq-quant-method-fix`, `mmap-zero-copy`, `quant-formats-design`, `source-hub` | refuse each: `cwd missing`, one grouped line |
+| `cwd` exists, **a sub-directory of another project** | 9 | `api`, `web`, `shared` (under `ThinkersJournal-Community`); `backend`, `frontend`, `routes`, `worker` (under the `HumboldtUnifiedKidTracker` `backend-foundation` worktree); `docs` (`agentlife/docs`); `mlmf-gguf` (`mlmf/crates/mlmf-gguf`) | **write** a spec and mark it startable |
+| `cwd` exists, a worktree or repo root | 3 | `hf-config`, `humboldtunifiedkidtracker`, `synapse-restarttest-lane` | write a spec, startable |
+
+**The 9 sub-directory roles are probably not lanes, and importing them is the risky half.** The state hook
+falls back to "the current directory's leaf name" for a role when `LANE_ROLE` is unset (`assert-idle`'s own
+usage text says so), and every name above is the leaf of a sub-directory a session happened to `cd` into
+(`apps/api`, `packages/shared`, `agentlife/docs`). `specs import` cannot tell that from a lane, so it would mark
+all 9 `startable`, and a `start` would launch a second session in a directory whose project already has a lane
+(`docs` is inside this repo's tree; `web`, `api` and `shared` are inside `thinkersjournal-community`'s). This is
+inference from the names and cwd paths, **not read from any session**; I have not asked those lanes. Proposals
+for the PM to rule:
+
+1. **Retire the 18 `cwd missing` roles** (`specs retire`, which moves the state file to `retired/`, writes a
+   ledger row, and has a `--dry-run`). A directory that is gone cannot start; recreating 18 worktrees to
+   resume sessions last active 2026-10-02 to 03 is a larger decision than an import. I have not seen the real
+   `retire --dry-run` output (HANDOFF: unverified).
+2. **Do not import the 9 sub-directory roles; retire them too**, after the PM (or each project's lane) confirms
+   none is a session someone wants resumed. Ask first, because a retire is the same reversible move but a
+   wrong import is a duplicate session.
+3. **The 3 worktree/repo-root roles**: PM decides per role. `synapse-restarttest-lane` has a live peer at that
+   cwd right now (a `claude-peers` row, `list_peers` 12:00Z) while its state file says `Crashed`, so its pid is
+   not the live session's: read that before any `start`.
+4. **A code change worth making either way (small): `specs import` and `status` print a fourth group,
+   "cwd is inside another role's cwd"** next to `cwd missing`, so the sub-directory roles are named as a class
+   in the report and the PM does not have to find them by reading paths. It would only *report*; legitimate
+   nested lanes (`hf-config` is a worktree under `mlmf`) are in the same class, so it cannot decide, which is
+   why it is a label and not a refusal.
+
+### Not proposed, on purpose
+
+- **Subscribing to lanes, or any `SendMessage notify_when_idle` wiring**: that is the PM's session tooling, not
+  a state-directory reader; this repo does not send messages to peers.
+- **Anything that writes another lane's state or HANDOFF**: items 1 to 4 read only.
+- **Assigning work to idle lanes**: a decision, not a tool; the PM's.
+
 ## Waiting on someone else
 
 | item | who | why it waits |
