@@ -192,7 +192,7 @@ fn install_with(
     };
     copy(candidate, &target)
         .map_err(|e| fail(format!("cannot copy to {}: {e}", target.display())))?;
-    let got = sha256_file(&target).map_err(&fail)?;
+    let got = sha256_file(&target).map_err(fail)?;
     if got != want {
         return Err(fail(format!(
             "the installed copy reads back as {got}, not {want}"
