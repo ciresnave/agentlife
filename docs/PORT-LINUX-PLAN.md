@@ -1,6 +1,9 @@
 # Linux port plan: lane-restart, the lane host, and the consent/secret broker
 
-Status: **proposal, no code**. Written 2026-10-14 at `origin/main` = `a84165d` (0.14.26). Standing direction
+Status: **in progress** (updated 2026-10-14 at `origin/main` = `d9605ba`, 0.14.28). Built: **P0, P1, P2**
+(0.14.27) and **P4** (0.14.28). Rulings since the first version: Q1, Q2, Q3 (section 7). Two slices were re-read
+against the code and changed: **P3** and **P11** (section 6, "Revisions"). Original status: proposal, no code,
+written 2026-10-14 at `origin/main` = `a84165d` (0.14.26). Standing direction
 (PM message 2026-10-14 17:12Z, relaying CireSnave): *AgentLife (lane-restart, lane host) and the secret broker must
 not be Windows-only; the goal is Windows AND Linux.* The PM asked for: an inventory of every Windows-only seam, a
 trait plus per-OS backend proposal, and a sized slice list, as a docs PR; **no code before this plan merges**.
@@ -123,7 +126,7 @@ dir, keeping the existing "one fixed place" rule):
   caller, replacing the **three** copies;
 * AgentLife home: `$XDG_STATE_HOME/agentlife`; hooks dir: `~/.local/lib/agentlife/hooks`.
 
-### Launch backends (needs a CireSnave decision, section 7 Q1)
+### Launch backends (ruled, section 7 Q1: direct first, tmux later, no emulator)
 
 | Backend | How a lane gets its session | Pros | Cons |
 |---|---|---|---|
@@ -131,8 +134,10 @@ dir, keeping the existing "one fixed place" rule):
 | `tmux` | `tmux new-window -d -n <role> ...` in a named session | headless, attachable, close = `kill-window`; replaces the whole tab-close feature | needs tmux; a second terminal layer under the host's PTY |
 | `emulator` | `x-terminal-emulator` / `gnome-terminal` / `kitty` / `konsole` with a per-terminal arg builder | closest to today's visible tab | needs a display session; each emulator differs (`--title`, `--working-directory`, `--`); window-per-agent only |
 
-Recommendation: implement `direct` first (it is the smallest and the only one that works in the unattended logon
-case), then `tmux`; `emulator` last and optional. Windows keeps `wt.exe` -> `conhost.exe`.
+**Ruled (CireSnave, 2026-10-14, board 205 Q1, verbatim):** *"Direct process first with tmux support on our
+roadmap to build later."* So: `direct` is the Linux launch; `tmux` is a later viewer (a ROADMAP row, not
+started); **`emulator` is dropped** (no terminal-emulator support is planned). Windows keeps `wt.exe` ->
+`conhost.exe`. The host's tty handling (P4) depends on neither tmux nor an emulator.
 
 ## 4. Process model on Linux
 
@@ -187,7 +192,8 @@ Candidates that can pass it:
 | polkit authentication agent (password/biometric dialog by a separate agent process) | **uncertain** on X11 (synthetic input), harder on Wayland | desktop session |
 | TPM2 `authValue` PIN on an unseal | no, if the PIN is typed by a person on a path the agent cannot read | TPM + a PIN entry surface (again a UI to secure) |
 
-Recommendation: **FIDO2 touch as the required channel**, with fprintd as an alternative where a reader exists;
+**Ruled (CireSnave, 2026-10-14, board 205 Q2, relayed by the PM; not a verbatim quote): FIDO2 touch, tiered key,
+no terminal prompt.** Recommendation as written: **FIDO2 touch as the required channel**, with fprintd as an alternative where a reader exists;
 **no terminal-prompt fallback**, ever (it would silently turn "a person approved" into "something on this machine
 answered"). If none is available the result stays `Unavailable` and consent fails closed, as it does today.
 This is a security-model choice, so it needs CireSnave and the OverMind owner, not this repo alone (Q2).
@@ -222,19 +228,36 @@ Windows leg and a Linux leg in CI.
 | P0 | **Constants resolve per OS**: one `platform::dirs` replacing the three `C:/Projects/.lane-state` copies, `DEFAULT_HOME`, hooks dir, `HOOK_EXE`, `portfolio_root`, `worktrees --stale` root; Windows value unchanged | S | none | test per resolver; a Windows run diff-clean; Linux no longer creates `C:/...` under the cwd |
 | P1 | **Manifest and naming hygiene**: `windows-sys` under `[target.'cfg(windows)']`, `EXE_SUFFIX` in install names and sha line, reword `wt.exe` text | S | none | `cargo tree --target x86_64-unknown-linux-gnu` has no `windows-sys` for lane-restart |
 | P2 | **Name sets**: one `platform::names` (claude image predicate, shells incl. zsh/fish/dash, terminal hosts); replace the five copies | S | P0 | table-driven tests; a real `zsh` ancestor accepted |
-| P3 | **Start-time token on Linux** (`/proc` ticks); `procindex` key | M | P0 | a repeat-read test that fails on seconds and passes on ticks; removes the `launch_e2e` flake or shows it is not this |
+| P3 | ~~Start-time token on Linux (`/proc` ticks)~~ **replaced by P3'**, see "Revisions" below | n/a | n/a | n/a |
+| P3' | **Identity-mismatch diagnostic (Linux)**: on a recycled-pid / identity-changed / not-live verdict, record sysinfo `start_time`, `/proc/<pid>/stat` ticks and `btime` on the ledger line | S | none | a test with a stand-in table; the failing log issue #14 is waiting for |
 | P4 | **Host tty on unix**: raw guard, `TIOCGWINSZ`, SIGWINCH; un-gate the 11 ConPTY host tests with Linux children | M | none | real host test: CPR round trip and resize on Linux CI |
 | P5 | **Signals**: TERM, grace, KILL to the process group; `down` and `lane_stop` | S | P3 | tests with real `sleep` trees: children gone, identity-mismatch refused |
-| P6 | **`TabLauncher` trait + `direct` backend** (`setsid`); `SpawnVia::Direct` gets real use; report fields additive | M | P0, P4 | `launch_e2e` Linux leg opens N agents and the registry shows them |
-| P7 | **`tmux` backend** and `lane-restart attach`; tab-close becomes `kill-window` | M | P6 | real tmux test (skipped, loudly, when tmux is absent) |
+| P6 | **`TabLauncher` trait + `direct` backend** (`setsid`); `SpawnVia::Direct` gets real use; report fields additive. **This is the Linux lane host (Q1)**; a way to look at a running lane (`lane-restart attach`) belongs here, over the host's own pty, with no tmux | M | P0, P4 | `launch_e2e` Linux leg opens N agents and the registry shows them |
+| P7 | ~~`tmux` backend~~ **tmux viewer, LATER (ROADMAP row, not started)**: a viewer over the direct host, never a launcher the host depends on | M | P6 | real tmux test (skipped, loudly, when tmux is absent) |
 | P8 | **Autostart**: `Autostart` trait, `systemd --user` units for logon, an unlock path (`logind` `Unlock` signal) or a documented "logon only" limit | M | P6 | `install-task` prints units; a real `systemctl --user` test on CI where available |
 | P9 | **Shutdown marker** via `journalctl`/`last -x` | S | none | classifier test with captured sample output |
 | P10 | **Hook origin / tab-close lists** use the P2 sets; `Origin::Hand` reachable on Linux | S | P2 | hand-launch test with a Linux terminal ancestor chain |
-| P11 | **Consent readiness on our side**: confirm `UserRequestBackend::with_parts` takes dir/head/protector; add a Linux `Prompt`/`Protector` injection seam and unit-test the fail-closed path | S | none | tests with fake protector and prompt |
+| P11 | ~~Consent readiness on our side~~ **already built**, see "Revisions" below | n/a | n/a | n/a |
 | P12 | **Upstream (OverMind): Linux `Protector` (tiered) + XDG store dir + head path** | L | decision Q2 | `user-request` round trip on Linux CI, tier shown in `list` |
 | P13 | **Upstream (OverMind): approval channel** (FIDO2 first) | L | Q2, P12 | a person-present live test (like `live_hello_cancel_is_denied`), never in CI |
 | P14 | **CI**: a Linux job running the real-behaviour tests (P4, P6, P7) with `tmux`/`setsid`; keep the matrix | S | P4, P6 | the job fails if a gated test silently skips |
 | P15 | Docs: README/DESIGN/CONSENT/HOOK-INSTALL gain Linux sections; remove "Windows" from crate keywords | S | all | review |
+
+### Revisions (2026-10-14, after reading the code and measuring)
+
+* **P3 was wrong as drafted.** `*_start_secs` is used as *epoch* seconds, not only as an equality key:
+  `lane_stop.rs:168` compares a session's start with a transcript mtime, `intent.rs:336` stores
+  `started.timestamp()`, `facts.rs:348` filters `find_claude_process_in` by a wall-clock kill moment (with a 5 s
+  margin), and `tab_close`/`hook` order parent against child by it. A boot-relative `/proc` token would silently
+  break those, and the value is persisted in state files and registry records.
+  **Measured** on WSL2 (Linux 6.18, `CLK_TCK` 100): ten reads of `/proc/stat` `btime` over ten seconds were
+  identical. The kernel's boot time is the realtime clock minus a fixed offset, so it moves only when the clock is
+  *stepped* (VM resume, an NTP step: plausible on a hosted runner at start). Issue #14 stays unproven and I have no
+  failing log. So **P3' only adds the diagnostic** that would produce one; a token redesign waits for that log.
+* **P11 is already built.** `UserRequestBackend::with_parts(dir, head, Box<dyn Protector>, requester)` is at
+  `src/consent/real.rs:141`, its tests run a test protector on both CI legs, and `Prompt`/`Consent` are traits. The
+  one hard-wired call is `production()` -> `ur::locate::*`, which cannot change until U1-U3 are published.
+* **P5** no longer depends on P3 (it depended on a token it does not need).
 
 Suggested order: **P0, P1, P2** (no behaviour change, unblocks everything), then **P3, P4** in parallel, then
 **P5, P6**, then **P7, P8, P9, P10, P11**; **P12/P13** run in OverMind in parallel from the moment Q2 is answered,
@@ -242,13 +265,13 @@ because the secret broker is on the critical path for `restore` on Linux. P14 gr
 
 ## 7. Decisions needed (not guessed here)
 
-* **Q1 (CireSnave): where do lanes run on Linux?** Visible terminal tabs (`emulator`), tmux windows, or detached
-  with no UI. Recommended: `direct` then `tmux`. It changes P6-P8 and whether tab-close survives at all.
-* **Q2 (CireSnave + OverMind owner): the approval channel and the key tier.** Is a physical-presence device
-  (FIDO2 touch, fingerprint) acceptable as the Linux "Hello"? Is a `0600` key file acceptable as the floor?
-  Recommended: FIDO2 required, tiered key, no TTY fallback.
-* **Q3 (PM): who files and owns the `user-request` upstream work** (P12, P13), since this repo cannot edit it.
-* **Q4 (PM): macOS** is out of scope here (no `launchd`, Keychain, Touch ID backend). Stated so it is not assumed.
+* **Q1 (CireSnave): where do lanes run on Linux?** **Ruled 2026-10-14 (verbatim):** *"Direct process first with
+  tmux support on our roadmap to build later."* No terminal-emulator support planned.
+* **Q2 (CireSnave + OverMind owner): the approval channel and the key tier.** **Ruled 2026-10-14 (relayed by the
+  PM):** FIDO2 touch, tiered key, no terminal prompt.
+* **Q3 (PM): who files and owns the `user-request` upstream work** (P12, P13). **Ruled:** the PM files U1-U8 and
+  routes them to the owners; this repo cannot edit the crate.
+* **Q4 (PM): macOS** is out of scope here (no `launchd`, Keychain, Touch ID backend). **Accepted.**
 
 ## 8. What is not known yet (measure on Linux before P2/P3 are final)
 
