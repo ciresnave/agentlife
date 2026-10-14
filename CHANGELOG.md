@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (version allocated at gate)
+## 0.14.9
 
 - **`lane-restart status --json` carries each role's `model` and the disk floor** (ROADMAP slice item 1). `model`
   is what the launch spec records (`null` with no readable spec; Opus shown as recorded). `disk` is
