@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.6
+
+- Docs only: `docs/ROADMAP.md` gains a proposed next slice (status `--json`, a ledger reader, a HANDOFF lint,
+  specs coverage, the non-Rust pieces of the OverMind split) and the PM-approved `specs import` rulings
+  (group `cwd missing` rows, `specs retire` PM-only, resume Crashed roles with `start`, first/last-line banner).
+
 ## 0.14.5
 
 - **`pin-plan --target current|latest`** (with `--emit-patch`; default `current`, unchanged). `latest` pins a
