@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.9
+
+- **`lane-restart status --json` carries each role's `model` and the disk floor** (ROADMAP slice item 1). `model`
+  is what the launch spec records (`null` with no readable spec; Opus shown as recorded). `disk` is
+  `{mount, free_bytes, floor_bytes, below_floor, unknown}` for the state volume; it was a stderr line before, and
+  the stderr line stays. Additive: `schema` stays 1 and every existing field is unchanged.
+  (The ROADMAP's earlier claim that `status` was human text only was wrong; `--json` has existed since 0.12.10.)
+
 ## 0.14.8
 
 - **`lane-restart specs retire --role R [--role R]... [--dry-run]`** (PM only; PM-approved 2026-10-14). For a role

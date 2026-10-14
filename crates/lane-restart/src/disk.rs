@@ -159,6 +159,43 @@ pub enum GuardOk {
     Unknown(String),
 }
 
+/// The disk facts `status --json` reports: machine-readable, so a consumer does not parse
+/// [`status_line`]. `unknown` carries the probe's reason when free space could not be read (and
+/// `below_floor` is then `false`: unreadable is not refused, same as [`guard`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DiskStatus {
+    pub mount: Option<String>,
+    pub free_bytes: Option<u64>,
+    pub floor_bytes: u64,
+    pub below_floor: bool,
+    pub unknown: Option<String>,
+}
+
+/// Pure: a probe result and a floor -> what `status --json` prints.
+pub fn disk_status(free: Result<Free, String>, floor: u64) -> DiskStatus {
+    match free {
+        Ok(f) => DiskStatus {
+            below_floor: f.bytes < floor,
+            mount: Some(f.mount),
+            free_bytes: Some(f.bytes),
+            floor_bytes: floor,
+            unknown: None,
+        },
+        Err(why) => DiskStatus {
+            mount: None,
+            free_bytes: None,
+            floor_bytes: floor,
+            below_floor: false,
+            unknown: Some(why),
+        },
+    }
+}
+
+/// [`disk_status`] for the volume holding `path`.
+pub fn status(path: &Path) -> DiskStatus {
+    disk_status(probe(&probe_path(path)), floor_bytes())
+}
+
 /// One line for `status`: `C: free: 123.4 GB (floor 20.0 GB)` or why it is unknown.
 pub fn status_line(path: &Path) -> String {
     match probe(&probe_path(path)) {
@@ -187,6 +224,31 @@ mod tests {
             ("D:\\".into(), 900),
             ("C:\\mnt\\big".into(), 777),
         ]
+    }
+
+    #[test]
+    fn disk_status_is_the_json_twin_of_the_status_line() {
+        let free = |b: u64| {
+            Ok(Free {
+                mount: "C:\\".into(),
+                bytes: b,
+            })
+        };
+        let floor = 20 * (1 << 30);
+        let ok = disk_status(free(floor), floor);
+        assert_eq!(
+            (ok.below_floor, ok.free_bytes, ok.unknown),
+            (false, Some(floor), None)
+        );
+        let low = disk_status(free(floor - 1), floor);
+        assert!(low.below_floor);
+        assert_eq!(low.mount.as_deref(), Some("C:\\"));
+        let unk = disk_status(Err("no volume".into()), floor);
+        assert_eq!((unk.below_floor, unk.free_bytes), (false, None));
+        assert_eq!(unk.unknown.as_deref(), Some("no volume"));
+        let v = serde_json::to_value(&low).unwrap();
+        assert_eq!(v["floor_bytes"], floor);
+        assert_eq!(v["below_floor"], true);
     }
 
     #[test]

@@ -383,6 +383,9 @@ pub struct RoleStatus {
     pub since: Option<DateTime<Utc>>,
     pub stop_reason: Option<String>,
     pub detail: Option<String>,
+    /// The model the launch spec records (`None` when there is no readable spec). Opus is shown as
+    /// recorded; a start replaces it (see `lane-restart models`).
+    pub model: Option<String>,
 }
 
 /// Is the process a state file names still the same live `claude`? Pid AND start time; a pid
@@ -409,6 +412,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         since: None,
         stop_reason: None,
         detail: None,
+        model: None,
     };
     let lane_state = state::load(dir, role);
     let live = lane_state
@@ -420,6 +424,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         Ok(s) => {
             out.since = Some(s.written_at);
             out.stop_reason = s.stop_reason.clone();
+            out.model = Some(s.model.clone());
             // `lane-start` replaces an Opus, unknown or unset model by `sonnet` (14.5), so the
             // spec is startable when it is complete with that replacement applied.
             match s.pinned().0.check() {
@@ -472,6 +477,9 @@ pub struct StatusReport {
     pub roles: Vec<RoleStatus>,
     /// `*.json` files that are neither a lane state nor a launch spec (listed, never dropped).
     pub skipped: Vec<String>,
+    /// Free space on the state volume against the launch floor (added, same schema: a reader that
+    /// ignores unknown fields is unaffected).
+    pub disk: crate::disk::DiskStatus,
 }
 
 /// Every role with a lane state or a launch spec under `dir`.
@@ -502,6 +510,7 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
         schema: 1,
         roles: roles.iter().map(|r| role_status(dir, r, facts)).collect(),
         skipped,
+        disk: crate::disk::status(dir),
     }
 }
 
@@ -721,6 +730,21 @@ mod tests {
         let d = tempdir().unwrap();
         let s = role_status(d.path(), "ghost", &dead_facts());
         assert_eq!((s.state, s.startable), (Lifecycle::NeverRun, false));
+    }
+
+    #[test]
+    fn status_carries_the_specs_model_and_the_disk_in_the_json() {
+        let d = tempdir().unwrap();
+        // No spec: no model. With a spec: the model it records (the `built` fixture is sonnet).
+        assert_eq!(role_status(d.path(), "ghost", &dead_facts()).model, None);
+        write_atomic(d.path(), &built("baracuda", SpecState::Suspended)).unwrap();
+        let report = status_all(d.path(), &dead_facts());
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["roles"][0]["role"], "baracuda");
+        assert_eq!(v["roles"][0]["model"], "sonnet");
+        assert!(v["disk"]["floor_bytes"].as_u64().unwrap() > 0, "{v}");
+        assert!(v["disk"].get("below_floor").is_some(), "{v}");
+        assert_eq!(v["schema"], 1);
     }
 
     #[test]
