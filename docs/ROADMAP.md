@@ -51,6 +51,66 @@ branch refs** (67 `dtolnay/rust-toolchain@stable`). CodeRipper's 235 pins in 18 
 population (see `crates/pin-plan/README.md`). Acting on it (writing the pins) is not this lane's: the tool
 only plans.
 
+## Next slice (proposed 2026-10-14 at `origin/main` = `0842e3e`, 0.14.5): what other lanes need from agentlife
+
+Source: `PORTFOLIO-ROADMAP.md` (idle-lane signal; session restart tool; the OverMind split) and
+`CIRESNAVE-EXPECTATIONS.md` 2.3b/2.3c (restart at every task boundary; HANDOFF size ceiling), read at the same
+date. Every row is a **proposal for the PM to accept, reorder or strike**; none is started. Versions are the PM's.
+
+| # | item | why a lane or the PM needs it (evidence) | size | waits on |
+|---|---|---|---|---|
+| 1 | **`lane-restart status --json`** (same facts as `status`: role, state, launch-spec complete, startable, model, `C:` free vs the floor) | The PM's idle sweep reads each lane's state to decide whether to assign work (`PORTFOLIO-ROADMAP.md`, "Idle-lane signal"); `status` is human text today (`lane-restart --help`), so every consumer parses prose | small | nothing |
+| 2 | **`lane-restart ledger [--role R] [--since T]`**, read-only | Every start, stop, restart, import and refusal is already written by `log_ledger` to `restart.log`; there is no reader, and PM attribution of who restarted whom is done by hand (`CLAUDE.md` 8: "only the PM's ledger ... attribute") | small | nothing |
+| 3 | **HANDOFF lint in `assert-idle`**: warn (not refuse) when the lane's HANDOFF is over 8 KB, or has no dated rewrite line | The ceiling is 20 KB (PM) / 8 KB (lane) by `CIRESNAVE-EXPECTATIONS.md` 2.3c and is measured by hand with `wc -c`; `PM-HANDOFF.md` reached 321 KB of stacked dated blocks | small | PM ruling: warn or refuse |
+| 4 | **Port-or-retire of the non-Rust pieces of the OverMind split that land here** | CireSnave's caveat (2026-10-08, board 143): non-Rust pieces get "porting them to Rust" on the roadmap; `PORTFOLIO-ROADMAP.md` lists them under the split. This lane owns only what moves here | unknown: not measured | the split's step 3 onward (PM) |
+| 5 | **Specs coverage**: after the PM's `specs import`, report which roles still have no complete spec and why, as one table in `status` | `restore` launches from the spec and falls back to the registry; until imports run most plans say `registry` (item 4 in "Next, in order") | small | the PM's `specs import` (dry run read first) |
+| 6 | **Linux `start_time`** (issue #14) | Parked by the PM until a failing log exists | n/a | a failing log |
+
+### `specs import`: cwd-missing and Crashed roles (PM question 2026-10-14 10:37Z)
+
+What the code does at `0842e3e` (`crates/lane-restart/src/spec_import.rs`, `import_one`), read, not run: a role is
+**refused with its reason** when it has no `launch_args`, when its `cwd` is not a directory (`cwd missing: <path>`),
+when the model resolves to Opus, or when the spec fails its own check; otherwise it is **written**, as `Running`
+if its recorded process is live and as **`Crashed` if not**. So a Crashed role whose `cwd` exists *is* written
+(startable by the PM's `start`); a role that is only Crashed-and-not-written must have been refused for one of the
+reasons above or already have a spec. The 11 "Crashed, not written" roles in the PM's report therefore need their
+printed reason rows read; I have not seen them.
+
+Proposals (PM to rule):
+
+1. **cwd missing: keep listing it, group it.** Dropping a row silently breaks the rule that every refusal is
+   listed (the module header says "never dropped"); a quiet skip would also hide a role whose directory was
+   moved. Instead print the refused rows **grouped by reason**, one line per reason with a count and the role
+   names, so ~30 vanished mlmf worktrees read as one line, not 30. Exit code and the per-role rows stay available
+   (`--verbose`). Small, no behaviour change to what is written.
+2. **cwd missing means prune, never resume.** A spec for a directory that is gone cannot start. The honest
+   outcomes are *recreate the worktree* (then re-import) or *retire the role*. Retiring is an edit to the lane
+   state directory, which `specs import` promises never to make, so it belongs in a **separate PM-only**
+   `lane-restart specs retire --role R [--dry-run]` that **moves** `<role>.json` to `.lane-state/retired/` (never
+   deletes) and writes a ledger row. Not built; needs the PM's ruling that retiring is wanted.
+3. **Crashed with a live cwd: resume, not prune.** It is imported as `Crashed` and is what `start` is for; the
+   PM decides per role, the tool does not auto-start.
+4. **Import should say what it did, first and last.** The PM's 2026-10-14 10:36Z sequence was `specs import
+   --dry-run` (all roles, "would write" for five), then `specs import --role <r>` for those five, which wrote
+   them (`written_by: import`, `written_at 10:36:14Z` to `10:36:16Z`); the labels were correct. (An earlier
+   revision of this paragraph read that run as a mislabelled dry run; that was wrong, retracted on the PM's
+   command log.) The proposal stands without it: with ~40 rows, a relayed report should be unmistakable about
+   whether anything was written, so print `DRY RUN - nothing written` or `WROTE n spec(s)` as the **first and
+   last line**.
+
+### Not proposed, on purpose
+
+- Anything that starts, stops or restarts a running lane from this lane: PM-only by the tool's own check.
+- M5/M6/M7: they wait on CireSnave and the first real restore (see "Waiting on someone else").
+- New SUP-008 work: `pin-plan` is done at 0.14.5; applying the patches is each lane's PR.
+
+### What I could not establish from `PORTFOLIO-ROADMAP.md`
+
+The file is 55 KB; I searched it for `agentlife`, `lane-restart`, `lane-state`, `restart`, `ledger` and `status`
+and read the hits (lines 486 to 505, 558 to 566). A request for agentlife that does not use those words would not
+be found by that search, so this slice is a list of what the file says, not a census of what lanes want. Lanes'
+own asks belong in a `[TASK]` or an issue.
+
 ## Waiting on someone else
 
 | item | who | why it waits |
