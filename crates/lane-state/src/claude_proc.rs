@@ -195,17 +195,12 @@ pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
 /// parent was `bash.exe`, not `claude.exe`, so the single-hop check this
 /// module shipped with (verified only against a headless `claude -p`
 /// session, §10.3) refused every real interactive write.
-const SHELL_ANCESTOR_NAMES: &[&str] = &["bash", "sh", "cmd", "powershell", "pwsh"];
+use crate::platform::names::{image_base, is_shell};
 
 /// How many shell layers this walk tolerates before giving up -
 /// RESTART-TOOL-DESIGN.md §11.1's real chain needed 2; this leaves margin
 /// without walking indefinitely.
 const MAX_ANCESTRY_HOPS: u32 = 4;
-
-fn image_base(name: &str) -> String {
-    let lower = name.to_lowercase();
-    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
-}
 
 /// Walks up from `my_pid`, skipping ONLY known shell images, and returns
 /// the pid of the first `claude` found. Refuses (never skips past) any
@@ -220,7 +215,7 @@ pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32,
         if base == "claude" {
             return Ok(parent_pid);
         }
-        if !SHELL_ANCESTOR_NAMES.contains(&base.as_str()) {
+        if !is_shell(&base) {
             return Err(PidError::UnexpectedAncestor(name));
         }
         current = parent_pid;
@@ -349,6 +344,21 @@ mod tests {
     fn walks_past_a_single_powershell_layer_too() {
         let lookup = FakeAncestry::chain(&[(1, 10, "powershell.exe"), (10, 99, "claude")]);
         assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+    }
+
+    /// P2 (`docs/PORT-LINUX-PLAN.md`): a zsh/fish/dash user had every hook refused as an
+    /// `UnexpectedAncestor`. Control: a stranger in the same position is still refused.
+    #[test]
+    fn walks_past_zsh_fish_and_dash_layers() {
+        for shell in ["zsh", "fish", "dash"] {
+            let lookup = FakeAncestry::chain(&[(1, 10, shell), (10, 99, "claude")]);
+            assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99, "{shell}");
+        }
+        let stranger = FakeAncestry::chain(&[(1, 10, "node"), (10, 99, "claude")]);
+        assert!(matches!(
+            claude_parent_pid(1, &stranger),
+            Err(PidError::UnexpectedAncestor(_))
+        ));
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub const MAX_SESSIONS_KEPT: usize = 20;
 /// The reasons `SessionEnd` documents as matchers (hooks docs, fetched 2026-10-06).
 pub const KNOWN_END_REASONS: &[&str] = &["clear", "resume", "logout", "prompt_input_exit", "other"];
 
-pub(crate) const SHELLS: &[&str] = &["bash", "sh", "cmd", "powershell", "pwsh"];
+pub(crate) use lane_state::platform::names::SHELLS;
 const TERMINALS: &[&str] = &["windowsterminal", "openconsole", "conhost", "wt"];
 const HOSTS: &[&str] = &["lane-restart", "agentlife"];
 
@@ -95,12 +95,7 @@ impl Outcome {
 }
 
 fn norm_image(name: &str) -> String {
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name)
-        .to_lowercase();
-    base.strip_suffix(".exe").unwrap_or(&base).to_string()
+    lane_state::platform::names::image_base(name)
 }
 
 /// `WindowsTerminal -> shell -> claude` is a hand launch; a `lane-restart`/`agentlife` parent is a

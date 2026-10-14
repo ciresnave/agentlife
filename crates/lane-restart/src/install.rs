@@ -15,9 +15,15 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// The installed file's name, and the names derived from it.
+/// The installed file's name, and the names derived from it (`.exe` only where the OS has it).
+#[cfg(windows)]
 pub const EXE_NAME: &str = "lane-restart.exe";
+#[cfg(not(windows))]
+pub const EXE_NAME: &str = "lane-restart";
+#[cfg(windows)]
 pub const BAK_NAME: &str = "lane-restart.exe.bak";
+#[cfg(not(windows))]
+pub const BAK_NAME: &str = "lane-restart.bak";
 pub const SHA_NAME: &str = "lane-restart.sha256";
 
 /// Where the installed exe lives. Fixed, like `state_dir`: a caller-supplied directory would let

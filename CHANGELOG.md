@@ -2,6 +2,29 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.27
+
+- **Linux port, slices P0 to P2** (`docs/PORT-LINUX-PLAN.md`, merged in #78 without a bump; PM-allocated number).
+  **No behaviour change on Windows**: every Windows value is the literal it was.
+  - **P0, fixed directories per OS.** New `lane_state::platform` (`state_dir`, `agentlife_home`, `hooks_dir`,
+    `portfolio_root`, with fallible `try_*` forms and a testable `Env`). Off Windows they resolve under
+    `XDG_STATE_HOME` (else `~/.local/state`): `lane-state/`, `agentlife/`; hooks under `~/.local/lib/agentlife/hooks`;
+    portfolio root `~/Projects`. Before, off Windows `C:/Projects/.lane-state` was a *relative* directory created under
+    the cwd. `lane_restart::state_dir()` and the two other copies in `host.rs` now use it; `Config::resolve`
+    re-resolves `portfolio_root` and `lane_state_dir` for this OS (`Config::default()` stays the Windows layout);
+    `Home::resolve`, `doctor` (`doctor::hook_exe()`), `worktrees --stale` and `install` use it too. The agentlife
+    home is a sibling of the state directory, not inside it (a small change from the plan's wording).
+  - **P1, naming.** `windows-sys` moves under `[target.'cfg(windows)'.dependencies]`; `install` names the installed
+    file `lane-restart` (and `.bak`) off Windows. User-facing `wt.exe` text is left as is: it is accurate until a
+    Linux launcher exists (P6).
+  - **P2, one set of process names.** New `lane_state::platform::names` (`image_base`, `is_claude`, `is_shell`,
+    `SHELLS`) replaces five private copies. **Behaviour change off Windows only:** `zsh`, `fish`, `dash` and `ksh`
+    are accepted as shells above `claude` (a zsh user had every hook refused with `UnexpectedAncestor`), and count as
+    "a live shell" below it. What Claude Code's process is called on Linux is still unmeasured, so `is_claude`
+    accepts exactly `claude` / `claude.exe`.
+  - Not changed, on purpose: `tab_close` shell and terminal lists (destructive, Windows-only until P10), `hook.rs`
+    `TERMINALS` (P10), `pin-plan --root` default (a standalone crate with no dependency on `lane-state`).
+
 ## 0.14.26
 
 - Double-launch guard (PM task 2026-10-14; the UniSQL case: a lane did `--self` at 09:03, the PM ran `start --role
