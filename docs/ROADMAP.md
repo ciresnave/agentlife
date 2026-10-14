@@ -51,6 +51,34 @@ branch refs** (67 `dtolnay/rust-toolchain@stable`). CodeRipper's 235 pins in 18 
 population (see `crates/pin-plan/README.md`). Acting on it (writing the pins) is not this lane's: the tool
 only plans.
 
+## Next slice (proposed 2026-10-14 at `origin/main` = `0842e3e`, 0.14.5): what other lanes need from agentlife
+
+Source: `PORTFOLIO-ROADMAP.md` (idle-lane signal; session restart tool; the OverMind split) and
+`CIRESNAVE-EXPECTATIONS.md` 2.3b/2.3c (restart at every task boundary; HANDOFF size ceiling), read at the same
+date. Every row is a **proposal for the PM to accept, reorder or strike**; none is started. Versions are the PM's.
+
+| # | item | why a lane or the PM needs it (evidence) | size | waits on |
+|---|---|---|---|---|
+| 1 | **`lane-restart status --json`** (same facts as `status`: role, state, launch-spec complete, startable, model, `C:` free vs the floor) | The PM's idle sweep reads each lane's state to decide whether to assign work (`PORTFOLIO-ROADMAP.md`, "Idle-lane signal"); `status` is human text today (`lane-restart --help`), so every consumer parses prose | small | nothing |
+| 2 | **`lane-restart ledger [--role R] [--since T]`**, read-only | Every start, stop, restart, import and refusal is already written by `log_ledger` to `restart.log`; there is no reader, and PM attribution of who restarted whom is done by hand (`CLAUDE.md` 8: "only the PM's ledger ... attribute") | small | nothing |
+| 3 | **HANDOFF lint in `assert-idle`**: warn (not refuse) when the lane's HANDOFF is over 8 KB, or has no dated rewrite line | The ceiling is 20 KB (PM) / 8 KB (lane) by `CIRESNAVE-EXPECTATIONS.md` 2.3c and is measured by hand with `wc -c`; `PM-HANDOFF.md` reached 321 KB of stacked dated blocks | small | PM ruling: warn or refuse |
+| 4 | **Port-or-retire of the non-Rust pieces of the OverMind split that land here** | CireSnave's caveat (2026-10-08, board 143): non-Rust pieces get "porting them to Rust" on the roadmap; `PORTFOLIO-ROADMAP.md` lists them under the split. This lane owns only what moves here | unknown: not measured | the split's step 3 onward (PM) |
+| 5 | **Specs coverage**: after the PM's `specs import`, report which roles still have no complete spec and why, as one table in `status` | `restore` launches from the spec and falls back to the registry; until imports run most plans say `registry` (item 4 in "Next, in order") | small | the PM's `specs import` (dry run read first) |
+| 6 | **Linux `start_time`** (issue #14) | Parked by the PM until a failing log exists | n/a | a failing log |
+
+### Not proposed, on purpose
+
+- Anything that starts, stops or restarts a running lane from this lane: PM-only by the tool's own check.
+- M5/M6/M7: they wait on CireSnave and the first real restore (see "Waiting on someone else").
+- New SUP-008 work: `pin-plan` is done at 0.14.5; applying the patches is each lane's PR.
+
+### What I could not establish from `PORTFOLIO-ROADMAP.md`
+
+The file is 55 KB; I searched it for `agentlife`, `lane-restart`, `lane-state`, `restart`, `ledger` and `status`
+and read the hits (lines 486 to 505, 558 to 566). A request for agentlife that does not use those words would not
+be found by that search, so this slice is a list of what the file says, not a census of what lanes want. Lanes'
+own asks belong in a `[TASK]` or an issue.
+
 ## Waiting on someone else
 
 | item | who | why it waits |
