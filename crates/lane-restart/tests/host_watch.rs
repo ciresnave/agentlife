@@ -79,10 +79,48 @@ fn a_watcher_sees_the_lane_and_cannot_type_into_it() {
         !work.path().join("got.bin").exists(),
         "a watcher's bytes reached the lane"
     );
-    // control: the lane really does read a byte from its tty when one arrives through the host's
-    // own input path (killing the host here instead, so we do not depend on it)
     let _ = watcher.kill();
     let _ = watcher.wait();
+    let _ = host.kill();
+    let _ = host.wait();
+}
+
+/// Positive control for the test above: the same lane DOES record a byte that arrives through the
+/// host's own input path, so "got.bin never appeared" there means the watcher's bytes were not
+/// delivered, not that this lane cannot record anything.
+#[test]
+fn the_same_lane_records_a_byte_sent_through_the_hosts_own_stdin() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let exe = env!("CARGO_BIN_EXE_lane-restart");
+    let mut host = Command::new(exe)
+        .args([
+            "host",
+            "--role",
+            "p6bctl",
+            "--",
+            "sh",
+            "-c",
+            "echo VISIBLE_P6B; head -c 1 > got.bin; echo AFTER_P6B",
+        ])
+        .current_dir(work.path())
+        .env("HOME", home.path())
+        .env("XDG_STATE_HOME", home.path().join("state"))
+        .env_remove("USERPROFILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the host");
+    let mut stdin = host.stdin.take().unwrap();
+    // the lane has to be at `head` before the byte is useful; resend until it is recorded
+    let got = work.path().join("got.bin");
+    wait_for("the byte to be recorded", 15, || {
+        let _ = stdin.write_all(b"Y");
+        let _ = stdin.flush();
+        got.exists() && std::fs::metadata(&got).map(|m| m.len() >= 1).unwrap_or(false)
+    });
+    drop(stdin);
     let _ = host.kill();
     let _ = host.wait();
 }
