@@ -267,14 +267,49 @@ fn run_approvals_cmd(role: Option<String>) -> ExitCode {
     }
 }
 
+/// ` QUIET>Ns` after the quiet seconds when `--quiet-over N` was given and the role is over it.
+fn quiet_mark(a: &lane_restart::spec::Activity, quiet_over: Option<i64>) -> String {
+    match (a.quiet_over, quiet_over) {
+        (Some(true), Some(n)) => format!(" QUIET>{n}s"),
+        _ => String::new(),
+    }
+}
+
+/// `status [--json] [--quiet-over <secs>]` arguments, any order. The threshold is a positive
+/// whole number of seconds; no default is applied (the flag is opt-in).
+fn parse_status_args(args: &[String]) -> Result<(bool, Option<i64>), String> {
+    let (mut json, mut quiet) = (false, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--quiet-over" => {
+                let v = it.next().ok_or("--quiet-over needs a number of seconds")?;
+                let n: i64 =
+                    v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                        format!("--quiet-over: not a positive whole number: {v:?}")
+                    })?;
+                if quiet.replace(n).is_some() {
+                    return Err("--quiet-over given twice".to_string());
+                }
+            }
+            other => return Err(format!("unexpected argument {other:?}")),
+        }
+    }
+    Ok((json, quiet))
+}
+
 /// `lane-restart status [--json]` - RESTART-TOOL-DESIGN.md 14.2 / 14.10. Read-only: for every
 /// role with a lane state or a launch spec, whether it is running, suspended, crashed or never
 /// run, and whether it can be started again from its spec. Liveness is the process table's
 /// (pid and start time), never a file's age.
-fn run_status_cmd(json: bool) -> ExitCode {
+fn run_status_cmd(json: bool, quiet_over: Option<i64>) -> ExitCode {
     use lane_restart::spec;
     let facts = SysinfoFacts::new(claude_config_dir());
-    let report = spec::status_all(&state_dir(), &facts);
+    let mut report = spec::status_all(&state_dir(), &facts);
+    if let Some(secs) = quiet_over {
+        report.mark_quiet_over(secs);
+    }
     if json {
         // The JSON shape is unchanged; the disk line goes to stderr so a reader of stdout is not
         // broken by it.
@@ -297,11 +332,16 @@ fn run_status_cmd(json: bool) -> ExitCode {
             r.spec,
             r.startable,
             match &r.activity {
-                Some(a) if a.idle => format!("idle=true quiet={}s", a.quiet_secs),
+                Some(a) if a.idle => format!(
+                    "idle=true quiet={}s{}",
+                    a.quiet_secs,
+                    quiet_mark(a, quiet_over)
+                ),
                 Some(a) => format!(
-                    "idle=false({}) quiet={}s",
+                    "idle=false({}) quiet={}s{}",
                     a.idle_blockers.join("+"),
-                    a.quiet_secs
+                    a.quiet_secs,
+                    quiet_mark(a, quiet_over)
                 ),
                 None => "idle=-".to_string(),
             },
@@ -1046,7 +1086,10 @@ USAGE:
         (from that repo's default branch only) and list every active and
         refused one, exactly as `host` would load them.
 
-    lane-restart status [--json]
+    lane-restart status [--json] [--quiet-over <secs>]
+        --quiet-over marks (QUIET>Ns; activity.quiet_over in JSON) each live
+        role whose last hook write is older than <secs>. Opt-in, nothing is
+        enforced and there is no default; the PM's recommended value is 120.
         Read-only: each role's state (running, suspended, crashed, never_run,
         unknown), whether its launch spec (<role>.launch.json, written before a
         restart's kill and at a confirmed launch) is complete, and whether it can
@@ -1143,11 +1186,12 @@ fn main() -> ExitCode {
             };
         }
         if first == "status" {
-            return match rest {
-                [] => run_status_cmd(false),
-                [flag] if flag == "--json" => run_status_cmd(true),
-                _ => {
-                    eprintln!("lane-restart status: expected `status [--json]`");
+            return match parse_status_args(rest) {
+                Ok((json, quiet_over)) => run_status_cmd(json, quiet_over),
+                Err(e) => {
+                    eprintln!(
+                        "lane-restart status: {e}; expected `status [--json] [--quiet-over <secs>]`"
+                    );
                     ExitCode::FAILURE
                 }
             };
@@ -1553,6 +1597,26 @@ mod cli_tests {
 
     fn strs(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn status_args_take_json_and_an_optional_positive_quiet_over_in_any_order() {
+        assert_eq!(parse_status_args(&strs(&[])), Ok((false, None)));
+        assert_eq!(parse_status_args(&strs(&["--json"])), Ok((true, None)));
+        assert_eq!(
+            parse_status_args(&strs(&["--quiet-over", "120", "--json"])),
+            Ok((true, Some(120)))
+        );
+        for bad in [
+            &["--quiet-over"][..],
+            &["--quiet-over", "0"],
+            &["--quiet-over", "-5"],
+            &["--quiet-over", "2m"],
+            &["--quiet-over", "1", "--quiet-over", "2"],
+            &["--wat"],
+        ] {
+            assert!(parse_status_args(&strs(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

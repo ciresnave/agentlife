@@ -431,6 +431,11 @@ pub struct Activity {
     /// not-busy process with a large value is the quiet stall no hook event announces. No
     /// threshold is applied here: the number is the whole claim.
     pub quiet_secs: i64,
+    /// Only with `status --quiet-over N`: whether `quiet_secs > N`. Absent without the flag, so the
+    /// default output is unchanged. It is a mark on the raw number, not a stall verdict: a lane in
+    /// one long tool call is also quiet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_over: Option<bool>,
 }
 
 fn handoff_size(cwd: &str, role: &str) -> Option<HandoffSize> {
@@ -489,6 +494,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 idle: st.is_idle(),
                 idle_blockers: st.idle_blockers(),
                 quiet_secs: (facts.now() - st.updated_at).num_seconds().max(0),
+                quiet_over: None,
             });
         }
     }
@@ -563,6 +569,23 @@ pub struct StatusReport {
     /// How many roles have a complete launch spec, and why each of the others does not (added,
     /// same schema).
     pub coverage: SpecCoverage,
+    /// The `--quiet-over` threshold the `activity.quiet_over` marks were computed with; absent
+    /// when the flag was not given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_over_secs: Option<i64>,
+}
+
+impl StatusReport {
+    /// Mark each live role's activity with whether it has been quiet longer than `secs`. Opt-in
+    /// and never enforced: nothing in this tool acts on the mark.
+    pub fn mark_quiet_over(&mut self, secs: i64) {
+        self.quiet_over_secs = Some(secs);
+        for r in &mut self.roles {
+            if let Some(a) = &mut r.activity {
+                a.quiet_over = Some(a.quiet_secs > secs);
+            }
+        }
+    }
 }
 
 /// Roles that share one reason for having no complete launch spec.
@@ -714,6 +737,7 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
         skipped,
         disk: crate::disk::status(dir),
         coverage,
+        quiet_over_secs: None,
     }
 }
 
@@ -1147,6 +1171,34 @@ mod tests {
         // `RecordingFacts::now` is its own clock: the age is only ever non-negative and >= 7200
         // when that clock is at or after the write, which `Utc::now()` is.
         assert!(a.quiet_secs >= 0, "{}", a.quiet_secs);
+    }
+
+    #[test]
+    fn quiet_over_marks_only_when_asked_and_only_roles_older_than_the_threshold() {
+        let d = tempdir().unwrap();
+        let facts = facts_with_live(55, 100);
+        let mut st = crate::testing::state_at("baracuda", "s", "Stop");
+        st.pid = 55;
+        st.pid_start_secs = Some(100);
+        // the fake clock is fixed, so the write is placed relative to it, not to the wall clock
+        st.updated_at = facts.now() - chrono::Duration::seconds(7200);
+        std::fs::write(
+            d.path().join("baracuda.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        let mut r = status_all(d.path(), &facts);
+        let a = r.roles[0].activity.as_ref().unwrap();
+        assert_eq!((a.quiet_over, r.quiet_over_secs), (None, None));
+        assert!(!serde_json::to_string(&r).unwrap().contains("quiet_over"));
+        r.mark_quiet_over(3600);
+        assert_eq!(r.roles[0].activity.as_ref().unwrap().quiet_over, Some(true));
+        r.mark_quiet_over(86_400);
+        assert_eq!(
+            r.roles[0].activity.as_ref().unwrap().quiet_over,
+            Some(false)
+        );
+        assert_eq!(r.quiet_over_secs, Some(86_400));
     }
 
     #[test]
