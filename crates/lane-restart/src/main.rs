@@ -135,6 +135,7 @@ fn run_state_hook(event: &str) -> ExitCode {
 fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
     let my_pid = std::process::id();
     let lane_role_env = role_override.or_else(|| std::env::var("LANE_ROLE").ok());
+    let lint_role = lane_role_env.clone();
     let cwd = match std::env::current_dir() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => {
@@ -149,7 +150,20 @@ fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
         lane_role_env.as_deref(),
         &cwd,
     ) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // A warning, never a refusal: a restart is mandatory at a task boundary. The role is
+            // the same one assert-idle resolved: --role, then LANE_ROLE, then the cwd's leaf.
+            let role = lint_role.unwrap_or_else(|| {
+                std::path::Path::new(&cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+            if let Some(w) = lane_restart::handoff_lint::check(&cwd, &role) {
+                eprintln!("lane-restart assert-idle: {w}");
+            }
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("lane-restart assert-idle: {e}");
             ExitCode::FAILURE
@@ -981,7 +995,9 @@ USAGE:
     lane-restart assert-idle [--role <name>]
         Run by a lane ITSELF, from its own shell, right after writing
         HANDOFF: asserts that no background shell it started is still
-        running. Required before any restart of that lane can be
+        running. Also WARNS (exit code unchanged) when the HANDOFF is over
+        its size ceiling: 8 KB for a lane, 20 KB for the PM
+        (CIRESNAVE-EXPECTATIONS.md 2.3c). Required before any restart of that lane can be
         authorized - RESTART-TOOL-DESIGN.md §1a. Role defaults to
         LANE_ROLE, then falls back to the current directory's leaf name,
         the same as the state hook.
