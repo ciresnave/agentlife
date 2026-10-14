@@ -90,12 +90,13 @@ Proposals (PM to rule):
    deletes) and writes a ledger row. Not built; needs the PM's ruling that retiring is wanted.
 3. **Crashed with a live cwd: resume, not prune.** It is imported as `Crashed` and is what `start` is for; the
    PM decides per role, the tool does not auto-start.
-4. **Import must say what it did.** A 2026-10-14 10:36Z run described as `--dry-run` wrote five specs
-   (`persistant`, `safeimage`, `thinkersfoundation`, `thinkersjournal-community`, `restarttest`; each has
-   `written_by: import`, `written_at 10:36:14Z` to `10:36:16Z`). `--dry-run` is parsed and has a test
-   (`a_dry_run_reports_and_writes_nothing`), so that run was a real import or the report mislabelled it. Proposal:
-   print `DRY RUN - nothing written` / `WROTE n spec(s)` as the **first and last line**, so the two cannot be
-   confused in a relayed report.
+4. **Import should say what it did, first and last.** The PM's 2026-10-14 10:36Z sequence was `specs import
+   --dry-run` (all roles, "would write" for five), then `specs import --role <r>` for those five, which wrote
+   them (`written_by: import`, `written_at 10:36:14Z` to `10:36:16Z`); the labels were correct. (An earlier
+   revision of this paragraph read that run as a mislabelled dry run; that was wrong, retracted on the PM's
+   command log.) The proposal stands without it: with ~40 rows, a relayed report should be unmistakable about
+   whether anything was written, so print `DRY RUN - nothing written` or `WROTE n spec(s)` as the **first and
+   last line**.
 
 ### Not proposed, on purpose
 
