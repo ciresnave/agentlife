@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.13
+
+- Docs only: `docs/ROADMAP.md` slice item 4 is now a measurement item with its first measurement (this repo at
+  `2ca6368`: 118 tracked files, 79 `.rs`, no `.py`/`.sh`/`.ts`/`.js`/`.ps1`) and the PM's ruling (2026-10-14
+  11:48Z) on the open question: `tools/*.py` and `probe/` stay in OverMind, nothing is assigned here. No code.
+
 ## 0.14.12
 
 - **`lane-restart assert-idle` warns when the HANDOFF is over its ceiling** (ROADMAP slice item 3, PM ruling
@@ -9,6 +15,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   `CIRESNAVE-EXPECTATIONS.md` section 2.3c step 5: **8 KB for a lane's HANDOFF, 20 KB for the PM's**, measured in
   bytes (`wc -c`), "KB" read as 1024 bytes. The warning names the file, its size and the ceiling, goes to stderr
   and leaves the exit code alone. A missing HANDOFF is silent here (`stop` already refuses that).
+
 
 ## 0.14.11
 
