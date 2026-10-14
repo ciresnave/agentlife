@@ -192,6 +192,25 @@ Recommendation: **FIDO2 touch as the required channel**, with fprintd as an alte
 answered"). If none is available the result stays `Unavailable` and consent fails closed, as it does today.
 This is a security-model choice, so it needs CireSnave and the OverMind owner, not this repo alone (Q2).
 
+### Exact asks for the upstream (`user-request`, OverMind) - for the PM to file as P12 and P13
+
+Each ask names the symbol read in 0.11.1 and the acceptance a Linux CI leg can check. Nothing here changes the
+consent model (who / what / duration, one-shot grants, hash-chained audit).
+
+| # | Ask | Today (0.11.1) | Acceptance |
+|---|---|---|---|
+| U1 | `locate::dir()` returns an XDG path off Windows: `$XDG_STATE_HOME/OverMind/user-request`, else `~/.local/state/OverMind/user-request`; `USER_REQUEST_DIR` stays debug-only | `%LOCALAPPDATA%` only; `Err("LOCALAPPDATA is not set")` | `dir()` is `Ok` on Linux with and without `XDG_STATE_HOME`; the Windows value is unchanged |
+| U2 | `locate::head_copy()` stops hard-coding `C:/Projects/.lane-state/...`: use the same state-dir resolver as `lane-state` (single definition), `USER_REQUEST_HEAD` stays debug-only | literal `C:/Projects/.lane-state/user-request-audit.head` (relative path under the cwd on Linux) | on Linux the head copy is outside the store dir, absolute, and verified-to-exist on first write |
+| U3 | A Linux `Protector` behind `locate::PROTECTOR`, **tiered** TPM2 -> Secret Service -> `0600` key file, the chosen tier recorded in the store header and shown by `user-request list` | `Dpapi` non-Windows impl returns `Err("DPAPI is Windows-only")` for both `protect` and `unprotect` | round trip on Linux CI at the file tier; a blob written by one tier is refused (not silently re-wrapped) by another; the tier is never silent |
+| U4 | `cfg` hygiene: `windows`/`windows-future` stay `[target.'cfg(windows)']`; new Linux deps (`keyring`, `tpm2`, `libfido2` bindings) behind features so a headless build needs none | n/a | `cargo tree` on Linux without features pulls no D-Bus or TPM crate |
+| U5 | A Linux `Consent` (`hello.rs` counterpart) whose success requires **physical presence**: FIDO2 user-presence touch first, `fprintd` verify second. Returns `Unavailable` (never `Approved`) when neither exists | `HelloConsent::ask` returns `Unavailable("Windows Hello exists only on Windows")` | a fake authenticator test proves `Approved` only on a presence assertion, `Denied` on cancel, `TimedOut` on the deadline; a **live** test (ignored by default, like `live_hello_cancel_is_denied`) |
+| U6 | **No terminal-prompt channel** in the crate, behind no flag and no env var | n/a | a grep-level test that no `Consent` impl reads stdin; documented in the crate README as a deliberate omission |
+| U7 | `Owner`/window parameters of `HelloConsent` do not leak into the portable API: `Channel` construction takes only what every OS needs | `Owner::{Foreground,Console}` are Windows window handles | the same `HelloChannel::new` call site compiles on both OSes |
+| U8 | `with-secret` consumes U1-U3 unchanged (it shares the store) and states its Linux support level in its own README | shares `locate` | `revoke --all` on Linux covers every kind |
+
+AgentLife's side (P11) is only the injection seam and tests with a fake protector and prompt; it needs none of
+U1-U8 to land first, and it must not guess their names before they are published.
+
 ## 6. Slice list
 
 Sizes: **S** small PR (under about 300 changed lines, no new dependency), **M** medium, **L** large or needs a
