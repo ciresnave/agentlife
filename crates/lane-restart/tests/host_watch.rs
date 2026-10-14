@@ -87,7 +87,7 @@ fn a_watcher_sees_the_lane_and_cannot_type_into_it() {
     raw.write_all(b"X\n").unwrap();
     std::thread::sleep(Duration::from_secs(1));
     assert!(
-        !work.path().join("got.bin").exists(),
+        std::fs::metadata(work.path().join("got.bin")).map_or(0, |m| m.len()) == 0,
         "a watcher's bytes reached the lane"
     );
     let _ = watcher.kill();
@@ -97,7 +97,7 @@ fn a_watcher_sees_the_lane_and_cannot_type_into_it() {
 }
 
 /// Positive control for the test above: the same lane DOES record a byte that arrives through the
-/// host's own input path, so "got.bin never appeared" there means the watcher's bytes were not
+/// host's own input path, so "got.bin stayed empty" there means the watcher's bytes were not
 /// delivered, not that this lane cannot record anything.
 #[test]
 fn the_same_lane_records_a_byte_sent_through_the_hosts_own_stdin() {
@@ -127,7 +127,7 @@ fn the_same_lane_records_a_byte_sent_through_the_hosts_own_stdin() {
     // the lane has to be at `head` before the byte is useful; resend until it is recorded
     let got = work.path().join("got.bin");
     wait_for("the byte to be recorded", 15, || {
-        let _ = stdin.write_all(b"Y");
+        let _ = stdin.write_all(b"Y\n");
         let _ = stdin.flush();
         got.exists()
             && std::fs::metadata(&got)

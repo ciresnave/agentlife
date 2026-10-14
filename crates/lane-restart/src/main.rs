@@ -215,9 +215,11 @@ fn run_attach_cmd(rest: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     if !watch {
-        eprintln!(
-            "lane-restart attach: --watch is required. Only read-only watching exists; interactive              attach is not built (it is not approved until a threat-model note says how a              same-user agent is kept off the socket)."
-        );
+        eprintln!(concat!(
+            "lane-restart attach: --watch is required. Only read-only watching exists; ",
+            "interactive attach is not built (it is not approved until a threat-model note ",
+            "says how a same-user agent is kept off the socket)."
+        ));
         return ExitCode::FAILURE;
     }
     #[cfg(unix)]
