@@ -1,0 +1,10 @@
+[package]
+name = "pin-plan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Read-only planner for SUP-008: which `uses:` refs in a repo's workflows are mutable, what SHA to pin them to, and which Node runtime the action declares. Writes nothing."
+
+[dependencies]

@@ -21,6 +21,7 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 | `restore` launches from the lane's launch spec, registry as the flagged fallback | 0.14.0 |
 | `host` relays the child's last output after the ConPTY closes (`drain_tail`) | 0.14.1 |
 | disk floor: `lane-restart start`/restart and `agentlife restore` refuse below 20 GB free on the state volume; `status` prints it | 0.14.2 |
+| `pin-plan` (SUP-008 planner, read-only): mutable `uses:` refs, SHA of the current ref, latest release SHA, Node runtime now and at latest | 0.14.3 |
 
 ## Next, in order (nothing below waits on CireSnave or the PM's hands)
 
@@ -40,7 +41,15 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 | # | item | state |
 |---|---|---|
 | 1 | **Disk floor**: `lane-restart start`/restart/`restore` refuse (exit 1, named reason) when `C:` free < 20 GB; `lane-restart status` prints `C:` free. Incident 2026-10-14 04:45Z: `C:` hit 4 GB, builds failed in 6 lanes | built, 0.14.2 |
-| 2 | **SUP-008 pin tool**: read-only planner. Workflows enumerated with `git ls-files` (never a disk walk) in every repo under `C:\Projects`; per `uses:` ref that is a mutable tag or branch, the latest release tag's SHA to pin and the action's Node runtime (flag node20); a per-repo table, no writes. Scale per CodeRipper: 235 pins in 18 repos | next |
+| 2 | **SUP-008 pin tool**: read-only planner. Workflows enumerated with `git ls-files` (never a disk walk) in every repo under `C:\Projects`; per `uses:` ref that is a mutable tag or branch, the latest release tag's SHA to pin and the action's Node runtime (flag node20); a per-repo table, no writes. Scale per CodeRipper: 235 pins in 18 repos | built, 0.14.3 (#54) |
+
+### Finding from the first real `pin-plan` run (2026-10-14, each repo's `origin/main`)
+
+455 `uses:` in 32 repos: 59 pinned, **393 mutable** (313 tag, 80 branch) in 22 repos. **213 run node20 or
+older today** (100 are `actions/checkout@v4`; all declare node24 at their latest release), and **80 are
+branch refs** (67 `dtolnay/rust-toolchain@stable`). CodeRipper's 235 pins in 18 repos is a different
+population (see `crates/pin-plan/README.md`). Acting on it (writing the pins) is not this lane's: the tool
+only plans.
 
 ## Waiting on someone else
 
