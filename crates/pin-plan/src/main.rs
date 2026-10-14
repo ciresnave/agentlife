@@ -11,7 +11,8 @@
 //! repo. Release data comes from `gh api`, once per action, however many files use it.
 
 use pin_plan::{
-    pick_latest_tag, pin_line, runs_using, runtime_needs_attention, scan, unified_diff, Kind, Use,
+    major_of, pick_latest_tag, pin_line_as, runs_using, runtime_needs_attention, scan,
+    unified_diff, Kind, Use,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use std::process::Command;
 
 const USAGE: &str = "\
 usage: pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all] [--emit-patch DIR]
+                [--target current|latest]
 
   --root DIR     the directory whose child repositories are planned (default C:/Projects)
   --repo NAME    only this child (repeatable)
@@ -28,6 +30,14 @@ usage: pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all] [--emit-pat
                  write one unified diff per repo to DIR/<repo>.patch (`git apply` it in that
                  repo): each mutable ref becomes the SHA it names now, the old ref in a comment.
                  Nothing is written into a repo; a DIR inside one is refused. Needs the network.
+
+  --target current|latest
+                 what --emit-patch pins to (default current). `current`: the SHA the ref names now,
+                 behaviour unchanged. `latest`: the SHA of the action's latest release tag (a tag
+                 ref only; a branch ref is kept at the SHA it names now, because a branch such as
+                 `dtolnay/rust-toolchain@stable` selects behaviour a release tag does not carry; so is every
+                 ref of dtolnay/rust-toolchain, `@1.85.0` included).
+                 DIR/ACTIONS.md lists every action with its runtime now and at latest.
 
 Read-only apart from --emit-patch. Exit 0 when the plan was produced, 1 when a repo could not be read, 2 for bad usage.
 ";
@@ -39,6 +49,7 @@ struct Args {
     no_network: bool,
     all: bool,
     emit: Option<PathBuf>,
+    latest: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,6 +61,13 @@ fn parse_args() -> Result<Args, String> {
             "--repo" => a.repos.push(it.next().ok_or("--repo needs a value")?),
             "--no-network" => a.no_network = true,
             "--all" => a.all = true,
+            "--target" => {
+                a.latest = match it.next().ok_or("--target needs a value")?.as_str() {
+                    "current" => false,
+                    "latest" => true,
+                    other => return Err(format!("--target takes current or latest, not {other}")),
+                }
+            }
             "--emit-patch" => a.emit = Some(it.next().ok_or("--emit-patch needs a value")?.into()),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -275,6 +293,186 @@ struct Totals {
     docker: usize,
     unresolved: usize,
     node_flag: usize,
+    info: BTreeMap<String, ActionInfo>,
+}
+
+/// Actions whose ref selects behaviour rather than a version (`dtolnay/rust-toolchain@1.85.0` or
+/// `@stable` installs that toolchain; its `v1` release installs none): never moved to a release tag.
+const SELECTS_BEHAVIOUR: &[&str] = &["dtolnay/rust-toolchain"];
+
+/// What is known about one distinct action (`owner/repo[/path]`) across every repo planned.
+#[derive(Default)]
+struct ActionInfo {
+    uses: usize,
+    branch_uses: usize,
+    kept_branch: usize,
+    repos: std::collections::BTreeSet<String>,
+    /// `ref` -> runtime at the commit that ref names now.
+    now: BTreeMap<String, String>,
+    latest: Option<Resolved>,
+    latest_note: String,
+    latest_runtime: String,
+}
+
+/// `node24` -> `Some(24)`; anything else (`composite`, `docker`, `?`) -> `None`.
+fn node_version(rt: &str) -> Option<u32> {
+    rt.strip_prefix("node")?.parse().ok()
+}
+
+fn record(info: &mut BTreeMap<String, ActionInfo>, remote: &mut Remote, u: &Use, repo: &str) {
+    let Some((o, r, path)) = u.parts() else {
+        return;
+    };
+    if u.kind == Kind::Unversioned {
+        return;
+    }
+    let e = info.entry(u.target.clone()).or_default();
+    e.uses += 1;
+    e.repos.insert(repo.to_string());
+    if u.kind == Kind::MutableBranch {
+        e.branch_uses += 1;
+    }
+    if !remote.enabled {
+        return;
+    }
+    let reusable = u.is_reusable_workflow();
+    if !e.now.contains_key(&u.reference) {
+        let rt = if reusable {
+            "n/a".to_string()
+        } else {
+            match remote.commit_of(o, r, &u.reference) {
+                Ok(sha) => remote
+                    .runtime(o, r, path, &sha)
+                    .unwrap_or_else(|_| "?".into()),
+                Err(_) => "?".into(),
+            }
+        };
+        e.now.insert(u.reference.clone(), rt);
+    }
+    if e.latest.is_none() && e.latest_note.is_empty() {
+        match remote.latest(o, r) {
+            Ok(l) => {
+                e.latest_runtime = if reusable {
+                    "n/a".into()
+                } else {
+                    remote
+                        .runtime(o, r, path, &l.sha)
+                        .unwrap_or_else(|_| "?".into())
+                };
+                e.latest = Some(l);
+            }
+            Err(err) => e.latest_note = format!("no release: {err}"),
+        }
+    }
+}
+
+fn verdict(i: &ActionInfo) -> &'static str {
+    if i.latest.is_none() {
+        return "NO RELEASE";
+    }
+    match node_version(&i.latest_runtime) {
+        Some(n) if n <= 20 => "NO-NODE24",
+        Some(_) => "node24+",
+        None if i.latest_runtime == "n/a" => "reusable workflow",
+        None if i.latest_runtime == "?" => "runtime unread",
+        None => "no node runtime",
+    }
+}
+
+/// `DIR/ACTIONS.md`: every distinct mutable action, those with no node24 release first.
+fn write_actions(
+    dir: &Path,
+    latest_mode: bool,
+    info: &BTreeMap<String, ActionInfo>,
+) -> Result<(), String> {
+    let row = |name: &str, i: &ActionInfo| {
+        let now: Vec<String> = i.now.iter().map(|(r, rt)| format!("{r}={rt}")).collect();
+        let (tag, rt) = i
+            .latest
+            .as_ref()
+            .map_or(("-".to_string(), i.latest_note.clone()), |l| {
+                (l.tag.clone(), i.latest_runtime.clone())
+            });
+        let cur_majors: std::collections::BTreeSet<u64> =
+            i.now.keys().filter_map(|r| major_of(r)).collect();
+        let jump = match (major_of(&tag), cur_majors.iter().next_back()) {
+            (Some(l), Some(c)) if l != *c || cur_majors.len() > 1 => {
+                format!(
+                    "MAJOR {}->{l}",
+                    cur_majors
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join("/")
+                )
+            }
+            (Some(l), Some(_)) => format!("same major {l}"),
+            _ => "branch ref".into(),
+        };
+        let jump = if i.kept_branch > 0 {
+            format!(
+                "{jump}; {} of {} uses kept at current SHA",
+                i.kept_branch, i.uses
+            )
+        } else {
+            jump
+        };
+        format!(
+            "| `{}` | {} | {} | {} | {} | {} | {} |",
+            cell(name),
+            i.uses,
+            i.repos.len(),
+            cell(&now.join(", ")),
+            cell(&tag),
+            cell(&rt),
+            jump
+        )
+    };
+    let head = "| action | uses | repos | now (ref=runtime) | latest tag | runtime at latest | major |\n|---|---|---|---|---|---|---|";
+    let mut out = format!(
+        "# Actions with a mutable ref ({} mode)\n\nRuntime = `runs.using` of the action.yml at the commit named. \
+         `NO-NODE24` = the latest release itself still declares node20 or older (no upstream fix); \
+         `composite`/`docker` run no Node of their own.\n\n",
+        if latest_mode { "target latest" } else { "target current" }
+    );
+    let no24: Vec<_> = info
+        .iter()
+        .filter(|(_, i)| verdict(i) == "NO-NODE24")
+        .collect();
+    let norel: Vec<_> = info
+        .iter()
+        .filter(|(_, i)| verdict(i) == "NO RELEASE")
+        .collect();
+    out.push_str(&format!(
+        "## No node24 release yet ({})\n\n{head}\n",
+        no24.len()
+    ));
+    for (n, i) in &no24 {
+        out.push_str(&row(n, i));
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "\n## No release at all ({})\n\n{head}\n",
+        norel.len()
+    ));
+    for (n, i) in &norel {
+        out.push_str(&row(n, i));
+        out.push('\n');
+    }
+    let rest: Vec<_> = info
+        .iter()
+        .filter(|(_, i)| !matches!(verdict(i), "NO-NODE24" | "NO RELEASE"))
+        .collect();
+    out.push_str(&format!(
+        "\n## Everything else ({})\n\n{head}\n",
+        rest.len()
+    ));
+    for (n, i) in &rest {
+        out.push_str(&row(n, i));
+        out.push('\n');
+    }
+    let path = dir.join("ACTIONS.md");
+    std::fs::write(&path, out).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn cell(s: &str) -> String {
@@ -286,6 +484,7 @@ fn plan_repo(
     remote: &mut Remote,
     all: bool,
     emit: Option<&Path>,
+    latest_mode: bool,
     totals: &mut Totals,
 ) -> Result<(), String> {
     let name = repo
@@ -337,13 +536,34 @@ fn plan_repo(
                     if let Some((o, r, _)) = u.parts() {
                         totals.actions.insert(format!("{o}/{r}"));
                     }
+                    record(&mut totals.info, remote, &u, &name);
                     if emit.is_some() {
-                        // The SHA the ref names right now: pinning changes no behaviour.
+                        // current: the SHA the ref names right now (no behaviour change). latest:
+                        // the latest release's SHA for a tag ref; a branch ref keeps its current SHA.
+                        let want_latest = latest_mode
+                            && u.kind == Kind::MutableTag
+                            && !SELECTS_BEHAVIOUR.contains(&u.target.as_str());
+                        if latest_mode && !want_latest {
+                            if let Some(i) = totals.info.get_mut(&u.target) {
+                                i.kept_branch += 1;
+                            }
+                        }
                         let pinned = u
                             .parts()
                             .filter(|_| u.kind != Kind::Unversioned)
-                            .and_then(|(o, r, _)| remote.commit_of(o, r, &u.reference).ok())
-                            .and_then(|sha| pin_line(lines[u.line - 1], &u, &sha));
+                            .and_then(|(o, r, _)| {
+                                if want_latest {
+                                    remote.latest(o, r).ok().map(|l| (l.sha, l.tag))
+                                } else {
+                                    remote
+                                        .commit_of(o, r, &u.reference)
+                                        .ok()
+                                        .map(|s| (s, u.reference.clone()))
+                                }
+                            })
+                            .and_then(|(sha, label)| {
+                                pin_line_as(lines[u.line - 1], &u, &sha, &label)
+                            });
                         match pinned {
                             Some(new) => {
                                 edits.insert(u.line, new);
@@ -564,6 +784,7 @@ fn main() {
             &mut remote,
             args.all,
             args.emit.as_deref(),
+            args.latest,
             &mut totals,
         ) {
             let name = repo
@@ -572,6 +793,12 @@ fn main() {
                 .unwrap_or_default();
             println!("## {name}\n\nCOULD NOT READ: {e}\n");
             failed.push(name);
+        }
+    }
+    if let Some(dir) = &args.emit {
+        if let Err(e) = write_actions(dir, args.latest, &totals.info) {
+            eprintln!("pin-plan: {e}");
+            failed.push("ACTIONS.md".into());
         }
     }
     println!("## Totals\n");
