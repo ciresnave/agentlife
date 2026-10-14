@@ -161,6 +161,9 @@ impl Rig {
             .env("USER_REQUEST_HEAD", self.dir.path().join("consent-head"))
             .env("AGENTLIFE_NO_HELLO", "1")
             .env("LANE_DISK_FLOOR_BYTES", floor)
+            // The lane state directory is `C:/Projects/.lane-state`, which is on no mount off
+            // Windows: measure this test's own directory so the refusal is exercised everywhere.
+            .env("LANE_DISK_PROBE_PATH", self.dir.path())
             .output()
             .expect("run agentlife")
     }

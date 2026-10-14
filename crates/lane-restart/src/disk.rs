@@ -20,6 +20,21 @@ pub const FLOOR_BYTES: u64 = 20 * (1 << 30);
 /// release build ignores it, because a lane that could set it to `0` would have no floor.
 pub const FLOOR_ENV: &str = "LANE_DISK_FLOOR_BYTES";
 
+/// Debug builds only: the path whose volume is measured instead of the lane state directory. A test
+/// on a machine where `C:/Projects/.lane-state` is on no mount (Linux CI) points it at a temp dir,
+/// so the refusal is exercised there too. A release build ignores it.
+pub const PROBE_PATH_ENV: &str = "LANE_DISK_PROBE_PATH";
+
+/// The path to measure: `default`, or in a debug build `$LANE_DISK_PROBE_PATH` when it is set.
+fn probe_path(default: &Path) -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(p) = std::env::var_os(PROBE_PATH_ENV).filter(|p| !p.is_empty()) {
+            return p.into();
+        }
+    }
+    default.to_path_buf()
+}
+
 /// The floor in force: [`FLOOR_BYTES`], or in a debug build `$LANE_DISK_FLOOR_BYTES` when it parses.
 pub fn floor_bytes() -> u64 {
     if cfg!(debug_assertions) {
@@ -131,7 +146,7 @@ pub fn probe(path: &Path) -> Result<Free, String> {
 /// there is not, and `Ok(Unknown(why))` when free space could not be read. **Unreadable is not
 /// refused**: a broken probe must not stop every lane from restarting; the caller prints `why`.
 pub fn guard(path: &Path) -> Result<GuardOk, Refusal> {
-    match probe(path) {
+    match probe(&probe_path(path)) {
         Ok(free) => check(&free, floor_bytes()).map(|()| GuardOk::Free(free)),
         Err(why) => Ok(GuardOk::Unknown(why)),
     }
@@ -146,7 +161,7 @@ pub enum GuardOk {
 
 /// One line for `status`: `C: free: 123.4 GB (floor 20.0 GB)` or why it is unknown.
 pub fn status_line(path: &Path) -> String {
-    match probe(path) {
+    match probe(&probe_path(path)) {
         Ok(f) => format!(
             "{} free: {} (floor {}){}",
             f.mount,

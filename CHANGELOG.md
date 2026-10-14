@@ -16,8 +16,9 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   so the JSON on stdout keeps its shape).
 - **An unreadable probe is a warning, not a refusal**: if no mount contains the state directory the launch goes
   ahead and says it did not check, so a broken probe cannot stop every lane restarting. Say so if you disagree.
-- **Debug builds only** honour `LANE_DISK_FLOOR_BYTES` (tests set `0`); a release build ignores it, so a lane
-  cannot lower the floor.
+- **Debug builds only** honour `LANE_DISK_FLOOR_BYTES` (tests set `0`) and `LANE_DISK_PROBE_PATH` (the path whose
+  volume is measured, so Linux CI, where `C:/Projects/.lane-state` is on no mount, still exercises the refusal);
+  a release build ignores both, so a lane cannot lower the floor.
 - Not exercised for real: the refusal on this machine's actual `C:` (it has 130 GB free), and `lane-restart`'s
   start and restart paths end to end; those are covered by the pure `check`/`volume_for` tests, the restore
   preflight test and the `agentlife restore` e2e.
