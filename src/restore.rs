@@ -398,6 +398,34 @@ pub fn preflight(programs: &Programs, exists: &dyn Fn(&str) -> bool) -> Vec<Pref
     ]
 }
 
+/// The disk-floor line for the preflight: fatal when the volume is below the floor, a non-fatal
+/// note when free space could not be read (a broken probe must not block every restore).
+pub fn disk_preflight(
+    guard: Result<lane_restart::disk::GuardOk, lane_restart::disk::Refusal>,
+) -> PreflightLine {
+    use lane_restart::disk::GuardOk;
+    match guard {
+        Ok(GuardOk::Free(f)) => PreflightLine {
+            name: "disk floor".into(),
+            ok: true,
+            detail: format!("{} has {} bytes free", f.mount, f.bytes),
+            fatal: true,
+        },
+        Ok(GuardOk::Unknown(why)) => PreflightLine {
+            name: "disk floor".into(),
+            ok: true,
+            detail: format!("free space was not checked: {why}"),
+            fatal: false,
+        },
+        Err(r) => PreflightLine {
+            name: "disk floor".into(),
+            ok: false,
+            detail: r.to_string(),
+            fatal: true,
+        },
+    }
+}
+
 struct Live {
     idx: usize,
     launched_at: DateTime<Utc>,
@@ -1230,6 +1258,38 @@ mod tests {
             r.report.summary.working, 3,
             "a missing claude on this PATH only warns"
         );
+    }
+
+    #[test]
+    fn a_volume_below_the_disk_floor_starts_nothing_and_an_unreadable_probe_does_not_block() {
+        use lane_restart::disk::{check, Free, GuardOk};
+        let plan = plan_of(3, false, 3, true);
+        let low = Free {
+            mount: "C:\\".into(),
+            bytes: 4 << 30,
+        };
+        let refused = check(&low, 20 << 30).map(|()| GuardOk::Free(low.clone()));
+        let mut pre = ok_pre();
+        pre.push(disk_preflight(refused));
+        let r = run_with(Fleet::new(GOOD), &plan, pre, &|| None, 2);
+        assert!(r.fleet.spawn_calls.borrow().is_empty(), "nothing launched");
+        assert!(matches!(
+            outcome(&r.report, "a-0"),
+            Outcome::NotStarted(w) if w.contains("disk floor") && w.contains("C:\\")
+        ));
+        // Positive control: the same plan with enough free space runs.
+        let enough = check(&low, 1 << 30).map(|()| GuardOk::Free(low.clone()));
+        let mut pre = ok_pre();
+        pre.push(disk_preflight(enough));
+        let r = run_with(Fleet::new(GOOD), &plan, pre, &|| None, 2);
+        assert_eq!(r.report.summary.working, 3);
+        // Unreadable: a warning line, not a refusal.
+        let mut pre = ok_pre();
+        let line = disk_preflight(Ok(GuardOk::Unknown("no volume".into())));
+        assert!(!line.fatal && line.ok);
+        pre.push(line);
+        let r = run_with(Fleet::new(GOOD), &plan, pre, &|| None, 2);
+        assert_eq!(r.report.summary.working, 3);
     }
 
     #[test]

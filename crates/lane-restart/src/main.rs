@@ -262,6 +262,9 @@ fn run_status_cmd(json: bool) -> ExitCode {
     let facts = SysinfoFacts::new(claude_config_dir());
     let report = spec::status_all(&state_dir(), &facts);
     if json {
+        // The JSON shape is unchanged; the disk line goes to stderr so a reader of stdout is not
+        // broken by it.
+        eprintln!("{}", lane_restart::disk::status_line(&state_dir()));
         match serde_json::to_string_pretty(&report) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -271,6 +274,7 @@ fn run_status_cmd(json: bool) -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    println!("{}", lane_restart::disk::status_line(&state_dir()));
     for r in &report.roles {
         println!(
             "{}\t{:?}\tspec={:?}\tstartable={}{}",
@@ -338,6 +342,22 @@ fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
     })
 }
 
+/// The disk floor (`disk.rs`), checked before any launch. A refusal is printed as `kind: refused -
+/// ...` and the caller exits 1 and logs it; an unreadable probe is a warning, not a refusal.
+fn disk_gate(kind: &str) -> Result<(), lane_restart::disk::Refusal> {
+    match lane_restart::disk::guard(&state_dir()) {
+        Ok(lane_restart::disk::GuardOk::Free(_)) => Ok(()),
+        Ok(lane_restart::disk::GuardOk::Unknown(why)) => {
+            eprintln!("lane-restart {kind}: warning - free disk space was not checked: {why}");
+            Ok(())
+        }
+        Err(refusal) => {
+            eprintln!("lane-restart {kind}: refused - {refusal}");
+            Err(refusal)
+        }
+    }
+}
+
 /// `specs import [--role R] [--dry-run]` -> `(role, dry_run)`.
 fn parse_specs_import_args(rest: &[String]) -> Result<(Option<String>, bool), ArgError> {
     let mut role = None;
@@ -400,6 +420,10 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Err(refusal) = disk_gate("start") {
+        ledger(None, &format!("refused: {refusal}"), false);
+        return ExitCode::FAILURE;
+    }
     let pin_note = plan
         .pinned_from
         .as_deref()
@@ -1051,6 +1075,16 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(plan) => {
+            // Before the kill: after it, a refusal would leave a lane dead and not relaunched.
+            if let Err(refusal) = disk_gate("restart") {
+                log_outcome(
+                    requested_by,
+                    &args.role,
+                    &format!("refused: {refusal}"),
+                    false,
+                );
+                return ExitCode::FAILURE;
+            }
             eprintln!(
                 "lane-restart: killing pid {} and relaunching a fresh session...",
                 plan.state.pid

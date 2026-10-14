@@ -20,6 +20,7 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 | restore report lists every wanted agent not in a batch, with why | 0.13.1 |
 | `restore` launches from the lane's launch spec, registry as the flagged fallback | 0.14.0 |
 | `host` relays the child's last output after the ConPTY closes (`drain_tail`) | 0.14.1 |
+| disk floor: `lane-restart start`/restart and `agentlife restore` refuse below 20 GB free on the state volume; `status` prints it | 0.14.2 |
 
 ## Next, in order (nothing below waits on CireSnave or the PM's hands)
 
@@ -33,6 +34,13 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
    complete `<role>.launch.json` when there is one and from the registry otherwise, and each plan entry says which
    (`source`). Remaining from it: nothing writes specs for lanes that have none except `lane-restart specs import`
    (PM only) and a lane's own next launch, so until the PM runs that import most plans still say `registry`.
+
+## Portfolio items from the PM (2026-10-14), taken in order
+
+| # | item | state |
+|---|---|---|
+| 1 | **Disk floor**: `lane-restart start`/restart/`restore` refuse (exit 1, named reason) when `C:` free < 20 GB; `lane-restart status` prints `C:` free. Incident 2026-10-14 04:45Z: `C:` hit 4 GB, builds failed in 6 lanes | built, 0.14.2 |
+| 2 | **SUP-008 pin tool**: read-only planner. Workflows enumerated with `git ls-files` (never a disk walk) in every repo under `C:\Projects`; per `uses:` ref that is a mutable tag or branch, the latest release tag's SHA to pin and the action's Node runtime (flag node20); a per-repo table, no writes. Scale per CodeRipper: 235 pins in 18 repos | next |
 
 ## Waiting on someone else
 

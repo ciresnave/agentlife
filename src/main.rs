@@ -254,6 +254,11 @@ fn build_plan(
     Ok((p, listing.problems))
 }
 
+/// The directory whose volume the disk floor is measured on: the lane state directory.
+fn state_dir_of(cfg: &Config) -> std::path::PathBuf {
+    std::path::PathBuf::from(&cfg.lane_state_dir)
+}
+
 fn free_memory_gb() -> Option<f64> {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
@@ -279,6 +284,15 @@ fn run_with_runtime(
         eprintln!("agentlife {command}: {e}");
         ExitCode::FAILURE
     };
+    // The disk floor, before anyone is asked: an approval must not be spent on a run that is then
+    // refused. `restore::preflight` repeats it at execution time.
+    match lane_restart::disk::guard(&state_dir_of(cfg)) {
+        Ok(lane_restart::disk::GuardOk::Free(_)) => {}
+        Ok(lane_restart::disk::GuardOk::Unknown(why)) => {
+            eprintln!("agentlife {command}: warning - free disk space was not checked: {why}")
+        }
+        Err(refusal) => return fail(format!("refused - {refusal}")),
+    }
     let mut backend = match consent::installed() {
         Ok(b) => b,
         Err(e) => return fail(e),
@@ -313,7 +327,10 @@ fn run_with_runtime(
             lane_state_dir: &lane_state_dir,
         };
         let sleep = |d: std::time::Duration| std::thread::sleep(d);
-        let pre = restore::preflight(&programs, &restore::program_exists);
+        let mut pre = restore::preflight(&programs, &restore::program_exists);
+        pre.push(restore::disk_preflight(lane_restart::disk::guard(
+            &state_dir_of(cfg),
+        )));
         restore::execute(
             p,
             pre,
