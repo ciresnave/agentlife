@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.4
+
+- **`pin-plan --emit-patch DIR`**: one `git apply`-able unified diff per repo (`DIR/<repo>.patch`) that pins each
+  mutable `uses:` to the commit SHA its ref names now, the old ref kept as a comment (`@<sha> # v4`; an existing
+  comment follows, CRLF kept). It writes only into `DIR`, refuses a `DIR` inside any planned repo, needs the
+  network, and opens no PR; unresolvable refs are counted, not patched.
+- **Dogfood test** (`crates/pin-plan/tests/own_workflows.rs`): this repo's workflow files, read from the index,
+  hold 0 mutable refs and every pin carries its tag comment. `ci.yml` was already pinned (0.12.4, #36) and each
+  SHA still equals what its commented ref names (read 2026-10-14); no workflow file changes here.
+
 ## 0.14.3
 
 - **`pin-plan`: the SUP-008 read-only pin planner** (new workspace crate `crates/pin-plan`, not published). For

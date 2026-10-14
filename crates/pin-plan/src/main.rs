@@ -3,26 +3,33 @@
 //! `pin-plan` - SUP-008 planner. Read-only: for every repo under a root, every `uses:` in its
 //! workflow and action files that names a mutable tag or branch, with the latest release tag's
 //! commit SHA to pin it to and the Node runtime that action declares (node20 is flagged). Prints
-//! one table per repo. It writes nothing: no file, no ref, no PR.
+//! one table per repo. It writes nothing: no file, no ref, no PR. The one exception is
+//! `--emit-patch DIR`, which writes one `<repo>.patch` per repo into `DIR` and nowhere else.
 //!
 //! Files are enumerated with `git ls-files` (the index), never by walking a checkout, and their
 //! text is read from `origin/main` (`git show`), falling back to `HEAD`, with the ref printed per
 //! repo. Release data comes from `gh api`, once per action, however many files use it.
 
-use pin_plan::{pick_latest_tag, runs_using, runtime_needs_attention, scan, Kind, Use};
+use pin_plan::{
+    pick_latest_tag, pin_line, runs_using, runtime_needs_attention, scan, unified_diff, Kind, Use,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const USAGE: &str = "\
-usage: pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all]
+usage: pin-plan [--root DIR] [--repo NAME]... [--no-network] [--all] [--emit-patch DIR]
 
   --root DIR     the directory whose child repositories are planned (default C:/Projects)
   --repo NAME    only this child (repeatable)
   --no-network   do not call `gh`: the tables list the mutable refs only
   --all          also list refs that are already pinned (default: counted, not listed)
+  --emit-patch DIR
+                 write one unified diff per repo to DIR/<repo>.patch (`git apply` it in that
+                 repo): each mutable ref becomes the SHA it names now, the old ref in a comment.
+                 Nothing is written into a repo; a DIR inside one is refused. Needs the network.
 
-Read-only. Exit 0 when the plan was produced, 1 when a repo could not be read, 2 for bad usage.
+Read-only apart from --emit-patch. Exit 0 when the plan was produced, 1 when a repo could not be read, 2 for bad usage.
 ";
 
 #[derive(Default)]
@@ -31,6 +38,7 @@ struct Args {
     repos: Vec<String>,
     no_network: bool,
     all: bool,
+    emit: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -42,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
             "--repo" => a.repos.push(it.next().ok_or("--repo needs a value")?),
             "--no-network" => a.no_network = true,
             "--all" => a.all = true,
+            "--emit-patch" => a.emit = Some(it.next().ok_or("--emit-patch needs a value")?.into()),
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -258,6 +267,8 @@ struct Totals {
     mutable_tag: usize,
     mutable_branch: usize,
     mutable_other: usize,
+    patched: usize,
+    unpatchable: usize,
     repos_with_mutable: usize,
     actions: std::collections::BTreeSet<String>,
     local: usize,
@@ -274,6 +285,7 @@ fn plan_repo(
     repo: &Path,
     remote: &mut Remote,
     all: bool,
+    emit: Option<&Path>,
     totals: &mut Totals,
 ) -> Result<(), String> {
     let name = repo
@@ -296,6 +308,7 @@ fn plan_repo(
     let mut rows: Vec<(Use, [String; 3])> = Vec::new();
     let mut missing = Vec::new();
     let mut repo_mutable = 0usize;
+    let mut patch = String::new();
     for f in &files {
         let text = match git(repo, &["show", &format!("{rev}:{f}")]) {
             Ok(t) => t,
@@ -305,6 +318,8 @@ fn plan_repo(
                 continue;
             }
         };
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut edits = BTreeMap::new();
         for u in scan(f, &text) {
             totals.uses += 1;
             match u.kind {
@@ -322,6 +337,21 @@ fn plan_repo(
                     if let Some((o, r, _)) = u.parts() {
                         totals.actions.insert(format!("{o}/{r}"));
                     }
+                    if emit.is_some() {
+                        // The SHA the ref names right now: pinning changes no behaviour.
+                        let pinned = u
+                            .parts()
+                            .filter(|_| u.kind != Kind::Unversioned)
+                            .and_then(|(o, r, _)| remote.commit_of(o, r, &u.reference).ok())
+                            .and_then(|sha| pin_line(lines[u.line - 1], &u, &sha));
+                        match pinned {
+                            Some(new) => {
+                                edits.insert(u.line, new);
+                                totals.patched += 1;
+                            }
+                            None => totals.unpatchable += 1,
+                        }
+                    }
                 }
             }
             let show = u.is_mutable() || all;
@@ -335,6 +365,13 @@ fn plan_repo(
             };
             rows.push((u, note));
         }
+        patch.push_str(&unified_diff(f, &text, &edits));
+    }
+    if let (Some(dir), false) = (emit, patch.is_empty()) {
+        let out = dir.join(format!("{name}.patch"));
+        std::fs::write(&out, &patch).map_err(|e| format!("{}: {e}", out.display()))?;
+        println!("Patch: `{}`.", out.display());
+        println!();
     }
     if repo_mutable > 0 {
         totals.repos_with_mutable += 1;
@@ -438,6 +475,32 @@ fn describe(u: &Use, remote: &mut Remote, totals: &mut Totals) -> [String; 3] {
     ]
 }
 
+/// Creates `dir` unless it lies inside one of `repos` (judged by its nearest existing ancestor,
+/// canonicalised, so a not-yet-created subfolder of a repo is refused too).
+fn prepare_patch_dir(dir: &Path, repos: &[PathBuf]) -> Result<(), String> {
+    let mut probe = std::path::absolute(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    while !probe.exists() {
+        if !probe.pop() {
+            return Err(format!("{}: no existing ancestor", dir.display()));
+        }
+    }
+    let probe = probe
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", probe.display()))?;
+    for r in repos {
+        if let Ok(r) = r.canonicalize() {
+            if probe.starts_with(&r) {
+                return Err(format!(
+                    "{} is inside the repository {}: patches are never written into a repo",
+                    dir.display(),
+                    r.display()
+                ));
+            }
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
 fn main() {
     let args = match parse_args() {
         Ok(a) => a,
@@ -457,6 +520,16 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(dir) = &args.emit {
+        if args.no_network {
+            eprintln!("pin-plan: --emit-patch needs the network (drop --no-network)");
+            std::process::exit(2);
+        }
+        if let Err(e) = prepare_patch_dir(dir, &repos) {
+            eprintln!("pin-plan: {e}");
+            std::process::exit(2);
+        }
+    }
     println!("# SUP-008 pin plan (read-only)");
     println!();
     println!(
@@ -486,7 +559,13 @@ fn main() {
     let mut totals = Totals::default();
     let mut failed = Vec::new();
     for repo in &repos {
-        if let Err(e) = plan_repo(repo, &mut remote, args.all, &mut totals) {
+        if let Err(e) = plan_repo(
+            repo,
+            &mut remote,
+            args.all,
+            args.emit.as_deref(),
+            &mut totals,
+        ) {
             let name = repo
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -500,7 +579,7 @@ fn main() {
         "{} repo(s) read ({} failed), {} workflow/action file(s), {} `uses:` reference(s): {} already \
          pinned, **{} mutable** ({} tag, {} branch, {} no ref) in {} repo(s) across {} distinct \
          action repo(s), {} local, {} docker. {} mutable reference(s) unresolved, {} on node20 or \
-         older.",
+         older.{}",
         totals.repos,
         failed.len(),
         totals.files,
@@ -515,7 +594,15 @@ fn main() {
         totals.local,
         totals.docker,
         totals.unresolved,
-        totals.node_flag
+        totals.node_flag,
+        if args.emit.is_some() {
+            format!(
+                " Patches: {} reference(s) pinned, {} could not be.",
+                totals.patched, totals.unpatchable
+            )
+        } else {
+            String::new()
+        }
     );
     std::process::exit(if failed.is_empty() { 0 } else { 1 });
 }

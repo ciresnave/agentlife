@@ -168,6 +168,75 @@ pub fn scan(file: &str, text: &str) -> Vec<Use> {
     out
 }
 
+/// `line` (no newline; a trailing CR is kept) with `u`'s `target@ref` replaced by `target@sha`
+/// and the old ref written after it as a comment: `uses: a/b@<sha> # v4`. A comment the line
+/// already had follows: `# v4 - old note`. `None` when the line does not carry `u.raw`.
+pub fn pin_line(line: &str, u: &Use, sha: &str) -> Option<String> {
+    let at = line.find(&u.raw)?;
+    let (head, rest) = (&line[..at], &line[at + u.raw.len()..]);
+    let (rest, cr) = match rest.strip_suffix('\r') {
+        Some(r) => (r, "\r"),
+        None => (rest, ""),
+    };
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+    let tail = &rest[quote.map_or(0, char::len_utf8)..];
+    let note = tail.trim().strip_prefix('#').map(str::trim);
+    let q = quote.map(String::from).unwrap_or_default();
+    let comment = match note {
+        Some(n) if !n.is_empty() => format!("# {} - {n}", u.reference),
+        _ => format!("# {}", u.reference),
+    };
+    Some(format!("{head}{}@{sha}{q} {comment}{cr}", u.target))
+}
+
+/// A unified diff (`git apply` takes it) for `path`, turning each 1-based line in `edits` into the
+/// new text given (no newline). Three lines of context; hunks that touch or overlap are merged.
+/// Empty when `edits` is empty. An edit replaces one line with one line, so both hunk sides have
+/// equal length.
+pub fn unified_diff(
+    path: &str,
+    old: &str,
+    edits: &std::collections::BTreeMap<usize, String>,
+) -> String {
+    const CTX: usize = 3;
+    let lines: Vec<&str> = old.split_inclusive('\n').collect();
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    for &e in edits.keys().filter(|e| **e >= 1 && **e <= lines.len()) {
+        let (s, t) = (e.saturating_sub(CTX).max(1), (e + CTX).min(lines.len()));
+        match hunks.last_mut() {
+            Some(h) if s <= h.1 + 1 => h.1 = t,
+            _ => hunks.push((s, t)),
+        }
+    }
+    if hunks.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n");
+    let emit = |out: &mut String, tag: char, text: &str| {
+        out.push(tag);
+        out.push_str(text);
+        if !text.ends_with('\n') {
+            out.push_str("\n\\ No newline at end of file\n");
+        }
+    };
+    for (s, t) in hunks {
+        let n = t - s + 1;
+        out.push_str(&format!("@@ -{s},{n} +{s},{n} @@\n"));
+        for no in s..=t {
+            let l = lines[no - 1];
+            match edits.get(&no) {
+                Some(new) => {
+                    emit(&mut out, '-', l);
+                    let nl = if l.ends_with('\n') { "\n" } else { "" };
+                    emit(&mut out, '+', &format!("{new}{nl}"));
+                }
+                None => emit(&mut out, ' ', l),
+            }
+        }
+    }
+    out
+}
+
 /// The `runs.using` value of an `action.yml` (`node20`, `composite`, `docker`...), or `None`.
 pub fn runs_using(action_yml: &str) -> Option<String> {
     let mut in_runs = false;
@@ -347,5 +416,98 @@ mod tests {
             pick_latest_tag(&n(&["v3", "v3.0.1"])),
             Some("v3.0.1".into())
         );
+    }
+    fn apply(old: &str, edits: &std::collections::BTreeMap<usize, String>) -> String {
+        old.split_inclusive('\n')
+            .enumerate()
+            .map(|(i, l)| match edits.get(&(i + 1)) {
+                Some(n) => format!("{n}{}", if l.ends_with('\n') { "\n" } else { "" }),
+                None => l.to_string(),
+            })
+            .collect()
+    }
+
+    fn pin_all(text: &str) -> std::collections::BTreeMap<usize, String> {
+        let mut edits = std::collections::BTreeMap::new();
+        let lines: Vec<&str> = text.split('\n').collect();
+        for u in scan("w.yml", text).iter().filter(|u| u.is_mutable()) {
+            if let Some(n) = pin_line(lines[u.line - 1], u, SHA) {
+                edits.insert(u.line, n);
+            }
+        }
+        edits
+    }
+
+    fn mutable_count(text: &str) -> usize {
+        scan("w.yml", text)
+            .iter()
+            .filter(|u| u.is_mutable())
+            .count()
+    }
+
+    #[test]
+    fn pin_line_pins_to_the_sha_and_comments_the_old_ref() {
+        let u = |l: &str| scan("w", l).remove(0);
+        for (line, want) in [
+            (
+                "      - uses: actions/checkout@v4",
+                format!("      - uses: actions/checkout@{SHA} # v4"),
+            ),
+            (
+                "        uses: a/b@main # note",
+                format!("        uses: a/b@{SHA} # main - note"),
+            ),
+            (
+                "  uses: \"a/b@v1\" # n",
+                format!("  uses: \"a/b@{SHA}\" # v1 - n"),
+            ),
+            ("  uses: 'a/b@v1'", format!("  uses: 'a/b@{SHA}' # v1")),
+            ("  uses: a/b@v1\r", format!("  uses: a/b@{SHA} # v1\r")),
+            ("  uses: a/b/c@v1 #", format!("  uses: a/b/c@{SHA} # v1")),
+        ] {
+            let got = pin_line(line, &u(line), SHA).unwrap();
+            assert_eq!(got, want, "{line}");
+            // What was written reads back as pinned, to the same target.
+            let back = u(got.trim_end_matches('\r'));
+            assert_eq!((back.kind, back.target), (Kind::Pinned, u(line).target));
+        }
+        assert_eq!(pin_line("nothing here", &u("uses: a/b@v1"), SHA), None);
+    }
+
+    #[test]
+    fn the_diff_pins_every_mutable_ref_and_nothing_else() {
+        let text = "a: 1\nsteps:\n  - uses: x/y@v1\n  - run: ls\n  - uses: p/q@main\nz: 2\nlast: 3\n  - uses: far/away@v9\nend";
+        let edits = pin_all(text);
+        assert_eq!(edits.len(), 3);
+        let d = unified_diff("w.yml", text, &edits);
+        assert!(d.starts_with("diff --git a/w.yml b/w.yml\n--- a/w.yml\n+++ b/w.yml\n"));
+        // Edits on lines 3, 5 and 8 all lie within context of each other: one hunk.
+        assert_eq!(d.matches("\n@@ ").count(), 1, "{d}");
+        assert_eq!(d.matches("\n-  - uses:").count(), 3, "{d}");
+        assert_eq!(d.matches("\n+  - uses:").count(), 3, "{d}");
+        assert_eq!(mutable_count(text), 3);
+        assert_eq!(mutable_count(&apply(text, &edits)), 0);
+        assert_eq!(unified_diff("w.yml", text, &Default::default()), "");
+    }
+
+    #[test]
+    fn the_diff_marks_a_missing_final_newline_and_keeps_crlf() {
+        let text = "s:\r\n  - uses: x/y@v1";
+        let d = unified_diff("w.yml", text, &pin_all(text));
+        let want =
+            format!("-  - uses: x/y@v1\n\\ No newline at end of file\n+  - uses: x/y@{SHA} # v1\n\\ No newline");
+        assert!(d.contains(&want), "{d:?}");
+        assert!(d.contains(" s:\r\n"), "{d:?}");
+    }
+
+    #[test]
+    fn distant_edits_make_separate_hunks() {
+        let mut text = String::from("  - uses: a/b@v1\n");
+        text.push_str(&"k: v\n".repeat(20));
+        text.push_str("  - uses: c/d@v2\n");
+        let d = unified_diff("w.yml", &text, &pin_all(&text));
+        assert!(d.contains("@@ -1,4 +1,4 @@"), "{d}");
+        assert!(d.contains("@@ -19,4 +19,4 @@"), "{d}");
+        assert_eq!(d.matches("@@ -").count(), 2, "{d}");
     }
 }
