@@ -112,9 +112,9 @@ the publish record; numbers above are for 0.12.2 and will differ.
   toolchain fails inside a dependency with a message that does not name agentlife. `lane-state` has the
   field; `agentlife` and `lane-restart` do not.
 * **`lane-restart` has no `readme`, `keywords` or `categories`**; crates.io accepts that, but the page is bare.
-* **`lane-restart` depends on `windows-sys`** unconditionally. It builds on Linux CI today
-  (`windows-sys` compiles to nothing there); whether a Windows-only tool belongs on crates.io is a
-  decision below.
+* **`lane-restart` depends on `windows-sys`** under `[target.'cfg(windows)'.dependencies]` since 0.14.27
+  (it was unconditional and compiled to nothing off Windows). The tool is being made to run on Linux too
+  (`docs/PORT-LINUX-PLAN.md`), so "a Windows-only tool on crates.io" is no longer the question.
 
 ## Dependency order
 

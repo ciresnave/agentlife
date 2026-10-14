@@ -63,7 +63,7 @@ impl Home {
     pub fn resolve(env_value: Option<&str>) -> Result<Self, HomeError> {
         match env_value {
             Some(v) if !v.is_empty() => Self::new(v),
-            _ => Self::new(DEFAULT_HOME),
+            _ => Self::new(lane_state::platform::agentlife_home()),
         }
     }
 
@@ -121,7 +121,13 @@ mod tests {
     #[test]
     fn the_default_is_outside_every_repo_and_is_not_lane_state() {
         let h = Home::resolve(None).unwrap();
-        assert_eq!(h.root(), Path::new("C:/Projects/.agentlife"));
+        if cfg!(windows) {
+            assert_eq!(h.root(), Path::new("C:/Projects/.agentlife"));
+        } else {
+            // off Windows the default is the XDG location, never the relative `C:/...` directory
+            assert_eq!(h.root(), lane_state::platform::agentlife_home().as_path());
+            assert!(!h.root().to_string_lossy().starts_with("C:"));
+        }
         assert!(Home::new(DEFAULT_HOME).is_ok());
     }
 

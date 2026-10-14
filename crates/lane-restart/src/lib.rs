@@ -37,11 +37,12 @@ pub mod tab_close;
 #[cfg(test)]
 mod testing;
 
-/// `C:/Projects/.lane-state` - RESTART-TOOL-DESIGN.md section 7. Not
+/// The state directory (`C:/Projects/.lane-state` on Windows; under `XDG_STATE_HOME` elsewhere, see
+/// `lane_state::platform`) - RESTART-TOOL-DESIGN.md section 7. Not
 /// configurable via CLI on purpose: a caller-supplied state directory would
 /// defeat the whole point of a fixed, portfolio-wide location every lane and
 /// the PM agree on. (Moved here from the binary with `relaunch`, which reads
 /// the policy default model from it; the path is unchanged.)
 pub fn state_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("C:/Projects/.lane-state")
+    lane_state::platform::state_dir()
 }

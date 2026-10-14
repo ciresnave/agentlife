@@ -69,10 +69,7 @@ impl std::fmt::Display for DuplicateRefusal {
     }
 }
 
-fn base_name(name: &str) -> String {
-    let lower = name.to_lowercase();
-    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
-}
+use lane_state::platform::names::image_base as base_name;
 
 fn is_host_of(p: &ProcEntry, role: &str) -> bool {
     base_name(&p.name) == "lane-restart"

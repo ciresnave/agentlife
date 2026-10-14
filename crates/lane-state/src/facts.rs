@@ -31,10 +31,6 @@ fn full_process_refresh() -> ProcessRefreshKind {
         .with_exe(UpdateKind::Always)
 }
 
-/// Image names (lowercased, no extension) counted as "a live shell" when
-/// found as a descendant of the target PID — RESTART-TOOL-DESIGN.md §1a.
-const SHELL_IMAGE_NAMES: &[&str] = &["bash", "pwsh", "powershell", "cmd", "sh", "zsh", "fish"];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellCheckError {
     /// The process table could not be enumerated cleanly. RESTART-TOOL-DESIGN.md
@@ -175,10 +171,7 @@ impl SystemFacts for SysinfoFacts {
             full_process_refresh(),
         );
         match sys.process(Pid::from_u32(pid)) {
-            Some(p) => {
-                let name = p.name().to_string_lossy().to_lowercase();
-                name == "claude" || name == "claude.exe"
-            }
+            Some(p) => crate::platform::names::is_claude(&p.name().to_string_lossy()),
             None => false,
         }
     }
@@ -213,9 +206,8 @@ impl SystemFacts for SysinfoFacts {
                 if process.parent() != Some(current) {
                     continue;
                 }
-                let name = process.name().to_string_lossy().to_lowercase();
-                let base = name.trim_end_matches(".exe");
-                if SHELL_IMAGE_NAMES.contains(&base) {
+                // "A live shell" (RESTART-TOOL-DESIGN.md §1a): `platform::names::SHELLS`.
+                if crate::platform::names::is_shell(&process.name().to_string_lossy()) {
                     return Ok(true);
                 }
                 stack.push(*child_pid);

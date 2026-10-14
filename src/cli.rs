@@ -164,13 +164,14 @@ USAGE:
         whose head is the worktree's HEAD, the remote branch gone, the tree clean: CLAUDE.md
         sections 3 and 4). Prints the `git worktree remove` lines and NEVER removes anything.
         Uncommitted files are \"stale-dirty\" (ask first); a failed lookup is \"unknown\", never
-        stale. Repos are the --repo paths, else the children of --root (default C:/Projects)
-        with a .git directory. Needs git and gh. Read-only.
+        stale. Repos are the --repo paths, else the children of --root (default C:/Projects on Windows,
+        ~/Projects elsewhere) with a .git directory. Needs git and gh. Read-only.
 
     agentlife doctor [--exe <path>]
         Read-only. Reports the installed lane-restart host (the configured host_program, resolved as a
         task would) and the agentlife.exe at the path the hooks use (default
-        C:/Projects/.claude-hooks/agentlife.exe) with the version each reports, against the version
+        C:/Projects/.claude-hooks/agentlife.exe on Windows, agentlife in ~/.local/lib/agentlife/hooks
+        elsewhere) with the version each reports, against the version
         this build requires: OK, MISMATCH, MISSING or UNREADABLE for each. Exits non-zero unless both
         are OK. Installs nothing.
 
@@ -206,7 +207,8 @@ USAGE:
     agentlife --version | --help
 
 STATE:
-    <home> is $AGENTLIFE_HOME, else C:/Projects/.agentlife.
+    <home> is $AGENTLIFE_HOME, else C:/Projects/.agentlife on Windows ($XDG_STATE_HOME/agentlife, else
+    ~/.local/state/agentlife, elsewhere).
 ";
 
 fn one_agent<'a>(rest: &'a [String], cmd: &str) -> Result<(&'a String, &'a [String]), String> {

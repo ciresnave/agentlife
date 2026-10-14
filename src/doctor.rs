@@ -15,8 +15,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where `docs/HOOK-INSTALL.md` tells the hooks and the logon task to find this binary.
+/// Where `docs/HOOK-INSTALL.md` tells the hooks and the logon task to find this binary on
+/// Windows. Off Windows see [`hook_exe`].
 pub const HOOK_EXE: &str = "C:/Projects/.claude-hooks/agentlife.exe";
+
+/// The hook binary's path on this OS: [`HOOK_EXE`] on Windows, `agentlife` in the hooks directory
+/// elsewhere (`lane_state::platform::hooks_dir`).
+pub fn hook_exe() -> String {
+    if cfg!(windows) {
+        HOOK_EXE.to_string()
+    } else {
+        lane_state::platform::hooks_dir()
+            .join("agentlife")
+            .to_string_lossy()
+            .into_owned()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {

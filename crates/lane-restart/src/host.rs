@@ -553,8 +553,7 @@ fn run_with_handlers_and_window(
 /// per-field match result for every loaded approval, and any injection
 /// with the exact bytes sent.
 fn host_log_path(role: &str) -> std::path::PathBuf {
-    std::path::Path::new("C:/Projects/.lane-state")
-        .join(format!("host-{role}-{}.log", std::process::id()))
+    crate::state_dir().join(format!("host-{role}-{}.log", std::process::id()))
 }
 
 /// Best-effort append - never fatal to the relay that's still running.
@@ -697,8 +696,6 @@ fn escape_bytes(bytes: &[u8]) -> String {
     format!("{:?}", String::from_utf8_lossy(&bytes[..take]))
 }
 
-const STATE_DIR: &str = "C:/Projects/.lane-state";
-
 /// RESTART-TOOL-DESIGN.md §12.6: the startup window ended and no handler
 /// matched. If the lane has since shown real progress there was no dialog
 /// to answer, and nothing happens. Otherwise: capture the screen, then tell
@@ -713,7 +710,8 @@ fn handle_unhandled(
     log_path: &std::path::Path,
     screen: String,
 ) {
-    let state_dir = std::path::Path::new(STATE_DIR);
+    let state_dir_buf = crate::state_dir();
+    let state_dir = state_dir_buf.as_path();
     let now = chrono::Utc::now().to_rfc3339();
     if notify::lane_progressed_since(state_dir, role, started_at) {
         append_host_log(
@@ -752,7 +750,7 @@ fn handle_unhandled(
 /// one place to look. Best-effort: a write failure is reported to stderr,
 /// never allowed to take down the relay that's still running.
 fn capture_unhandled_prompt(screen_text: &str) -> Option<std::path::PathBuf> {
-    let dir = std::path::Path::new(STATE_DIR).join("unhandled-prompts");
+    let dir = crate::state_dir().join("unhandled-prompts");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("lane-restart host: could not create {dir:?}: {e}");
         return None;
