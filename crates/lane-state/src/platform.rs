@@ -10,6 +10,7 @@
 //! machine too. None of these is configurable by a command-line flag: the state directory is "one
 //! fixed place every lane and the PM agree on" (RESTART-TOOL-DESIGN.md section 7).
 
+pub mod diag;
 pub mod names;
 
 use std::path::PathBuf;

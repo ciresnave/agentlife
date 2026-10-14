@@ -501,9 +501,12 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
             expected_start,
             actual_start,
         }) => {
+            // Issue #14: on Linux, say what /proc reports too, so a stepped clock can be told from a
+            // recycled pid by the log alone.
             let why = format!(
-                "pid {} now belongs to a different process (started {actual_start}, expected {expected_start})",
-                identity.pid
+                "pid {} now belongs to a different process (started {actual_start}, expected {expected_start}); {}",
+                identity.pid,
+                lane_state::platform::diag::start_readings(identity.pid)
             );
             put_back(&why);
             return Err(DownError::IdentityChanged(why));

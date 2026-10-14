@@ -12,6 +12,11 @@
 // Moved to the `lane-state` crate; the old paths keep working.
 pub use lane_state::{facts, paths, state};
 
+/// `lane_state::platform::diag::start_readings`, re-exported for the binary.
+pub fn platform_diag(pid: u32) -> String {
+    lane_state::platform::diag::start_readings(pid)
+}
+
 pub mod approvals;
 pub mod authorize;
 pub mod disk;

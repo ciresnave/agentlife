@@ -863,10 +863,14 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
             exit
         }
         Err(e) => {
-            eprintln!("lane-restart stop: {e}");
+            let note = match &e {
+                lane_stop::StopError::Kill(inner) => identity_note(inner, plan.state.pid),
+                lane_stop::StopError::SpecNotWritten(_) => String::new(),
+            };
+            eprintln!("lane-restart stop: {e}{note}");
             ledger(
                 Some(&plan.stopping.model),
-                &format!("action failed: {e}{pin_note}"),
+                &format!("action failed: {e}{pin_note}{note}"),
                 false,
             );
             ExitCode::FAILURE
@@ -1711,8 +1715,14 @@ fn main() -> ExitCode {
                     relaunch_exit_code(outcome)
                 }
                 Err(e) => {
-                    eprintln!("lane-restart: {e}");
-                    log_outcome(requested_by, &role, &format!("action failed: {e}"), false);
+                    let note = identity_note(&e, plan.state.pid);
+                    eprintln!("lane-restart: {e}{note}");
+                    log_outcome(
+                        requested_by,
+                        &role,
+                        &format!("action failed: {e}{note}"),
+                        false,
+                    );
                     ExitCode::FAILURE
                 }
             };
@@ -1728,6 +1738,18 @@ fn main() -> ExitCode {
             );
             exit
         }
+    }
+}
+
+/// Issue #14 (`docs/PORT-LINUX-PLAN.md`, P3'): when a kill was refused because the pid's identity no
+/// longer matched, append what `/proc` says about its start so the log can tell a stepped clock
+/// from a recycled pid. Empty for every other error. Changes no decision.
+fn identity_note(e: &relaunch::RelaunchError, pid: u32) -> String {
+    match e {
+        relaunch::RelaunchError::Kill(lane_restart::facts::KillError::IdentityChanged) => {
+            format!(" ({})", lane_restart::platform_diag(pid))
+        }
+        _ => String::new(),
     }
 }
 
