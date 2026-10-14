@@ -358,19 +358,21 @@ fn disk_gate(kind: &str) -> Result<(), lane_restart::disk::Refusal> {
     }
 }
 
-/// `specs import [--role R] [--dry-run]` -> `(role, dry_run)`.
-fn parse_specs_import_args(rest: &[String]) -> Result<(Option<String>, bool), ArgError> {
+/// `specs import [--role R] [--dry-run] [--verbose]` -> `(role, dry_run, verbose)`.
+fn parse_specs_import_args(rest: &[String]) -> Result<(Option<String>, bool, bool), ArgError> {
     let mut role = None;
     let mut dry_run = false;
+    let mut verbose = false;
     let mut iter = rest.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
             "--dry-run" => dry_run = true,
+            "--verbose" => verbose = true,
             other => return Err(ArgError::Unknown(other.to_string())),
         }
     }
-    Ok((role, dry_run))
+    Ok((role, dry_run, verbose))
 }
 
 /// The role whose `claude` session is running this command, verified by pid and start time
@@ -691,7 +693,7 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
 }
 
 /// `lane-restart specs import [--role R] [--dry-run]` - 14.9. PM only.
-fn run_specs_import_cmd(role: Option<String>, dry_run: bool) -> ExitCode {
+fn run_specs_import_cmd(role: Option<String>, dry_run: bool, verbose: bool) -> ExitCode {
     use lane_restart::spec_import::{import_specs, ImportOutcome};
     let facts = SysinfoFacts::new(claude_config_dir());
     let caller = verified_caller(&facts);
@@ -732,7 +734,6 @@ fn run_specs_import_cmd(role: Option<String>, dry_run: bool) -> ExitCode {
     for r in &rows {
         match &r.outcome {
             ImportOutcome::Written(s) => {
-                println!("{}\twritten\tstate={s:?}", r.role);
                 log_ledger(
                     &requested_by,
                     &r.role,
@@ -744,17 +745,14 @@ fn run_specs_import_cmd(role: Option<String>, dry_run: bool) -> ExitCode {
                     true,
                 );
             }
-            ImportOutcome::WouldWrite(s) => println!("{}\twould write\tstate={s:?}", r.role),
-            ImportOutcome::AlreadyHasSpec => {
-                println!("{}\tskipped\ta launch spec already exists", r.role)
-            }
-            ImportOutcome::Refused(why) => {
-                println!("{}\trefused\t{why}", r.role);
-                refused_named |= role.is_some();
-            }
+            ImportOutcome::WouldWrite(_) | ImportOutcome::AlreadyHasSpec => {}
+            ImportOutcome::Refused(_) => refused_named |= role.is_some(),
         }
     }
-    println!("({} role(s) considered)", rows.len());
+    print!(
+        "{}",
+        lane_restart::spec_import::render(&rows, dry_run, verbose)
+    );
     if refused_named {
         ExitCode::FAILURE
     } else {
@@ -848,8 +846,11 @@ USAGE:
         Exit codes: 0 stopped and suspended; 1 refused or failed; 4 stopped,
         but the suspended mark could not be written (still startable).
 
-    lane-restart specs import [--role <name>] [--dry-run]
-        PM only. For every lane state file with no launch spec, build
+    lane-restart specs import [--role <name>] [--dry-run] [--verbose]
+        PM only. The first and last lines say whether anything was written
+        (DRY RUN - nothing written / WROTE n spec(s)). Refused roles are all
+        listed; roles refused for the same reason (e.g. cwd missing) share one
+        line with a count unless --verbose. For every lane state file with no launch spec, build
         <role>.launch.json from its recorded launch_args, labelled
         written_by=import, only if the spec is complete; the rest are listed
         with the reason. Never overwrites a spec; never edits a state file.
@@ -924,7 +925,7 @@ fn main() -> ExitCode {
         if first == "specs" {
             return match rest.split_first() {
                 Some((sub, tail)) if sub == "import" => match parse_specs_import_args(tail) {
-                    Ok((role, dry_run)) => run_specs_import_cmd(role, dry_run),
+                    Ok((role, dry_run, verbose)) => run_specs_import_cmd(role, dry_run, verbose),
                     Err(e) => {
                         eprintln!("lane-restart specs import: {e}");
                         ExitCode::FAILURE
@@ -1452,10 +1453,10 @@ mod cli_tests {
 
     #[test]
     fn specs_import_args_are_role_and_dry_run() {
-        assert_eq!(parse_specs_import_args(&[]), Ok((None, false)));
+        assert_eq!(parse_specs_import_args(&[]), Ok((None, false, false)));
         assert_eq!(
-            parse_specs_import_args(&strs(&["--role", "baracuda", "--dry-run"])),
-            Ok((Some("baracuda".into()), true))
+            parse_specs_import_args(&strs(&["--role", "baracuda", "--dry-run", "--verbose"])),
+            Ok((Some("baracuda".into()), true, true))
         );
         assert_eq!(
             parse_specs_import_args(&strs(&["--yes"])),
