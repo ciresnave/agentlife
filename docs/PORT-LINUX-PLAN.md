@@ -1,7 +1,8 @@
 # Linux port plan: lane-restart, the lane host, and the consent/secret broker
 
-Status: **in progress** (updated 2026-10-14 at `origin/main` = `d9605ba`, 0.14.28). Built: **P0, P1, P2**
-(0.14.27) and **P4** (0.14.28). Rulings since the first version: Q1, Q2, Q3 (section 7). Two slices were re-read
+Status: **in progress** (updated 2026-10-14 at `origin/main` = `09a1d82`, 0.14.31). Built: **P0, P1, P2**
+(0.14.27), **P4** (0.14.28), **P3'** (0.14.29), **P9** (0.14.31) and **P5** (this change). **Unverified on
+Linux hardware: P9** (see its row), and the unix half of P4 and P5 has been run only by the ubuntu CI leg. Rulings since the first version: Q1, Q2, Q3 (section 7). Two slices were re-read
 against the code and changed: **P3** and **P11** (section 6, "Revisions"). Original status: proposal, no code,
 written 2026-10-14 at `origin/main` = `a84165d` (0.14.26). Standing direction
 (PM message 2026-10-14 17:12Z, relaying CireSnave): *AgentLife (lane-restart, lane host) and the secret broker must
@@ -239,11 +240,11 @@ Windows leg and a Linux leg in CI.
 | P3 | ~~Start-time token on Linux (`/proc` ticks)~~ **replaced by P3'**, see "Revisions" below | n/a | n/a | n/a |
 | P3' | **Identity-mismatch diagnostic (Linux)**: on a recycled-pid / identity-changed / not-live verdict, record sysinfo `start_time`, `/proc/<pid>/stat` ticks and `btime` on the ledger line | S | none | a test with a stand-in table; the failing log issue #14 is waiting for |
 | P4 | **Host tty on unix**: raw guard, `TIOCGWINSZ`, SIGWINCH; un-gate the 11 ConPTY host tests with Linux children | M | none | real host test: CPR round trip and resize on Linux CI |
-| P5 | **Signals**: TERM, grace, KILL to the process group; `down` and `lane_stop` | S | P3 | tests with real `sleep` trees: children gone, identity-mismatch refused |
+| P5 | **Signals**: TERM, grace, KILL to the process group; `down` and `lane_stop`. **Built**: `lane_state::platform::signal::terminate`, used by `SysinfoFacts::kill_verified` (so `lane-restart` stop/restart/`lane_stop`) and `agentlife down`; grace 5 s; identity asked again before the KILL | S | none | real-process tests on the ubuntu leg: TERM honoured is not KILLed, TERM ignored is KILLed only after the grace, a leader's children end with it, a pid that changed hands is never signalled |
 | P6 | **`TabLauncher` trait + `direct` backend** (`setsid`); `SpawnVia::Direct` gets real use; report fields additive. **This is the Linux lane host (Q1)**; a way to look at a running lane (`lane-restart attach`) belongs here, over the host's own pty, with no tmux | M | P0, P4 | `launch_e2e` Linux leg opens N agents and the registry shows them |
 | P7 | ~~`tmux` backend~~ **tmux viewer, LATER (ROADMAP row, not started)**: a viewer over the direct host, never a launcher the host depends on | M | P6 | real tmux test (skipped, loudly, when tmux is absent) |
 | P8 | **Autostart**: `Autostart` trait, `systemd --user` units for logon, an unlock path (`logind` `Unlock` signal) or a documented "logon only" limit | M | P6 | `install-task` prints units; a real `systemctl --user` test on CI where available |
-| P9 | **Shutdown marker** via `journalctl`/`last -x` | S | none | classifier test with captured sample output |
+| P9 | **Shutdown marker** via `journalctl`/`last -x`. **Built** (0.14.31, `journalctl --boot=-1`). **NOT verified against a real systemd journal**: the parser is tested on sample text only; the marker strings (`Shutting down.`, `systemd-shutdown`, `Journal stopped`) are what systemd documents, not something observed here, and a non-persistent journal or a host without systemd reads as "no marker". Owed: one capture from a real previous boot, and a reboot and a crash on a Linux box | S | none | classifier test with captured sample output |
 | P10 | **Hook origin / tab-close lists** use the P2 sets; `Origin::Hand` reachable on Linux | S | P2 | hand-launch test with a Linux terminal ancestor chain |
 | P11 | ~~Consent readiness on our side~~ **already built**, see "Revisions" below | n/a | n/a | n/a |
 | P12 | **Upstream (OverMind): Linux `Protector` (tiered) + XDG store dir + head path** | L | decision Q2 | `user-request` round trip on Linux CI, tier shown in `list` |

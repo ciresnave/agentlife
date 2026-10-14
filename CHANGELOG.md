@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.32
+
+- **Unix stop is TERM, grace, KILL to the process group** (`docs/PORT-LINUX-PLAN.md`, P5). `sysinfo`'s `kill()` is
+  `SIGKILL` on Linux: no flush, and a lane's shells and helpers were left running. New
+  `lane_state::platform::signal::terminate` (unix): `SIGTERM` to the target's process group when it leads one (a
+  session leader on a pty does), else to the process alone; wait up to 5 s (`facts::KILL_GRACE`); then `SIGKILL`
+  **only if the same process is still there**, asked again immediately before the signal (a pid that changed
+  hands during the grace is never signalled; a zombie counts as gone). Used by `SysinfoFacts::kill_verified`
+  (`lane-restart` restart and stop, `lane_stop`) and by `agentlife down`. **Behaviour change off Windows:** a stop
+  can now take up to 5 s longer when the process ignores `SIGTERM`. Windows is unchanged (one `TerminateProcess`).
+  New unix-only dependency `rustix` features `process` in `lane-state`.
+- Docs: P9 is recorded as **not verified against a real systemd journal** in the plan and the ROADMAP.
+
 ## 0.14.31
 
 - **Shutdown marker on Linux** (`docs/PORT-LINUX-PLAN.md`, P9). The reboot-vs-crash classifier (`intent`) had a

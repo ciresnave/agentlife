@@ -12,6 +12,8 @@
 
 pub mod diag;
 pub mod names;
+#[cfg(unix)]
+pub mod signal;
 
 use std::path::PathBuf;
 

@@ -130,12 +130,46 @@ impl Terminator for SysinfoTerminator {
                 actual_start: proc_.start_time(),
             });
         }
-        if proc_.kill() {
-            Ok(())
-        } else {
-            Err(KillError::Failed(
-                "the operating system refused to end the process".into(),
-            ))
+        // Unix: TERM to the process group, a grace period, KILL only if it is still the same
+        // process (`lane_state::platform::signal`); Windows keeps its one call.
+        #[cfg(unix)]
+        {
+            let start = expected.start_secs;
+            let outcome = lane_state::platform::signal::terminate(
+                expected.pid,
+                &|| {
+                    use lane_state::platform::signal::Presence;
+                    let mut s = System::new();
+                    s.refresh_processes_specifics(
+                        ProcessesToUpdate::Some(&[pid]),
+                        true,
+                        ProcessRefreshKind::nothing(),
+                    );
+                    match s.process(pid) {
+                        None => Presence::Gone,
+                        Some(p) if crate::identity::process_is_dead(p) => Presence::Gone,
+                        Some(p) if p.start_time() != start => Presence::Other,
+                        Some(_) => Presence::Target,
+                    }
+                },
+                lane_state::facts::KILL_GRACE,
+                std::time::Duration::from_millis(100),
+            );
+            outcome.map(|_| ()).map_err(|e| {
+                KillError::Failed(format!(
+                    "the operating system refused to end the process: {e}"
+                ))
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            if proc_.kill() {
+                Ok(())
+            } else {
+                Err(KillError::Failed(
+                    "the operating system refused to end the process".into(),
+                ))
+            }
         }
     }
 
