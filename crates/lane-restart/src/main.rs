@@ -42,7 +42,8 @@ fn dirs_home() -> Option<PathBuf> {
 
 #[derive(Debug)]
 struct Args {
-    role: String,
+    /// `None` only with `--self` and no `--role`: resolved in `main` before use.
+    role: Option<String>,
     target_self: bool,
     dry_run: bool,
     confirmed: bool,
@@ -90,8 +91,11 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, ArgError>
             other => return Err(ArgError::Unknown(other.to_string())),
         }
     }
+    if role.is_none() && !target_self {
+        return Err(ArgError::RoleRequired);
+    }
     Ok(Args {
-        role: role.ok_or(ArgError::RoleRequired)?,
+        role,
         target_self,
         dry_run,
         confirmed,
@@ -1046,8 +1050,10 @@ const USAGE: &str = "\
 lane-restart - a bulletproof session-restart tool. RESTART-TOOL-DESIGN.md.
 
 USAGE:
-    lane-restart --role <name> [--self] [--dry-run] [--yes]
-        Restart a lane. --self restarts the CALLING lane (no idle check);
+    lane-restart (--role <name> | --self) [--dry-run] [--yes]
+        Restart a lane. --self restarts the CALLING lane (no idle check) and
+        needs no --role: the role is LANE_ROLE, else the one role whose lane
+        state records the current directory (--role overrides);
         omitting it targets a DIFFERENT lane, which must be independently
         idle and requires --yes to act for real - otherwise it prints a dry
         run and does nothing.
@@ -1277,10 +1283,35 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A bare `--self` (the documented form): the role is the caller's own, found the way
+    // `assert-idle` finds it. An explicit `--role` is never second-guessed here.
+    let role = match args.role.clone() {
+        Some(r) => r,
+        None => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let claude_pid =
+                lane_state_writer::claude_parent_pid(std::process::id(), &RealParentProcess::new())
+                    .ok();
+            match lane_restart::spec::resolve_self_role(
+                &state_dir(),
+                std::env::var("LANE_ROLE").ok().as_deref(),
+                &cwd,
+                claude_pid,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("lane-restart: --self without --role: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
 
     let target = if args.target_self {
         Target::Myself {
-            role: args.role.clone(),
+            role: role.clone(),
             // The same ancestry walk the hooks use to record `pid`: this
             // process <- shell(s) <- claude. `decide` compares it with the
             // state file's pid, so `--self` is a claim it can check.
@@ -1291,9 +1322,7 @@ fn main() -> ExitCode {
             .ok(),
         }
     } else {
-        Target::Other {
-            role: args.role.clone(),
-        }
+        Target::Other { role: role.clone() }
     };
 
     let facts = SysinfoFacts::new(claude_config_dir());
@@ -1314,12 +1343,7 @@ fn main() -> ExitCode {
     if let Some(caller) = caller {
         if let Err(refusal) = lane_stop::require_pm_for_other(false, caller) {
             eprintln!("lane-restart: refused - {refusal}");
-            log_outcome(
-                requested_by,
-                &args.role,
-                &format!("refused: {refusal}"),
-                false,
-            );
+            log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
             return ExitCode::FAILURE;
         }
     }
@@ -1332,12 +1356,7 @@ fn main() -> ExitCode {
     match authorize::decide(&req, &facts, &state_dir()) {
         Err(refusal) => {
             eprintln!("lane-restart: refused - {refusal}");
-            log_outcome(
-                requested_by,
-                &args.role,
-                &format!("refused: {refusal}"),
-                false,
-            );
+            log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
             ExitCode::FAILURE
         }
         Ok(plan) if !plan.will_act => {
@@ -1380,18 +1399,13 @@ fn main() -> ExitCode {
                     println!("lane-restart: DRY RUN - would leave the tab's shell alone: {why}")
                 }
             }
-            log_outcome(requested_by, &args.role, "dry run - no action taken", false);
+            log_outcome(requested_by, &role, "dry run - no action taken", false);
             ExitCode::SUCCESS
         }
         Ok(plan) => {
             // Before the kill: after it, a refusal would leave a lane dead and not relaunched.
             if let Err(refusal) = disk_gate("restart") {
-                log_outcome(
-                    requested_by,
-                    &args.role,
-                    &format!("refused: {refusal}"),
-                    false,
-                );
+                log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
                 return ExitCode::FAILURE;
             }
             eprintln!(
@@ -1429,7 +1443,7 @@ fn main() -> ExitCode {
                 Ok(outcome @ relaunch::RelaunchOutcome::Relaunched) => {
                     log_outcome(
                         requested_by,
-                        &args.role,
+                        &role,
                         &format!(
                             "killed pid {} and relaunched a fresh session (continuity via HANDOFF only)",
                             plan.state.pid
@@ -1441,7 +1455,7 @@ fn main() -> ExitCode {
                 Ok(outcome @ relaunch::RelaunchOutcome::AwaitingConfirmation) => {
                     log_outcome(
                         requested_by,
-                        &args.role,
+                        &role,
                         "awaiting human confirmation at the dev-channels dialog",
                         true,
                     );
@@ -1449,12 +1463,7 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("lane-restart: {e}");
-                    log_outcome(
-                        requested_by,
-                        &args.role,
-                        &format!("action failed: {e}"),
-                        false,
-                    );
+                    log_outcome(requested_by, &role, &format!("action failed: {e}"), false);
                     ExitCode::FAILURE
                 }
             };
@@ -1462,7 +1471,7 @@ fn main() -> ExitCode {
                 &facts,
                 "restart",
                 requested_by,
-                &args.role,
+                &role,
                 leftover_shell,
                 relaunch_acted,
                 plan.state.pid,
@@ -1597,6 +1606,18 @@ mod cli_tests {
 
     fn strs(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_bare_self_is_accepted_and_the_role_is_resolved_later() {
+        // The documented form (`lane-restart --self`, CLAUDE.md and CIRESNAVE-EXPECTATIONS 2.3b).
+        let a = parse_args(strs(&["--self"])).expect("bare --self must parse");
+        assert!(a.target_self);
+        // without --self the role is still required
+        assert_eq!(
+            parse_args(strs(&["--yes"])).unwrap_err(),
+            ArgError::RoleRequired
+        );
     }
 
     #[test]

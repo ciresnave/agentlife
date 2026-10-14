@@ -649,7 +649,7 @@ pub fn coverage(roles: &[RoleStatus], reason: impl Fn(&RoleStatus) -> String) ->
 
 /// `/`-separated, lower-case, no trailing `/` and no `\\?\` prefix: the form two cwds are compared in
 /// (Windows paths are case-insensitive and the state files mix `\` and `/`).
-fn norm_cwd(p: &str) -> String {
+pub(crate) fn norm_cwd(p: &str) -> String {
     let p = p.replace('\\', "/");
     let p = p.strip_prefix("//?/").unwrap_or(&p);
     p.trim_end_matches('/').to_lowercase()
@@ -684,6 +684,94 @@ pub fn nesting(cwds: &[(String, String)]) -> std::collections::BTreeMap<String, 
         }
     }
     out
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelfRoleError {
+    /// `LANE_ROLE` is set but is not a plain role identifier.
+    BadEnv(String),
+    /// No lane state records this cwd (and `LANE_ROLE` is unset).
+    NoMatch(String),
+    /// More than one lane state records this cwd, and the claude pid did not pick one.
+    Ambiguous(Vec<String>),
+}
+
+impl std::fmt::Display for SelfRoleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadEnv(v) => write!(
+                f,
+                "LANE_ROLE={v:?} is not a plain role identifier; pass --role <name>"
+            ),
+            Self::NoMatch(cwd) => write!(
+                f,
+                "no lane state records the directory {cwd}; set LANE_ROLE or pass --role <name>"
+            ),
+            Self::Ambiguous(c) => write!(
+                f,
+                "more than one role records this directory ({}); pass --role <name>",
+                c.join(", ")
+            ),
+        }
+    }
+}
+
+/// Which role `--self` means when no `--role` was given: `LANE_ROLE` if set, else the one role
+/// whose lane state records this `cwd`. When several do, the role whose recorded pid is
+/// `claude_pid` breaks the tie; if that does not leave exactly one, the answer is an error naming
+/// the candidates, never a guess. The restart's own checks (`authorize::decide`: the pid in the
+/// state file must be the caller's claude) still run on the result, so this only saves typing.
+pub fn resolve_self_role(
+    dir: &Path,
+    lane_role_env: Option<&str>,
+    cwd: &str,
+    claude_pid: Option<u32>,
+) -> Result<String, SelfRoleError> {
+    if let Some(v) = lane_role_env.map(str::trim).filter(|v| !v.is_empty()) {
+        return if crate::relaunch::valid_identifier(v) {
+            Ok(v.to_string())
+        } else {
+            Err(SelfRoleError::BadEnv(v.to_string()))
+        };
+    }
+    let here = norm_cwd(cwd);
+    let mut found: Vec<(String, u32)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if is_spec_file_name(&name) {
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if !crate::relaunch::valid_identifier(stem) {
+                continue;
+            }
+            let Ok(st) = state::load(dir, stem) else {
+                continue;
+            };
+            if st.role == stem && !here.is_empty() && norm_cwd(&st.cwd) == here {
+                found.push((stem.to_string(), st.pid));
+            }
+        }
+    }
+    found.sort();
+    if found.len() > 1 {
+        if let Some(pid) = claude_pid {
+            let by_pid: Vec<_> = found.iter().filter(|(_, p)| *p == pid).cloned().collect();
+            if by_pid.len() == 1 {
+                found = by_pid;
+            }
+        }
+    }
+    match found.len() {
+        0 => Err(SelfRoleError::NoMatch(cwd.to_string())),
+        1 => Ok(found.remove(0).0),
+        _ => Err(SelfRoleError::Ambiguous(
+            found.into_iter().map(|(r, _)| r).collect(),
+        )),
+    }
 }
 
 /// `nesting` over the cwd each of `roles` recorded in its lane state (a role with no readable
@@ -961,6 +1049,72 @@ mod tests {
 
     fn pair(r: &str, c: &str) -> (String, String) {
         (r.to_string(), c.to_string())
+    }
+
+    fn write_state(d: &Path, role: &str, cwd: &str, pid: u32) {
+        let mut st = crate::testing::state_at(role, "s", "Stop");
+        st.pid = pid;
+        st.cwd = cwd.to_string();
+        std::fs::write(
+            d.join(format!("{role}.json")),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn self_role_is_lane_role_then_the_one_role_with_this_cwd_and_never_a_guess() {
+        let d = tempdir().unwrap();
+        write_state(d.path(), "agentlife", "C:\\Projects\\agentlife", 10);
+        write_state(d.path(), "docs", "C:/Projects/agentlife/docs", 11);
+        let r = |env: Option<&str>, cwd: &str, pid: Option<u32>| {
+            resolve_self_role(d.path(), env, cwd, pid)
+        };
+        // LANE_ROLE wins, even over a cwd that matches another role
+        assert_eq!(
+            r(Some("docs"), "C:/Projects/agentlife", None),
+            Ok("docs".into())
+        );
+        // else the role whose cwd matches (case and separator insensitive)
+        assert_eq!(
+            r(None, "c:/projects/AgentLife/", None),
+            Ok("agentlife".into())
+        );
+        // a nested directory is its own role's cwd, not its parent's
+        assert_eq!(
+            r(None, "C:/Projects/agentlife/docs", None),
+            Ok("docs".into())
+        );
+        assert!(matches!(
+            r(None, "C:/Projects/other", None),
+            Err(SelfRoleError::NoMatch(_))
+        ));
+        assert!(matches!(
+            r(Some("../x"), "C:/Projects/agentlife", None),
+            Err(SelfRoleError::BadEnv(_))
+        ));
+        // two roles, one cwd: the claude pid breaks the tie, otherwise it is refused naming both
+        write_state(d.path(), "twin", "C:/Projects/agentlife", 12);
+        assert_eq!(
+            r(None, "C:/Projects/agentlife", Some(12)),
+            Ok("twin".into())
+        );
+        let both = Err(SelfRoleError::Ambiguous(vec![
+            "agentlife".into(),
+            "twin".into(),
+        ]));
+        assert_eq!(r(None, "C:/Projects/agentlife", Some(99)), both);
+        assert_eq!(r(None, "C:/Projects/agentlife", None), both);
+        // a pid shared by two candidates narrows nothing: all three stay named
+        write_state(d.path(), "twin2", "C:/Projects/agentlife", 12);
+        assert_eq!(
+            r(None, "C:/Projects/agentlife", Some(12)),
+            Err(SelfRoleError::Ambiguous(vec![
+                "agentlife".into(),
+                "twin".into(),
+                "twin2".into()
+            ]))
+        );
     }
 
     #[test]
