@@ -2,6 +2,26 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.2
+
+- **Disk floor: nothing is launched while `C:` has less than 20 GB free** (PM task, incident 2026-10-14 04:45Z:
+  `C:` hit 4 GB and builds failed in six lanes). New `lane_restart::disk` (`FLOOR_BYTES` = 20 GiB; the volume is
+  the one holding the lane state directory, picked as the longest mount that is a path prefix, case and slash
+  insensitive). It refuses, with exit 1 and the volume, free and floor named, in: `lane-restart start`
+  (also `--dry-run`, which reports what would be refused), `lane-restart --role R --self|--yes` (checked
+  **before** the kill, so a refusal never leaves a lane dead and not relaunched), `agentlife restore` and
+  `agentlife pending approve` (checked **before** anyone is asked, so an approval is not spent on a refused
+  run; `restore::preflight` repeats it as a fatal `disk floor` line at execution time). `restore --dry-run` is
+  unaffected. `lane-restart status` prints a `C:\ free: N GB (floor 20.0 GB)` line first (stderr under `--json`,
+  so the JSON on stdout keeps its shape).
+- **An unreadable probe is a warning, not a refusal**: if no mount contains the state directory the launch goes
+  ahead and says it did not check, so a broken probe cannot stop every lane restarting. Say so if you disagree.
+- **Debug builds only** honour `LANE_DISK_FLOOR_BYTES` (tests set `0`); a release build ignores it, so a lane
+  cannot lower the floor.
+- Not exercised for real: the refusal on this machine's actual `C:` (it has 130 GB free), and `lane-restart`'s
+  start and restart paths end to end; those are covered by the pure `check`/`volume_for` tests, the restore
+  preflight test and the `agentlife restore` e2e.
+
 ## 0.14.1
 
 - **`lane-restart host` relays the child's last output instead of leaving it in the channel** (the quirk noted

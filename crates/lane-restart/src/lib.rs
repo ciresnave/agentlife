@@ -14,6 +14,7 @@ pub use lane_state::{facts, paths, state};
 
 pub mod approvals;
 pub mod authorize;
+pub mod disk;
 pub mod handlers;
 pub mod host;
 pub mod lane_state_writer;

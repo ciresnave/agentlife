@@ -146,6 +146,21 @@ impl Rig {
             .env("USER_REQUEST_DIR", self.dir.path().join("consent-store"))
             .env("USER_REQUEST_HEAD", self.dir.path().join("consent-head"))
             .env("AGENTLIFE_NO_HELLO", "1")
+            // The test does not depend on how full this machine's disk is (debug builds only).
+            .env("LANE_DISK_FLOOR_BYTES", "0")
+            .output()
+            .expect("run agentlife")
+    }
+
+    /// As [`Rig::agentlife`] but with the disk floor set to `floor` bytes.
+    fn agentlife_floor(&self, args: &[&str], floor: &str) -> std::process::Output {
+        Command::new(AGENTLIFE)
+            .args(args)
+            .env("AGENTLIFE_HOME", &self.home)
+            .env("USER_REQUEST_DIR", self.dir.path().join("consent-store"))
+            .env("USER_REQUEST_HEAD", self.dir.path().join("consent-head"))
+            .env("AGENTLIFE_NO_HELLO", "1")
+            .env("LANE_DISK_FLOOR_BYTES", floor)
             .output()
             .expect("run agentlife")
     }
@@ -1517,6 +1532,37 @@ fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_noth
     // The live lane was killed above, so this one has two candidates: a different plan.
     assert_ne!(again["hash"], plan["hash"]);
     assert_eq!(again["entries"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn restore_below_the_disk_floor_is_refused_before_anyone_is_asked() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({ "portfolio_root": rig.cwd() }).to_string(),
+    )
+    .unwrap();
+    let start = rig.payload("start.json", "SessionStart", "sess-gone", Some("startup"));
+    let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
+    rig.run(LANE_ARGS, &script, &[]);
+    // A floor no disk meets (positive control for the refusal's text is the same run below).
+    let out = rig.agentlife_floor(&["restore"], &u64::MAX.to_string());
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("disk floor"), "{err}");
+    assert!(err.contains("nothing was launched"), "{err}");
+    assert!(
+        !err.contains("pending"),
+        "nobody was asked and nothing was recorded: {err}"
+    );
+    assert!(!rig.home.join("reports").exists());
+    // Control: floor 0 on the same rig gets past the gate (and is stopped later by the missing
+    // approval, which is a different message).
+    let past = rig.agentlife_floor(&["restore"], "0");
+    let past_err = String::from_utf8_lossy(&past.stderr);
+    assert!(!past_err.contains("disk floor"), "{past_err}");
 }
 
 #[test]
