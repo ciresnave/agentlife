@@ -73,6 +73,7 @@ fn report_for(plan: &Plan) -> Report {
         held_for_memory: false,
         preflight: vec![],
         entries: vec![],
+        unstarted: vec![],
         summary: Summary::default(),
     }
 }

@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.13.1
+
+- **A restore's report names every wanted agent it did not put in a batch, with why** (RESTORE-GAP-ANALYSIS 5b).
+  `Report.unstarted` (and a `NOT IN ANY BATCH (n)` section of the text) lists agents the plan held (`held:max_running`,
+  `held:memory`) or excluded (`excluded:Running`, `Unverifiable`, `DuplicateAlive`, `NoLaunchArgs`, `CwdMissing`,
+  `CwdOutsideRoot`, `BypassNotPm`, `UnsafeArgument`), so a restore can no longer finish clean with a lane missing
+  because it looked alive. `NotSelected` and `NotWanted` are the person's own choices and are not listed. Older report
+  files still read (`#[serde(default)]`). Additive.
+- `twelve_real_stand_ins_are_paced_...` now prints `held` and `running_now` as well as `excluded` when its entry count
+  is wrong, so the known flake names its cause.
+
 ## 0.13.0
 
 - **`agentlife park|stop` of a RUNNING lane now keeps `lane-restart stop`'s invariant: a lane is stopped only

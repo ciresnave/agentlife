@@ -560,7 +560,14 @@ fn twelve_real_stand_ins_are_paced_pm_first_and_never_more_than_a_batch_at_once(
         rig.register_gone(&n, &d);
     }
     let plan = rig.plan(None);
-    assert_eq!(plan.entries.len(), 12, "{:?}", plan.excluded);
+    assert_eq!(
+        plan.entries.len(),
+        12,
+        "excluded: {:?}; held: {:?}; running_now: {}",
+        plan.excluded,
+        plan.held,
+        plan.running_now
+    );
     assert!(plan.entries[0].pm, "the PM is first");
     // PM alone, then 5, 5, 1.
     assert_eq!(
