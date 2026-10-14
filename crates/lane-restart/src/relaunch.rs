@@ -482,7 +482,9 @@ fn set_lane_role(cmd: &mut std::process::Command, role: &str) {
     cmd.env("LANE_ROLE", role);
 }
 
-/// The `wt.exe` command and the `conhost.exe` fallback for one launch, not yet started.
+/// The `wt.exe` command and the `conhost.exe` fallback for one launch, not yet started. Windows
+/// only in production; compiled everywhere so its tests run on both legs.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn launch_commands(
     spec: &LaunchSpec,
     argv: &[String],
@@ -502,7 +504,68 @@ fn launch_commands(
     (wt, conhost)
 }
 
+/// The direct launch (`docs/PORT-LINUX-PLAN.md`, P6; ruled by CireSnave 2026-10-14: *"Direct process
+/// first"*): the host itself, started detached with no terminal. No `wt.exe`, no terminal emulator,
+/// no tmux. Its stdin is the null device and its output goes to `host-<role>.out` in the state
+/// directory (the null device if that cannot be opened); the host makes itself a session leader
+/// when it finds it has no tty (`host::detach_session_if_headless`).
+///
+/// Pure: nothing is spawned here, so the command is testable without a process.
+pub fn direct_command(
+    spec: &LaunchSpec,
+    hosted_argv: &[String],
+    out_file: Option<std::fs::File>,
+) -> std::process::Command {
+    let (program, args) = hosted_argv
+        .split_first()
+        .map(|(p, a)| (p.as_str(), a))
+        .unwrap_or(("lane-restart", &[]));
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    cmd.current_dir(&spec.cwd);
+    strip_session_identity_env(&mut cmd);
+    set_lane_role(&mut cmd, &spec.role);
+    cmd.stdin(std::process::Stdio::null());
+    match out_file.and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
+        Some((out, err)) => {
+            cmd.stdout(out).stderr(err);
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
+    cmd
+}
+
+/// Starts [`direct_command`]. The child is not waited for: the caller watches for the new session
+/// the same way it does after a `wt.exe` launch.
+fn spawn_direct(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchError> {
+    let hosted_argv = host_wrapped_argv(&spec.role, argv);
+    spawn_direct_argv(spec, &hosted_argv, &crate::state_dir())
+}
+
+fn spawn_direct_argv(
+    spec: &LaunchSpec,
+    hosted_argv: &[String],
+    out_dir: &std::path::Path,
+) -> Result<(), RelaunchError> {
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out_dir.join(format!("host-{}.out", spec.role)))
+        .ok();
+    direct_command(spec, hosted_argv, out)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| RelaunchError::Spawn(e.to_string()))
+}
+
 pub fn spawn_launch(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchError> {
+    // Off Windows there is no `wt.exe`/`conhost.exe`: the lane host runs directly.
+    if !cfg!(windows) {
+        return spawn_direct(spec, argv);
+    }
     let (mut wt, mut conhost) = launch_commands(spec, argv);
     match wt.spawn() {
         Ok(_) => return Ok(()),
@@ -926,6 +989,82 @@ mod tests {
     // -- LANE_ROLE on a launch ----------------------------------------- //
     // `LANE_ROLE`, when set, always wins in `resolve_role`. A launch run by a
     // peer inherited the peer's, so the child wrote the peer's role file.
+
+    fn direct_spec() -> LaunchSpec {
+        LaunchSpec {
+            role: "baracuda".to_string(),
+            name: "baracuda".to_string(),
+            cwd: "C:/Projects/baracuda".to_string(),
+            permission_mode: None,
+            remote_control: false,
+            launch_args: None,
+        }
+    }
+
+    /// The direct launch is the host itself: no terminal program in front of it, the lane's own
+    /// directory and role, and no inherited session identity.
+    #[test]
+    fn the_direct_command_is_the_host_in_the_lanes_directory_with_its_own_role() {
+        let hosted = strs(&[
+            "/opt/lane-restart",
+            "host",
+            "--role",
+            "baracuda",
+            "--",
+            "claude",
+            "go",
+        ]);
+        let cmd = direct_command(&direct_spec(), &hosted, None);
+        assert_eq!(cmd.get_program(), "/opt/lane-restart");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["host", "--role", "baracuda", "--", "claude", "go"]);
+        assert_eq!(
+            cmd.get_current_dir().unwrap().to_string_lossy(),
+            "C:/Projects/baracuda"
+        );
+        let role = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "LANE_ROLE")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(role.as_deref(), Some("baracuda"));
+        // no wt.exe/conhost.exe anywhere in it
+        let all = format!("{:?}", cmd);
+        assert!(!all.contains("wt.exe") && !all.contains("conhost"), "{all}");
+    }
+
+    /// Real spawn, unix only: the direct launch runs the command it is given, detached from our
+    /// stdio, in the spec's directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_direct_launch_runs_its_command_in_the_specs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = direct_spec();
+        spec.cwd = dir.path().to_string_lossy().into_owned();
+        let argv = strs(&[
+            "sh",
+            "-c",
+            "pwd > where.txt; echo \"$LANE_ROLE\" > role.txt",
+        ]);
+        spawn_direct_argv(&spec, &argv, dir.path()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let role_file = dir.path().join("role.txt");
+        while !role_file.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&role_file).unwrap().trim(),
+            "baracuda"
+        );
+        let pwd = std::fs::read_to_string(dir.path().join("where.txt")).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(pwd.trim()).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+    }
 
     #[test]
     fn both_launch_commands_set_the_launched_role_not_the_spawners() {

@@ -2,6 +2,21 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.33
+
+- **A lane starts as a direct process off Windows** (`docs/PORT-LINUX-PLAN.md`, P6a; CireSnave 2026-10-14, verbatim:
+  "Direct process first with tmux support on our roadmap to build later."). No terminal program, no tmux, no
+  emulator. Windows is unchanged (`wt.exe`, then `conhost.exe`).
+  - `lane-restart` (`start`, restart, `--self`): `relaunch::spawn_launch` runs the host itself through the pure
+    `relaunch::direct_command`: the lane's directory, `LANE_ROLE` set to the launched role, the session identity
+    removed, stdin the null device, stdout and stderr appended to `host-<role>.out` in the state directory.
+  - `agentlife restore`: new `launch::DirectSpawner` and `launch::platform_spawner()` (Windows: `RealSpawner`,
+    unchanged); `SpawnVia::Direct` is now the real direct launch, not only a test double.
+  - The host makes itself a session leader (`setsid`) when its stdin is not a tty, so a launcher's terminal closing
+    does not take every lane it started. A host a person runs in a terminal is left alone.
+  - Not in this change: **attach**. Ruled by the PM 2026-10-14: read-only `--watch` is P6b; interactive attach is
+    not approved until a threat-model note says how a same-user agent is kept off the socket.
+
 ## 0.14.32
 
 - **Unix stop is TERM, grace, KILL to the process group** (`docs/PORT-LINUX-PLAN.md`, P5). `sysinfo`'s `kill()` is

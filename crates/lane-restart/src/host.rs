@@ -178,6 +178,19 @@ impl Drop for RawConsoleGuard {
     }
 }
 
+/// A direct launch (`docs/PORT-LINUX-PLAN.md`, P6) starts the host with no terminal: its stdin is the
+/// null device. Such a host must not share its launcher's session, or closing the launcher's
+/// terminal (SIGHUP to the session) would end every lane it started. `setsid` makes the host the
+/// leader of a new session. A host that HAS a tty (a person ran it in a terminal) is left alone: it
+/// belongs to that terminal. Failure (already a session leader) is not an error.
+#[cfg(unix)]
+fn detach_session_if_headless() {
+    use std::os::fd::AsFd;
+    if !rustix::termios::isatty(std::io::stdin().as_fd()) {
+        let _ = rustix::process::setsid();
+    }
+}
+
 /// What an automatic answer gets logged with - `restart.log` (§12.4: "log
 /// the automatic answer... with the handler's id and the exact text that
 /// matched").
@@ -632,6 +645,8 @@ fn append_host_log(path: &std::path::Path, line: &str) {
 /// before its handlers arrive would never be re-checked on a static screen
 /// - and wires this process's OWN real stdin/stdout as the outer relay ends.
 pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
+    #[cfg(unix)]
+    detach_session_if_headless();
     let log_path = host_log_path(role);
     let started_at = chrono::Utc::now();
 

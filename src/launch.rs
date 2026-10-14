@@ -218,7 +218,9 @@ pub enum SpawnVia {
     WindowsTerminal,
     /// `wt.exe` is absent: one console window per agent, no tabs. The agent still starts.
     Conhost,
-    /// A test double that ran the host directly (never a real lane).
+    /// The host was started directly, with no terminal in front of it: the Linux lane host (ruled
+    /// by CireSnave 2026-10-14, *"Direct process first"*; `docs/PORT-LINUX-PLAN.md`, P6), and the
+    /// test doubles that run the host the same way.
     Direct,
 }
 
@@ -234,6 +236,62 @@ impl std::fmt::Display for SpawnError {
 /// The one thing that starts a process. A test supplies its own and spawns stand-ins.
 pub trait Spawner {
     fn spawn(&self, tab: &TabLaunch) -> Result<SpawnVia, SpawnError>;
+}
+
+/// Starts the host itself, detached, with no terminal program in front of it: how a lane runs on
+/// Linux. The host makes itself a session leader when it finds it has no tty
+/// (`lane_restart::host`), so the launcher's terminal closing does not take the lane with it.
+/// Output goes to the null device (the host keeps its own log).
+#[derive(Debug, Clone, Default)]
+pub struct DirectSpawner {
+    /// Extra environment for the spawned process (a test points it at its own `AGENTLIFE_HOME`).
+    pub extra_env: Vec<(String, String)>,
+}
+
+impl DirectSpawner {
+    /// The command for a tab, not yet started.
+    pub fn command(&self, tab: &TabLaunch) -> Command {
+        let (program, args) = tab
+            .hosted_argv
+            .split_first()
+            .map(|(p, a)| (p.as_str(), a))
+            .unwrap_or(("lane-restart", &[]));
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        cmd.current_dir(&tab.cwd);
+        strip_session_identity_env(&mut cmd);
+        for (k, v) in self.extra_env.iter().chain(tab.env_set.iter()) {
+            cmd.env(k, v);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd
+    }
+}
+
+impl Spawner for DirectSpawner {
+    fn spawn(&self, tab: &TabLaunch) -> Result<SpawnVia, SpawnError> {
+        self.command(tab)
+            .spawn()
+            .map(|_| SpawnVia::Direct)
+            .map_err(|e| {
+                SpawnError(format!(
+                    "{}: {e}",
+                    tab.hosted_argv.first().map_or("", |s| s)
+                ))
+            })
+    }
+}
+
+/// The spawner a real `restore` uses on this OS: `wt.exe` with the `conhost.exe` fallback on
+/// Windows (unchanged), the direct host elsewhere.
+pub fn platform_spawner() -> Box<dyn Spawner> {
+    if cfg!(windows) {
+        Box::new(RealSpawner::default())
+    } else {
+        Box::new(DirectSpawner::default())
+    }
 }
 
 fn strip_session_identity_env(cmd: &mut Command) {
@@ -665,6 +723,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             t.hosted_argv
         );
+    }
+
+    /// The direct spawner runs the host itself, in the tab's directory, with the tab's role and
+    /// agent id and none of the spawner's own session identity.
+    #[test]
+    fn the_direct_command_is_the_host_with_the_tabs_env_and_directory() {
+        let t = build_tab(&entry(Some("lane"), 0), &programs(), true).unwrap();
+        let s = DirectSpawner {
+            extra_env: vec![("AGENTLIFE_HOME".to_string(), "D:/h".to_string())],
+        };
+        let c = s.command(&t);
+        assert_eq!(c.get_program().to_string_lossy(), t.hosted_argv[0]);
+        assert_eq!(
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            t.hosted_argv[1..]
+        );
+        assert_eq!(
+            c.get_current_dir()
+                .map(|p| p.to_string_lossy().into_owned()),
+            Some(t.cwd.clone())
+        );
+        let envs: std::collections::HashMap<String, Option<String>> = c
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for var in SESSION_IDENTITY_ENV_VARS {
+            assert_eq!(envs.get(*var), Some(&None), "must remove {var}");
+        }
+        assert_eq!(envs["LANE_ROLE"].as_deref(), Some("lane"));
+        assert_eq!(envs["AGENTLIFE_HOME"].as_deref(), Some("D:/h"));
+        // and no terminal program in front of it
+        assert!(!format!("{c:?}").contains("wt.exe"));
+    }
+
+    /// Unix, real process: the direct spawner starts the hosted command in the tab's directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_direct_spawn_runs_the_hosted_command_in_the_tabs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = build_tab(&entry(Some("lane"), 0), &programs(), true).unwrap();
+        t.cwd = dir.path().to_string_lossy().into_owned();
+        t.hosted_argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo \"$LANE_ROLE\" > role.txt".to_string(),
+        ];
+        let via = DirectSpawner::default().spawn(&t).unwrap();
+        assert_eq!(via, SpawnVia::Direct);
+        let f = dir.path().join("role.txt");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(std::fs::read_to_string(&f).unwrap().trim(), "lane");
     }
 
     #[test]
