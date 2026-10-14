@@ -144,6 +144,79 @@ pub fn import_specs(
         .collect()
 }
 
+/// The key refused rows are grouped by: the reason without the part that differs per role (the
+/// path of a `cwd missing:` row), so thirty vanished worktrees are one line, not thirty.
+fn reason_key(why: &str) -> &str {
+    if why.starts_with("cwd missing:") {
+        "cwd missing"
+    } else {
+        why
+    }
+}
+
+/// The report `specs import` prints. The first and last lines say whether anything was written
+/// (`DRY RUN - nothing written` / `WROTE n spec(s)`), so a relayed report cannot be misread. Every
+/// refused role is still listed with its reason: rows that share a reason are grouped onto one
+/// line (count and role names) unless `verbose`, and a group of one keeps the per-role row.
+pub fn render(rows: &[ImportRow], dry_run: bool, verbose: bool) -> String {
+    use std::collections::BTreeMap;
+    let mut out = String::new();
+    out.push_str(if dry_run {
+        "DRY RUN - nothing written\n"
+    } else {
+        "IMPORT - writing launch specs (a dry run is --dry-run)\n"
+    });
+    let mut refused: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    let (mut wrote, mut would) = (0usize, 0usize);
+    for r in rows {
+        match &r.outcome {
+            ImportOutcome::Written(s) => {
+                wrote += 1;
+                out.push_str(&format!("{}\twritten\tstate={s:?}\n", r.role));
+            }
+            ImportOutcome::WouldWrite(s) => {
+                would += 1;
+                out.push_str(&format!("{}\twould write\tstate={s:?}\n", r.role));
+            }
+            ImportOutcome::AlreadyHasSpec => {
+                out.push_str(&format!(
+                    "{}\tskipped\ta launch spec already exists\n",
+                    r.role
+                ));
+            }
+            ImportOutcome::Refused(why) => {
+                refused
+                    .entry(reason_key(why))
+                    .or_default()
+                    .push((&r.role, why));
+            }
+        }
+    }
+    for (key, group) in &refused {
+        if verbose || group.len() == 1 {
+            for (role, why) in group {
+                out.push_str(&format!("{role}\trefused\t{why}\n"));
+            }
+        } else {
+            let names: Vec<&str> = group.iter().map(|(r, _)| *r).collect();
+            out.push_str(&format!(
+                "refused\t{} role(s)\t{key}: {}\n",
+                group.len(),
+                names.join(", ")
+            ));
+        }
+    }
+    out.push_str(&format!("({} role(s) considered)\n", rows.len()));
+    if dry_run {
+        out.push_str(&format!(
+            "DRY RUN - nothing written ({would} would be written)\n"
+        ));
+    } else {
+        out.push_str(&format!("WROTE {wrote} spec(s)\n"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +420,65 @@ mod tests {
             matches!(rows[0].outcome, ImportOutcome::Refused(_)),
             "{rows:?}"
         );
+    }
+
+    fn row(role: &str, outcome: ImportOutcome) -> ImportRow {
+        ImportRow {
+            role: role.into(),
+            outcome,
+        }
+    }
+
+    fn refused(role: &str, why: &str) -> ImportRow {
+        row(role, ImportOutcome::Refused(why.into()))
+    }
+
+    #[test]
+    fn the_report_says_first_and_last_whether_anything_was_written() {
+        let rows = vec![row("a", ImportOutcome::WouldWrite(SpecState::Running))];
+        let dry = render(&rows, true, false);
+        assert_eq!(dry.lines().next(), Some("DRY RUN - nothing written"));
+        assert_eq!(
+            dry.lines().last(),
+            Some("DRY RUN - nothing written (1 would be written)")
+        );
+        assert!(!dry.contains("WROTE"));
+        let real = render(
+            &[row("a", ImportOutcome::Written(SpecState::Running))],
+            false,
+            false,
+        );
+        assert!(real.starts_with("IMPORT - writing launch specs"));
+        assert_eq!(real.lines().last(), Some("WROTE 1 spec(s)"));
+        assert!(!real.contains("DRY RUN"));
+    }
+
+    #[test]
+    fn refused_rows_with_one_reason_are_grouped_not_dropped() {
+        let rows = vec![
+            refused("w1", "cwd missing: C:/gone/w1"),
+            refused("w2", "cwd missing: C:/gone/w2"),
+            refused("w3", "cwd missing: C:/gone/w3"),
+            refused("x", "no launch_args recorded: unknown"),
+        ];
+        let text = render(&rows, true, false);
+        assert!(
+            text.contains("refused\t3 role(s)\tcwd missing: w1, w2, w3\n"),
+            "{text}"
+        );
+        // A group of one keeps the full per-role row with the reason.
+        assert!(
+            text.contains("x\trefused\tno launch_args recorded: unknown\n"),
+            "{text}"
+        );
+        assert!(text.contains("(4 role(s) considered)"));
+        // Every role is named somewhere.
+        for r in ["w1", "w2", "w3", "x"] {
+            assert!(text.contains(r), "{r} missing from {text}");
+        }
+        // verbose: one row per role with its own path.
+        let v = render(&rows, true, true);
+        assert!(v.contains("w2\trefused\tcwd missing: C:/gone/w2\n"), "{v}");
+        assert!(!v.contains("3 role(s)"));
     }
 }

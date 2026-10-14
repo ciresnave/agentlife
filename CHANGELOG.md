@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.7
+
+- **`lane-restart specs import` reports unmistakably and groups what it refuses** (PM-approved 2026-10-14, ROADMAP
+  "specs import: cwd-missing and Crashed roles", #57). The first and last lines say whether anything was written
+  (`DRY RUN - nothing written` / `WROTE n spec(s)`). Roles refused for the same reason, notably `cwd missing`,
+  share one line with a count and their names instead of one row each; a group of one keeps its full row, and
+  `--verbose` restores one row per role. No role is dropped from the report, and what is written is unchanged.
+
 ## 0.14.6
 
 - Docs only: `docs/ROADMAP.md` gains a proposed next slice (status `--json`, a ledger reader, a HANDOFF lint,
