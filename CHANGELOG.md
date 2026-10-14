@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (version allocated at gate)
+## 0.14.4
 
 - **`pin-plan --emit-patch DIR`**: one `git apply`-able unified diff per repo (`DIR/<repo>.patch`) that pins each
   mutable `uses:` to the commit SHA its ref names now, the old ref kept as a comment (`@<sha> # v4`; an existing
