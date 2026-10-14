@@ -4,6 +4,27 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## 0.14.2
 
+- **`pin-plan`: the SUP-008 read-only pin planner** (new workspace crate `crates/pin-plan`, not published). For
+  every repo under `--root` (default `C:/Projects`) it prints one table per repo of each `uses:` that names a
+  mutable tag or branch, with two SHAs and the runtime: the **commit the current ref names today** (pinning to
+  it changes no behaviour; for a branch such as `dtolnay/rust-toolchain@stable` it is the only faithful pin), the
+  **latest release** (tag and commit SHA; the highest plain-semver tag when the repo has no release; annotated
+  tags dereferenced to the commit), and the **Node runtime** the action declares at each (`node20 -> node24`),
+  flagging a current `node20` or older. It **writes nothing**: no file, no ref, no PR.
+- Files are enumerated with `git ls-files` (never a disk walk) and their text is read from `origin/main`
+  (`HEAD` if there is none), the ref printed per repo; a file in the index but not at that ref is named, not
+  read. A child whose `.git` is a file (a linked worktree) is listed as skipped, so a repo is not planned twice.
+  `uses:` lines inside `run: |` / `script: >` blocks are not read as references.
+- Each distinct action is looked up once with `gh api`, however many files use it. `--no-network` lists the
+  mutable refs without release data; `--all` also lists already pinned references; `--repo NAME` limits it.
+  Anything that could not be resolved is printed as `UNRESOLVED:` with the reason and counted in the totals,
+  never dropped.
+- **Run for real** (2026-10-14, repos at their `origin/main` as fetched by each lane, `gh` as `ciresnave-bot`,
+  206 s): 32 repos read (27 linked worktrees skipped), 51 files, 455 `uses:` references: 59 pinned, **393
+  mutable** (313 tag, 80 branch) in 22 repos across 32 action repos; 1 unresolved (`NVIDIA/blossom-action@main`
+  has no tags); 213 on node20 or older today (100 are `actions/checkout@v4`). This is a different population
+  from CodeRipper's 235 pins in 18 repos: this counts every mutable reference in every repo here.
+  The pure parts (classification, scanning, runtime and tag choice) are unit-tested.
 - **Disk floor: nothing is launched while `C:` has less than 20 GB free** (PM task, incident 2026-10-14 04:45Z:
   `C:` hit 4 GB and builds failed in six lanes). New `lane_restart::disk` (`FLOOR_BYTES` = 20 GiB; the volume is
   the one holding the lane state directory, picked as the longest mount that is a path prefix, case and slash
