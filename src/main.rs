@@ -718,9 +718,8 @@ fn run_doctor(exe: Option<String>) -> ExitCode {
 }
 
 fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCode {
-    if (register || remove) && !cfg!(windows) {
-        eprintln!("agentlife install-task: Task Scheduler exists only on Windows");
-        return ExitCode::FAILURE;
+    if !cfg!(windows) {
+        return run_install_task_systemd(register, remove, exe);
     }
     let exe = match exe {
         Some(e) => e,
@@ -780,6 +779,54 @@ fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCo
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `agentlife install-task` off Windows (`docs/PORT-LINUX-PLAN.md`, P8): PRINTS the `systemd --user`
+/// unit and the commands to install it. It never writes into the user's systemd directory or runs
+/// `systemctl`: registering a unit that starts a restore at logon is a person's act (CireSnave
+/// approves, the PM operates), and this path has not been run against a real systemd.
+fn run_install_task_systemd(register: bool, remove: bool, exe: Option<String>) -> ExitCode {
+    if register || remove {
+        eprintln!(
+            "agentlife install-task: --register/--remove exist only on Windows. On Linux this prints              the systemd --user unit and the commands; install it by hand."
+        );
+        return ExitCode::FAILURE;
+    }
+    let exe = match exe {
+        Some(e) => e,
+        None => match std::env::current_exe() {
+            Ok(p) => p.display().to_string(),
+            Err(e) => {
+                eprintln!("agentlife install-task: cannot find this binary ({e}); pass --exe");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    for t in [task::Trigger::Logon, task::Trigger::SessionUnlock] {
+        match task::systemd_unit(t, &exe) {
+            Some(unit) => {
+                let name = task::systemd_unit_name(t);
+                println!("# {}  ({})", t.task_name(), t.arguments());
+                println!("# save as ~/.config/systemd/user/{name}, then:");
+                println!("#   systemctl --user daemon-reload");
+                println!(
+                    "#   systemctl --user enable {name}
+"
+                );
+                println!("{unit}");
+            }
+            None => {
+                println!("# {}  ({})", t.task_name(), t.arguments());
+                println!(
+                    "# No unit: systemd has no trigger for a session unlock (logind sends a D-Bus
+                     # `Unlock` signal that a listener would have to catch). Run                      `agentlife pending --prompt` by hand, or from your desktop's own unlock hook.
+"
+                );
+            }
+        }
+    }
+    println!("# Nothing was changed (not verified against a real systemd).");
+    ExitCode::SUCCESS
 }
 
 /// Runs `schtasks`, echoing what it said. `true` when it succeeded.

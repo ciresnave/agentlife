@@ -103,6 +103,58 @@ pub fn task_xml(trigger: Trigger, user: &str, exe: &str) -> String {
     )
 }
 
+/// One `ExecStart=` word for systemd: `%` and `$` doubled (systemd expands both), and the word
+/// quoted when it holds whitespace or a quote.
+pub fn systemd_word(s: &str) -> String {
+    let doubled = s.replace('%', "%%").replace('$', "$$");
+    if doubled
+        .chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == '\\')
+    {
+        format!("\"{}\"", doubled.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        doubled
+    }
+}
+
+/// The `systemd --user` unit for a trigger (`docs/PORT-LINUX-PLAN.md`, P8), or `None` when systemd
+/// has no honest equivalent.
+///
+/// * **Logon**: a `Type=oneshot` user service wanted by `default.target`, which the user manager
+///   starts when the user's session manager does. No start timeout: a restore waits for a person.
+/// * **Unlock**: `None`. systemd has no unit trigger for "the session was unlocked"; logind
+///   announces it as a D-Bus `Unlock` signal on the session object, and a listener for that is a
+///   service this tool would have to ship and could not test here. Documented as a limit, not
+///   guessed: on Linux `pending --prompt` is run by hand or from a desktop environment's own unlock
+///   hook.
+pub fn systemd_unit(trigger: Trigger, exe: &str) -> Option<String> {
+    match trigger {
+        Trigger::Logon => Some(format!(
+            "[Unit]
+Description={desc}
+Documentation=file:docs/PORT-LINUX-PLAN.md
+
+[Service]
+Type=oneshot
+ExecStart={exe} {args}
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=default.target
+",
+            desc = trigger.description(),
+            exe = systemd_word(exe),
+            args = trigger.arguments(),
+        )),
+        Trigger::SessionUnlock => None,
+    }
+}
+
+/// The unit's file name, in `~/.config/systemd/user/`.
+pub fn systemd_unit_name(trigger: Trigger) -> String {
+    format!("{}.service", trigger.task_name())
+}
+
 /// The `schtasks` arguments that register a task from an XML file. `/F` replaces an existing task of
 /// the same name, so running `install-task --register` twice is harmless.
 pub fn create_args(trigger: Trigger, xml_path: &str) -> Vec<String> {
@@ -195,6 +247,71 @@ pub fn wait_ready(probe: &dyn Probe, budget: Duration, interval: Duration) -> Wa
         let step = interval.min(budget - waited).max(Duration::from_millis(1));
         probe.sleep(step);
         waited += step;
+    }
+}
+
+#[cfg(test)]
+mod systemd_tests {
+    use super::*;
+
+    #[test]
+    fn the_logon_unit_is_a_oneshot_user_service_wanted_by_default_target() {
+        let u = systemd_unit(
+            Trigger::Logon,
+            "/home/u/.local/lib/agentlife/hooks/agentlife",
+        )
+        .unwrap();
+        assert!(
+            u.contains(
+                "Type=oneshot
+"
+            ),
+            "{u}"
+        );
+        assert!(
+            u.contains(
+                "ExecStart=/home/u/.local/lib/agentlife/hooks/agentlife restore --from-logon
+"
+            ),
+            "{u}"
+        );
+        assert!(
+            u.contains(
+                "WantedBy=default.target
+"
+            ),
+            "{u}"
+        );
+        // a restore waits for a person: no start timeout
+        assert!(
+            u.contains(
+                "TimeoutStartSec=infinity
+"
+            ),
+            "{u}"
+        );
+    }
+
+    /// systemd has no unlock trigger: no unit is produced, rather than one that never fires.
+    #[test]
+    fn there_is_no_unit_for_unlock() {
+        assert_eq!(systemd_unit(Trigger::SessionUnlock, "/x/agentlife"), None);
+    }
+
+    #[test]
+    fn exec_words_are_quoted_and_percent_and_dollar_are_doubled() {
+        assert_eq!(systemd_word("/usr/bin/agentlife"), "/usr/bin/agentlife");
+        assert_eq!(
+            systemd_word("/opt/my tools/agentlife"),
+            "\"/opt/my tools/agentlife\""
+        );
+        assert_eq!(systemd_word("/a/%h/$X"), "/a/%%h/$$X");
+        assert_eq!(systemd_word("/a\"b"), "\"/a\\\"b\"");
+    }
+
+    #[test]
+    fn the_unit_file_name_is_the_task_name() {
+        assert_eq!(systemd_unit_name(Trigger::Logon), "agentlife-logon.service");
     }
 }
 
