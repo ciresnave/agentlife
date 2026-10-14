@@ -2,6 +2,18 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.35
+
+- **`agentlife install-task` off Windows prints a `systemd --user` logon unit** (`docs/PORT-LINUX-PLAN.md`, P8).
+  Before, it refused outright (Task Scheduler exists only on Windows). Now it prints
+  `agentlife-logon.service` (`Type=oneshot`, `ExecStart=<exe> restore --from-logon`, `WantedBy=default.target`, no
+  start timeout because a restore waits for a person; `%` and `$` doubled and the path quoted when needed) and the
+  `systemctl --user daemon-reload` / `enable` commands. **There is no unlock unit**: systemd has no trigger for a
+  session unlock (logind announces it as a D-Bus `Unlock` signal that a listener would have to catch), so on Linux
+  `agentlife pending --prompt` is run by hand or from the desktop's own unlock hook; this is printed, not hidden.
+  `--register`/`--remove` stay Windows-only: nothing is written into the user's systemd directory and no
+  `systemctl` runs. **Not verified against a real systemd.** The Windows path is unchanged.
+
 ## 0.14.34
 
 - **`lane-restart attach --role <r> --watch`: a read-only view of a running direct lane host** (`docs/PORT-LINUX-PLAN.md`,
