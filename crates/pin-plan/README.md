@@ -20,6 +20,15 @@ inside one is refused before anything is created. References that could not be r
 are not patched and are counted in the totals. The PM routes each patch to its repo's lane; this tool opens
 no PR.
 
+### `--target latest`
+
+`--target current` (default) pins to the commit the ref names now. `--target latest` pins a *tag* ref to the
+commit of the action's latest release (comment = that tag): the way off node20 when the latest release declares
+node24, at the price of a possible major jump (its inputs may differ; CI in the repo is the proof). A *branch*
+ref is kept at its current commit in both modes, since a branch like `dtolnay/rust-toolchain@stable` selects
+behaviour a release tag does not carry. `DIR/ACTIONS.md` is the per-action table (runtime now and at latest,
+major jump, "no node24 release yet" first).
+
 ## Dogfood
 
 `tests/own_workflows.rs` fails when any workflow or action file in this repo's index holds a mutable ref, or a

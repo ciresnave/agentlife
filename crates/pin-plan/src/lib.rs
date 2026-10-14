@@ -172,6 +172,12 @@ pub fn scan(file: &str, text: &str) -> Vec<Use> {
 /// and the old ref written after it as a comment: `uses: a/b@<sha> # v4`. A comment the line
 /// already had follows: `# v4 - old note`. `None` when the line does not carry `u.raw`.
 pub fn pin_line(line: &str, u: &Use, sha: &str) -> Option<String> {
+    pin_line_as(line, u, sha, &u.reference)
+}
+
+/// [`pin_line`] with `label` (the tag or branch the SHA stands for) as the comment instead of the
+/// ref the line carried.
+pub fn pin_line_as(line: &str, u: &Use, sha: &str, label: &str) -> Option<String> {
     let at = line.find(&u.raw)?;
     let (head, rest) = (&line[..at], &line[at + u.raw.len()..]);
     let (rest, cr) = match rest.strip_suffix('\r') {
@@ -183,10 +189,18 @@ pub fn pin_line(line: &str, u: &Use, sha: &str) -> Option<String> {
     let note = tail.trim().strip_prefix('#').map(str::trim);
     let q = quote.map(String::from).unwrap_or_default();
     let comment = match note {
-        Some(n) if !n.is_empty() => format!("# {} - {n}", u.reference),
-        _ => format!("# {}", u.reference),
+        Some(n) if !n.is_empty() => format!("# {label} - {n}"),
+        _ => format!("# {label}"),
     };
     Some(format!("{head}{}@{sha}{q} {comment}{cr}", u.target))
+}
+
+/// The leading number of a tag (`v4`, `v4.2.1`, `4` -> 4), as written; pre-1.0 `0.5.3` -> 0.
+/// `None` for a branch name.
+pub fn major_of(reference: &str) -> Option<u64> {
+    let core = reference.strip_prefix('v').unwrap_or(reference);
+    let first = core.split('.').next()?;
+    first.parse().ok()
 }
 
 /// A unified diff (`git apply` takes it) for `path`, turning each 1-based line in `edits` into the
@@ -509,5 +523,19 @@ mod tests {
         assert!(d.contains("@@ -1,4 +1,4 @@"), "{d}");
         assert!(d.contains("@@ -19,4 +19,4 @@"), "{d}");
         assert_eq!(d.matches("@@ -").count(), 2, "{d}");
+    }
+
+    #[test]
+    fn pin_line_as_labels_with_the_given_tag_and_major_is_read() {
+        let u = scan("w", "  uses: a/b@v3").remove(0);
+        assert_eq!(
+            pin_line_as("  uses: a/b@v3", &u, SHA, "v4.1.0").unwrap(),
+            format!("  uses: a/b@{SHA} # v4.1.0")
+        );
+        assert_eq!(major_of("v4"), Some(4));
+        assert_eq!(major_of("v4.2.1"), Some(4));
+        assert_eq!(major_of("12"), Some(12));
+        assert_eq!(major_of("stable"), None);
+        assert_eq!(major_of("main"), None);
     }
 }

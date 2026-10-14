@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.5
+
+- **`pin-plan --target current|latest`** (with `--emit-patch`; default `current`, unchanged). `latest` pins a
+  **tag** ref to the commit of the action's latest release tag (comment = that tag) instead of the commit the old
+  ref names, which is how a node20 action reaches its node24 release. A **branch** ref is kept at the SHA it
+  names now in either mode: a branch such as `dtolnay/rust-toolchain@stable` selects behaviour (the toolchain)
+  that a release tag does not carry. `DIR/ACTIONS.md` lists every distinct action with its runtime now (per ref)
+  and at the latest release (`runs.using` at that commit), marks a major jump, and puts the actions whose
+  latest release still declares node20 or older ("no node24 release yet") and those with no release first.
+
 ## 0.14.4
 
 - **`pin-plan --emit-patch DIR`**: one `git apply`-able unified diff per repo (`DIR/<repo>.patch`) that pins each
