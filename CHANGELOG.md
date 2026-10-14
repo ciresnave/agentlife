@@ -2,6 +2,11 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.19
+
+- docs only: `docs/ROADMAP.md` slice 3 (what the PM and lanes still do by hand around restart/restore/status, and
+  where OverMind-split steps 6 and 7 stand, measured at OverMind `ca9e208` and consent `62b1788`). No code change.
+
 ## 0.14.18
 
 - `status --quiet-over <secs>` (opt-in; no default, nothing enforced): marks each **live** role whose last hook

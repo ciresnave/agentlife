@@ -175,6 +175,103 @@ for the PM to rule:
 - **Anything that writes another lane's state or HANDOFF**: items 1 to 4 read only.
 - **Assigning work to idle lanes**: a decision, not a tool; the PM's.
 
+## Next slice 3 (proposed 2026-10-14 at `origin/main` = `d396313`, 0.14.18): what is still done by hand, and the OverMind split's last step
+
+PM task 2026-10-14 13:50Z: (a) what lanes and the PM still do by hand around restart/restore/status after
+0.14.18, (b) OverMind split steps 6-7. Every row is a **proposal for the PM to accept, reorder or strike**;
+none is started; versions are the PM's. Sources were read at the refs named; this is a list of what they show,
+not a census of what the PM does.
+
+### (a) By hand today, around restart / restore / status
+
+| # | item | evidence (ref, what was run) | size | waits on |
+|---|---|---|---|---|
+| 1 | **`lane-restart --self` as documented does not run.** `C:\Projects\CLAUDE.md` and `CIRESNAVE-EXPECTATIONS.md` 2.3b say a lane runs `lane-restart --self`; the argument parser requires `--role <name>` (`ArgError::RoleRequired`, `main.rs`), so the bare form exits 1 with `--role <name> is required`. `assert-idle` resolves the role itself (`--role`, then `LANE_ROLE`, then the cwd's leaf). Fix either way: `--self` resolves the role the same way `assert-idle` does, or the instruction becomes `--role <me> --self` | measured once, 2026-10-14 ~13:05Z, this lane, installed 0.14.15 exe, from this lane's cwd with `LANE_ROLE` unset (the error text above). **I did not measure a lane whose `LANE_ROLE` is set**, so "fails for every lane" is not claimed. A role file `agentlife.json`/`agentlife.launch.json` exists, so the earlier belief that this lane has no role was wrong: the call was wrong | small | the PM: which side changes (the tool, or `CLAUDE.md`, which is the PM's) |
+| 2 | **Installing a new `lane-restart.exe` is a hand ritual.** The PM builds, renames the running exe aside and copies the new one (spec 5.3: "rename-then-copy, the old kept as `<name>.<version>.prev`") | `C:\Projects\.claude-hooks` listing 2026-10-14: 13 `lane-restart*` files under seven naming patterns (`.bak`, `.prev`, `.old`, `.old-in-use`, `.old-0.12.x`, `lane-restart.<ver>.exe`, `.sha256`) and a `lane-restart.sha256` last written Oct 7, which no longer describes `lane-restart.exe` (Oct 14 05:35). `agentlife doctor` already compares hook and host binaries to the build | medium | the PM's ruling that a PM-only `lane-restart install --from <exe>` is wanted: it would keep exactly one `<version>.prev`, verify the candidate by `--version` and `status` before replacing, and rewrite the sha file. It would touch `.claude-hooks`, so it is PM-only like `start` |
+| 3 | **Role and peer are joined by eye.** `status` knows each role's cwd and activity; the broker knows each live session's cwd and free-text summary; the PM's sweep reads both | 2026-10-14 ~12:00Z: `synapse-restarttest-lane` was `Crashed` in `status` while `list_peers` showed a live session at the same cwd. `agentlife` already has a broker client (`peers.rs`, used by `restore`) | small | whether the broker is stable enough to depend on from a read-only `status --peers` (it is read-only, fails soft to "unknown"); the PM's call |
+| 4 | **Merged-branch and worktree cleanup is a three-step ritual per PR** (`CLAUDE.md` 3: merge, delete ref, verify absent; then `git worktree remove` and `prune`) | `C:\Projects` holds 37 directories whose names start `fuel-`, `tjc-`, `kiss-`, `auth-framework-` or `synapse-wt`, or contain `-wt-` (`ls -d */`, 2026-10-14); **I did not check which are registered worktrees or merged**, so how many are stale is unmeasured. `CLAUDE.md` 3 itself cites 54 registered worktrees in one repo (measured 2026-10-02 by the PM) | small, read-only | not agentlife's by charter (it is neither restart, restore nor status). Listed because the PM asked what is done by hand; a report `agentlife worktrees --stale` using the section 4 predicate (`gh pr list --head <b> --state merged` plus `git ls-remote`) would never delete anything. Strike unless wanted |
+| 5 | **The logon and unlock tasks are not registered** (R8) | Roadmap "Waiting on someone else"; built 0.12.x, unregistered | n/a | CireSnave approves, the PM operates |
+
+Not proposed: anything that acts on another lane's session or state; `restore` automation beyond what M4 built.
+
+### (b) OverMind split: where steps 6 and 7 stand (read at OverMind `origin/main` = `ca9e208`, consent `origin/main` = `62b1788`)
+
+**Step 6 is already done.** `ARCHITECTURE-LAYERS-SPEC.md` 5.4 step 6 says so and the history agrees: `ciresnave/consent`
+was created with `git filter-repo` (the imported commits, for example `83ad6cf`, are followed by the scaffold `177d306`; `45a6856` 0.12.0
+verified the import byte-equal to OverMind `57fae94`), and OverMind#137 (`56764a2`, 0.13.0) deleted
+`crates/user-request`, `crates/with-secret` and the `rust` CI job. Two crates, one repo, one version, history kept.
+**What is left of step 6 is not a move:** `with-secret` is unpublished and waits on CireSnave's per-crate approval
+(board 173-A, per the spec and consent's README); the OverMind README points at the new home. So a plan for
+"steps 6-7" is a plan for step 7 only.
+
+**Step 7: the licence-tooling sources and the measurements home.** Measured by `git ls-tree` and `git show | wc -c`
+at `ca9e208` (the byte counts are of the blobs):
+
+| piece | files | size | goes with |
+|---|---|---|---|
+| `tools/spdx.py`, `tools/preflight.py`, `tools/gate_fleet.py` | 3 Python | 23,182 + 28,836 + 11,628 B | licence tooling |
+| `.github/workflows/gate-fleet.yml` | 1 | 4,002 B | licence tooling (it runs `OverMind/tools/gate_fleet.py`) |
+| `tests/test_spdx.py`, `tests/test_gate_fleet.py` | 2 | not measured | licence tooling (both `import` the tool by bare module name) |
+| `.github/spdx_gate.py` | 1 | 36,612 B | **stays** (OverMind's own deployment; `ci.yml` `spdx` job) |
+| `probe/` (34 files: 30 `.py`, 2 `.ts`, 1 `.sh`, 1 `.json`), `research/` (2), `MEASUREMENTS.md` | 37 | `MEASUREMENTS.md` 142,888 B | measurements home |
+| the six probes that import `overmind` (`daily_limits`, `free_capacity`, `ledger_context`, `local_throughput`, `p1_bench`, `paper_summaries`) | 6 of the 34 | | **stay** (ruling 4, 2026-10-08) |
+| `tests/test_desktop_grade.py`, `tests/test_paper_summaries.py` | 2 | not measured | `test_paper_summaries.py` tests `probe/paper_summaries.py`, one of the six that stay, so it stays too; `test_desktop_grade.py` goes with the probe home |
+
+Positive control for "six probes import overmind": the same `git grep -l "import overmind\|from overmind" -- probe`
+lists exactly those six names; no other file under `probe/` matches.
+
+**Finding that changes the plan: the gate fleet is already five, not four.** `.github/spdx_gate.py` exists at
+`origin/main` in `OverMind`, `consent`, `kiss-ref`, `synapse` and `vulkane` (the same listing over every
+`C:\Projects\<dir>` with a `.git`; `synapse-wt-redb` is a worktree of synapse and is not counted). `gate-fleet.yml`
+checks out OverMind, kiss-ref, vulkane and synapse: **consent is not compared.** `gate_fleet.py`'s own docstring names
+the trigger: "when a FIFTH repo gets this gate ... hand-copying stops being defensible". Only repos with a local
+clone were listed, so a sixth copy in a repo with no clone here would not show. This should be settled before the
+tooling moves, because the move rewrites that workflow.
+
+**Proposal: two destinations, as the spec's 5.2 already says, named now.**
+
+| piece | proposed repo | why that name |
+|---|---|---|
+| licence tooling | `ciresnave/licence-tools` (crate-less; Python, as it is today) | it is the sweeper (`spdx.py`), its pre-flight (`preflight.py`) and the fleet check; it is not OverMind's job. The CLI names stay (`spdx.py`, `preflight.py`, `gate_fleet.py`) so every recorded command line keeps working |
+| measurements | `ciresnave/measurements` | evidence, not product; `MEASUREMENTS.md` is cited by section number from OverMind's own source (25 lines in 13 files under `src/overmind` and `tests`, `git grep -c MEASUREMENTS`), so the file name and section numbers must not change |
+
+Version rule (ruling 3, the higher of source and destination): both repos are new, so each takes OverMind's current
+**0.13.2** only if the PM wants the number to stay readable; neither ships a binary, so there is no installed
+number to keep. That is the PM's call; I propose each starts at **0.1.0** because nothing installed carries the
+OverMind number. (If the PM prefers ruling 3 read literally, 0.13.2.)
+
+**Move order, history preserved, nothing executed:**
+
+1. **Settle the fleet first (in OverMind, before any move).** Either add consent to `gate-fleet.yml` (one more
+   checkout and argument; the planted-divergence control stays) or rule that consent's copy is checked another
+   way. This is the one step that changes behaviour, so it goes alone and first.
+2. **Create `licence-tools`** from OverMind with `git filter-repo --path tools/spdx.py --path tools/preflight.py
+   --path tools/gate_fleet.py --path tests/test_spdx.py --path tests/test_gate_fleet.py --path
+   .github/workflows/gate-fleet.yml`, plus scaffold: licences, CI (the python tests), its own SPDX gate as a
+   required context from day one (spec 5.3: "each new repo should require its own"), branch protection that
+   requires CI before the second PR. The two test files `sys.path`-insert `tools/`; each inserts `../tools` into `sys.path`, so one path edit each.
+   Verify as consent was: the copied files byte-equal OverMind `ca9e208`.
+3. **Repoint the fleet workflow** in `licence-tools` (it runs daily and on changes to the gate): `OverMind/tools/
+   gate_fleet.py` becomes the repo's own `tools/gate_fleet.py`, and the four (five) deployments are checked out
+   beside it. Until this lands and runs green once, OverMind keeps its copy and its workflow (rollback is "do
+   nothing").
+4. **One OverMind PR deletes** the three tools, two tests, the workflow and leaves a one-line pointer in README
+   (spec 5.3). The branch-protection note in 5.3 applies if `gate-fleet`'s job name is a required context: **not
+   measured**, read the protection before the PR.
+5. **Create `measurements`** the same way (`probe/` minus the six, `research/`, `MEASUREMENTS.md`,
+   `tests/test_desktop_grade.py`). Two blockers named by the spec: `probe/desktop_grade.py` runs through the installed
+   `with-secret.exe` and reads the runbook at pinned `REF` `3bf513f` (`CHANGELOG` 0.13.0), so it needs the
+   runbook's new address in consent; the pinned ref is an OverMind commit and **has not been checked to exist in consent's
+   history** (consent's runbook is byte-identical per its README, but the commit id differs).
+6. **OverMind's source comments** cite `MEASUREMENTS.md §n` and `probe/ledger_context.py`: after step 5 they cite a file that
+   is elsewhere. A one-line pointer in README is not enough for those; either leave the file in OverMind with a
+   pointer, or accept dangling section citations. **Open question for the PM**, not a default.
+
+Rollback per step: 1 revert; 2 and 5 delete the new repo (nothing depends on it yet); 3 revert; 4 revert (the files are
+still in `licence-tools`). No installed binary is involved anywhere in step 7.
+
+Out of scope here, per the PM's stop line: creating either repo, moving anything, publishing.
+
 ## Waiting on someone else
 
 | item | who | why it waits |
