@@ -631,7 +631,10 @@ fn wait_for_logon_preconditions() -> Result<(), String> {
 fn run_worktrees(json: bool, root: Option<String>, repos: Vec<String>) -> ExitCode {
     use agentlife::worktrees;
     let explicit: Vec<std::path::PathBuf> = repos.into_iter().map(Into::into).collect();
-    let root = std::path::PathBuf::from(root.unwrap_or_else(|| "C:/Projects".to_string()));
+    let root = root.map_or_else(
+        lane_state::platform::portfolio_root,
+        std::path::PathBuf::from,
+    );
     let (found, how) = worktrees::repos(&explicit, &root);
     let report = worktrees::scan(&worktrees::RealRunner, &found, how);
     if json {
@@ -695,7 +698,8 @@ fn run_doctor(exe: Option<String>) -> ExitCode {
             .map(str::to_string)
             .ok_or_else(|| "printed nothing".to_string())
     };
-    let hook_exe = exe.as_deref().unwrap_or(doctor::HOOK_EXE);
+    let default_hook_exe = doctor::hook_exe();
+    let hook_exe = exe.as_deref().unwrap_or(default_hook_exe.as_str());
     let lines = doctor::run(
         &cfg.host_program,
         hook_exe,

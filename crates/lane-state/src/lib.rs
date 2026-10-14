@@ -8,10 +8,12 @@
 //! - `state`: the `<role>.json` state file a lane's hooks write.
 //! - `facts`: the OS facts about processes (`SystemFacts`, `SysinfoFacts`).
 //! - `paths`: path comparison and the transcript directory name.
+//! - `platform`: where the portfolio's fixed directories live on this OS.
 //! - `claude_proc`: finding the `claude` pid, parsing its launch flags, the
 //!   session-identity environment variables.
 
 pub mod claude_proc;
 pub mod facts;
 pub mod paths;
+pub mod platform;
 pub mod state;

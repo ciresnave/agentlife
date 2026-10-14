@@ -23,7 +23,7 @@ pub const SHA_NAME: &str = "lane-restart.sha256";
 /// Where the installed exe lives. Fixed, like `state_dir`: a caller-supplied directory would let
 /// the verb install anywhere.
 pub fn hooks_dir() -> PathBuf {
-    PathBuf::from("C:/Projects/.claude-hooks")
+    lane_state::platform::hooks_dir()
 }
 
 /// Runs the candidate. Injected so tests need no real binary.

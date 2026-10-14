@@ -63,7 +63,7 @@ impl Home {
     pub fn resolve(env_value: Option<&str>) -> Result<Self, HomeError> {
         match env_value {
             Some(v) if !v.is_empty() => Self::new(v),
-            _ => Self::new(DEFAULT_HOME),
+            _ => Self::new(lane_state::platform::agentlife_home()),
         }
     }
 

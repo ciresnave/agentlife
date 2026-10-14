@@ -425,9 +425,25 @@ where
 }
 
 impl Config {
+    /// `Config::default()` with `portfolio_root` and `lane_state_dir` taken from
+    /// `lane_state::platform` for this OS. On Windows it equals `Config::default()`.
+    pub fn platform_default() -> Config {
+        Config {
+            portfolio_root: lane_state::platform::portfolio_root()
+                .to_string_lossy()
+                .into_owned(),
+            lane_state_dir: lane_state::platform::state_dir()
+                .to_string_lossy()
+                .into_owned(),
+            ..Config::default()
+        }
+    }
+
     /// Resolves the three layers over the defaults, then validates the result.
     pub fn resolve(flags: Layer, env: Layer, file: Layer) -> Result<Config, ConfigError> {
-        let d = Config::default();
+        // `Config::default()` is the Windows layout; the two directory defaults are re-resolved for
+        // this OS (identical values on Windows).
+        let d = Config::platform_default();
         macro_rules! field {
             ($f:ident) => {
                 pick(flags.$f, env.$f, file.$f).unwrap_or(d.$f)
@@ -623,7 +639,7 @@ mod tests {
     #[test]
     fn no_sources_means_the_documented_defaults() {
         let c = Config::resolve(Layer::default(), Layer::default(), Layer::default()).unwrap();
-        assert_eq!(c, Config::default());
+        assert_eq!(c, Config::platform_default());
         // The numbers CireSnave ruled on (archive, decision 121).
         assert_eq!(c.free_ram_floor_gb, 8.0);
         assert_eq!(c.tabs_per_window, 10);
@@ -632,9 +648,14 @@ mod tests {
         assert!(!c.lazy_enabled, "lazy ships off");
         assert_eq!(c.lazy_after_idle_minutes, 120);
         assert_eq!(c.pin_roles, ["pm"]);
-        assert_eq!(c.portfolio_root, "C:/Projects");
+        if cfg!(windows) {
+            assert_eq!(c.portfolio_root, "C:/Projects");
+            assert_eq!(c.lane_state_dir, "C:/Projects/.lane-state");
+        } else {
+            assert!(!c.portfolio_root.starts_with("C:"), "{}", c.portfolio_root);
+            assert!(!c.lane_state_dir.starts_with("C:"), "{}", c.lane_state_dir);
+        }
         assert_eq!(c.peers_addr.to_string(), "127.0.0.1:7899");
-        assert_eq!(c.lane_state_dir, "C:/Projects/.lane-state");
         assert_eq!((c.down_timeout_secs, c.down_poll_secs), (600, 2));
         assert_eq!(
             (c.host_program.as_str(), c.claude_program.as_str()),
