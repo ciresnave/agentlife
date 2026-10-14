@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.24
+
+- `agentlife worktrees --stale [--json] [--root <dir> | --repo <path>...]` (PM task 2026-10-14, ROADMAP slice 3
+  row (a)4): which registered worktrees belong to a merged branch, by the `CLAUDE.md` section 3/4 predicate: a MERGED
+  PR whose head is the worktree's own HEAD, no open PR, `git ls-remote --heads origin <branch>` empty, and a clean
+  tree. It prints the `git worktree remove` lines for the stale ones and **never removes anything**. Uncommitted
+  files are `stale-dirty` (ask first), a branch reused after its merge is `merged-then-diverged`, a failed lookup is
+  `unknown`; none of those is ever listed as stale. Worktrees come from `git worktree list --porcelain` per repo
+  (main worktrees excluded); repos are the `--repo` paths, else the children of `--root` (default `C:/Projects`)
+  that have a `.git` directory. Needs `git` and `gh`.
+
 ## 0.14.23
 
 - `lane-restart status --peers` (PM ruling 2026-10-14, ROADMAP slice 3 row (a)3; `docs/PROPOSAL-STATUS-PEERS-JOIN.md`):

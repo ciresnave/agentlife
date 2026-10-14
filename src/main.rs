@@ -78,6 +78,7 @@ fn main() -> ExitCode {
             exe,
         }) => run_install_task(register, remove, exe),
         Ok(Command::Doctor { exe }) => run_doctor(exe),
+        Ok(Command::Worktrees { json, root, repos }) => run_worktrees(json, root, repos),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
             ExitCode::FAILURE
@@ -626,6 +627,27 @@ fn wait_for_logon_preconditions() -> Result<(), String> {
 
 /// `agentlife install-task`. Prints by default; `--register` / `--remove` call `schtasks`.
 /// R16 and R17: reads the installed host and hook binary, changes nothing.
+/// `agentlife worktrees --stale`: read-only; prints, never removes.
+fn run_worktrees(json: bool, root: Option<String>, repos: Vec<String>) -> ExitCode {
+    use agentlife::worktrees;
+    let explicit: Vec<std::path::PathBuf> = repos.into_iter().map(Into::into).collect();
+    let root = std::path::PathBuf::from(root.unwrap_or_else(|| "C:/Projects".to_string()));
+    let (found, how) = worktrees::repos(&explicit, &root);
+    let report = worktrees::scan(&worktrees::RealRunner, &found, how);
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("agentlife worktrees: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        print!("{}", worktrees::render(&report));
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_doctor(exe: Option<String>) -> ExitCode {
     use agentlife::doctor;
     let home = match Home::from_env() {
