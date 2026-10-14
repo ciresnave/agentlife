@@ -16,6 +16,7 @@
 //! * **Start only a lane that is not running**, and recognise the NEW session as the one that
 //!   is not the dead session recorded in the lane's state file (which is stale, not new).
 
+use crate::duplicate::{self, DuplicateRefusal};
 use crate::facts::SystemFacts;
 use crate::launch::{launch_and_wait_with, prepare_launch, LaunchSpec, LivenessTiming, SpawnFn};
 use crate::relaunch::{valid_identifier, RelaunchError, RelaunchOutcome, StateReader};
@@ -146,6 +147,9 @@ pub enum StartRefusal {
     NoSpec(String),
     SpecUnusable(String),
     AlreadyRunning,
+    /// A `lane-restart host --role R` or a claude named for R is in the process table although
+    /// no live recorded session is (the state file is stale, or its session never started).
+    DuplicateRisk(DuplicateRefusal),
     Launch(RelaunchError),
 }
 
@@ -181,6 +185,7 @@ impl std::fmt::Display for StartRefusal {
                 f,
                 "the lane is already running (a live claude matches its recorded pid and start time)"
             ),
+            StartRefusal::DuplicateRisk(d) => write!(f, "{d}"),
             StartRefusal::Launch(e) => write!(f, "{e}"),
         }
     }
@@ -236,6 +241,11 @@ pub fn plan_start(
         Err(SpecError::NotFound(p)) => return Err(StartRefusal::NoSpec(p)),
         Err(e) => return Err(StartRefusal::SpecUnusable(e.to_string())),
     };
+    // A session that never reached its `SessionStart` (stuck at a startup dialog) is in no state
+    // file: only the process table sees it, whatever the state file says (2026-10-14).
+    let spec_name = from_disk.launch_spec().name;
+    duplicate::check(facts, req.role, &[req.role, spec_name.as_str()], None)
+        .map_err(StartRefusal::DuplicateRisk)?;
     // An explicit request wins; else the spec's own model, replaced when it is not an explicit
     // Sonnet or Haiku. `LANE_RESTART_ALLOW_OPUS` is never read here.
     let mut effective = from_disk.clone();
@@ -699,6 +709,120 @@ mod tests {
             &facts,
         );
         assert!(matches!(r, Err(StartRefusal::SpecUnusable(_))), "{r:?}");
+    }
+
+    // ---- double-launch guard ---------------------------------------------------------------
+
+    fn proc(pid: u32, parent: u32, name: &str, cmd: &[&str]) -> crate::facts::ProcEntry {
+        crate::facts::ProcEntry {
+            pid,
+            parent: Some(parent),
+            name: name.to_string(),
+            start_time_secs: 9000,
+            exe: None,
+            cmd: cmd.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn unisql_session() -> Vec<crate::facts::ProcEntry> {
+        vec![
+            proc(
+                3000,
+                1,
+                "lane-restart.exe",
+                &[
+                    "lane-restart.exe",
+                    "host",
+                    "--role",
+                    "baracuda",
+                    "--",
+                    "claude.exe",
+                ],
+            ),
+            proc(
+                3001,
+                3000,
+                "claude.exe",
+                &["claude.exe", "--name", "baracuda", "--model", "sonnet"],
+            ),
+        ]
+    }
+
+    /// Case 1: the first session is alive but stuck at the startup dialog, so no state file
+    /// names it (there is none for the role at all). Only the process table knows.
+    #[test]
+    fn a_live_host_stuck_at_the_startup_dialog_refuses_a_start_with_no_state_file() {
+        let (d, mut facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        // control: the same plan with an empty process table is accepted
+        assert!(plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts
+        )
+        .is_ok());
+        facts.table = Ok(unisql_session());
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        );
+        let Err(StartRefusal::DuplicateRisk(DuplicateRefusal::Live(ref v))) = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(
+            v.iter().map(|x| x.pid).collect::<Vec<_>>(),
+            vec![3000, 3001]
+        );
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("host pid 3000") && msg.contains("claude pid 3001"),
+            "{msg}"
+        );
+    }
+
+    /// Case 2: the state file exists but is stale (crashed; its pid is dead), and a host for the
+    /// role is alive anyway. The state file saying "crashed" must not make it startable.
+    #[test]
+    fn a_stale_crashed_state_file_does_not_hide_a_live_host() {
+        let (d, mut facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Crashed);
+        write_state(d.path(), "baracuda", 19184, Some(1), "dead-session");
+        // the stale state reads as not running, so only the guard can refuse
+        assert_eq!(
+            role_status(d.path(), "baracuda", &facts).state,
+            Lifecycle::Crashed
+        );
+        facts.table = Ok(vec![unisql_session().remove(0)]);
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        );
+        assert!(matches!(r, Err(StartRefusal::DuplicateRisk(_))), "{r:?}");
+    }
+
+    #[test]
+    fn an_unreadable_process_table_refuses_a_start() {
+        let (d, mut facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        facts.table = Err("access denied".into());
+        let r = plan_start(
+            d.path(),
+            &req("baracuda"),
+            pm_caller(d.path(), &facts),
+            &facts,
+        );
+        assert!(
+            matches!(
+                r,
+                Err(StartRefusal::DuplicateRisk(DuplicateRefusal::Unreadable(_)))
+            ),
+            "{r:?}"
+        );
     }
 
     // ---- execute_start ---------------------------------------------------------------------

@@ -407,6 +407,11 @@ pub struct RoleStatus {
     /// `claude`, or `"unknown"` when the broker could not be read. Absent without the flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peers: Option<crate::peers_join::RolePeers>,
+    /// `duplicate-risk`: live `lane-restart host --role R` / claude processes of this role that
+    /// its own live state file does not account for (a session stuck before its `SessionStart`,
+    /// or one a stale state file hides). Empty - and absent from JSON - for a normal row.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_risk: Vec<crate::duplicate::Duplicate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -483,6 +488,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         handoff: None,
         nested_in: None,
         peers: None,
+        duplicate_risk: Vec::new(),
     };
     let lane_state = state::load(dir, role);
     let live = lane_state
@@ -584,6 +590,9 @@ pub struct StatusReport {
     /// Only with `status --peers`: why the broker could not be read (every role is then `unknown`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peers_error: Option<String>,
+    /// Why the process table could not be read for the `duplicate-risk` marks (none were made).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_error: Option<String>,
 }
 
 impl StatusReport {
@@ -839,6 +848,7 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
         quiet_over_secs: None,
         peers_unmatched: None,
         peers_error: None,
+        duplicate_error: None,
     }
 }
 

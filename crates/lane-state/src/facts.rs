@@ -65,6 +65,8 @@ pub struct ProcEntry {
     pub name: String,
     pub start_time_secs: u64,
     pub exe: Option<PathBuf>,
+    /// The full command line, one element per argument (empty when it cannot be read).
+    pub cmd: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -304,7 +306,9 @@ impl SystemFacts for SysinfoFacts {
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+            ProcessRefreshKind::nothing()
+                .with_exe(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always),
         );
         let table: Vec<ProcEntry> = sys
             .processes()
@@ -315,6 +319,11 @@ impl SystemFacts for SysinfoFacts {
                 name: p.name().to_string_lossy().to_string(),
                 start_time_secs: p.start_time(),
                 exe: p.exe().map(|e| e.to_path_buf()),
+                cmd: p
+                    .cmd()
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
             })
             .collect();
         if table.is_empty() {
@@ -667,6 +676,8 @@ mod tests {
             c.name.to_lowercase().trim_end_matches(".exe"),
             SLEEP_CHILD_IMAGE_NAME
         );
+        // the command line is read too (the double-launch guard matches on it)
+        assert!(c.cmd.iter().any(|a| a == "30"), "cmd was {:?}", c.cmd);
     }
 
     /// The image name `spawn_sleep_child_in` actually spawns, per platform -
