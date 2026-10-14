@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.14.2
+## 0.14.3
 
 - **`pin-plan`: the SUP-008 read-only pin planner** (new workspace crate `crates/pin-plan`, not published). For
   every repo under `--root` (default `C:/Projects`) it prints one table per repo of each `uses:` that names a
