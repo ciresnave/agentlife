@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (Linux port P3'; the PM numbers it at gate)
+## 0.14.29
 
 - **Identity-mismatch diagnostic, no change to any decision** (`docs/PORT-LINUX-PLAN.md`, P3'; issue #14 has no
   failing log). New `lane_state::platform::diag::start_readings(pid)`: on Linux, the `/proc/<pid>/stat` start tick
