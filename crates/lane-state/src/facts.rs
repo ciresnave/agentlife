@@ -280,12 +280,31 @@ impl SystemFacts for SysinfoFacts {
         if !exe_matches(&current.exe, &expected.exe) {
             return Err(KillError::IdentityChanged);
         }
-        if process.kill() {
-            Ok(())
-        } else {
-            Err(KillError::SignalRejected(format!(
-                "kill signal to pid {pid} was not accepted"
-            )))
+        // Unix: SIGTERM to the process group, a grace period, then SIGKILL only if the same
+        // process is still there (`platform::signal`; `docs/PORT-LINUX-PLAN.md` P5). Windows keeps
+        // its one call.
+        #[cfg(unix)]
+        {
+            let start = expected.start_time_secs;
+            let exe = expected.exe.clone();
+            crate::platform::signal::terminate(
+                pid,
+                &|| presence(pid, start, &exe),
+                KILL_GRACE,
+                std::time::Duration::from_millis(100),
+            )
+            .map(|_| ())
+            .map_err(|e| KillError::SignalRejected(format!("signal to pid {pid} failed: {e}")))
+        }
+        #[cfg(not(unix))]
+        {
+            if process.kill() {
+                Ok(())
+            } else {
+                Err(KillError::SignalRejected(format!(
+                    "kill signal to pid {pid} was not accepted"
+                )))
+            }
         }
     }
 
@@ -325,6 +344,37 @@ impl SystemFacts for SysinfoFacts {
         }
         Ok(table)
     }
+}
+
+/// How long a `SIGTERM` is given before the process is `SIGKILL`ed (unix only).
+#[cfg(unix)]
+pub const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Is `pid` still the process recorded as `start`/`exe`? A zombie is gone; a different start time
+/// or executable means the pid changed hands.
+#[cfg(unix)]
+fn presence(pid: u32, start: u64, exe: &Option<PathBuf>) -> crate::platform::signal::Presence {
+    use crate::platform::signal::Presence;
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        full_process_refresh(),
+    );
+    let Some(p) = sys.process(Pid::from_u32(pid)) else {
+        return Presence::Gone;
+    };
+    if matches!(
+        p.status(),
+        sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+    ) {
+        return Presence::Gone;
+    }
+    let now_exe = p.exe().map(|e| e.to_path_buf());
+    if p.start_time() != start || !exe_matches(&now_exe, exe) {
+        return Presence::Other;
+    }
+    Presence::Target
 }
 
 /// The real work behind `find_claude_process_in`, pulled out with an

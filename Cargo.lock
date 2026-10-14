@@ -621,6 +621,7 @@ name = "lane-state"
 version = "0.14.31"
 dependencies = [
  "chrono",
+ "rustix",
  "serde",
  "serde_json",
  "sysinfo",
