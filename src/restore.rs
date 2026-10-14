@@ -85,6 +85,46 @@ pub struct EntryReport {
     pub session_id: Option<String>,
 }
 
+/// A registered agent that is wanted and was **not** in this run's batches, with why. Without
+/// this a restore could finish clean with a lane missing: an agent that looks alive (a recycled
+/// pid, a record with no start time) is left out of the plan, not failed, and was never listed.
+/// `NotSelected` and `NotWanted` are the person's own choices and are not listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unstarted {
+    pub agent_id: String,
+    pub name: Option<String>,
+    /// `held:<max_running|memory>` or `excluded:<reason>`.
+    pub kind: String,
+    pub detail: String,
+}
+
+/// Every wanted agent the plan did not put in a batch, from the plan alone.
+pub fn unstarted_from(plan: &Plan) -> Vec<Unstarted> {
+    use crate::plan::Reason;
+    let mut out: Vec<Unstarted> = plan
+        .held
+        .iter()
+        .map(|h| Unstarted {
+            agent_id: h.agent_id.clone(),
+            name: h.name.clone(),
+            kind: format!("held:{}", h.why),
+            detail: h.why.clone(),
+        })
+        .collect();
+    out.extend(
+        plan.excluded
+            .iter()
+            .filter(|x| !matches!(x.reason, Reason::NotSelected | Reason::NotWanted))
+            .map(|x| Unstarted {
+                agent_id: x.agent_id.clone(),
+                name: x.name.clone(),
+                kind: format!("excluded:{:?}", x.reason),
+                detail: x.detail.clone(),
+            }),
+    );
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreflightLine {
     pub name: String,
@@ -116,6 +156,10 @@ pub struct Report {
     pub held_for_memory: bool,
     pub preflight: Vec<PreflightLine>,
     pub entries: Vec<EntryReport>,
+    /// Wanted agents that were not in a batch (held or excluded), so none goes missing silently.
+    /// Absent in reports written before 0.13.1.
+    #[serde(default)]
+    pub unstarted: Vec<Unstarted>,
     pub summary: Summary,
 }
 
@@ -134,6 +178,20 @@ impl Report {
         );
         if let Some(h) = &self.halted {
             out.push_str(&format!("HALTED: {h}\n"));
+        }
+        if !self.unstarted.is_empty() {
+            out.push_str(&format!(
+                "NOT IN ANY BATCH ({}): wanted, but not started by this run\n",
+                self.unstarted.len()
+            ));
+            for u in &self.unstarted {
+                out.push_str(&format!(
+                    "  {} {}: {}\n",
+                    u.name.as_deref().unwrap_or(&u.agent_id),
+                    u.kind,
+                    u.detail
+                ));
+            }
         }
         if self.held_for_memory {
             out.push_str("HELD FOR MEMORY: the rest were not started\n");
@@ -430,6 +488,7 @@ pub fn execute(plan: &Plan, pre: Vec<PreflightLine>, d: &Deps) -> Report {
         held_for_memory,
         preflight: pre,
         entries: reports,
+        unstarted: unstarted_from(plan),
         summary,
     }
 }
@@ -1081,6 +1140,76 @@ mod tests {
         // A reading that cannot be taken holds nothing.
         let r = run_with(Fleet::new(GOOD), &plan, ok_pre(), &|| None, 2);
         assert_eq!(r.report.summary.working, 7);
+    }
+
+    #[test]
+    fn every_wanted_agent_left_out_of_the_batches_is_named_in_the_report_with_why() {
+        use crate::plan::{Excluded, Held, Reason};
+        let mut plan = plan_of(2, false, 3, true);
+        let ex = |id: &str, reason: Reason, detail: &str| Excluded {
+            agent_id: id.into(),
+            name: Some(id.into()),
+            reason,
+            detail: detail.into(),
+        };
+        plan.excluded = vec![
+            ex("not-selected", Reason::NotSelected, "not in --only"),
+            ex("parked", Reason::NotWanted, "closed"),
+            ex("looks-alive", Reason::Running, "pid 7 is alive"),
+            ex("no-start-time", Reason::Unverifiable, "no start time"),
+            ex("gone-dir", Reason::CwdMissing, "directory missing"),
+        ];
+        let r = run_with(Fleet::new(GOOD), &plan, ok_pre(), &|| None, 2);
+        let kinds: Vec<(String, String)> = r
+            .report
+            .unstarted
+            .iter()
+            .map(|u| (u.agent_id.clone(), u.kind.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("looks-alive".to_string(), "excluded:Running".to_string()),
+                (
+                    "no-start-time".to_string(),
+                    "excluded:Unverifiable".to_string()
+                ),
+                ("gone-dir".to_string(), "excluded:CwdMissing".to_string()),
+            ],
+            "the person's own choices (not selected, parked) are not listed; the rest are"
+        );
+        let text = r.report.render_text();
+        assert!(text.contains("NOT IN ANY BATCH (3)"), "{text}");
+        assert!(
+            text.contains("looks-alive excluded:Running: pid 7 is alive"),
+            "{text}"
+        );
+        // Positive control: the same plan with nothing excluded prints no such section.
+        plan.excluded.clear();
+        let r = run_with(Fleet::new(GOOD), &plan, ok_pre(), &|| None, 2);
+        assert!(r.report.unstarted.is_empty());
+        assert!(!r.report.render_text().contains("NOT IN ANY BATCH"));
+        // Held agents are listed with their cause (read from the plan alone).
+        plan.held = vec![Held {
+            agent_id: "h-1".into(),
+            name: None,
+            why: "max_running".into(),
+        }];
+        let u = unstarted_from(&plan);
+        assert_eq!(
+            (u[0].agent_id.as_str(), u[0].kind.as_str()),
+            ("h-1", "held:max_running")
+        );
+    }
+
+    #[test]
+    fn a_report_written_before_unstarted_existed_still_reads() {
+        let plan = plan_of(1, false, 3, true);
+        let r = run_with(Fleet::new(GOOD), &plan, ok_pre(), &|| None, 2).report;
+        let mut v = serde_json::to_value(&r).unwrap();
+        v.as_object_mut().unwrap().remove("unstarted");
+        let back: Report = serde_json::from_value(v).unwrap();
+        assert!(back.unstarted.is_empty());
     }
 
     #[test]

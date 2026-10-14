@@ -16,15 +16,13 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 | R16/R17 `doctor` (host and hook binary vs this build) | built, 0.12.5 |
 | `lane-restart`: launch spec before any kill, `status`, `start`, `specs import`, `stop`, PM-only restart of another lane, host thread fix | built, 0.12.10 to 0.12.14 |
 | the approval prompt's fourth thing (why) | built, 0.12.16 |
-| `park`/`stop` of a running lane refused unless the lane can be started again | **0.13.0, this PR** |
+| `park`/`stop` of a running lane refused unless the lane can be started again | 0.13.0 (#49) |
+| restore report lists every wanted agent not in a batch, with why | 0.13.1 |
 
 ## Next, in order (nothing below waits on CireSnave or the PM's hands)
 
-1. **Restore report names every Wanted agent it did not start, with the reason** (RESTORE-GAP-ANALYSIS 5b (1)).
-   Today `Report.entries` holds plan entries only: an agent excluded as `running` or `unverifiable`, or held for
-   `max_running` / memory, is absent from the report, so a restore can finish "clean" with a lane missing.
-   Also make `twelve_real_stand_ins_are_paced_pm_first_...` print `held` and `running_now` on failure (5b (2)),
-   so the known flake names its cause. Size S; proposed 0.13.1.
+1. ~~Restore report names every Wanted agent it did not start, with the reason~~ (RESTORE-GAP-ANALYSIS 5b): done in
+   0.13.1 (`Report.unstarted`; the flaky test's message now prints `held` and `running_now`).
 2. **`launch_e2e` flake and issue #14** (Linux `start_time` may differ by 1 s between reads): stay unproven
    until a failing log exists; the PM's ruling is to file an issue with the log, not to skip the test.
 3. **`host.rs` main loop drops the final chunk when the child exits** (noted in #44, unfixed): drain `rx`
