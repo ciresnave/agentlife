@@ -291,11 +291,18 @@ fn run_status_cmd(json: bool) -> ExitCode {
     println!("{}", lane_restart::disk::status_line(&state_dir()));
     for r in &report.roles {
         println!(
-            "{}\t{:?}\tspec={:?}\tstartable={}{}",
+            "{}\t{:?}\tspec={:?}\tstartable={}\t{}{}",
             r.role,
             r.state,
             r.spec,
             r.startable,
+            match &r.activity {
+                Some(a) => format!(
+                    "idle={} busy={} subagents={}",
+                    a.idle, a.busy, a.subagents_running
+                ),
+                None => "idle=-".to_string(),
+            },
             r.detail
                 .as_deref()
                 .map(|d| format!("\t{d}"))
