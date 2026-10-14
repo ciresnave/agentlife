@@ -4,6 +4,11 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## 0.14.7
 
+- **`lane-restart specs retire --role R [--role R]... [--dry-run]`** (PM only; PM-approved 2026-10-14). For a role
+  whose recorded `cwd` is not a directory and whose recorded process is not live, **moves** its state file (and
+  launch spec, if any) to `<state dir>/retired/<file>.<UTC stamp>`: never deletes, never overwrites, reads the
+  move back, writes a ledger row. Role `pm`, a role with a directory (resume it with `start`) and a role with a
+  live process are refused with the reason. Additive subcommand: proposed 0.14.x, not breaking.
 - **`lane-restart specs import` reports unmistakably and groups what it refuses** (PM-approved 2026-10-14, ROADMAP
   "specs import: cwd-missing and Crashed roles", #57). The first and last lines say whether anything was written
   (`DRY RUN - nothing written` / `WROTE n spec(s)`). Roles refused for the same reason, notably `cwd missing`,
