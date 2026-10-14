@@ -25,6 +25,7 @@ pub mod launch;
 pub mod ledger;
 pub mod log;
 pub mod notify;
+pub mod peers_join;
 pub mod relaunch;
 pub mod spec;
 pub mod spec_import;

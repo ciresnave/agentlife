@@ -37,6 +37,13 @@ pub fn broker_addr() -> SocketAddr {
 pub struct Peer {
     pub id: String,
     pub cwd: String,
+    /// The MCP helper's pid, whose parent is the lane's `claude` (`0` if the broker omitted it).
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub last_seen: Option<String>,
 }
 
 /// A minimal HTTP/1.1 JSON POST to the local broker: `Connection: close`,
@@ -99,6 +106,16 @@ fn dechunk(mut s: &str) -> Result<String, String> {
         out.push_str(rest.get(..size).ok_or("short chunk")?);
         s = rest.get(size + 2..).ok_or("short chunk")?;
     }
+}
+
+/// Every peer the broker knows on this machine, unfiltered. Read-only: it sends nothing.
+pub fn list_all(addr: SocketAddr) -> Result<Vec<Peer>, String> {
+    let body = post_json(
+        addr,
+        "/list-peers",
+        &serde_json::json!({"scope": "machine", "cwd": "", "git_root": null}),
+    )?;
+    serde_json::from_str(&body).map_err(|e| format!("unexpected /list-peers reply: {e}"))
 }
 
 /// Every live peer whose cwd is `cwd`.

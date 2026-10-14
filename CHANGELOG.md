@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.23
+
+- `lane-restart status --peers` (PM ruling 2026-10-14, ROADMAP slice 3 row (a)3; `docs/PROPOSAL-STATUS-PEERS-JOIN.md`):
+  per role, the claude-peers sessions whose MCP helper's **parent process** is the role's live `claude` (never joined
+  by cwd, never by peer id), then the peers no role's live `claude` owns, with the cwd. `--json` gains `peers` per
+  role, `peers_unmatched` and `peers_error`, all absent without the flag. A broker that cannot be read is
+  `"unknown"` for every role, never an empty list. A peer's `summary` is printed (one line, control characters
+  dropped, cut at 100 characters) only under `--peers`. Read-only: it sends nothing. `notify::Peer` gains
+  `pid`, `summary` and `last_seen` (all defaulted) and `notify::list_all`; the notify send path is unchanged.
+
 ## 0.14.22
 
 - docs only: `docs/PROPOSAL-STATUS-PEERS-JOIN.md`, the proposal for `lane-restart status --peers` (ROADMAP slice 3
