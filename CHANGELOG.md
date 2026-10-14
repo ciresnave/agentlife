@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (Linux port P6b; the PM numbers it at gate)
+## 0.14.34
 
 - **`lane-restart attach --role <r> --watch`: a read-only view of a running direct lane host** (`docs/PORT-LINUX-PLAN.md`,
   P6b; approved by the PM 2026-10-14 as the only attach to build). The host serves a unix-domain socket
