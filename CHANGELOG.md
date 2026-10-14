@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.29
+
+- **Identity-mismatch diagnostic, no change to any decision** (`docs/PORT-LINUX-PLAN.md`, P3'; issue #14 has no
+  failing log). New `lane_state::platform::diag::start_readings(pid)`: on Linux, the `/proc/<pid>/stat` start tick
+  (boot-relative, so a stepped clock cannot move it), the `btime` `/proc/stat` reports now, and the epoch start they
+  give together; off Linux it says it is unavailable. It is appended to the message when a kill is refused because
+  the pid's identity no longer matches: `agentlife down` (`DownError::IdentityChanged`), and `lane-restart` restart
+  and `stop` (`action failed: ... kill refused: ... (start readings: ...)`). A later clock step then shows in the
+  ledger as `proc_start_ticks` stable while `btime` moved. The token redesign (old P3) stays out unless a log shows
+  that.
+
 ## 0.14.28
 
 - **`lane-restart host` on unix** (`docs/PORT-LINUX-PLAN.md`, slice P4). No change on Windows.
