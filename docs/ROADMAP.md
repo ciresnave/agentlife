@@ -267,6 +267,23 @@ OverMind number. (If the PM prefers ruling 3 read literally, 0.13.2.)
    is elsewhere. A one-line pointer in README is not enough for those; either leave the file in OverMind with a
    pointer, or accept dangling section citations. **Open question for the PM**, not a default.
 
+**[ASK]-ready (for the PM to put on the board): `spdx_gate.py` is deployed in five repositories and the fleet check
+compares four.**
+
+- *Situation* (measured as above, `origin/main` of each local clone): OverMind, consent, kiss-ref, synapse, vulkane.
+  `gate-fleet.yml` checks out four of them; consent is not compared. `gate_fleet.py` was built because on 2026-09-11
+  four copies all printed PASS while one lagged, and its own docstring names the trigger for ending hand-copying:
+  "when a FIFTH repo gets this gate". consent got its copy on 2026-10-12 (scaffold `177d306`); nothing has
+  compared it since.
+- *Options.* **A**, add consent to `gate-fleet.yml` (one checkout, one argument) and keep hand-copying; the
+  detector covers five again, and the docstring trigger is acknowledged, not acted on. **B**, publish the gate as a
+  package each repo pins by version, which the docstring calls closing it fully; this needs a registry choice (the
+  gate is Python, so not crates.io) and touches CireSnave's rule on depending on published versions rather than
+  GitHub. **C**, leave it: consent's copy is checked by nothing.
+- *Recommend* **A now**, **B** when a sixth repo takes the gate or any `DIVERGENT` entry needs a second reason (the
+  docstring's own second trigger). A is a one-line workflow edit, reversible, and restores the detector today.
+- *Blocks:* nothing in agentlife; the licence-tools move (step 1 above) wants A first.
+
 Rollback per step: 1 revert; 2 and 5 delete the new repo (nothing depends on it yet); 3 revert; 4 revert (the files are
 still in `licence-tools`). No installed binary is involved anywhere in step 7.
 

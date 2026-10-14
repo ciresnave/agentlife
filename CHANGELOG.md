@@ -2,6 +2,15 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.14.20
+
+- `lane-restart --self` needs no `--role` (PM ruling 2026-10-14): the documented bare form in `CLAUDE.md` and
+  `CIRESNAVE-EXPECTATIONS.md` 2.3b exited 1 with `--role <name> is required`. The role is `LANE_ROLE`, else the one
+  role whose lane state records the current directory (case and separator insensitive); several matches are
+  narrowed by the caller's claude pid, and if that does not leave exactly one the command refuses and names the
+  candidates. An explicit `--role` is used as given, and every existing check on `--self` (the state file's pid
+  must be the caller's claude) still runs on the result. Without `--self` the role is still required.
+
 ## 0.14.19
 
 - docs only: `docs/ROADMAP.md` slice 3 (what the PM and lanes still do by hand around restart/restore/status, and
