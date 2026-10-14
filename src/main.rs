@@ -279,7 +279,7 @@ fn run_with_runtime(
     f: impl FnOnce(&mut run::Runtime) -> Result<run::Ran, String>,
 ) -> ExitCode {
     use agentlife::consent::real::{self, HelloPrompt};
-    use agentlife::launch::{Programs, RealSpawner};
+    use agentlife::launch::{platform_spawner, Programs};
     use agentlife::restore::{self, Deps, RegistryObserver};
     let fail = |e: String| {
         eprintln!("agentlife {command}: {e}");
@@ -316,7 +316,7 @@ fn run_with_runtime(
         host: cfg.host_program.clone(),
         claude: cfg.claude_program.clone(),
     };
-    let spawner = RealSpawner::default();
+    let spawner = platform_spawner();
     let show = |text: &str| print!("{text}");
     let rebuild = || build_plan(home, cfg, priority, only).map(|(p, _)| p);
     let execute = |p: &plan::Plan| {
@@ -336,7 +336,7 @@ fn run_with_runtime(
             p,
             pre,
             &Deps {
-                spawner: &spawner,
+                spawner: spawner.as_ref(),
                 observer: &observer,
                 clock: &SystemClock,
                 sleep: &sleep,
