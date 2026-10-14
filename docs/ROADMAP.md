@@ -183,7 +183,9 @@ Built: P0, P1, P2 (0.14.27), P4 (0.14.28), P3' (0.14.29), P9 (0.14.31; **not ver
 |---|---|---|
 | P3' | identity-mismatch diagnostic on Linux (the failing log issue #14 waits for) | proposed, awaiting the PM |
 | P5 | TERM, grace, KILL to the process group (`down`, `lane_stop`) | built |
-| P6 | `TabLauncher` + the direct lane host (`setsid`), `lane-restart attach` over the host's own pty | next |
+| P6a | the direct lane host (`setsid`), `DirectSpawner` | built (0.14.33) |
+| P6b | `lane-restart attach --watch`: read-only relay + snapshot (the only attach approved) | next |
+| P6c | interactive attach | **open: not approved until a threat-model note says how a same-user agent is kept off the socket** |
 | P8 | autostart: `systemd --user` units; an unlock path or a documented "logon only" limit | after P6 |
 | P9 | shutdown marker via `journalctl` / `last -x` | built; unverified on a real journal (owed: a capture from a real previous boot) |
 | P10 | hook origin and tab-close lists for Linux | after P2 (done) |
