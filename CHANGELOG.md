@@ -2,6 +2,25 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.13.0
+
+- **`agentlife park|stop` of a RUNNING lane now keeps `lane-restart stop`'s invariant: a lane is stopped only
+  if it can be started again** (the PM's task of 2026-10-13: lane-stop and lane-start must keep every lane
+  resumable). The lane's `<role>.launch.json` must exist and pass `lane_restart::spec::SpecFile::check`
+  (complete, an explicit non-Opus model) twice: before the lane is asked to wrap up, and again just before
+  the intent is recorded (the wait can be long). Without one nothing is asked, recorded or ended, and the
+  refusal names `lane-restart specs import --role <role>`. After the process is gone the spec is marked
+  `suspended` (best effort: a failure is journalled in `stopped` as `spec_error` and leaves the earlier
+  complete spec, so the lane stays startable). Dry runs refuse too, so they cannot promise a stop that
+  would be refused. **Breaking**: a `park|stop` that used to proceed on a lane with no spec is refused.
+  A person who wants the old behaviour has no flag for it, on purpose.
+- The role is the lane's self-claimed `LANE_ROLE`, else the leaf of its launch directory (the fallback the
+  state file uses); a record with neither is refused.
+- `agentlife` now depends on `lane-restart` (published, 0.12.16 on crates.io when read; by version plus
+  workspace path, as `lane-state` is). This is what 0.12.15 said was missing.
+- `docs/ROADMAP.md`: the priority-ordered list of what is built, what is unblocked and what waits on whom.
+- Nothing is wired to a logon task and no live start/stop was run; tests use stand-in processes only.
+
 ## 0.12.16
 
 - **The approval prompt's fourth thing: why (board 173, CireSnave 2026-10-12: *"four things, all prompts"*).**

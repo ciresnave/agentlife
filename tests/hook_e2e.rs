@@ -960,6 +960,7 @@ fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
     let lane_state = rig.dir.path().join("lane-state");
     std::fs::create_dir_all(&lane_state).unwrap();
     std::fs::create_dir_all(&rig.home).unwrap();
+    write_launch_spec(&lane_state, &rig, "target");
     std::fs::write(
         rig.home.join("config.json"),
         serde_json::json!({
@@ -980,7 +981,7 @@ fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
     args.extend_from_slice(extra_target_args);
     let pidfile_s = pidfile.display().to_string();
     args.extend_from_slice(&["--fake-child", &pidfile_s]);
-    let target = rig.spawn(&args, &script, &report, 120, &[]);
+    let target = rig.spawn(&args, &script, &report, 120, &[("LANE_ROLE", "target")]);
     let target_pid = target.id();
     wait_for(&report);
     let helper_pid: u32 = wait_for(&pidfile).trim().parse().unwrap();
@@ -998,6 +999,33 @@ fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
         helper_pid,
         _cleanup: Cleanup(vec![target_pid, helper_pid]),
     }
+}
+
+/// A lane is stopped only if it can be started again, so `park` of a running lane needs the
+/// lane's complete launch spec on disk, under the role the stand-in claims (`LANE_ROLE`).
+fn write_launch_spec(lane_state: &Path, rig: &Rig, role: &str) {
+    let cwd = rig.cwd();
+    let role = role.to_string();
+    let spec = lane_restart::spec::SpecFile {
+        schema: lane_restart::spec::SCHEMA,
+        role,
+        name: "target".to_string(),
+        cwd,
+        model: "sonnet".to_string(),
+        permission_mode: Some("auto".to_string()),
+        remote_control: false,
+        launch_args: vec![],
+        handoff_path: None,
+        handoff_mtime: None,
+        state: lane_restart::spec::SpecState::Running,
+        written_at: chrono::Utc::now(),
+        written_by: "test".to_string(),
+        stopped_session_id: None,
+        stopped_pid_start_secs: None,
+        stop_reason: None,
+        tool_version: "test".to_string(),
+    };
+    lane_restart::spec::write_atomic(lane_state, &spec).expect("a complete spec for the stand-in");
 }
 
 /// The lane's side of the protocol: once a wrap-up message arrives, write a HANDOFF and an idle
