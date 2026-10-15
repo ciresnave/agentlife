@@ -670,5 +670,7 @@ impl<'a> Engine<'a> {
     }
 }
 
+pub mod service;
+
 #[cfg(test)]
 mod tests;

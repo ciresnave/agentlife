@@ -2,6 +2,26 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.14
+
+- **`agentlife launcher`: the launch-on-message service, notifier-only build** (`docs/LAUNCHER-SERVICE.md`,
+  build order step 1). Long-polls Synapse as role `agentlife-launcher` through `synapsed-client` 6.0.0-rc.80
+  (`waiting`, `launch_result`, `launch_clear`, and `/v1/list` for the R7 online observation), decides each
+  signal with the `launcher` engine, posts every result (refusals included) from an outbox, re-checks
+  conditional refusals with `launch-clear`, and sends stall alarms to the `pm` lane over claude-peers. It
+  **never starts a lane**: with no standing grant (M5 unbuilt, board 216) a launchable signal is answered
+  `refused: no-grant`, and the mechanism it hands the engine always fails closed. One instance (OS advisory
+  lock `<state>/launcher.lock`); the caller record `<state>/agentlife-launcher.launcher-caller` is written only
+  while a session is held and removed only if it still names this process; the store is never created on its
+  own (`--init-store` once). `--once` runs a single cycle. Not run against a real daemon, lane or logon: unit
+  tests use stand-ins and the wire shapes were read from Synapse's own tests at 3230c03.
+- **Not in this change:** the second Task Scheduler task (`install-task` does not register the service yet, so it
+  is run by hand), `start-role --json`, the per-role start lock, and the grant read (rule 7).
+- **New dependency tree (needs a PM disposition at gate):** `synapsed-client` pulls `synapse`, which brings
+  ~6000 lines of `Cargo.lock` and, on `cargo deny`, licences outside `deny.toml`'s allow list (BSD-3-Clause,
+  ISC, MPL-2.0, CDLA-Permissive-2.0, Zlib, 0BSD, BSL-1.0, CC0-1.0) and RUSTSEC-2023-0071 (`rsa` through
+  `jsonwebtoken` through `synapse`). `deny.toml` is unchanged.
+
 ## 0.15.13
 
 - **The launcher path of `lane-restart start` holds `restore.lock`, the caps and the memory floor**

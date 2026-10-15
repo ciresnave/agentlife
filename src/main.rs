@@ -93,6 +93,7 @@ fn main() -> ExitCode {
             exe,
         }) => run_install_task(register, remove, exe),
         Ok(Command::Doctor { exe }) => run_doctor(exe),
+        Ok(Command::Launcher { init_store, once }) => run_launcher(init_store, once),
         Ok(Command::Worktrees { json, root, repos }) => run_worktrees(json, root, repos),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
@@ -664,6 +665,166 @@ fn run_worktrees(json: bool, root: Option<String>, repos: Vec<String>) -> ExitCo
         print!("{}", worktrees::render(&report));
     }
     ExitCode::SUCCESS
+}
+
+/// `agentlife launcher`: see `agentlife::launcher_service`. Exit 3 when another instance holds the
+/// lock, 1 on any other refusal to start.
+fn run_launcher(init_store: bool, once: bool) -> ExitCode {
+    use agentlife::launcher_service as svc;
+    use launcher::{service, Engine, FileStore};
+    use std::time::Duration;
+
+    let app = match app("launcher") {
+        Ok(a) => a,
+        Err(c) => return c,
+    };
+    let state_dir = state_dir_of(&app.cfg);
+    let log_file = Home::from_env().ok().map(|h| h.root().join("launcher.log"));
+    let log = |text: &str| {
+        let line = format!(
+            "{} agentlife launcher: {text}",
+            chrono::Utc::now().to_rfc3339()
+        );
+        eprintln!("{line}");
+        if let Some(p) = &log_file {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    };
+    let fail = |text: String| {
+        log(&text);
+        ExitCode::FAILURE
+    };
+
+    let _lock = match svc::take_instance_lock(&state_dir) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            log("another instance holds the lock; exiting");
+            return ExitCode::from(3);
+        }
+        Err(e) => return fail(format!("cannot take the instance lock: {e}")),
+    };
+
+    let store = FileStore {
+        path: svc::store_path(&state_dir),
+    };
+    let table = SysinfoTable;
+    let dir = svc::RegistryDirectory {
+        registry: &app.registry,
+        lane_state_dir: &state_dir,
+        table: &table,
+    };
+    let mech = svc::NoMechanism;
+    let mut engine = match Engine::open(&store, &mech, &dir, init_store) {
+        Ok(e) => e,
+        Err(e) => {
+            return fail(format!(
+                "{e} (the service never creates its store; run once with --init-store)"
+            ))
+        }
+    };
+    let now = || chrono::Utc::now().timestamp();
+    match engine.recover(now()) {
+        Ok(0) => {}
+        Ok(n) => log(&format!(
+            "resolved {n} request(s) left in flight by a crash"
+        )),
+        Err(e) => return fail(format!("cannot resolve in-flight requests: {e}")),
+    }
+
+    let home = match synapse::keystore::default_home() {
+        Ok(h) => h,
+        Err(e) => return fail(format!("no Synapse home (set SYNAPSE_HOME): {e}")),
+    };
+    let source = match svc::SynapseSource::connect(&home) {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    let notify = svc::PeerNotify {
+        state_dir: &state_dir,
+    };
+    let record = svc::own_record();
+    let mut holding = false;
+    log(&format!(
+        "started, notifier-only, role {}",
+        lane_restart::start::LAUNCHER_ROLE
+    ));
+
+    let exit = loop {
+        // The caller record exists only while a valid session is held.
+        if !holding {
+            match source.session_ok() {
+                Ok(()) => match &record {
+                    Some(r) => match svc::write_caller_record(&state_dir, r) {
+                        Ok(()) => holding = true,
+                        Err(e) => log(&format!("cannot write the caller record: {e}")),
+                    },
+                    None => log("cannot read this process's start time; no caller record"),
+                },
+                Err(e) => {
+                    log(&format!("no valid session: {e:?}"));
+                    if once {
+                        break ExitCode::FAILURE;
+                    }
+                    std::thread::sleep(Duration::from_secs(30));
+                    continue;
+                }
+            }
+        }
+        let wait = if once { 0 } else { svc::POLL_WAIT_SECS };
+        let rep = service::cycle(
+            &mut engine,
+            &source,
+            &notify,
+            now(),
+            svc::LAUNCH_WAIT_SECS,
+            wait,
+        );
+        for note in &rep.notes {
+            log(note);
+        }
+        for (text, reached) in &rep.alarms {
+            log(&format!("alarm {text:?} reached={reached}"));
+        }
+        if rep.decided + rep.posted + rep.cleared > 0 {
+            log(&format!(
+                "cycle: decided={} posted={} cleared={}",
+                rep.decided, rep.posted, rep.cleared
+            ));
+        }
+        if rep.session_lost {
+            if let Some(r) = &record {
+                svc::remove_caller_record(&state_dir, r);
+            }
+            holding = false;
+            log("session lost: caller record removed");
+            if once {
+                break ExitCode::FAILURE;
+            }
+            std::thread::sleep(Duration::from_secs(30));
+            continue;
+        }
+        if once {
+            break ExitCode::SUCCESS;
+        }
+        // A cycle that did not hold the poll (a daemon down, or signals waiting) must not spin.
+        std::thread::sleep(Duration::from_secs(if rep.notes.is_empty() {
+            1
+        } else {
+            5
+        }));
+    };
+    if holding {
+        if let Some(r) = &record {
+            svc::remove_caller_record(&state_dir, r);
+        }
+    }
+    exit
 }
 
 fn run_doctor(exe: Option<String>) -> ExitCode {
