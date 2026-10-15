@@ -31,10 +31,25 @@ OverMind's rule 3 is "known lane" only. Revision 2/3 intent still binds (*"any l
 closed should remain closed unless intentionally reopened"*, CireSnave, quoted in `DESIGN-REVISION-2.md`).
 The service adds a rule between OverMind's 3 and 4, from the **registry**: a role whose intent is `closed`
 (`parked` or `exited`) is `refused: closed-on-purpose`, terminal for that signal, never launched; only `wanted`
-(not running) and `lazy` are launchable. Unverified and to be settled before build: whether a lane stopped by
-`lane-restart stop` (spec `suspended`) is recorded in the registry as `lazy`, `wanted` or `closed`; today
-`lane-restart` writes only the spec, so the mapping has no evidence behind it. Until it does, a role with no
-registry intent is `refused: unknown-role`, which is the safe side.
+(not running) and `lazy` are launchable.
+
+**Verified at `origin/main` 3de10ab (code read; no run):** the two stop paths record different things.
+
+| stopped by | registry intent | spec state |
+|---|---|---|
+| `agentlife down` (park/stop, `src/down.rs`) | `Closed{parked}`, written **before** the kill | `suspended` |
+| `lane-restart stop` (the PM) | **unchanged: `Wanted`** | `suspended` |
+
+`crates/lane-restart` has 0 references to the registry and does not depend on `agentlife` (the dependency
+runs the other way), so it cannot write intent. And nothing on the agentlife side reads spec state:
+`plan.rs`, `restore.rs`, `select.rs` and `intent.rs` have 0 references to `suspended`/`SpecState`, while
+`plan.rs:403` does gate on `Intent::Wanted` (the control for that grep). Consequence: **a lane the PM stopped
+with `lane-restart stop` is `Wanted` and not running, so it is a restore candidate and, by the registry alone,
+launchable by this service.** The launcher therefore reads both: a role is launchable only if registry
+intent is `lazy`, or `wanted` **and** its launch spec is not `suspended`; a `suspended` spec with intent
+`wanted` is `refused: closed-on-purpose`. A role with no registry intent stays `refused: unknown-role`.
+The same gap means `agentlife restore` can relaunch a `lane-restart stop`ped lane at logon; that is existing
+behaviour and is reported to the PM, not changed here.
 
 ## Parts, and who owns each
 
