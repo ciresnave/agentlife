@@ -658,7 +658,7 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
         Err(refusal) => {
             eprintln!("lane-restart start: refused - {refusal}");
             ledger(None, &format!("refused: {refusal}"), false);
-            return ExitCode::FAILURE;
+            return ExitCode::from(refusal.exit_code());
         }
     };
     if let Err(refusal) = disk_gate("start") {
@@ -1387,7 +1387,10 @@ USAGE:
         is sonnet or haiku (default: the spec's, else sonnet); Opus is
         refused and LANE_RESTART_ALLOW_OPUS is not read. The permission mode
         is always auto. Starting role pm is refused: it is started by a
-        person. Exit codes as a restart: 0, 2 (awaiting the dialog), 1.
+        person. Exit codes: 0 started with progress confirmed, 2 started and
+        awaiting the dialog, 3 the lane is already running (nothing was
+        launched: a no-op, safe to call again), 1 any other refusal or a
+        failed launch.
         REFUSED (duplicate-risk) while the process table holds a
         `lane-restart host --role <name>` or a claude named for the role,
         whatever the state file says; the pids are printed. A restart

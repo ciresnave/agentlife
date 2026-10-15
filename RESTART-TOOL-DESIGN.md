@@ -1253,6 +1253,18 @@ process; (b) for a role never run, an `agentlife create` record (below). With ne
   spec with `state: "suspended"`, `written_by: "create"`, so `lane-start` has one thing to read and never
   consults the registry itself (which would make `lane-restart` depend on `agentlife`).
 
+**Exit codes** (the contract for a caller that only wants "make sure it is up"):
+
+| code | meaning |
+|---|---|
+| `0` | started; progress confirmed |
+| `2` | started; awaiting a human at the dev-channels dialog |
+| `3` | **already running**: a live claude matches the recorded pid and start time; nothing launched or written, safe to call again |
+| `1` | any other refusal (not PM, no spec, duplicate-risk, model, reason, disk) or a failed launch |
+
+A `duplicate-risk` refusal is `1`, not `3`: a stuck or unrecorded session is not a confirmed live lane. The
+role is the plain identifier of the spec (`<role>.launch.json`).
+
 ### 14.6 What a crash leaves behind
 
 The order is *complete spec durable, then kill, then mark suspended*, so there is no point at which a
