@@ -59,6 +59,10 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   2026-10-15). Names what blocks it: `synapsed-client` is a `0.0.0` name reservation on crates.io (no code), the
   M5 grant store and board 216 are unbuilt, and `start-role` on the launcher path does not exist. Nothing built.
 
+- **Docs: the launcher design now states how the two stop paths differ** (`docs/LAUNCHER-SERVICE.md`, Intent):
+  `agentlife down` records `Closed` intent, `lane-restart stop` records only the `suspended` spec, and the
+  launcher must read both. Code read at 3de10ab; nothing run.
+
 ## 0.15.2
 
 - **`lane-restart start` accepts a second caller, role `overmind`, for the launch-on-message service** (PM task
