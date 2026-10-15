@@ -136,8 +136,10 @@ The instance lock above does not cover a human or another caller. **Required of 
 service launches unattended** (a `start`/`start-role` change, its own PR): a per-role start lock
 `<state>/<role>.start.lock` (OS advisory lock, held across check, spawn and the confirmed-live wait), and a
 re-check of `role_status` and `duplicate::check` after the lock is taken and immediately before the spawn.
-The second starter then gets `already-running` (exit 3), which is the contract it already has. Until that
-lands, notifier-only mode (rule 7 refuses) is the only safe mode, which is the build order below anyway.
+The second starter then gets `already-running` (exit 3), which is the contract it already has. **Landed in
+0.15.11**: the lock is taken before `plan_start` (so the plan's checks are the re-check), `--json` reason
+`start-lock-held`; a lock that cannot be taken is `failed` / `start-lock-unavailable`. Not exercised against
+two real starters.
 
 ## Soft and hard stops (board 216)
 

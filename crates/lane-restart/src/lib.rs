@@ -37,6 +37,7 @@ pub mod spec;
 pub mod spec_import;
 pub mod spec_retire;
 pub mod start;
+pub mod start_lock;
 pub mod stop;
 pub mod tab_close;
 #[cfg(test)]
