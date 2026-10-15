@@ -32,6 +32,15 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## Unreleased
 
+- **New crate `launcher`: the decision engine of the launch-on-message service** (`docs/LAUNCHER-SERVICE.md`;
+  PM task 2026-10-15, OverMind policy #145 @e4c6ae3 sections 2-4). Pure and trait-based: rules 1-7 in order, the
+  section 3 mechanism mapping, the replay/rate/no-claim store with intent-before-call crash safety and an outbox,
+  the R7 online observation and `launch-stalled` alarm, and the service-side `launch-clear` re-check. **No network,
+  no process spawn and no Synapse dependency yet**: the daemon routes are synapse#175 (unbuilt at rc.77). The model
+  is never read from a signal. 25 unit tests with stand-in daemon/mechanism/directory; five guards mutated out to
+  see tests fail. Not a service yet; not published (`publish = false`).
+
+
 - **Docs: `docs/LAUNCHER-SERVICE.md`, the design of the launch-on-message service** (`agentlife launcher`; PM task
   2026-10-15). Names what blocks it: `synapsed-client` is a `0.0.0` name reservation on crates.io (no code), the
   M5 grant store and board 216 are unbuilt, and `start-role` on the launcher path does not exist. Nothing built.

@@ -629,6 +629,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "launcher"
+version = "0.15.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
