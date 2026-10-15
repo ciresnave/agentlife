@@ -22,6 +22,10 @@ pub struct SpecLaunch {
     pub cwd: String,
     /// A recorded-style argument list (no program name).
     pub argv: Vec<String>,
+    /// The spec's state is `suspended`: `lane-restart stop` or `agentlife down` ended this lane on
+    /// purpose. `restore` must leave it alone (a deliberate stop survives logon); only
+    /// `lane-restart start` resumes it.
+    pub suspended: bool,
 }
 
 /// Turns a spec into a [`SpecLaunch`]. Pure.
@@ -43,6 +47,7 @@ pub fn from_spec(s: &spec::SpecFile) -> SpecLaunch {
     SpecLaunch {
         cwd: s.cwd.clone(),
         argv,
+        suspended: s.state == spec::SpecState::Suspended,
     }
 }
 
@@ -50,7 +55,11 @@ pub fn from_spec(s: &spec::SpecFile) -> SpecLaunch {
 /// or it is not complete.
 pub fn load(lane_state_dir: &Path, role: &str) -> Option<SpecLaunch> {
     let s = spec::read(lane_state_dir, role).ok()?;
-    s.check().ok()?;
+    // A suspended spec is reported as such even when it is not complete: it must never fall back
+    // to the registry record and be launched (the deliberate stop would not survive).
+    if s.check().is_err() && s.state != spec::SpecState::Suspended {
+        return None;
+    }
     Some(from_spec(&s))
 }
 
@@ -105,6 +114,36 @@ mod tests {
     }
 
     #[test]
+    fn load_reports_a_suspended_spec_even_when_it_is_not_complete() {
+        let d = tempfile::tempdir().unwrap();
+        // complete + suspended
+        spec::write_atomic(d.path(), &spec_of("alpha", "sonnet")).unwrap();
+        assert!(load(d.path(), "alpha").unwrap().suspended);
+        // complete + running: not suspended (the control)
+        let mut run = spec_of("beta", "sonnet");
+        run.state = spec::SpecState::Running;
+        spec::write_atomic(d.path(), &run).unwrap();
+        assert!(!load(d.path(), "beta").unwrap().suspended);
+        // incomplete (Opus) + suspended: still reported, so it cannot fall back to the registry
+        let opus = spec_of("gamma", "opus");
+        std::fs::write(
+            d.path().join("gamma.launch.json"),
+            serde_json::to_vec_pretty(&opus).unwrap(),
+        )
+        .unwrap();
+        assert!(load(d.path(), "gamma").unwrap().suspended);
+        // incomplete + running: None, as before
+        let mut opus_run = spec_of("delta", "opus");
+        opus_run.state = spec::SpecState::Running;
+        std::fs::write(
+            d.path().join("delta.launch.json"),
+            serde_json::to_vec_pretty(&opus_run).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load(d.path(), "delta"), None);
+    }
+
+    #[test]
     fn load_reads_a_complete_spec_and_nothing_else() {
         let d = tempfile::tempdir().unwrap();
         spec::write_atomic(d.path(), &spec_of("alpha", "sonnet")).unwrap();
@@ -116,7 +155,8 @@ mod tests {
 
         // Present but not complete (Opus): `write_atomic` refuses it, so write the bytes by hand
         // and check that `load` refuses it too.
-        let opus = spec_of("gamma", "opus");
+        let mut opus = spec_of("gamma", "opus");
+        opus.state = spec::SpecState::Running; // a suspended one is reported, see the test above
         let json = serde_json::to_vec_pretty(&opus).unwrap();
         std::fs::write(d.path().join("gamma.launch.json"), json).unwrap();
         assert!(
