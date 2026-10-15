@@ -4,7 +4,7 @@ members = [".", "crates/lane-restart", "crates/lane-state", "crates/launcher", "
 # One version for the whole project (CIRESNAVE-EXPECTATIONS.md 2.2): the higher of
 # agentlife (0.2.16) and lane-restart / lane-state (0.11.1), then bumped for each change.
 [workspace.package]
-version = "0.15.6"
+version = "0.15.7"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ciresnave/agentlife"
