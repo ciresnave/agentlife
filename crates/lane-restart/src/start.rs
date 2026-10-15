@@ -38,10 +38,41 @@ pub const PM_ROLE: &str = "pm";
 /// "Synapse->OverMind->AgentLife launch", relayed by the PM): the launcher service that acts on a
 /// Synapse mail-waiting signal. `stop` and a restart never accept it (`lane_stop::require_pm_for_other`
 /// and `authorize::decide` read their own caller).
-pub const LAUNCHER_ROLE: &str = "overmind";
+pub const LAUNCHER_ROLE: &str = "agentlife-launcher";
+
+/// The name 0.15.2 used. Accepted for one more release so a record written by an earlier service
+/// build still works; the PM ruling (2026-10-15) is that the service never claims `overmind`, since
+/// one Synapse session per role would knock the OverMind lane off it. Remove after 0.16.
+pub const LEGACY_LAUNCHER_ROLE: &str = "overmind";
+
+/// Is `role` a name the launcher service may act under?
+pub fn is_launcher_role(role: &str) -> bool {
+    role == LAUNCHER_ROLE || role == LEGACY_LAUNCHER_ROLE
+}
+
+/// What `launcher_caller` returns, followed by the role from the record: `launcher:<role>`. A `:`
+/// cannot occur in a lane's role (state files are `<identifier>.json`), so a *lane* that merely
+/// shares a name with the launcher (the OverMind lane's role is `overmind`) can never present
+/// this: only a validated launcher record produces it.
+pub const LAUNCHER_CALLER_PREFIX: &str = "launcher:";
+
+/// Is `caller` the output of a validated launcher record?
+pub fn is_launcher_caller(caller: &str) -> bool {
+    caller
+        .strip_prefix(LAUNCHER_CALLER_PREFIX)
+        .is_some_and(is_launcher_role)
+}
 
 /// Where the launcher service mirrors its identity. Deliberately not `*.json`: every other reader of
-/// the state dir treats `<stem>.json` as a lane's state file.
+/// the state dir treats `<stem>.json` as a lane's state file. One file per accepted role name.
+pub fn launcher_record_name(role: &str) -> String {
+    format!("{role}.launcher-caller")
+}
+
+/// The 0.15.2 record name, kept so code that named it still compiles. Use [`launcher_record_name`].
+#[deprecated(
+    note = "use launcher_record_name(LAUNCHER_ROLE); the legacy name is LEGACY_LAUNCHER_ROLE"
+)]
 pub const LAUNCHER_RECORD: &str = "overmind.launcher-caller";
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
@@ -65,18 +96,23 @@ pub fn launcher_caller(
     facts: &dyn SystemFacts,
 ) -> Result<String, CallerError> {
     let pid = parent.ok_or(CallerError::NoClaudeAncestor)?;
-    let bytes =
-        std::fs::read(dir.join(LAUNCHER_RECORD)).map_err(|_| CallerError::Unrecognised(pid))?;
-    let rec: LauncherRecord =
-        serde_json::from_slice(&bytes).map_err(|_| CallerError::Unrecognised(pid))?;
-    let live = facts
-        .process_identity(pid)
-        .is_some_and(|id| id.start_time_secs == rec.pid_start_secs);
-    if rec.role == LAUNCHER_ROLE && rec.pid == pid && live {
-        Ok(LAUNCHER_ROLE.to_string())
-    } else {
-        Err(CallerError::Unrecognised(pid))
+    for role in [LAUNCHER_ROLE, LEGACY_LAUNCHER_ROLE] {
+        let Ok(bytes) = std::fs::read(dir.join(launcher_record_name(role))) else {
+            continue;
+        };
+        let Ok(rec) = serde_json::from_slice::<LauncherRecord>(&bytes) else {
+            continue;
+        };
+        let live = facts
+            .process_identity(pid)
+            .is_some_and(|id| id.start_time_secs == rec.pid_start_secs);
+        // The file's name and the role inside it must agree, so one record cannot stand in for
+        // the other name.
+        if rec.role == role && rec.pid == pid && live {
+            return Ok(format!("{LAUNCHER_CALLER_PREFIX}{role}"));
+        }
     }
+    Err(CallerError::Unrecognised(pid))
 }
 
 /// A Synapse signal id is `<role>:<oldest queued global id>`. For a launcher call it must name the
@@ -330,7 +366,7 @@ pub fn plan_start(
 ) -> Result<StartPlan, StartRefusal> {
     let launcher = match caller {
         Ok(role) if role == PM_ROLE => false,
-        Ok(role) if role == LAUNCHER_ROLE => true,
+        Ok(caller) if is_launcher_caller(&caller) => true,
         other => return Err(StartRefusal::NotPm(other)),
     };
     if !valid_identifier(req.role) {
@@ -532,24 +568,52 @@ mod tests {
     const LAUNCHER_PID: u32 = 7000;
     const LAUNCHER_START: u64 = 8000;
 
-    fn write_launcher_record(dir: &Path, role: &str, pid: u32, start: u64) {
+    /// Writes `<file_role>.launcher-caller` holding a record that names `role`.
+    fn write_launcher_record_in(dir: &Path, file_role: &str, role: &str, pid: u32, start: u64) {
         let rec = LauncherRecord {
             role: role.into(),
             pid,
             pid_start_secs: start,
         };
-        std::fs::write(dir.join(LAUNCHER_RECORD), serde_json::to_vec(&rec).unwrap()).unwrap();
+        std::fs::write(
+            dir.join(launcher_record_name(file_role)),
+            serde_json::to_vec(&rec).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_launcher_record(dir: &Path, role: &str, pid: u32, start: u64) {
+        write_launcher_record_in(dir, role, role, pid, start);
     }
 
     #[test]
     fn the_launcher_is_recognised_by_its_record_pid_and_start_time() {
         let (d, mut facts) = world();
-        write_launcher_record(d.path(), "overmind", LAUNCHER_PID, LAUNCHER_START);
+        write_launcher_record(d.path(), LAUNCHER_ROLE, LAUNCHER_PID, LAUNCHER_START);
         facts.live_pid = Some((LAUNCHER_PID, LAUNCHER_START));
         assert_eq!(
             launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).as_deref(),
-            Ok("overmind")
+            Ok("launcher:agentlife-launcher")
         );
+        // the 0.15.2 name still works for one release
+        std::fs::remove_file(d.path().join(launcher_record_name(LAUNCHER_ROLE))).unwrap();
+        write_launcher_record(d.path(), LEGACY_LAUNCHER_ROLE, LAUNCHER_PID, LAUNCHER_START);
+        assert_eq!(
+            launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).as_deref(),
+            Ok("launcher:overmind")
+        );
+        // a record filed under one name but naming another is not either of them
+        std::fs::remove_file(d.path().join(launcher_record_name(LEGACY_LAUNCHER_ROLE))).unwrap();
+        write_launcher_record_in(
+            d.path(),
+            LAUNCHER_ROLE,
+            LEGACY_LAUNCHER_ROLE,
+            LAUNCHER_PID,
+            LAUNCHER_START,
+        );
+        assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
+        std::fs::remove_file(d.path().join(launcher_record_name(LAUNCHER_ROLE))).unwrap();
+        write_launcher_record(d.path(), LAUNCHER_ROLE, LAUNCHER_PID, LAUNCHER_START);
         // a recycled pid: same number, other start time
         facts.live_pid = Some((LAUNCHER_PID, LAUNCHER_START + 1));
         assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
@@ -557,10 +621,16 @@ mod tests {
         facts.live_pid = Some((LAUNCHER_PID, LAUNCHER_START));
         assert!(launcher_caller(d.path(), Some(LAUNCHER_PID + 1), &facts).is_err());
         // a record for another role is not the launcher
-        write_launcher_record(d.path(), "baracuda", LAUNCHER_PID, LAUNCHER_START);
+        write_launcher_record_in(
+            d.path(),
+            LAUNCHER_ROLE,
+            "baracuda",
+            LAUNCHER_PID,
+            LAUNCHER_START,
+        );
         assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
         // no record at all
-        std::fs::remove_file(d.path().join(LAUNCHER_RECORD)).unwrap();
+        std::fs::remove_file(d.path().join(launcher_record_name(LAUNCHER_ROLE))).unwrap();
         assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
     }
 
@@ -568,7 +638,7 @@ mod tests {
     fn the_launcher_may_start_only_for_a_signal_that_names_the_role() {
         let (d, facts) = world();
         write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
-        let launcher = || Ok("overmind".to_string());
+        let launcher = || Ok("launcher:agentlife-launcher".to_string());
         let mut r = req("baracuda");
         // positive control: the PM needs no signal and gets past the same gate
         assert!(!matches!(
@@ -602,9 +672,41 @@ mod tests {
         let mut r = req("pm");
         r.signal_id = Some("pm:1");
         assert!(matches!(
-            plan_start(d.path(), &r, Ok("overmind".to_string()), &facts),
+            plan_start(
+                d.path(),
+                &r,
+                Ok("launcher:agentlife-launcher".to_string()),
+                &facts
+            ),
             Err(StartRefusal::PmRole)
         ));
+        // the legacy name is the same gate
+        assert!(matches!(
+            plan_start(d.path(), &r, Ok("launcher:overmind".to_string()), &facts),
+            Err(StartRefusal::PmRole)
+        ));
+    }
+
+    /// A *lane* whose role is `overmind` or `agentlife-launcher` (found by process ancestry, as
+    /// the OverMind lane would be) is an ordinary non-PM caller: only a launcher record counts.
+    #[test]
+    fn a_lane_that_shares_the_launchers_name_is_not_the_launcher() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let mut r = req("baracuda");
+        r.signal_id = Some("baracuda:42");
+        for lane in ["overmind", "agentlife-launcher"] {
+            let e = plan_start(d.path(), &r, Ok(lane.to_string()), &facts).unwrap_err();
+            assert!(matches!(e, StartRefusal::NotPm(_)), "{lane}: {e:?}");
+        }
+        // positive control: the same request from a validated launcher record passes the gate
+        let e = plan_start(
+            d.path(),
+            &r,
+            Ok("launcher:agentlife-launcher".to_string()),
+            &facts,
+        );
+        assert!(!matches!(e, Err(StartRefusal::NotPm(_))), "{e:?}");
         assert!(matches!(
             plan_start(d.path(), &req("baracuda"), Ok("fuel".to_string()), &facts),
             Err(StartRefusal::NotPm(_))

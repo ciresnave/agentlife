@@ -611,6 +611,8 @@ mod tests {
         for caller in [
             Ok("synapse".to_string()),
             Ok("overmind".to_string()),
+            Ok("agentlife-launcher".to_string()),
+            Ok("launcher:agentlife-launcher".to_string()),
             Err(CallerError::NoClaudeAncestor),
         ] {
             let r = plan_stop(

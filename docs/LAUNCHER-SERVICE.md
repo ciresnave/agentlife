@@ -20,7 +20,7 @@ launched it (Synapse spec C2a).
 `/v1/waiting` (level-triggered, with `signal_id`/`attempt`) instead of diffing `pending` counts. One process,
 not two; the name `watch` or `launcher` is a naming choice for the PM.
 
-Loop, per OverMind's policy section 2: long-poll `GET /v1/waiting?wait=30` as role `overmind`; for each
+Loop, per OverMind's policy section 2: long-poll `GET /v1/waiting?wait=30` as role `agentlife-launcher` (a distinct role in Synapse's `launcher_roles`; never `overmind`, which is the OverMind lane's and holds one session); for each
 signal apply rules 1-7 in order; call the mechanism once; `POST /v1/launch-result`
 `{signal_id, attempt, role, outcome, reason}`; once per cycle read `GET /v1/list` for the online
 observation (R7) and the `transient` re-checks (`launch-clear`).
@@ -48,8 +48,8 @@ registry intent is `refused: unknown-role`, which is the safe side.
 
 ## Identity
 
-After taking the instance lock and loading the store, the service writes `<state>/overmind.launcher-caller`
-(`{role:"overmind", pid, pid_start_secs}`); on exit it removes the file **only if it still names its own pid
+After taking the instance lock and loading the store, the service writes `<state>/agentlife-launcher.launcher-caller`
+(`{role:"agentlife-launcher", pid, pid_start_secs}`); on exit it removes the file **only if it still names its own pid
 and start time**. A second instance never gets that far (it fails the lock first). `lane-restart start`
 accepts the record only from that process's direct child (0.15.2).
 The trust root is the Synapse credential, not this file: the service must write the record **only while it

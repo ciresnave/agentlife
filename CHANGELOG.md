@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.4
+
+- **The launcher caller is `agentlife-launcher`, not `overmind`** (PM ruling 2026-10-15). Synapse holds one
+  session per role and a claim supersedes the other holder, so a service claiming `overmind` would knock the
+  OverMind lane off its role. `lane-restart start` now accepts caller role `agentlife-launcher` (record
+  `<state>/agentlife-launcher.launcher-caller`); the 0.15.2 name `overmind` and its record are **accepted for
+  one more release** and removed after 0.16. A record must be filed under the name it carries. `stop` and a
+  restart still refuse both. The caller is recorded as `launcher:<role>` (the `:` cannot appear in a lane's
+  role), so a lane that shares the name, such as the OverMind lane, is not mistaken for the service (a
+  hole in 0.15.2's gate, found in review of this change). `LAUNCHER_RECORD` stays as a deprecated alias.
+  Threat note updated. No exit code or output changes; not run live (the service
+  that writes the record does not exist yet).
+
 ## 0.15.3
 
 - **`agentlife restore` no longer relaunches a lane that was stopped on purpose.** A `wanted` lane whose launch

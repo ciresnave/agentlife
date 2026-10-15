@@ -1,18 +1,18 @@
-# Launch on message: what the `overmind` caller can and cannot do
+# Launch on message: what the `agentlife-launcher` caller can and cannot do
 
-Scope: `lane-restart start` accepts a second caller, role `overmind`, for the launcher service that acts on a
+Scope: `lane-restart start` accepts a second caller, role `agentlife-launcher` (renamed from `overmind` at 0.15.4 by PM ruling 2026-10-15: the service must never claim `overmind`, the OverMind lane's role; the old name is accepted for one more release), for the launcher service that acts on a
 Synapse mail-waiting signal (CireSnave 2026-10-15, relayed by the PM: "Synapse->OverMind->AgentLife launch").
 Written at 0.15.2 against `crates/lane-restart/src/start.rs`. Nothing here was run against a real service: the
 service does not exist yet, and `start` is PM-only on this machine.
 
 ## What the identity is
 
-- The service writes `<state>/overmind.launcher-caller` (`{role, pid, pid_start_secs}`; deliberately not
+- The service writes `<state>/agentlife-launcher.launcher-caller` (`{role, pid, pid_start_secs}`; deliberately not
   `*.json`, which every other reader treats as a lane's state file) naming **itself**.
 - `lane-restart start` accepts it only when the **direct parent** of the running `lane-restart` is that pid
   **and** the process start time matches (a reused pid does not inherit it). One level, not the ancestry.
 - The PM is still recognised first, by its `claude` ancestor and the PM state file, as before.
-- The trust root intended by the PM is the Synapse `launcher_roles=overmind` credential, held by the service
+- The trust root intended by the PM is the Synapse `launcher_roles` credential of role `agentlife-launcher`, held by the service
   through `synapsed-client`. **This record is only a local mirror of that fact**; `lane-restart` does not talk to
   Synapse and cannot check the credential. Whether the record is written only while the service holds a valid
   session is the service's contract (PR3), not something this gate verifies.
@@ -24,13 +24,15 @@ service does not exist yet, and `start` is PM-only on this machine.
 - Only for a `--signal-id` of the form `<role>:<id>` whose role is the lane being started, so one signal
   cannot be spent on another lane. The id is otherwise not checked here (a forged id for the right role passes).
 - With the model pinned: `sonnet` or `haiku` only, as for the PM; Opus and `LANE_RESTART_ALLOW_OPUS` are refused.
-- Every call is ledgered: `requested_by` and `caller_role` = `overmind`, the signal id inside the reason, the
+- Every call is ledgered: `requested_by` and `caller_role` = `launcher:agentlife-launcher` (a call
+  authenticated by the legacy record is logged `launcher:overmind`; the prefix is what tells the service apart
+  from a *lane* that merely shares the name, which is an ordinary non-PM caller and is refused), the signal id inside the reason, the
   refusal or the outcome. A refused call is ledgered too.
 
 ## What it CANNOT do
 
 - `stop` and a restart: both read the `claude`-ancestry caller only, and `require_pm_for_other` refuses any role
-  but `pm` (tested with `overmind` in the refused list).
+  but `pm` (tested with `agentlife-launcher` and `overmind` in the refused list).
 - Start `pm`, change a spec's model upward, pass flags, a prompt or a working directory: `start` takes the spec
   as written, with `--model` pinned and permission mode `auto` (`plan_start`); it adds nothing the caller chooses.
 - Read or answer a dialog, kill a process, or write anything but the spec's `running` mark and the ledger.
@@ -38,7 +40,7 @@ service does not exist yet, and `start` is PM-only on this machine.
 ## If the identity is forged or the service is compromised
 
 Anything running as the same user can write the record and run `lane-restart` as a child of a process it
-controls, exactly as it could forge the PM's state file today. So the bound is *what a forged `overmind` can do*:
+controls, exactly as it could forge the PM's state file today. So the bound is *what a forged `agentlife-launcher` can do*:
 
 - At worst: start lanes **that already exist and have a spec**, as often as it likes, each on Sonnet or Haiku,
   and name any role in the signal id. Cost: tokens and memory, not data or code execution.
