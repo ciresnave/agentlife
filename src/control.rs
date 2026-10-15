@@ -26,6 +26,7 @@ use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::fmt;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -208,12 +209,41 @@ pub fn unpark_no_start(
     if !applied {
         return Err(ControlError::NotClosed);
     }
+    // A lane stopped by `lane-restart stop`/`agentlife down` has a `suspended` spec, and since
+    // 0.15.3 `restore` keeps such a lane out of its plan. `Wanted` + `suspended` is the same
+    // state as "the PM stopped it", so a deliberate reopen has to change the spec too:
+    // `crashed` is the existing "ended without a stop; the last known launch is the way back".
+    // Best effort: if it cannot be written the lane stays refused, which is the safe side.
+    let spec = reopen_spec(Path::new(&cfg.lane_state_dir), &rec);
     let _ = journal.append(
         "reopened",
         Some(id.as_str()),
-        json!({"by": by, "start": false}),
+        json!({"by": by, "start": false, "spec_reopened": spec.as_ref().ok().copied(),
+               "spec_error": spec.as_ref().err()}),
     );
     Ok(())
+}
+
+/// Rewrites the lane's `suspended`/`stopping` launch spec to `crashed`. `Ok(true)` when it was
+/// rewritten, `Ok(false)` when there was nothing to do (no spec, or it records no stop).
+fn reopen_spec(dir: &Path, rec: &AgentRecord) -> Result<bool, String> {
+    use lane_restart::spec::{self, SpecState};
+    let Some(role) = rec.spec_role() else {
+        return Ok(false);
+    };
+    let mut s = match spec::read(dir, &role) {
+        Ok(s) => s,
+        Err(spec::SpecError::NotFound(_)) => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !matches!(s.state, SpecState::Suspended | SpecState::Stopping) {
+        return Ok(false);
+    }
+    s.state = SpecState::Crashed;
+    s.written_by = "unpark".to_string();
+    s.written_at = chrono::Utc::now();
+    spec::write_atomic(dir, &s).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -550,7 +580,12 @@ mod tests {
     #[test]
     fn unpark_no_start_clears_the_mark_and_starts_nothing() {
         let r = rig(&[agent("a1", "lane", "C:/Projects/lane", None, None)]);
-        let cfg = Config::default();
+        // a temp lane-state dir: this must never read or rewrite a real lane's spec
+        let d = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            lane_state_dir: d.path().display().to_string(),
+            ..Config::default()
+        };
         assert_eq!(
             unpark_no_start(
                 &r.registry,
@@ -594,6 +629,101 @@ mod tests {
             .map(|e| e.kind)
             .collect();
         assert_eq!(kinds, ["closed", "reopened"]);
+    }
+
+    fn spec_in(role: &str, state: lane_restart::spec::SpecState) -> lane_restart::spec::SpecFile {
+        lane_restart::spec::SpecFile {
+            schema: lane_restart::spec::SCHEMA,
+            role: role.into(),
+            name: role.into(),
+            cwd: format!("C:/Projects/{role}"),
+            model: "sonnet".into(),
+            permission_mode: Some("auto".into()),
+            remote_control: false,
+            launch_args: vec![],
+            handoff_path: None,
+            handoff_mtime: None,
+            state,
+            written_at: Utc::now(),
+            written_by: "test".into(),
+            stopped_session_id: None,
+            stopped_pid_start_secs: None,
+            stop_reason: None,
+            tool_version: "test".into(),
+        }
+    }
+
+    /// A reopened lane must not stay refused by its `suspended` spec (0.15.3's restore and the
+    /// launcher rule both read it): `unpark --no-start` rewrites it to `crashed`.
+    #[test]
+    fn unpark_no_start_reopens_a_suspended_spec() {
+        use lane_restart::spec::{self, SpecState};
+        for (role, before, after) in [
+            ("lane", SpecState::Suspended, SpecState::Crashed),
+            ("lane", SpecState::Stopping, SpecState::Crashed),
+            // nothing to undo: a running or crashed spec is left exactly as it was
+            ("lane", SpecState::Running, SpecState::Running),
+            ("lane", SpecState::Crashed, SpecState::Crashed),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            spec::write_atomic(d.path(), &spec_in(role, before)).unwrap();
+            let cfg = Config {
+                lane_state_dir: d.path().display().to_string(),
+                ..Config::default()
+            };
+            let r = rig(&[agent("a1", "lane", "C:/Projects/lane", None, None)]);
+            closed(
+                &r,
+                "a1",
+                ClosedHow::Parked,
+                &Caller::Person,
+                None,
+                None,
+                &Alive(vec![]),
+            )
+            .unwrap();
+            unpark_no_start(
+                &r.registry,
+                &r.journal,
+                &cfg,
+                &Caller::Person,
+                None,
+                &id("a1"),
+            )
+            .unwrap();
+            let got = spec::read(d.path(), role).unwrap();
+            assert_eq!(got.state, after, "from {before:?}");
+            if before != after {
+                assert_eq!(got.written_by, "unpark");
+            }
+        }
+        // no spec at all: reopening still works and writes nothing
+        let d = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            lane_state_dir: d.path().display().to_string(),
+            ..Config::default()
+        };
+        let r = rig(&[agent("a1", "lane", "C:/Projects/lane", None, None)]);
+        closed(
+            &r,
+            "a1",
+            ClosedHow::Parked,
+            &Caller::Person,
+            None,
+            None,
+            &Alive(vec![]),
+        )
+        .unwrap();
+        unpark_no_start(
+            &r.registry,
+            &r.journal,
+            &cfg,
+            &Caller::Person,
+            None,
+            &id("a1"),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
     }
 
     #[test]

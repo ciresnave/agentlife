@@ -183,8 +183,8 @@ USAGE:
         claude-peers broker and the lane-restart host program, then does what `restore` does; on
         session unlock, `pending --prompt` asks about a restore that is waiting, if there is one.
         `install-task` only PRINTS both tasks' XML and the schtasks commands; a person runs it with
-        --register to create them (replacing same-named tasks) or --remove to delete them. Nothing
-        starts an agent yet: `restore` without --dry-run is not built.
+        --register to create them (replacing same-named tasks) or --remove to delete them. A logon
+        restore freezes its plan and asks a person first; nothing starts without that approval.
 
     agentlife import-lane-state [--write] [--json] [--since 48h] [--park a,b]
         Seeds the registry from OverMind's .lane-state/<role>.json files (read only) so the first
