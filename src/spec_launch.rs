@@ -134,8 +134,28 @@ mod tests {
             stopped_session_id: None,
             stopped_pid_start_secs: None,
             stop_reason: None,
+            stop_kind: None,
             tool_version: "test".into(),
         }
+    }
+
+    // `agentlife stop` records the kind in the spec it suspends (board 216).
+    #[test]
+    fn a_down_records_the_stop_kind_in_the_suspended_spec() {
+        use crate::down::{Facts, FsFacts};
+        let d = tempfile::tempdir().unwrap();
+        let mut run = spec_of("alpha", "sonnet");
+        run.state = spec::SpecState::Running;
+        spec::write_atomic(d.path(), &run).unwrap();
+        let facts = FsFacts {
+            lane_state_dir: d.path(),
+        };
+        facts
+            .mark_suspended("alpha", "agentlife stop: test", spec::StopKind::Soft)
+            .unwrap();
+        let after = spec::read(d.path(), "alpha").unwrap();
+        assert_eq!(after.state, spec::SpecState::Suspended);
+        assert_eq!(after.stop_kind, Some(spec::StopKind::Soft));
     }
 
     #[test]

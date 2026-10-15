@@ -20,7 +20,7 @@
 use crate::authorize::{self, Refusal, Request, Target};
 use crate::facts::{ProcessIdentity, SystemFacts};
 use crate::relaunch::{resolve_launch_model, valid_identifier, RelaunchError};
-use crate::spec::{self, find_handoff, SpecFile, SpecState, SpecStore};
+use crate::spec::{self, find_handoff, SpecFile, SpecState, SpecStore, StopKind};
 use crate::start::{validate_reason, CallerError, PM_ROLE};
 use crate::state::LaneState;
 use crate::stop::stop_lane;
@@ -38,6 +38,8 @@ pub struct StopRequest<'a> {
     /// `--yes`: without it a stop of another lane is a dry run (the same rule as a restart).
     pub confirmed: bool,
     pub dry_run: bool,
+    /// `Hard` unless the caller said `--soft`; `--self` is always soft and refuses `Hard`.
+    pub kind: StopKind,
 }
 
 #[derive(Debug)]
@@ -68,6 +70,9 @@ pub enum StopRefusal {
         modified: DateTime<Utc>,
         claimed: DateTime<Utc>,
     },
+    /// `--self --hard`: a lane cannot hard-stop itself (216). A hard stop is the PM's or a
+    /// person's, because it is the one a launcher must never undo.
+    SelfHard,
     /// A spec that `prepare_launch` accepts cannot be built from the live lane.
     Spec(String),
 }
@@ -118,6 +123,11 @@ impl std::fmt::Display for StopRefusal {
                  kept working after claiming it had stopped"
             ),
             StopRefusal::Spec(why) => write!(f, "{why}"),
+            StopRefusal::SelfHard => write!(
+                f,
+                "a lane cannot hard-stop itself: --self stops are soft (a message may start the \
+                 lane again); a hard stop is the PM's or a person's"
+            ),
         }
     }
 }
@@ -201,6 +211,9 @@ pub fn plan_stop(
         return Err(StopRefusal::PmRole);
     }
     validate_reason(req.reason).map_err(StopRefusal::Reason)?;
+    if req.self_stop && req.kind == StopKind::Hard {
+        return Err(StopRefusal::SelfHard);
+    }
     require_pm_for_other(req.self_stop, caller)?;
     let target = if req.self_stop {
         Target::Myself {
@@ -228,6 +241,7 @@ pub fn plan_stop(
         decided.will_act,
         req.reason,
         req.self_stop,
+        req.kind,
         facts.now(),
         policy_default,
     )
@@ -235,12 +249,14 @@ pub fn plan_stop(
 
 /// The checks that need a decided target: the HANDOFF and a complete spec. Separate from
 /// `plan_stop` so they are testable without a process table.
+#[allow(clippy::too_many_arguments)]
 pub fn build_stop_plan(
     state: LaneState,
     identity: ProcessIdentity,
     will_act: bool,
     reason: &str,
     self_stop: bool,
+    kind: StopKind,
     now: DateTime<Utc>,
     policy_default: &str,
 ) -> Result<StopPlan, StopRefusal> {
@@ -271,6 +287,7 @@ pub fn build_stop_plan(
     })
     .map_err(|e| StopRefusal::Spec(e.to_string()))?;
     stopping.stop_reason = Some(reason.trim().to_string());
+    stopping.stop_kind = Some(kind);
     stopping
         .check()
         .map_err(|e| StopRefusal::Spec(e.to_string()))?;
@@ -372,6 +389,11 @@ mod tests {
             true,
             "end of shift",
             self_stop,
+            if self_stop {
+                StopKind::Soft
+            } else {
+                StopKind::Hard
+            },
             now,
             "sonnet",
         )
@@ -590,6 +612,52 @@ mod tests {
         assert!(on_disk.check().is_ok());
     }
 
+    // Board 216: every stop says whether a launcher may undo it, on both spec writes (a failed
+    // final write leaves the `stopping` spec, which must still carry the kind).
+    #[test]
+    fn a_stop_records_its_kind_on_the_stopping_and_the_suspended_spec() {
+        let d = tempdir().unwrap();
+        let plan = ready_plan(d.path());
+        assert_eq!(plan.stopping.stop_kind, Some(StopKind::Hard));
+        let specs = DirSpecStore {
+            dir: d.path().to_path_buf(),
+        };
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        execute_stop(&plan, &facts, &specs, &mut |_| {}).unwrap();
+        let after = spec::read(d.path(), "baracuda").unwrap();
+        assert_eq!(after.state, SpecState::Suspended);
+        assert_eq!(after.stop_kind, Some(StopKind::Hard));
+    }
+
+    #[test]
+    fn a_lane_cannot_hard_stop_itself_but_can_soft_stop_itself() {
+        let d = tempdir().unwrap();
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        let mut hard = request("baracuda", true);
+        hard.kind = StopKind::Hard;
+        let r = plan_stop(
+            d.path(),
+            &hard,
+            Ok("baracuda".to_string()),
+            &facts,
+            "sonnet",
+        );
+        assert!(matches!(r, Err(StopRefusal::SelfHard)), "{r:?}");
+        // Control: the same request, soft, gets past that check (and stops at the missing state
+        // file, which comes later), so the refusal above is about the kind and nothing else.
+        let soft = request("baracuda", true);
+        let r = plan_stop(
+            d.path(),
+            &soft,
+            Ok("baracuda".to_string()),
+            &facts,
+            "sonnet",
+        );
+        assert!(!matches!(r, Err(StopRefusal::SelfHard)), "{r:?}");
+    }
+
     // --- who may stop --------------------------------------------------------------------
 
     fn request<'a>(role: &'a str, self_stop: bool) -> StopRequest<'a> {
@@ -600,6 +668,11 @@ mod tests {
             caller_claude_pid: None,
             confirmed: true,
             dry_run: false,
+            kind: if self_stop {
+                StopKind::Soft
+            } else {
+                StopKind::Hard
+            },
         }
     }
 

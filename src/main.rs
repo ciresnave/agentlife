@@ -49,13 +49,28 @@ fn main() -> ExitCode {
             confirm,
             yes,
             timeout,
-        }) => run_close(&agent, ClosedHow::Parked, confirm.as_deref(), yes, timeout),
+        }) => run_close(
+            &agent,
+            ClosedHow::Parked,
+            confirm.as_deref(),
+            yes,
+            timeout,
+            false,
+        ),
         Ok(Command::Stop {
             agent,
             confirm,
             yes,
             timeout,
-        }) => run_close(&agent, ClosedHow::Exited, confirm.as_deref(), yes, timeout),
+            soft,
+        }) => run_close(
+            &agent,
+            ClosedHow::Exited,
+            confirm.as_deref(),
+            yes,
+            timeout,
+            soft,
+        ),
         Ok(Command::Unpark { agent, .. }) => run_unpark(&agent),
         Ok(Command::Restore {
             dry_run,
@@ -1171,6 +1186,7 @@ fn run_close(
     confirm: Option<&str>,
     yes: bool,
     timeout: Option<u64>,
+    soft: bool,
 ) -> ExitCode {
     let name = if how == ClosedHow::Parked {
         "park"
@@ -1200,12 +1216,19 @@ fn run_close(
             name,
             target,
             how,
+            soft,
             confirm,
             yes,
             timeout,
             &caller,
             caller_rec.as_ref(),
         );
+    }
+    if soft {
+        eprintln!(
+            "agentlife {name}: --soft applies to ending a RUNNING session; this agent is not running, so nothing would be recorded"
+        );
+        return ExitCode::FAILURE;
     }
     let result = control::close(
         &app.registry,
@@ -1229,6 +1252,7 @@ fn run_down(
     command: &str,
     target: &AgentRecord,
     how: ClosedHow,
+    soft: bool,
     confirm: Option<&str>,
     yes: bool,
     timeout: Option<u64>,
@@ -1261,6 +1285,11 @@ fn run_down(
         &down::Request {
             target: &target.agent_id,
             how,
+            kind: if soft {
+                lane_restart::spec::StopKind::Soft
+            } else {
+                lane_restart::spec::StopKind::Hard
+            },
             confirm,
             yes,
             timeout: std::time::Duration::from_secs(timeout.unwrap_or(app.cfg.down_timeout_secs)),

@@ -12,6 +12,7 @@ use lane_restart::lane_state_writer::{self, ParentProcess, RealParentProcess};
 use lane_restart::lane_stop;
 use lane_restart::log;
 use lane_restart::relaunch;
+use lane_restart::spec::StopKind;
 use lane_restart::start;
 use lane_restart::tab_close;
 use std::path::PathBuf;
@@ -56,6 +57,8 @@ enum ArgError {
     Unknown(String),
     MissingChildArgv,
     MissingValue(&'static str),
+    /// Two flags that exclude each other were both given.
+    Conflict(&'static str, &'static str),
 }
 
 impl std::fmt::Display for ArgError {
@@ -68,6 +71,7 @@ impl std::fmt::Display for ArgError {
                 write!(f, "expected `-- <child argv...>` after --role <name>")
             }
             ArgError::MissingValue(flag) => write!(f, "{flag} requires a value"),
+            ArgError::Conflict(a, b) => write!(f, "{a} and {b} exclude each other"),
         }
     }
 }
@@ -823,18 +827,23 @@ struct StopArgs {
     target_self: bool,
     dry_run: bool,
     confirmed: bool,
+    /// `--soft` / `--hard`; `None` takes the default (soft for `--self`, hard otherwise).
+    kind: Option<StopKind>,
 }
 
-/// `stop --role R --reason <text> [--self] [--dry-run] [--yes]`. As with `start`, a missing
+/// `stop --role R --reason <text> [--self] [--soft|--hard] [--dry-run] [--yes]`. As with `start`, a missing
 /// `--reason` reaches `start::validate_reason`, so there is one message for it.
 fn parse_stop_args(rest: &[String]) -> Result<StopArgs, ArgError> {
     let mut role = None;
     let mut reason = String::new();
     let (mut target_self, mut dry_run, mut confirmed) = (false, false, false);
+    let (mut soft, mut hard) = (false, false);
     let mut iter = rest.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
+            "--soft" => soft = true,
+            "--hard" => hard = true,
             "--reason" => {
                 reason = iter
                     .next()
@@ -847,12 +856,21 @@ fn parse_stop_args(rest: &[String]) -> Result<StopArgs, ArgError> {
             other => return Err(ArgError::Unknown(other.to_string())),
         }
     }
+    if soft && hard {
+        return Err(ArgError::Conflict("--soft", "--hard"));
+    }
+    let kind = match (soft, hard) {
+        (true, _) => Some(StopKind::Soft),
+        (_, true) => Some(StopKind::Hard),
+        _ => None,
+    };
     Ok(StopArgs {
         role: role.ok_or(ArgError::RoleRequired)?,
         reason,
         target_self,
         dry_run,
         confirmed,
+        kind,
     })
 }
 
@@ -891,6 +909,13 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
             acted,
         );
     };
+    // Hard unless asked otherwise; a lane stopping itself is soft (board 216), and `--self --hard`
+    // is refused by `plan_stop`.
+    let kind = args.kind.unwrap_or(if args.target_self {
+        StopKind::Soft
+    } else {
+        StopKind::Hard
+    });
     let req = lane_stop::StopRequest {
         role: &args.role,
         reason: &args.reason,
@@ -898,6 +923,7 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
         caller_claude_pid: claude_pid,
         confirmed: args.confirmed,
         dry_run: args.dry_run,
+        kind,
     };
     let state_dir_path = state_dir();
     let plan = match lane_stop::plan_stop(
@@ -961,8 +987,9 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
             ledger(
                 Some(&plan.stopping.model),
                 &format!(
-                    "stopped pid {}; launch spec {}{pin_note}{warn}",
+                    "stopped pid {} ({} stop); launch spec {}{pin_note}{warn}",
                     plan.state.pid,
+                    kind.as_str(),
                     if done.spec_warning.is_some() {
                         "left as stopping (startable)"
                     } else {
@@ -1463,7 +1490,7 @@ USAGE:
         session and that session's host. `status` marks such roles
         duplicate-risk.
 
-    lane-restart stop --role <name> --reason <text> [--self] [--dry-run] [--yes]
+    lane-restart stop --role <name> --reason <text> [--self] [--soft|--hard] [--dry-run] [--yes]
         Suspend a lane. The complete launch spec (<role>.launch.json) is
         written durably and read back BEFORE the process is touched, then the
         verified kill, then the spec is marked suspended: a lane is stopped
@@ -1472,6 +1499,11 @@ USAGE:
         override. Another lane: PM only (same process-ancestry check as
         start), idle, and --yes to act for real, otherwise a dry run. --self
         stops the calling lane. Role pm is refused. --reason as for start.
+        The stop is recorded in the spec as soft or hard (stop_kind): HARD (the default) is
+        a deliberate stop that no launcher may undo; SOFT is a lane ending in the course of
+        its own work, which a message for it may start again. --self is always soft and
+        refuses --hard; a lane can never turn a hard stop into a soft one. A spec with no
+        kind (older, or a crash import) is unclassified and is never launcher-started.
         Exit codes: 0 stopped and suspended; 1 refused or failed; 4 stopped,
         but the suspended mark could not be written (still startable).
 
@@ -2197,7 +2229,24 @@ mod cli_tests {
                 target_self: true,
                 dry_run: true,
                 confirmed: true,
+                kind: None,
             })
+        );
+        assert_eq!(
+            parse_stop_args(&strs(&["--role", "a", "--soft"]))
+                .unwrap()
+                .kind,
+            Some(StopKind::Soft)
+        );
+        assert_eq!(
+            parse_stop_args(&strs(&["--role", "a", "--hard"]))
+                .unwrap()
+                .kind,
+            Some(StopKind::Hard)
+        );
+        assert_eq!(
+            parse_stop_args(&strs(&["--role", "a", "--soft", "--hard"])),
+            Err(ArgError::Conflict("--soft", "--hard"))
         );
         let a = parse_stop_args(&strs(&["--role", "baracuda"])).unwrap();
         assert_eq!(a.reason, "", "a missing reason reaches validate_reason");
