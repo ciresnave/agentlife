@@ -154,8 +154,12 @@ The launch spec records `stop_kind`, written by every stop:
 
 A crash (`crashed` spec state, or a `running` spec whose process is gone) is soft by nature and needs no
 mark. A lane can never turn a hard stop into a soft one or start a hard-stopped role: `--self` refuses
-`--hard`, and only the PM or a person writes or clears a hard stop. This PR is the **writer** half; the
-launcher reading the kind (and `start-role`, caps and the ledger) follows in later PRs.
+`--hard`, and only the PM or a person writes or clears a hard stop. 0.15.10 was the **writer** half.
+**Reader (0.15.12):** for a launcher caller `lane-restart start` starts a `suspended`/`stopping` spec only if
+`stop_kind` is `soft` (`stop-hard` / `stop-unclassified` otherwise, `refused`), and a `crashed` or dead
+`running` spec without a mark. The spec, not the registry, is read: `agentlife stop --soft` leaves registry
+intent `Closed{exited}` and writes `soft` here. A launch clears `stop_kind`. Caps, the ledger line and the
+memory floor / `restore.lock` on this path are still to build.
 
 ## Mapping the mechanism to Synapse (OverMind section 3)
 

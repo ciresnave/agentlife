@@ -256,6 +256,10 @@ pub enum StartRefusal {
     StartLockHeld,
     /// The start lock could not be created or taken; nothing was launched.
     StartLockUnavailable(String),
+    /// The launcher may start only a lane that ended on its own (board 216): this spec records a
+    /// stop that a person or the PM made on purpose (`stop-hard`) or none (`stop-unclassified`).
+    /// Terminal: asking again changes nothing until a person or the PM starts the lane.
+    StopNotSoft(&'static str),
     Launch(RelaunchError),
 }
 
@@ -292,6 +296,7 @@ impl StartRefusal {
             StartRefusal::Model(_) => ("refused", "model-not-pinned"),
             StartRefusal::NoSpec(_) => ("refused", "no-spec"),
             StartRefusal::SpecUnusable(_) => ("refused", "spec-unusable"),
+            StartRefusal::StopNotSoft(reason) => ("refused", reason),
             StartRefusal::StartLockHeld => ("already-running", "start-lock-held"),
             StartRefusal::StartLockUnavailable(_) => ("failed", "start-lock-unavailable"),
             StartRefusal::DuplicateRisk(DuplicateRefusal::Live(_)) => ("failed", "duplicate-risk"),
@@ -348,6 +353,14 @@ impl std::fmt::Display for StartRefusal {
             StartRefusal::StartLockUnavailable(why) => {
                 write!(f, "the start lock could not be taken: {why}")
             }
+            StartRefusal::StopNotSoft("stop-hard") => write!(
+                f,
+                "the lane was stopped on purpose (stop_kind hard); only a person or the PM may start it"
+            ),
+            StartRefusal::StopNotSoft(_) => write!(
+                f,
+                "the lane's stop is not classified (no stop_kind); the launcher starts only a soft                  stop or a crash"
+            ),
             StartRefusal::Launch(e) => write!(f, "{e}"),
         }
     }
@@ -411,6 +424,9 @@ pub fn plan_start(
         Err(SpecError::NotFound(p)) => return Err(StartRefusal::NoSpec(p)),
         Err(e) => return Err(StartRefusal::SpecUnusable(e.to_string())),
     };
+    if launcher {
+        launcher_may_start(&from_disk)?;
+    }
     // A session that never reached its `SessionStart` (stuck at a startup dialog) is in no state
     // file: only the process table sees it, whatever the state file says (2026-10-14).
     let spec_name = from_disk.launch_spec().name;
@@ -444,6 +460,23 @@ pub fn plan_start(
         launch,
         spec: effective,
     })
+}
+
+/// Board 216 (CireSnave: "216: yes"): the launcher starts a lane only if it ended in the course of
+/// its own work. A crash needs no mark (`Crashed`, or `Running` with the process gone: the caller
+/// has already refused a live one). A stop (`Suspended`, or `Stopping` when the suspend write did
+/// not land) must be recorded `soft`; `hard` and unclassified are refused. The spec is the
+/// authority, not the agent registry: `agentlife stop --soft` leaves its intent `Closed{exited}`
+/// and writes `soft` here, `park` writes `hard`, so the two cannot be read apart from this field.
+fn launcher_may_start(spec: &SpecFile) -> Result<(), StartRefusal> {
+    match spec.state {
+        SpecState::Running | SpecState::Crashed => Ok(()),
+        SpecState::Suspended | SpecState::Stopping => match spec.stop_kind {
+            Some(spec::StopKind::Soft) => Ok(()),
+            Some(spec::StopKind::Hard) => Err(StartRefusal::StopNotSoft("stop-hard")),
+            None => Err(StartRefusal::StopNotSoft("stop-unclassified")),
+        },
+    }
 }
 
 /// What `execute_start` achieved.
@@ -491,6 +524,8 @@ pub fn execute_start(
     running.state = SpecState::Running;
     running.written_by = "launch".to_string();
     running.written_at = facts.now();
+    // A launch is not a stop: the kind described the stop that ended the previous session.
+    running.stop_kind = None;
     running.stopped_session_id = None;
     running.stopped_pid_start_secs = None;
     running.tool_version = env!("CARGO_PKG_VERSION").to_string();
@@ -719,6 +754,62 @@ mod tests {
             !matches!(e, Err(StartRefusal::NoSignal) | Err(StartRefusal::NotPm(_))),
             "{e:?}"
         );
+    }
+
+    fn set_kind(dir: &Path, role: &str, kind: Option<&str>) {
+        let p = dir.join(format!("{role}.launch.json"));
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        match kind {
+            Some(k) => v["stop_kind"] = k.into(),
+            None => {
+                v.as_object_mut().unwrap().remove("stop_kind");
+            }
+        }
+        std::fs::write(&p, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_launcher_starts_only_a_soft_stop_or_a_crash_and_the_pm_is_unaffected() {
+        let launcher = || Ok("launcher:agentlife-launcher".to_string());
+        let mut r = req("baracuda");
+        r.signal_id = Some("baracuda:42");
+        let cases = [
+            (SpecState::Suspended, Some("soft"), None),
+            (SpecState::Suspended, Some("hard"), Some("stop-hard")),
+            (SpecState::Suspended, None, Some("stop-unclassified")),
+            (SpecState::Stopping, Some("soft"), None),
+            (SpecState::Stopping, Some("hard"), Some("stop-hard")),
+            (SpecState::Stopping, None, Some("stop-unclassified")),
+            // a crash is soft by nature: no mark needed, and a stale kind is not read
+            (SpecState::Crashed, None, None),
+            (SpecState::Crashed, Some("hard"), None),
+            (SpecState::Running, None, None),
+        ];
+        for (state, kind, want) in cases {
+            let (d, facts) = world();
+            write_spec(d.path(), "baracuda", "sonnet", state);
+            set_kind(d.path(), "baracuda", kind);
+            let got = plan_start(d.path(), &r, launcher(), &facts);
+            match (want, &got) {
+                (None, Ok(_)) => {}
+                (Some(reason), Err(e)) => {
+                    assert_eq!(e.outcome(), ("refused", reason), "{state:?} {kind:?}");
+                    assert_eq!(e.exit_code(), 1);
+                }
+                _ => panic!("{state:?} {kind:?}: wanted {want:?}, got {got:?}"),
+            }
+            // the PM may start the same lane whatever the kind
+            assert!(
+                plan_start(
+                    d.path(),
+                    &req("baracuda"),
+                    pm_caller(d.path(), &facts),
+                    &facts
+                )
+                .is_ok(),
+                "{state:?} {kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -1279,6 +1370,7 @@ mod tests {
     fn a_confirmed_start_writes_the_spec_back_as_running_by_launch() {
         let (d, facts) = world();
         write_spec(d.path(), "baracuda", "claude-opus-5-5", SpecState::Crashed);
+        set_kind(d.path(), "baracuda", Some("hard"));
         let plan = plan_start(
             d.path(),
             &req("baracuda"),
@@ -1316,6 +1408,10 @@ mod tests {
         assert_eq!(s.written_by, "launch");
         assert_eq!(s.model, "sonnet", "the pinned model is what is recorded");
         assert_eq!(s.permission_mode.as_deref(), Some("auto"));
+        assert_eq!(
+            s.stop_kind, None,
+            "a launch is unclassified, not the old stop's kind"
+        );
         // a start never kills
         assert!(
             !l.borrow().iter().any(|e| e.starts_with("kill")),
