@@ -170,6 +170,30 @@ impl StartRefusal {
     }
 }
 
+/// The `--json` outcome of a refused start: `(outcome, reason)` in the vocabulary of a caller that
+/// must decide whether to retry (Synapse's `/v1/launch-result`, spec C4): `already-running` is
+/// the no-op, `refused` is terminal (asking again changes nothing), `failed` may succeed later.
+/// Reasons are short codes, never free text.
+impl StartRefusal {
+    pub fn outcome(&self) -> (&'static str, &'static str) {
+        match self {
+            StartRefusal::AlreadyRunning => ("already-running", "already-running"),
+            StartRefusal::NotPm(_) => ("refused", "not-pm"),
+            StartRefusal::PmRole => ("refused", "pm-role"),
+            StartRefusal::InvalidRole(_) => ("refused", "invalid-role"),
+            StartRefusal::Reason(_) => ("refused", "reason"),
+            StartRefusal::Model(_) => ("refused", "model-not-pinned"),
+            StartRefusal::NoSpec(_) => ("refused", "no-spec"),
+            StartRefusal::SpecUnusable(_) => ("refused", "spec-unusable"),
+            StartRefusal::DuplicateRisk(DuplicateRefusal::Live(_)) => ("failed", "duplicate-risk"),
+            StartRefusal::DuplicateRisk(DuplicateRefusal::Unreadable(_)) => {
+                ("failed", "process-table-unreadable")
+            }
+            StartRefusal::Launch(_) => ("failed", "spawn-failed"),
+        }
+    }
+}
+
 impl std::fmt::Display for StartRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -663,6 +687,27 @@ mod tests {
     }
 
     /// OverMind's contract: "already running" is exit 3, distinct from every other refusal (1).
+    #[test]
+    fn json_outcomes_separate_terminal_refusals_from_retryable_failures() {
+        assert_eq!(
+            StartRefusal::AlreadyRunning.outcome(),
+            ("already-running", "already-running")
+        );
+        assert_eq!(StartRefusal::NoSpec("x".into()).outcome().0, "refused");
+        assert_eq!(
+            StartRefusal::Model("opus".into()).outcome().1,
+            "model-not-pinned"
+        );
+        assert_eq!(
+            StartRefusal::NotPm(Err(CallerError::NoClaudeAncestor)).outcome(),
+            ("refused", "not-pm")
+        );
+        assert_eq!(
+            StartRefusal::DuplicateRisk(DuplicateRefusal::Unreadable("x".into())).outcome(),
+            ("failed", "process-table-unreadable")
+        );
+    }
+
     #[test]
     fn already_running_has_its_own_exit_code_and_other_refusals_stay_one() {
         assert_eq!(EXIT_ALREADY_RUNNING, 3);

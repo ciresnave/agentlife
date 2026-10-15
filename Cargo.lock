@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentlife"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "chrono",
  "lane-restart",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "chrono",
  "lane-state",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "chrono",
  "rustix",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "pin-plan"
-version = "0.15.0"
+version = "0.15.1"
 
 [[package]]
 name = "pin-project-lite"
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "vte"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [

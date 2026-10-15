@@ -525,6 +525,7 @@ struct StartArgs {
     reason: String,
     model: Option<String>,
     dry_run: bool,
+    json: bool,
 }
 
 /// `start --role R --reason <text> [--model sonnet|haiku] [--dry-run]`. A missing `--reason` is
@@ -534,9 +535,11 @@ fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
     let mut reason = String::new();
     let mut model = None;
     let mut dry_run = false;
+    let mut json = false;
     let mut iter = rest.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--json" => json = true,
             "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
             "--reason" => {
                 reason = iter
@@ -560,6 +563,7 @@ fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
         reason,
         model,
         dry_run,
+        json,
     })
 }
 
@@ -648,6 +652,19 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
             acted,
         );
     };
+    // `--json`: one line on stdout, `{role,outcome,reason[,launch_to_live_secs]}`; the human
+    // lines stay on stderr and the exit codes do not change.
+    let emit = |outcome: &str, reason: &str, secs: Option<u64>| {
+        if args.json {
+            let mut v = serde_json::json!({
+                "role": args.role, "outcome": outcome, "reason": reason,
+            });
+            if let Some(s) = secs {
+                v["launch_to_live_secs"] = s.into();
+            }
+            println!("{v}");
+        }
+    };
     let req = start::StartRequest {
         role: &args.role,
         reason: &args.reason,
@@ -658,11 +675,14 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
         Err(refusal) => {
             eprintln!("lane-restart start: refused - {refusal}");
             ledger(None, &format!("refused: {refusal}"), false);
+            let (o, r) = refusal.outcome();
+            emit(o, r, None);
             return ExitCode::from(refusal.exit_code());
         }
     };
     if let Err(refusal) = disk_gate("start") {
         ledger(None, &format!("refused: {refusal}"), false);
+        emit("failed", "disk-floor", None);
         return ExitCode::FAILURE;
     }
     let pin_note = plan
@@ -695,12 +715,14 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
             &format!("dry run - no action taken{pin_note}"),
             false,
         );
+        emit("dry-run", "dry-run", None);
         return ExitCode::SUCCESS;
     }
     eprintln!(
         "lane-restart start: launching {} on {}...",
         args.role, plan.model
     );
+    let launched_at = std::time::Instant::now();
     let state_dir_path = state_dir();
     let state_reader = relaunch::RealStateReader {
         state_dir: &state_dir_path,
@@ -726,17 +748,31 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
                 .as_deref()
                 .map(|w| format!("; the launch spec could not be marked running: {w}"))
                 .unwrap_or_default();
-            let (what, exit) = match done.outcome {
+            // Seconds from spawn to confirmed progress, only when it was confirmed: an
+            // awaiting-dialog wait is a person's time, not the launch's (spec C4 `launch_wait`).
+            let (what, exit, secs, reason) = match done.outcome {
                 relaunch::RelaunchOutcome::Relaunched => (
                     "started a fresh session (continuity via HANDOFF only)",
                     ExitCode::SUCCESS,
+                    Some(launched_at.elapsed().as_secs()),
+                    "started",
                 ),
                 relaunch::RelaunchOutcome::AwaitingConfirmation => (
                     "started; awaiting human confirmation at the dev-channels dialog",
                     ExitCode::from(2),
+                    None,
+                    "awaiting-dialog",
                 ),
             };
-            ledger(Some(&plan.model), &format!("{what}{pin_note}{warn}"), true);
+            let live = secs
+                .map(|s| format!(" launch-to-live:{s}s"))
+                .unwrap_or_default();
+            ledger(
+                Some(&plan.model),
+                &format!("{what}{pin_note}{warn}{live}"),
+                true,
+            );
+            emit("started", reason, secs);
             exit
         }
         Err(e) => {
@@ -746,6 +782,7 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
                 &format!("action failed: {e}{pin_note}"),
                 false,
             );
+            emit("failed", "spawn-failed", None);
             ExitCode::FAILURE
         }
     }
@@ -1388,7 +1425,7 @@ USAGE:
         refused and LANE_RESTART_ALLOW_OPUS is not read. The permission mode
         is always auto. Starting role pm is refused: it is started by a
         person. Exit codes: 0 started with progress confirmed, 2 started and
-        awaiting the dialog, 3 the lane is already running (nothing was
+        awaiting the dialog (--json: one outcome line on stdout), 3 the lane is already running (nothing was
         launched: a no-op, safe to call again), 1 any other refusal or a
         failed launch.
         REFUSED (duplicate-risk) while the process table holds a
@@ -2069,13 +2106,15 @@ mod cli_tests {
                 "resume after crash",
                 "--model",
                 "haiku",
-                "--dry-run"
+                "--dry-run",
+                "--json"
             ])),
             Ok(StartArgs {
                 role: "baracuda".into(),
                 reason: "resume after crash".into(),
                 model: Some("haiku".into()),
                 dry_run: true,
+                json: true,
             })
         );
     }
