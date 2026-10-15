@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.7
+
+- **`start` launch-to-live seconds are timed around the launch only.** `lane-restart start --json`
+  (`launch_to_live_secs`) and the ledger line used a timer started before the state-dir and reader setup, so
+  the figure was an upper bound. `execute_start` now returns `launch_elapsed`, taken immediately around
+  `launch_and_wait_with`; the spec write-back and planning are excluded. Unit tests unchanged (they inject a
+  fake sleep, so the real elapsed time is about zero); not measured against a real launch.
+
 ## 0.15.6
 
 - **`agentlife unpark --no-start` reopens a stopped lane's launch spec.** A `lane-restart stop` or `agentlife

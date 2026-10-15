@@ -751,7 +751,6 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
         "lane-restart start: launching {} on {}...",
         args.role, plan.model
     );
-    let launched_at = std::time::Instant::now();
     let state_dir_path = state_dir();
     let state_reader = relaunch::RealStateReader {
         state_dir: &state_dir_path,
@@ -783,7 +782,7 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
                 relaunch::RelaunchOutcome::Relaunched => (
                     "started a fresh session (continuity via HANDOFF only)",
                     ExitCode::SUCCESS,
-                    Some(launched_at.elapsed().as_secs()),
+                    Some(done.launch_elapsed.as_secs()),
                     "started",
                 ),
                 relaunch::RelaunchOutcome::AwaitingConfirmation => (

@@ -168,12 +168,15 @@ HeldForMemory, LockHeld, Failed, InvalidArgument) before section 3 can map witho
 Not measured: `restart.log` held 4 real starts and recorded no duration. Two biases to state, both found in
 review of this design:
 
-- **`launch-to-live` (0.15.1) is an upper bound, not spawn-to-progress.** `main.rs` starts the timer before
-  `execute_start` and reads it after the spec write-back returns, so it includes pre-spawn setup and the
-  `running` spec write, and it is truncated to whole seconds. Both are small against a 120 s value but they
-  are not zero. A follow-up code PR makes `execute_start` return the elapsed time around
-  `launch_and_wait_with` alone, and `--json`/ledger report that. Until then the figure is labelled an upper
-  bound.
+- **`launch-to-live` changed meaning in 0.15.7.** Through 0.15.6 (0.15.1 introduced it) `main.rs` started
+  the timer before `execute_start` and read it after the spec write-back returned, so it was an upper bound
+  that included pre-spawn setup and the `running` spec write. From 0.15.7 `execute_start` returns
+  `launch_elapsed`, taken around `launch_and_wait_with` alone: argument preparation (no I/O), the spawn and
+  the wait for progress. It still excludes planning and the spec write-back, is truncated to whole seconds,
+  and is only reported when progress was confirmed (never for an awaiting-dialog hand-off). The ledger text
+  `launch-to-live:<n>s` and the `--json` field are the same in both eras and carry no marker: a ledger entry
+  written by a 0.15.6-or-earlier build is an upper bound and must not be pooled with later ones. N was 0
+  real claims when this changed, so no pooled estimate exists yet.
 - **The first `online` observation is not the claim.** Observing `online` at the next 30 s poll measures when
   the service noticed, so it overstates start-to-claim by up to one poll interval. The claim time itself
   must come from Synapse: **requested of the Synapse lane**, a per-role `claimed_at` (session start) in

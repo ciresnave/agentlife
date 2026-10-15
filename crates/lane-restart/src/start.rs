@@ -439,6 +439,11 @@ pub struct StartResult {
     /// Set when the lane is up but its spec could not be marked `running`: the previous spec is
     /// still complete, so nothing is lost, but the ledger should say so.
     pub spec_warning: Option<String>,
+    /// Wall-clock time spent inside `launch_and_wait_with` only: argument preparation (no I/O),
+    /// the spawn and the wait for progress or the dialog hand-off. Excludes planning, the disk gate
+    /// and the spec write-back. For an awaiting-dialog hand-off it is not a launch time, and the
+    /// caller reports none.
+    pub launch_elapsed: Duration,
 }
 
 /// Spawns the launch and waits for real progress, then writes the spec back as `running`
@@ -454,6 +459,7 @@ pub fn execute_start(
     sleep: &mut dyn FnMut(Duration),
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<StartResult, RelaunchError> {
+    let started = std::time::Instant::now();
     let outcome = launch_and_wait_with(
         facts,
         state_reader,
@@ -466,6 +472,7 @@ pub fn execute_start(
         sleep,
         on_awaiting,
     )?;
+    let launch_elapsed = started.elapsed();
     let mut running = plan.spec.clone();
     running.state = SpecState::Running;
     running.written_by = "launch".to_string();
@@ -477,6 +484,7 @@ pub fn execute_start(
     Ok(StartResult {
         outcome,
         spec_warning,
+        launch_elapsed,
     })
 }
 
