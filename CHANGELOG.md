@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.8
+
+- **`launcher` crate: `epoch` is a string.** Synapse's signal carries `epoch` as an opaque string and
+  `/v1/launch-result` requires it back (`LaunchResultBody.epoch: String`, Synapse 3230c03); the engine modelled
+  it as a number, so a real signal would not have parsed. `Signal.epoch`, the stored request rows and
+  `LaunchResult` now carry it as a string and echo it verbatim. `Engine::mark_posted` takes the result and
+  matches the full `(signal_id, attempt, epoch)` key, so another epoch's answer acknowledges nothing. Breaking
+  for the unpublished `launcher` crate only; a store written by an earlier build (none exist: the service was
+  not runnable) fails closed as unreadable. Unit-tested; nothing ran against a real daemon.
+
 ## 0.15.7
 
 - **`start` launch-to-live seconds are timed around the launch only.** `lane-restart start --json`

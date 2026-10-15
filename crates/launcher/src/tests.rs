@@ -105,7 +105,7 @@ fn sig(role: &str, id: u64, attempt: u32) -> Signal {
         role: role.into(),
         signal_id: format!("{role}:{id}"),
         attempt,
-        epoch: 0,
+        epoch: String::new(),
     }
 }
 
@@ -173,7 +173,7 @@ fn a_changed_epoch_is_not_a_replay() {
     let mut e = open(&io, &m, &d);
     let mut s = sig("fuel", 5, 1);
     e.handle(&s, 1000);
-    s.epoch = 1;
+    s.epoch = "1".into();
     e.handle(&s, 1010);
     assert_eq!(m.n(), 2);
 }
@@ -197,7 +197,7 @@ fn unknown_closed_and_invalid_roles_never_reach_the_mechanism() {
         role: "a;b".into(),
         signal_id: "a;b:1".into(),
         attempt: 1,
-        epoch: 0,
+        epoch: String::new(),
     };
     assert_eq!(
         got(&e.handle(&bad, 10)),
@@ -566,7 +566,7 @@ fn a_row_left_in_intent_by_a_crash_is_resolved_not_re_called() {
         requests: vec![Request {
             signal_id: "fuel:1".into(),
             attempt: 1,
-            epoch: 0,
+            epoch: String::new(),
             generation: 0,
             role: "fuel".into(),
             at: 10,
@@ -603,7 +603,12 @@ fn an_unacknowledged_result_stays_in_the_outbox_until_posted() {
     e.handle(&sig("fuel", 1, 1), 10);
     assert_eq!(e.outbox().len(), 1);
     assert_eq!(e.outbox().len(), 1, "reading it does not drain it");
-    e.mark_posted("fuel:1", 1).unwrap();
+    let r = e.outbox().remove(0);
+    let mut other_epoch = r.clone();
+    other_epoch.epoch = "other".into();
+    e.mark_posted(&other_epoch).unwrap();
+    assert_eq!(e.outbox().len(), 1, "another epoch acknowledges nothing");
+    e.mark_posted(&r).unwrap();
     assert!(e.outbox().is_empty());
 }
 

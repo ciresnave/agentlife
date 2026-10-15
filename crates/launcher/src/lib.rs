@@ -41,9 +41,10 @@ pub struct Signal {
     pub role: String,
     pub signal_id: String,
     pub attempt: u32,
-    /// Synapse's counter bumped by a clear or restart; 0 until Synapse sends one.
+    /// Synapse's opaque epoch string (bumped by a clear or a daemon restart); echoed back
+    /// verbatim in the result. Empty only in a stand-in that has none.
     #[serde(default)]
-    pub epoch: u64,
+    pub epoch: String,
 }
 
 /// The four outcomes Synapse's `/v1/launch-result` knows.
@@ -60,6 +61,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchResult {
     pub signal_id: String,
+    pub epoch: String,
     pub attempt: u32,
     pub role: String,
     pub outcome: Outcome,
@@ -127,7 +129,8 @@ pub enum Status {
 pub struct Request {
     pub signal_id: String,
     pub attempt: u32,
-    pub epoch: u64,
+    #[serde(default)]
+    pub epoch: String,
     /// Incremented when the same key arrives again after the replay window.
     pub generation: u32,
     pub role: String,
@@ -156,6 +159,7 @@ impl Request {
     fn result(&self) -> LaunchResult {
         LaunchResult {
             signal_id: self.signal_id.clone(),
+            epoch: self.epoch.clone(),
             attempt: self.attempt,
             role: self.role.clone(),
             outcome: self.outcome,
@@ -328,6 +332,7 @@ impl<'a> Engine<'a> {
     fn store_failed(sig: &Signal) -> LaunchResult {
         LaunchResult {
             signal_id: sig.signal_id.clone(),
+            epoch: sig.epoch.clone(),
             attempt: sig.attempt,
             role: sig.role.clone(),
             outcome: Outcome::Failed,
@@ -364,7 +369,7 @@ impl<'a> Engine<'a> {
         let mut row = Request {
             signal_id: sig.signal_id.clone(),
             attempt: sig.attempt,
-            epoch: sig.epoch,
+            epoch: sig.epoch.clone(),
             generation,
             role: sig.role.clone(),
             at: now,
@@ -494,15 +499,15 @@ impl<'a> Engine<'a> {
             .collect()
     }
 
-    /// Synapse acknowledged this result (a 2xx, or a duplicate reply).
-    pub fn mark_posted(&mut self, signal_id: &str, attempt: u32) -> Result<(), StoreError> {
-        for r in self
-            .data
-            .requests
-            .iter_mut()
-            .filter(|r| r.signal_id == signal_id && r.attempt == attempt)
+    /// Synapse acknowledged this result (a 2xx, or `stale_signal`: the signal is no longer open,
+    /// so there is nothing left to say). Matches the full `(signal_id, attempt, epoch)` key.
+    pub fn mark_posted(&mut self, r: &LaunchResult) -> Result<(), StoreError> {
+        for row in
+            self.data.requests.iter_mut().filter(|x| {
+                x.signal_id == r.signal_id && x.attempt == r.attempt && x.epoch == r.epoch
+            })
         {
-            r.posted = true;
+            row.posted = true;
         }
         self.save()
     }
