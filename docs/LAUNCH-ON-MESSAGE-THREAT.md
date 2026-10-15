@@ -24,7 +24,9 @@ service does not exist yet, and `start` is PM-only on this machine.
 - Only for a `--signal-id` of the form `<role>:<id>` whose role is the lane being started, so one signal
   cannot be spent on another lane. The id is otherwise not checked here (a forged id for the right role passes).
 - With the model pinned: `sonnet` or `haiku` only, as for the PM; Opus and `LANE_RESTART_ALLOW_OPUS` are refused.
-- Every call is ledgered: `requested_by` and `caller_role` = `agentlife-launcher`, the signal id inside the reason, the
+- Every call is ledgered: `requested_by` and `caller_role` = `launcher:agentlife-launcher` (a call
+  authenticated by the legacy record is logged `launcher:overmind`; the prefix is what tells the service apart
+  from a *lane* that merely shares the name, which is an ordinary non-PM caller and is refused), the signal id inside the reason, the
   refusal or the outcome. A refused call is ledgered too.
 
 ## What it CANNOT do

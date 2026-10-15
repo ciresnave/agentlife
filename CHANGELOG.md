@@ -9,7 +9,10 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   OverMind lane off its role. `lane-restart start` now accepts caller role `agentlife-launcher` (record
   `<state>/agentlife-launcher.launcher-caller`); the 0.15.2 name `overmind` and its record are **accepted for
   one more release** and removed after 0.16. A record must be filed under the name it carries. `stop` and a
-  restart still refuse both. Threat note updated. No exit code or output changes; not run live (the service
+  restart still refuse both. The caller is recorded as `launcher:<role>` (the `:` cannot appear in a lane's
+  role), so a lane that shares the name, such as the OverMind lane, is not mistaken for the service (a
+  hole in 0.15.2's gate, found in review of this change). `LAUNCHER_RECORD` stays as a deprecated alias.
+  Threat note updated. No exit code or output changes; not run live (the service
   that writes the record does not exist yet).
 
 ## 0.15.3
