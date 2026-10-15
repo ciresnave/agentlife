@@ -33,23 +33,41 @@ The service adds a rule between OverMind's 3 and 4, from the **registry**: a rol
 (`parked` or `exited`) is `refused: closed-on-purpose`, terminal for that signal, never launched; only `wanted`
 (not running) and `lazy` are launchable.
 
-**Verified at `origin/main` 3de10ab (code read; no run):** the two stop paths record different things.
+**Verified at `origin/main` 3de10ab and re-read at 0.15.4 (code read; no run):** the two stop paths record
+different things, and neither guarantees the end state.
 
-| stopped by | registry intent | spec state |
+| stopped by | registry intent afterwards | spec state afterwards |
 |---|---|---|
-| `agentlife down` (park/stop, `src/down.rs`) | `Closed{parked}`, written **before** the kill | `suspended` |
-| `lane-restart stop` (the PM) | **unchanged: `Wanted`** | `suspended` |
+| `agentlife down` (`src/down.rs`) | `Closed{how}`, `how` = what was asked (`parked` or `exited`), written **before** the kill and put back if the kill fails | `suspended` **best effort**: a failed `mark_suspended` is journalled and leaves the earlier spec (`running`) in place; a process already gone before the verified kill can return early |
+| `lane-restart stop` (the PM) | **unchanged** (whatever it was: `Wanted`, `Lazy`, `Closed`, or absent) | `stopping` before the kill, `suspended` after; if the final write fails the spec stays `stopping` (exit 4) |
 
 `crates/lane-restart` has 0 references to the registry and does not depend on `agentlife` (the dependency
-runs the other way), so it cannot write intent. And nothing on the agentlife side reads spec state:
-`plan.rs`, `restore.rs`, `select.rs` and `intent.rs` have 0 references to `suspended`/`SpecState`, while
-`plan.rs:403` does gate on `Intent::Wanted` (the control for that grep). Consequence: **a lane the PM stopped
-with `lane-restart stop` is `Wanted` and not running, so it is a restore candidate and, by the registry alone,
-launchable by this service.** The launcher therefore reads both: a role is launchable only if registry
-intent is `lazy`, or `wanted` **and** its launch spec is not `suspended`; a `suspended` spec with intent
-`wanted` is `refused: closed-on-purpose`. A role with no registry intent stays `refused: unknown-role`.
-The same gap means `agentlife restore` can relaunch a `lane-restart stop`ped lane at logon; that is existing
-behaviour and is reported to the PM, not changed here.
+runs the other way), so it cannot write intent. Before 0.15.3 nothing on the agentlife side read spec state
+either (`plan.rs`, `restore.rs`, `select.rs` and `intent.rs` had 0 references to `suspended`/`SpecState`,
+while `plan.rs:403` gates on `Intent::Wanted`, the control for that grep). Consequence: **a lane the PM
+stopped with `lane-restart stop` kept its intent, so a `Wanted` one was a restore candidate and, by the
+registry alone, launchable by this service.** 0.15.3 closed the restore half: `restore` excludes a lane whose
+spec is `suspended` or `stopping` (`Reason::SuspendedSpec`).
+
+**The launcher rule, read from both stores.** A role is launchable only if **registry intent is `wanted` or
+`lazy` AND its launch spec is neither `suspended` nor `stopping`**. Registry `closed{parked|exited}` is
+`refused: closed-on-purpose`; so is a `suspended`/`stopping` spec whatever the intent says (an intent of
+`lazy` does not override a spec that records a stop, because `lane-restart stop` leaves `lazy` as it was).
+A role with no registry intent is `refused: unknown-role`. A spec that is `running` or `crashed` while the
+process is gone (a stop that did not complete, or a lane that died) is launchable: that is a lane that should
+be up.
+
+**Reopening.** `agentlife unpark --no-start` clears `Closed` to `Wanted` but, at 0.15.3, left the spec
+`suspended`, which under the rule above (and under 0.15.3's `restore`) would keep a deliberately reopened
+lane refused. The two are indistinguishable by state alone (`Wanted` + `suspended` is both "the PM stopped
+it" and "a person reopened it"), so the reopen must change the spec: `unpark --no-start` rewrites a
+`suspended`/`stopping` spec to `crashed` ("ended without a stop, last known launch is the way back").
+That is a code change, tracked as its own PR; until it lands, an unparked lane is not launched by this
+service or by `restore`, which is the safe side. `unpark` without `--no-start` is not built.
+
+**What `restore` does with it.** `agentlife restore` (non-dry-run, after a person's approval) is built
+(`run::restore_now`); its `--help` text for `install-task` still says "not built", which is stale. At logon
+the plan is frozen and asked about; with 0.15.3 a stopped lane is not in it.
 
 ## Parts, and who owns each
 
