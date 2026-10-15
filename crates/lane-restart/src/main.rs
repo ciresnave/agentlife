@@ -703,6 +703,22 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
         model: args.model.as_deref(),
         signal_id: args.signal_id.as_deref(),
     };
+    // One starter per role from the check to the confirmed-live wait: the lock is taken before
+    // `plan_start`, so its checks are the re-check after the lock. A dry run spawns nothing.
+    let _start_lock = if args.dry_run {
+        None
+    } else {
+        match start::take_start_lock(&state_dir(), &args.role) {
+            Ok(lock) => lock,
+            Err(refusal) => {
+                eprintln!("lane-restart start: refused - {refusal}");
+                ledger(None, &format!("refused: {refusal}"), false);
+                let (o, r) = refusal.outcome();
+                emit(o, r, None);
+                return ExitCode::from(refusal.exit_code());
+            }
+        }
+    };
     let plan = match start::plan_start(&state_dir(), &req, caller, &facts) {
         Ok(p) => p,
         Err(refusal) => {

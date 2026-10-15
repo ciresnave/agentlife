@@ -2,6 +2,20 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.11
+
+- **`lane-restart start` takes a per-role start lock** (`docs/LAUNCHER-SERVICE.md`, "Two starters at once";
+  the mechanism requirement before the launcher may start lanes unattended). `<state>/<role>.start.lock` is an
+  OS advisory lock (`File::try_lock`), taken before `plan_start` and held through the spawn and the
+  confirmed-live wait, so `role_status` and `duplicate::check` are the re-check after the lock. A second
+  starter of the same role gets `already-running` (`--json` reason `start-lock-held`, exit 3, the contract it
+  already had); a lock that cannot be created or taken is `failed` / `start-lock-unavailable` and launches
+  nothing. A role that is not an identifier takes no lock and is refused as before; `--dry-run` takes none.
+  Different roles never contend; the OS releases the lock on a crash, so there is no stale file. New
+  `lane_restart::start_lock` module and `start::take_start_lock`; new `StartRefusal` variants (a public enum:
+  a source-incompatible addition for an exhaustive external `match`). Unit-tested, each guard
+  mutation-tested; not run against a real lane or two real starters.
+
 ## 0.15.10
 
 - **Every stop records whether it is soft or hard** (board 216, PM task 2026-10-15; CireSnave verbatim:

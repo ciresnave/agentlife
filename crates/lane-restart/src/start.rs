@@ -251,6 +251,11 @@ pub enum StartRefusal {
     /// A `lane-restart host --role R` or a claude named for R is in the process table although
     /// no live recorded session is (the state file is stale, or its session never started).
     DuplicateRisk(DuplicateRefusal),
+    /// Another starter of this role holds `<role>.start.lock`: the role is being started right now.
+    /// Same contract as `AlreadyRunning` (a no-op, exit 3).
+    StartLockHeld,
+    /// The start lock could not be created or taken; nothing was launched.
+    StartLockUnavailable(String),
     Launch(RelaunchError),
 }
 
@@ -265,7 +270,7 @@ impl StartRefusal {
     /// session is not a confirmed live lane.
     pub fn exit_code(&self) -> u8 {
         match self {
-            StartRefusal::AlreadyRunning => EXIT_ALREADY_RUNNING,
+            StartRefusal::AlreadyRunning | StartRefusal::StartLockHeld => EXIT_ALREADY_RUNNING,
             _ => 1,
         }
     }
@@ -287,6 +292,8 @@ impl StartRefusal {
             StartRefusal::Model(_) => ("refused", "model-not-pinned"),
             StartRefusal::NoSpec(_) => ("refused", "no-spec"),
             StartRefusal::SpecUnusable(_) => ("refused", "spec-unusable"),
+            StartRefusal::StartLockHeld => ("already-running", "start-lock-held"),
+            StartRefusal::StartLockUnavailable(_) => ("failed", "start-lock-unavailable"),
             StartRefusal::DuplicateRisk(DuplicateRefusal::Live(_)) => ("failed", "duplicate-risk"),
             StartRefusal::DuplicateRisk(DuplicateRefusal::Unreadable(_)) => {
                 ("failed", "process-table-unreadable")
@@ -334,6 +341,13 @@ impl std::fmt::Display for StartRefusal {
                 "the lane is already running (a live claude matches its recorded pid and start time)"
             ),
             StartRefusal::DuplicateRisk(d) => write!(f, "{d}"),
+            StartRefusal::StartLockHeld => write!(
+                f,
+                "another start of this role is in progress (its start lock is held)"
+            ),
+            StartRefusal::StartLockUnavailable(why) => {
+                write!(f, "the start lock could not be taken: {why}")
+            }
             StartRefusal::Launch(e) => write!(f, "{e}"),
         }
     }
@@ -488,6 +502,23 @@ pub fn execute_start(
     })
 }
 
+/// Takes the per-role start lock for `role` (see `start_lock`). `plan_start` must run while the
+/// returned guard is held, so its `role_status` and `duplicate::check` are the re-check after the
+/// lock. A role that is not an identifier takes no lock: `plan_start` refuses it as `InvalidRole`,
+/// and a lock path is never built from it.
+pub fn take_start_lock(
+    dir: &Path,
+    role: &str,
+) -> Result<Option<crate::start_lock::StartLock>, StartRefusal> {
+    use crate::start_lock::{acquire, StartLockError};
+    match acquire(dir, role) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(StartLockError::InvalidRole) => Ok(None),
+        Err(StartLockError::Held) => Err(StartRefusal::StartLockHeld),
+        Err(StartLockError::Unavailable(why)) => Err(StartRefusal::StartLockUnavailable(why)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +623,22 @@ mod tests {
 
     fn write_launcher_record(dir: &Path, role: &str, pid: u32, start: u64) {
         write_launcher_record_in(dir, role, role, pid, start);
+    }
+
+    #[test]
+    fn a_held_start_lock_is_the_already_running_noop_and_an_unavailable_one_is_failed() {
+        let d = tempdir().unwrap();
+        let _held = take_start_lock(d.path(), "lightbulb").unwrap().unwrap();
+        let second = take_start_lock(d.path(), "lightbulb").unwrap_err();
+        assert_eq!(second.outcome(), ("already-running", "start-lock-held"));
+        assert_eq!(second.exit_code(), EXIT_ALREADY_RUNNING);
+        // another role is unaffected; an invalid role takes no lock (plan_start refuses it)
+        assert!(take_start_lock(d.path(), "coderipper").unwrap().is_some());
+        assert!(take_start_lock(d.path(), "../pm").unwrap().is_none());
+        let gone = d.path().join("nope");
+        let un = take_start_lock(&gone, "lightbulb").unwrap_err();
+        assert_eq!(un.outcome(), ("failed", "start-lock-unavailable"));
+        assert_eq!(un.exit_code(), 1);
     }
 
     #[test]
