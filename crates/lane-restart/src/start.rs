@@ -34,6 +34,65 @@ pub const START_PERMISSION_MODE: &str = "auto";
 /// The role that a start may not target (the PM is started by a person; O1).
 pub const PM_ROLE: &str = "pm";
 
+/// The one non-PM role that may call `start`, and only `start` (CireSnave 2026-10-15,
+/// "Synapse->OverMind->AgentLife launch", relayed by the PM): the launcher service that acts on a
+/// Synapse mail-waiting signal. `stop` and a restart never accept it (`lane_stop::require_pm_for_other`
+/// and `authorize::decide` read their own caller).
+pub const LAUNCHER_ROLE: &str = "overmind";
+
+/// Where the launcher service mirrors its identity. Deliberately not `*.json`: every other reader of
+/// the state dir treats `<stem>.json` as a lane's state file.
+pub const LAUNCHER_RECORD: &str = "overmind.launcher-caller";
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
+pub struct LauncherRecord {
+    pub role: String,
+    pub pid: u32,
+    pub pid_start_secs: u64,
+}
+
+/// The launcher service, recognised by its own record: `parent` (the process that ran this
+/// `lane-restart start`, one level up and no further) must be the recorded pid AND start time, so
+/// a reused pid does not inherit it. The record is keyed by role, not by a `claude` ancestor,
+/// because the service is not a Claude session.
+///
+/// Limit, stated: anything running as the same user can write this file and so forge the identity
+/// (like `caller_role`'s state files). What the gate bounds is *what that identity may do*; see
+/// `docs/LAUNCH-ON-MESSAGE-THREAT.md`.
+pub fn launcher_caller(
+    dir: &Path,
+    parent: Option<u32>,
+    facts: &dyn SystemFacts,
+) -> Result<String, CallerError> {
+    let pid = parent.ok_or(CallerError::NoClaudeAncestor)?;
+    let bytes =
+        std::fs::read(dir.join(LAUNCHER_RECORD)).map_err(|_| CallerError::Unrecognised(pid))?;
+    let rec: LauncherRecord =
+        serde_json::from_slice(&bytes).map_err(|_| CallerError::Unrecognised(pid))?;
+    let live = facts
+        .process_identity(pid)
+        .is_some_and(|id| id.start_time_secs == rec.pid_start_secs);
+    if rec.role == LAUNCHER_ROLE && rec.pid == pid && live {
+        Ok(LAUNCHER_ROLE.to_string())
+    } else {
+        Err(CallerError::Unrecognised(pid))
+    }
+}
+
+/// A Synapse signal id is `<role>:<oldest queued global id>`. For a launcher call it must name the
+/// role being started, so a signal for one lane cannot be spent on another.
+pub fn signal_names_role(signal_id: &str, role: &str) -> bool {
+    let ok_chars = signal_id.len() <= 128
+        && signal_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'));
+    ok_chars
+        && signal_id
+            .strip_prefix(role)
+            .and_then(|r| r.strip_prefix(':'))
+            .is_some_and(|rest| !rest.is_empty())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CallerError {
     /// No `claude` ancestor could be established for this process.
@@ -131,6 +190,9 @@ pub struct StartRequest<'a> {
     pub reason: &'a str,
     /// `--model`, as typed.
     pub model: Option<&'a str>,
+    /// `--signal-id`: the Synapse mail-waiting signal this start answers. Required of the
+    /// launcher service, optional (and ledgered when given) for the PM.
+    pub signal_id: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -139,6 +201,9 @@ pub enum StartRefusal {
     NotPm(Result<String, CallerError>),
     /// A start of role `pm` is refused-and-reported: the PM is started by a person (O1).
     PmRole,
+    /// The launcher service called without a signal id that names the role (see
+    /// `signal_names_role`): it may start a lane only because mail waits for it.
+    NoSignal,
     InvalidRole(String),
     Reason(&'static str),
     /// A model other than `sonnet` or `haiku` was requested; an Opus request lands here too.
@@ -180,6 +245,7 @@ impl StartRefusal {
             StartRefusal::AlreadyRunning => ("already-running", "already-running"),
             StartRefusal::NotPm(_) => ("refused", "not-pm"),
             StartRefusal::PmRole => ("refused", "pm-role"),
+            StartRefusal::NoSignal => ("refused", "no-signal"),
             StartRefusal::InvalidRole(_) => ("refused", "invalid-role"),
             StartRefusal::Reason(_) => ("refused", "reason"),
             StartRefusal::Model(_) => ("refused", "model-not-pinned"),
@@ -209,6 +275,11 @@ impl std::fmt::Display for StartRefusal {
                 f,
                 "the PM is started by a person, not by lane-restart (it runs in \
                  bypassPermissions, which a start would silently downgrade)"
+            ),
+            StartRefusal::NoSignal => write!(
+                f,
+                "the launcher may start a lane only for a mail-waiting signal: --signal-id \
+                 <role>:<id> naming the role is required"
             ),
             StartRefusal::InvalidRole(r) => write!(f, "not a plain role identifier: {r:?}"),
             StartRefusal::Reason(why) => write!(f, "{why}"),
@@ -257,15 +328,23 @@ pub fn plan_start(
     caller: Result<String, CallerError>,
     facts: &dyn SystemFacts,
 ) -> Result<StartPlan, StartRefusal> {
-    match caller {
-        Ok(role) if role == PM_ROLE => {}
+    let launcher = match caller {
+        Ok(role) if role == PM_ROLE => false,
+        Ok(role) if role == LAUNCHER_ROLE => true,
         other => return Err(StartRefusal::NotPm(other)),
-    }
+    };
     if !valid_identifier(req.role) {
         return Err(StartRefusal::InvalidRole(req.role.to_string()));
     }
     if req.role == PM_ROLE {
         return Err(StartRefusal::PmRole);
+    }
+    if launcher
+        && !req
+            .signal_id
+            .is_some_and(|s| signal_names_role(s, req.role))
+    {
+        return Err(StartRefusal::NoSignal);
     }
     validate_reason(req.reason).map_err(StartRefusal::Reason)?;
     let requested = match req.model {
@@ -446,7 +525,90 @@ mod tests {
             role,
             reason: "resume after the 17:34Z crash",
             model: None,
+            signal_id: None,
         }
+    }
+
+    const LAUNCHER_PID: u32 = 7000;
+    const LAUNCHER_START: u64 = 8000;
+
+    fn write_launcher_record(dir: &Path, role: &str, pid: u32, start: u64) {
+        let rec = LauncherRecord {
+            role: role.into(),
+            pid,
+            pid_start_secs: start,
+        };
+        std::fs::write(dir.join(LAUNCHER_RECORD), serde_json::to_vec(&rec).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_launcher_is_recognised_by_its_record_pid_and_start_time() {
+        let (d, mut facts) = world();
+        write_launcher_record(d.path(), "overmind", LAUNCHER_PID, LAUNCHER_START);
+        facts.live_pid = Some((LAUNCHER_PID, LAUNCHER_START));
+        assert_eq!(
+            launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).as_deref(),
+            Ok("overmind")
+        );
+        // a recycled pid: same number, other start time
+        facts.live_pid = Some((LAUNCHER_PID, LAUNCHER_START + 1));
+        assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
+        // some other process claiming to be the service
+        facts.live_pid = Some((LAUNCHER_PID, LAUNCHER_START));
+        assert!(launcher_caller(d.path(), Some(LAUNCHER_PID + 1), &facts).is_err());
+        // a record for another role is not the launcher
+        write_launcher_record(d.path(), "baracuda", LAUNCHER_PID, LAUNCHER_START);
+        assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
+        // no record at all
+        std::fs::remove_file(d.path().join(LAUNCHER_RECORD)).unwrap();
+        assert!(launcher_caller(d.path(), Some(LAUNCHER_PID), &facts).is_err());
+    }
+
+    #[test]
+    fn the_launcher_may_start_only_for_a_signal_that_names_the_role() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let launcher = || Ok("overmind".to_string());
+        let mut r = req("baracuda");
+        // positive control: the PM needs no signal and gets past the same gate
+        assert!(!matches!(
+            plan_start(d.path(), &r, Ok("pm".to_string()), &facts),
+            Err(StartRefusal::NoSignal)
+        ));
+        for bad in [
+            None,
+            Some(""),
+            Some("baracuda"),
+            Some("baracuda:"),
+            Some("fuel:12"),
+            Some("baracudax:1"),
+            Some("baracuda:1;2"),
+        ] {
+            r.signal_id = bad;
+            let e = plan_start(d.path(), &r, launcher(), &facts).unwrap_err();
+            assert!(matches!(e, StartRefusal::NoSignal), "{bad:?}: {e:?}");
+        }
+        r.signal_id = Some("baracuda:42");
+        let e = plan_start(d.path(), &r, launcher(), &facts);
+        assert!(
+            !matches!(e, Err(StartRefusal::NoSignal) | Err(StartRefusal::NotPm(_))),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn the_launcher_cannot_start_the_pm_and_other_roles_are_still_not_pm() {
+        let (d, facts) = world();
+        let mut r = req("pm");
+        r.signal_id = Some("pm:1");
+        assert!(matches!(
+            plan_start(d.path(), &r, Ok("overmind".to_string()), &facts),
+            Err(StartRefusal::PmRole)
+        ));
+        assert!(matches!(
+            plan_start(d.path(), &req("baracuda"), Ok("fuel".to_string()), &facts),
+            Err(StartRefusal::NotPm(_))
+        ));
     }
 
     // ---- caller ----------------------------------------------------------------------------

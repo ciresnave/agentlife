@@ -8,7 +8,7 @@
 
 use lane_restart::authorize::{self, Target};
 use lane_restart::facts::SysinfoFacts;
-use lane_restart::lane_state_writer::{self, RealParentProcess};
+use lane_restart::lane_state_writer::{self, ParentProcess, RealParentProcess};
 use lane_restart::lane_stop;
 use lane_restart::log;
 use lane_restart::relaunch;
@@ -526,6 +526,7 @@ struct StartArgs {
     model: Option<String>,
     dry_run: bool,
     json: bool,
+    signal_id: Option<String>,
 }
 
 /// `start --role R --reason <text> [--model sonnet|haiku] [--dry-run]`. A missing `--reason` is
@@ -536,10 +537,18 @@ fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
     let mut model = None;
     let mut dry_run = false;
     let mut json = false;
+    let mut signal_id = None;
     let mut iter = rest.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--signal-id" => {
+                signal_id = Some(
+                    iter.next()
+                        .ok_or(ArgError::MissingValue("--signal-id"))?
+                        .clone(),
+                )
+            }
             "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
             "--reason" => {
                 reason = iter
@@ -564,6 +573,7 @@ fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
         model,
         dry_run,
         json,
+        signal_id,
     })
 }
 
@@ -626,20 +636,38 @@ fn verified_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
     start::caller_role(&state_dir(), pid, facts)
 }
 
-/// `lane-restart start --role R --reason <text> [--model sonnet|haiku] [--dry-run]` - 14.5.
+/// The caller of a `start`: the PM session by process (as for every command), else the launcher
+/// service by its record and by being this process's direct parent. Only `start` asks for the
+/// second; `stop` and a restart read `verified_caller` alone and so never see `overmind`.
+fn verified_start_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
+    match verified_caller(facts) {
+        Ok(role) => Ok(role),
+        Err(first) => {
+            let parent = RealParentProcess::new()
+                .parent_of(std::process::id())
+                .map(|(pid, _)| pid);
+            start::launcher_caller(&state_dir(), parent, facts).map_err(|_| first)
+        }
+    }
+}
+
+/// `lane-restart start --role R --reason <text> [--model sonnet|haiku] [--signal-id <id>]
+/// [--dry-run] [--json]` - 14.5.
 fn run_start_cmd(args: StartArgs) -> ExitCode {
     let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_caller(&facts);
+    let caller = verified_start_caller(&facts);
     let caller_role = caller.as_ref().ok().cloned();
     let requested_by = caller_role
         .clone()
         .unwrap_or_else(|| "unverified".to_string());
-    let reason_for_log: String = args
-        .reason
-        .trim()
-        .chars()
-        .take(start::REASON_MAX_CHARS)
-        .collect();
+    // The ledger line names the signal this start answers, inside the 200-character reason cap.
+    let reason_for_log: String = match args.signal_id.as_deref() {
+        Some(s) => format!("{} [signal {s}]", args.reason.trim()),
+        None => args.reason.trim().to_string(),
+    }
+    .chars()
+    .take(start::REASON_MAX_CHARS)
+    .collect();
     let ledger = |model: Option<&str>, outcome: &str, acted: bool| {
         log_ledger(
             &requested_by,
@@ -669,6 +697,7 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
         role: &args.role,
         reason: &args.reason,
         model: args.model.as_deref(),
+        signal_id: args.signal_id.as_deref(),
     };
     let plan = match start::plan_start(&state_dir(), &req, caller, &facts) {
         Ok(p) => p,
@@ -2107,7 +2136,9 @@ mod cli_tests {
                 "--model",
                 "haiku",
                 "--dry-run",
-                "--json"
+                "--json",
+                "--signal-id",
+                "baracuda:7"
             ])),
             Ok(StartArgs {
                 role: "baracuda".into(),
@@ -2115,6 +2146,7 @@ mod cli_tests {
                 model: Some("haiku".into()),
                 dry_run: true,
                 json: true,
+                signal_id: Some("baracuda:7".into()),
             })
         );
     }

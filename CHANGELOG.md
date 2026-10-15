@@ -2,6 +2,16 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.2
+
+- **`lane-restart start` accepts a second caller, role `overmind`, for the launch-on-message service** (PM task
+  2026-10-15; authority: CireSnave "Synapse->OverMind->AgentLife launch", relayed by the PM). Identified by a
+  record `<state>/overmind.launcher-caller` plus the direct parent's pid and start time, not by a `claude`
+  ancestor; `start` only (`stop` and a restart still require the PM, now tested with `overmind` refused); requires
+  `--signal-id <role>:<id>` naming the role started, else `refused: no-signal`; each call ledgered with the signal
+  id. Threat note: `docs/LAUNCH-ON-MESSAGE-THREAT.md`. No service writes the record yet (PR3); not run live.
+  Number proposed by the lane, the PM allocates.
+
 ## 0.15.1
 
 - **`lane-restart start --json`** prints one line on stdout, `{"role","outcome","reason"[,"launch_to_live_secs"]}`,
