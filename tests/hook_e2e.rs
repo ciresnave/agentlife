@@ -1406,6 +1406,19 @@ fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_o
         stop_reason: None,
         tool_version: "test".to_string(),
     };
+    // Suspended (stopped on purpose) + wanted: restore leaves it alone, whatever the registry says.
+    lane_restart::spec::write_atomic(&lane_state, &spec).unwrap();
+    let out = rig.agentlife(&["restore", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let held: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(held["entries"].as_array().map(Vec::len), Some(0), "{held}");
+    // The same spec marked running is the launch description (the positive control).
+    let mut spec = spec;
+    spec.state = lane_restart::spec::SpecState::Running;
     lane_restart::spec::write_atomic(&lane_state, &spec).unwrap();
     let out = rig.agentlife(&["restore", "--dry-run", "--json"]);
     assert!(
