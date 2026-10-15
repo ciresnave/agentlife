@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## Unreleased
+
+- **Docs: `docs/LAUNCHER-SERVICE.md`, the design of the launch-on-message service** (`agentlife launcher`; PM task
+  2026-10-15). Names what blocks it: `synapsed-client` is a `0.0.0` name reservation on crates.io (no code), the
+  M5 grant store and board 216 are unbuilt, and `start-role` on the launcher path does not exist. Nothing built.
+
 ## 0.15.2
 
 - **`lane-restart start` accepts a second caller, role `overmind`, for the launch-on-message service** (PM task
