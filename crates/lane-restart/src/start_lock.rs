@@ -95,6 +95,67 @@ mod tests {
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
     }
 
+    const HOLD_ENV: &str = "LANE_RESTART_TEST_HOLD_START_LOCK_DIR";
+
+    /// Not a test on its own: the child half of
+    /// `a_lock_held_by_another_process_refuses_this_one_until_that_process_ends`. Without the
+    /// variable it does nothing (and passes).
+    #[test]
+    fn child_holds_the_start_lock_until_stdin_closes() {
+        use std::io::{Read, Write};
+        let Ok(dir) = std::env::var(HOLD_ENV) else {
+            return;
+        };
+        let _lock = acquire(Path::new(&dir), "lightbulb").expect("child takes the lock");
+        println!("LOCKED");
+        std::io::stdout().flush().unwrap();
+        let mut sink = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut sink);
+    }
+
+    /// Two real OS processes (this test binary re-run on the child test above), not two handles in
+    /// one process: the advisory lock is per open file description, and the point is that a second
+    /// starter in another process is refused and that the lock goes when its holder does.
+    #[test]
+    fn a_lock_held_by_another_process_refuses_this_one_until_that_process_ends() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let d = tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "start_lock::tests::child_holds_the_start_lock_until_stdin_closes",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOLD_ENV, d.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        let mut locked = false;
+        while out.read_line(&mut line).unwrap() > 0 {
+            // libtest prefixes the first line of output with "test <name> ... "
+            if line.trim_end().ends_with("LOCKED") {
+                locked = true;
+                break;
+            }
+            line.clear();
+        }
+        assert!(locked, "the child never reported the lock");
+        assert!(matches!(
+            acquire(d.path(), "lightbulb"),
+            Err(StartLockError::Held)
+        ));
+        // another role is not blocked by the child's lock
+        assert!(acquire(d.path(), "coderipper").is_ok());
+        drop(child.stdin.take()); // EOF: the child exits and the OS releases the lock
+        assert!(child.wait().unwrap().success());
+        assert!(acquire(d.path(), "lightbulb").is_ok());
+    }
+
     #[test]
     fn a_missing_state_dir_is_unavailable_not_held() {
         let d = tempdir().unwrap();

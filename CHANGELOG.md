@@ -2,6 +2,20 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.12
+
+- **The launcher starts only a soft stop or a crash** (board 216, "216: yes"). For a launcher caller,
+  `lane-restart start` now reads the spec's `stop_kind`: a `suspended`/`stopping` spec must be `soft`;
+  `hard` is refused `stop-hard` and no kind `stop-unclassified` (both `refused`, exit 1, terminal); a
+  `crashed` spec, or `running` with its process gone, is a crash and is started without a mark. The PM's
+  `start` is unchanged. The spec is the authority, not the agent registry: `agentlife stop --soft` leaves
+  registry intent `Closed{exited}` and writes `soft` to the spec, `park` writes `hard`. A launch now
+  clears `stop_kind` (it is not a stop), so a lane the PM restarts after a hard stop is not still
+  marked hard when it later crashes. New `StartRefusal::StopNotSoft`. The 0.15.11 lock gains a test
+  with two real processes (a re-run of the test binary holds the lock; the parent is refused until the
+  child exits). Not run against a real lane. Still not built: the memory floor and `restore.lock` on the
+  launcher path, the per-role daily cap and the ledger line for launcher starts.
+
 ## 0.15.11
 
 - **`lane-restart start` takes a per-role start lock** (`docs/LAUNCHER-SERVICE.md`, "Two starters at once";
