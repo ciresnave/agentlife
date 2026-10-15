@@ -54,4 +54,5 @@ controls, exactly as it could forge the PM's state file today. So the bound is *
   gate says *who may call*; it does not say that a mail-triggered launch is approved. The service must refuse
   `no-grant` until that exists (OverMind's policy, rule 7).
 - Replay: `start` is idempotent through `already-running` (exit 3), not through the signal id. De-duplication
-  by `(signal_id, attempt)` is the service's.
+  by `(signal_id, attempt, epoch)`, with a generation counter for an epochless repeat after the replay window, is
+  the service's (`docs/LAUNCHER-SERVICE.md`, Store); an `epoch` change is a new request, never a replay.
