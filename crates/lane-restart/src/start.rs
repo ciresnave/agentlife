@@ -153,6 +153,23 @@ pub enum StartRefusal {
     Launch(RelaunchError),
 }
 
+/// Exit code of a start that was refused because the lane is already running: a no-op, not a
+/// failure, so a caller that wants "make sure it is up" (OverMind, on mail for a stopped lane)
+/// can tell it from every other refusal (exit 1). 0 and 2 are a launch; 4 is `stop`'s.
+pub const EXIT_ALREADY_RUNNING: u8 = 3;
+
+impl StartRefusal {
+    /// The process exit code for this refusal: `EXIT_ALREADY_RUNNING` for `AlreadyRunning`, 1
+    /// for every other refusal. A `duplicate-risk` refusal stays 1: a stuck or unrecorded
+    /// session is not a confirmed live lane.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            StartRefusal::AlreadyRunning => EXIT_ALREADY_RUNNING,
+            _ => 1,
+        }
+    }
+}
+
 impl std::fmt::Display for StartRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -643,6 +660,24 @@ mod tests {
         // the PM is not the live pid any more in this facts; the caller is passed verified
         let r = plan_start(d.path(), &req("baracuda"), Ok("pm".to_string()), &facts);
         assert!(matches!(r, Err(StartRefusal::AlreadyRunning)), "{r:?}");
+    }
+
+    /// OverMind's contract: "already running" is exit 3, distinct from every other refusal (1).
+    #[test]
+    fn already_running_has_its_own_exit_code_and_other_refusals_stay_one() {
+        assert_eq!(EXIT_ALREADY_RUNNING, 3);
+        assert_eq!(StartRefusal::AlreadyRunning.exit_code(), 3);
+        assert_eq!(StartRefusal::PmRole.exit_code(), 1);
+        assert_eq!(StartRefusal::NoSpec("x".into()).exit_code(), 1);
+        assert_eq!(StartRefusal::Model("opus".into()).exit_code(), 1);
+        assert_eq!(
+            StartRefusal::NotPm(Err(CallerError::NoClaudeAncestor)).exit_code(),
+            1
+        );
+        assert_eq!(
+            StartRefusal::DuplicateRisk(DuplicateRefusal::Unreadable("x".into())).exit_code(),
+            1
+        );
     }
 
     /// The 4775 s case: the dead lane's state file is hours old and says nothing about being

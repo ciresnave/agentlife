@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.0
+
+- **BREAKING (exit code): `lane-restart start` exits 3 when the lane is already running.** Before, that refusal
+  exited 1 like every other (no PM caller, no spec, a duplicate-risk process, a failed launch), so a caller that
+  only wants "make sure this lane is up" could not tell a harmless no-op from a failure. Now: `0` started with
+  progress confirmed, `2` started and awaiting the dev-channels dialog, `3` already running (a live claude matches
+  the recorded pid and start time; nothing is launched or written, safe to call again), `1` any other refusal or a
+  failed launch. `stop` keeps `4` (stopped, `suspended` mark not written). A `duplicate-risk` refusal stays `1`: a
+  stuck or unrecorded session is not a confirmed live lane. Also in `RESTART-TOOL-DESIGN.md` 14.5. Not run against
+  a real lane (`start` is PM-only); the mapping is unit-tested (`StartRefusal::exit_code`).
+
 ## 0.14.35
 
 - **`agentlife install-task` off Windows prints a `systemd --user` logon unit** (`docs/PORT-LINUX-PLAN.md`, P8).
