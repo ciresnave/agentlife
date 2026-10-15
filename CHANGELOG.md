@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.1
+
+- **`lane-restart start --json`** prints one line on stdout, `{"role","outcome","reason"[,"launch_to_live_secs"]}`,
+  for a caller that must decide whether to retry (Synapse's `/v1/launch-result`, spec C4). `outcome` is
+  `started` (reason `started` or `awaiting-dialog`), `already-running`, `refused` (terminal: `not-pm`, `pm-role`,
+  `invalid-role`, `reason`, `model-not-pinned`, `no-spec`, `spec-unusable`) or `failed` (retryable:
+  `duplicate-risk`, `process-table-unreadable`, `disk-floor`, `spawn-failed`); `dry-run` for `--dry-run`. Exit codes
+  are unchanged (0/1/2/3). A confirmed start also records `launch-to-live:<n>s` (spawn to confirmed progress) in
+  the ledger line and the JSON, so a measured `launch_wait` can accrue from real starts. Not run against a real
+  lane; the outcome mapping is unit-tested.
+
 ## 0.15.0
 
 - **BREAKING (exit code): `lane-restart start` exits 3 when the lane is already running.** Before, that refusal
