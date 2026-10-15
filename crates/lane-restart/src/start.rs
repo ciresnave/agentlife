@@ -439,8 +439,10 @@ pub struct StartResult {
     /// Set when the lane is up but its spec could not be marked `running`: the previous spec is
     /// still complete, so nothing is lost, but the ledger should say so.
     pub spec_warning: Option<String>,
-    /// Wall-clock time spent inside `launch_and_wait_with` only: spawn to confirmed progress (or
-    /// to the dialog hand-off). Excludes planning, the disk gate and the spec write-back.
+    /// Wall-clock time spent inside `launch_and_wait_with` only: argument preparation (no I/O),
+    /// the spawn and the wait for progress or the dialog hand-off. Excludes planning, the disk gate
+    /// and the spec write-back. For an awaiting-dialog hand-off it is not a launch time, and the
+    /// caller reports none.
     pub launch_elapsed: Duration,
 }
 
