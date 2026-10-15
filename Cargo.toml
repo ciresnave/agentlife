@@ -13,8 +13,8 @@ repository = "https://github.com/ciresnave/agentlife"
 # as by workspace path (cargo drops the path when it packages them). Same repo, so the
 # path is not a cross-repo dependency. Keep in step with the version above.
 [workspace.dependencies]
-lane-state = { version = "0.15.6", path = "crates/lane-state" }
-lane-restart = { version = "0.15.6", path = "crates/lane-restart" }
+lane-state = { version = "0.15.7", path = "crates/lane-state" }
+lane-restart = { version = "0.15.7", path = "crates/lane-restart" }
 
 [package]
 name = "agentlife"
