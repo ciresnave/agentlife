@@ -2,6 +2,21 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.3
+
+- **`agentlife restore` no longer relaunches a lane that was stopped on purpose.** A `wanted` lane whose launch
+  spec is `suspended` (written by `lane-restart stop` and `agentlife down`) is excluded from the plan with reason
+  `SuspendedSpec` (routine, counted not listed); `lane-restart start` stays the resume path. Before, only
+  `agentlife down` recorded `Closed` intent, so a `lane-restart stop`ped lane was `Wanted`, not running, and a
+  restore candidate (found by the launcher design review, #92). A suspended spec that is not complete is also
+  reported as suspended rather than falling back to the registry record, as is a `stopping` spec (the final
+  `suspended` write failed) and a spec file that only partly reads but says `suspended`; another role's spec
+  under a filename is not used. Not run against a real logon; the planner and loader are unit-tested, with the
+  exclusion mutated out to see the test fail. **Residual, stated:** restore does not re-read the spec between
+  building the plan and spawning, so a stop landing inside that window is still undone (not tested, not closed
+  here); a pending restore frozen by 0.15.3 and read by an older exe would not parse the new `SuspendedSpec`
+  reason (review finding, not run).
+
 ## Unreleased
 
 - **Docs: `docs/LAUNCHER-SERVICE.md`, the design of the launch-on-message service** (`agentlife launcher`; PM task

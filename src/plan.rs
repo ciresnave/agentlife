@@ -73,6 +73,10 @@ pub enum Reason {
     NotSelected,
     /// Intent is closed or lazy, so restore leaves it alone.
     NotWanted,
+    /// The lane's launch spec is `suspended` or `stopping`: it was stopped on purpose
+    /// (`lane-restart stop`, `agentlife down`), and a deliberate stop survives logon.
+    /// `lane-restart start` resumes it.
+    SuspendedSpec,
     /// Already running; starting it again would be a duplicate.
     Running,
     /// Its process is alive but the record has no start time to prove it is the same one.
@@ -94,7 +98,7 @@ impl Reason {
     pub fn is_routine(self) -> bool {
         matches!(
             self,
-            Reason::NotSelected | Reason::NotWanted | Reason::Running
+            Reason::NotSelected | Reason::NotWanted | Reason::SuspendedSpec | Reason::Running
         )
     }
 }
@@ -447,6 +451,15 @@ pub fn build(i: &Inputs) -> Plan {
         // Spec first (one launch description for `restore` and `lane-restart start`); the registry
         // record is the fallback, and the entry says which one it was built from.
         let spec = r.spec_role().and_then(|role| (i.specs)(&role));
+        if spec.as_ref().is_some_and(|s| s.suspended) {
+            exclude(
+                r,
+                Reason::SuspendedSpec,
+                "its launch spec is suspended (stopped on purpose); `lane-restart start` resumes it"
+                    .into(),
+            );
+            continue;
+        }
         let (args, cwd, source): (Vec<String>, String, &'static str) = match spec {
             Some(s) => (s.argv, s.cwd, SOURCE_SPEC),
             None => match r.launch_args.as_ref().filter(|a| !a.is_empty()) {
@@ -952,7 +965,35 @@ mod tests {
         crate::spec_launch::SpecLaunch {
             cwd: format!("C:/Projects/{role}"),
             argv,
+            suspended: false,
         }
+    }
+
+    /// A deliberate stop survives logon: a `wanted` lane whose spec is `suspended` is not
+    /// restored, a `wanted` lane with a running spec is (the positive control, same inputs).
+    #[test]
+    fn a_wanted_lane_with_a_suspended_spec_is_not_restored() {
+        let recs = vec![lane("a-a", "a", 2), lane("a-b", "b", 1)];
+        let p = plan_with_specs(&recs, &cfg(), &|role| {
+            let mut s = spec_for(role, &[]);
+            s.suspended = role == "a";
+            Some(s)
+        });
+        assert_eq!(
+            names(&p),
+            ["b"],
+            "only the lane that was not stopped on purpose"
+        );
+        let ex = p
+            .excluded
+            .iter()
+            .find(|e| e.name.as_deref() == Some("a"))
+            .expect("a is excluded");
+        assert_eq!(ex.reason, Reason::SuspendedSpec);
+        assert!(ex.detail.contains("lane-restart start"));
+        // The same lane with a spec that is not suspended is planned: the exclusion is the spec's.
+        let p = plan_with_specs(&recs, &cfg(), &|role| Some(spec_for(role, &[])));
+        assert_eq!(names(&p).len(), 2);
     }
 
     #[test]
@@ -1002,6 +1043,7 @@ mod tests {
                 argv: ["--name", "a", "--model", "claude-opus-4"]
                     .map(String::from)
                     .to_vec(),
+                suspended: false,
             })
         });
         assert_eq!(p.entries[0].argv[2..4], ["--model", "sonnet"]);
@@ -1020,6 +1062,7 @@ mod tests {
             Some(crate::spec_launch::SpecLaunch {
                 cwd: "C:/Windows/System32".into(),
                 argv: spec_for("a", &[]).argv,
+                suspended: false,
             })
         });
         assert!(p.entries.is_empty());
