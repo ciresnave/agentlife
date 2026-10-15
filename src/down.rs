@@ -42,6 +42,7 @@ use crate::peers::{peers_of_claude, Messenger, Peer};
 use crate::readiness::{self, Evidence, LaneStateView, ProcTree};
 use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
 use chrono::{DateTime, Utc};
+use lane_restart::spec::StopKind;
 use lane_state::claude_proc::ParentProcess;
 use serde_json::json;
 use std::fmt;
@@ -75,7 +76,7 @@ pub trait Facts {
     /// accept. The `Err` says why not.
     fn launch_spec(&self, role: &str) -> Result<(), String>;
     /// Marks the role's spec `suspended` once the process is gone (best effort).
-    fn mark_suspended(&self, role: &str, reason: &str) -> Result<(), String>;
+    fn mark_suspended(&self, role: &str, reason: &str, kind: StopKind) -> Result<(), String>;
 }
 
 pub struct FsFacts<'a> {
@@ -99,11 +100,12 @@ impl Facts for FsFacts<'_> {
         spec.check().map(|_| ()).map_err(|e| e.to_string())
     }
 
-    fn mark_suspended(&self, role: &str, reason: &str) -> Result<(), String> {
+    fn mark_suspended(&self, role: &str, reason: &str, kind: StopKind) -> Result<(), String> {
         let mut spec =
             lane_restart::spec::read(self.lane_state_dir, role).map_err(|e| e.to_string())?;
         spec.state = lane_restart::spec::SpecState::Suspended;
         spec.stop_reason = Some(reason.to_string());
+        spec.stop_kind = Some(kind);
         lane_restart::spec::write_atomic(self.lane_state_dir, &spec).map_err(|e| e.to_string())
     }
 }
@@ -196,6 +198,8 @@ pub struct Deps<'a> {
 pub struct Request<'a> {
     pub target: &'a AgentId,
     pub how: ClosedHow,
+    /// Recorded in the launch spec: `Hard` unless a person said `--soft`. A park is always hard.
+    pub kind: StopKind,
     pub confirm: Option<&'a str>,
     pub yes: bool,
     pub timeout: Duration,
@@ -588,6 +592,11 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
                 "stop"
             }
         ),
+        if r.how == ClosedHow::Parked {
+            StopKind::Hard
+        } else {
+            r.kind
+        },
     );
     let _ = d.journal.append(
         "stopped",
@@ -720,8 +729,11 @@ mod tests {
                 _ => Ok(()),
             }
         }
-        fn mark_suspended(&self, role: &str, _: &str) -> Result<(), String> {
-            self.log.lock().unwrap().push(format!("suspended {role}"));
+        fn mark_suspended(&self, role: &str, _: &str, kind: StopKind) -> Result<(), String> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("suspended {role} {}", kind.as_str()));
             Ok(())
         }
     }
@@ -837,6 +849,31 @@ mod tests {
         how: ClosedHow,
         timeout_secs: u64,
     ) -> Ran {
+        go_kind(
+            rig,
+            sc,
+            caller,
+            caller_rec,
+            yes,
+            confirm,
+            how,
+            StopKind::Hard,
+            timeout_secs,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn go_kind(
+        rig: &Rig,
+        sc: Scenario,
+        caller: &Caller,
+        caller_rec: Option<&AgentRecord>,
+        yes: bool,
+        confirm: Option<&str>,
+        how: ClosedHow,
+        kind: StopKind,
+        timeout_secs: u64,
+    ) -> Ran {
         let cfg = Config::default();
         let table = Alive(sc.alive);
         let msg = Msg {
@@ -880,6 +917,7 @@ mod tests {
             &Request {
                 target: &id,
                 how,
+                kind,
                 confirm,
                 yes,
                 timeout: Duration::from_secs(timeout_secs),
@@ -1116,7 +1154,7 @@ mod tests {
         );
         assert_eq!(
             ran.kills,
-            ["kill pid 100 start 5000", "suspended x"],
+            ["kill pid 100 start 5000", "suspended x hard"],
             "exactly one kill, of exactly that process, then the spec marked suspended"
         );
         assert!(
@@ -1188,6 +1226,7 @@ mod tests {
             &Request {
                 target: &id,
                 how: ClosedHow::Exited,
+                kind: StopKind::Hard,
                 confirm: None,
                 yes: true,
                 timeout: Duration::from_secs(60),
@@ -1691,5 +1730,38 @@ mod tests {
             ),
             "a gone process must never be killed again"
         );
+    }
+    // Board 216: a person's `--soft` stop is recorded soft; a park is hard whatever was asked.
+    #[test]
+    fn the_stop_kind_reaches_the_spec_and_a_park_is_always_hard() {
+        for (how, asked, recorded) in [
+            (ClosedHow::Exited, StopKind::Soft, "soft"),
+            (ClosedHow::Exited, StopKind::Hard, "hard"),
+            (ClosedHow::Parked, StopKind::Soft, "hard"),
+        ] {
+            let rig = rig(&[target(), pm_record()]);
+            let (c, rec) = person();
+            let ran = go_kind(
+                &rig,
+                Scenario::default(),
+                &c,
+                Some(&rec),
+                true,
+                None,
+                how,
+                asked,
+                60,
+            );
+            assert!(
+                matches!(ran.result, Ok(Outcome::Stopped { .. })),
+                "{:?}",
+                ran.result
+            );
+            assert_eq!(
+                ran.kills.last().map(String::as_str),
+                Some(format!("suspended x {recorded}").as_str()),
+                "{how:?} asked {asked:?}"
+            );
+        }
     }
 }

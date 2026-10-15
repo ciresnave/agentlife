@@ -51,6 +51,30 @@ pub enum SpecState {
     Crashed,
 }
 
+/// Why a lane was stopped, as far as a launcher may act on it (board 216, CireSnave: "216: yes").
+///
+/// `Soft`: the lane ended in the course of its own work (its own shutdown, idle or task-boundary
+/// path), so a message for it may start it again. `Hard`: a person or the PM stopped it on purpose
+/// and it stays stopped until a person or the PM starts it. A spec with **no** kind (older than this
+/// field, or never stopped) is *unclassified* and is never started by the launcher.
+///
+/// Only the PM or CireSnave can turn a `Hard` stop into anything else; no lane can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopKind {
+    Soft,
+    Hard,
+}
+
+impl StopKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopKind::Soft => "soft",
+            StopKind::Hard => "hard",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecFile {
     pub schema: u32,
@@ -74,6 +98,10 @@ pub struct SpecFile {
     pub stopped_session_id: Option<String>,
     pub stopped_pid_start_secs: Option<u64>,
     pub stop_reason: Option<String>,
+    /// Soft or hard, written by every stop. `None` for a spec written by an older build, by a
+    /// launch, or by `specs import` (a crash): unclassified, which a launcher refuses.
+    #[serde(default)]
+    pub stop_kind: Option<StopKind>,
     pub tool_version: String,
 }
 
@@ -181,6 +209,7 @@ pub fn build(i: &SpecInputs) -> Result<SpecFile, SpecError> {
         stopped_session_id: i.session_id.map(str::to_string),
         stopped_pid_start_secs: i.pid_start_secs,
         stop_reason: None,
+        stop_kind: None,
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -382,6 +411,8 @@ pub struct RoleStatus {
     pub startable: bool,
     pub since: Option<DateTime<Utc>>,
     pub stop_reason: Option<String>,
+    /// `soft` or `hard` when the spec records a stop; absent when unclassified.
+    pub stop_kind: Option<StopKind>,
     pub detail: Option<String>,
     /// The model the launch spec records (`None` when there is no readable spec). Opus is shown as
     /// recorded; a start replaces it (see `lane-restart models`).
@@ -482,6 +513,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         startable: false,
         since: None,
         stop_reason: None,
+        stop_kind: None,
         detail: None,
         model: None,
         activity: None,
@@ -521,6 +553,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 out.handoff = handoff_size(&s.cwd, role);
             }
             out.stop_reason = s.stop_reason.clone();
+            out.stop_kind = s.stop_kind;
             out.model = Some(s.model.clone());
             // `lane-start` replaces an Opus, unknown or unset model by `sonnet` (14.5), so the
             // spec is startable when it is complete with that replacement applied.
@@ -893,6 +926,20 @@ mod tests {
             written_by: "restart",
             now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
         }
+    }
+
+    // A spec written before the field existed is unclassified, never soft or hard.
+    #[test]
+    fn a_spec_without_stop_kind_reads_as_unclassified_and_a_kind_round_trips() {
+        let mut v = serde_json::to_value(built("agentlife", SpecState::Suspended)).unwrap();
+        assert!(v.as_object_mut().unwrap().remove("stop_kind").is_some());
+        let old: SpecFile = serde_json::from_value(v).unwrap();
+        assert_eq!(old.stop_kind, None);
+        let mut s = built("agentlife", SpecState::Suspended);
+        s.stop_kind = Some(StopKind::Soft);
+        let back: SpecFile = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.stop_kind, Some(StopKind::Soft));
+        assert_eq!(StopKind::Hard.as_str(), "hard");
     }
 
     fn built(role: &str, state: SpecState) -> SpecFile {

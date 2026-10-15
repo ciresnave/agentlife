@@ -139,6 +139,22 @@ re-check of `role_status` and `duplicate::check` after the lock is taken and imm
 The second starter then gets `already-running` (exit 3), which is the contract it already has. Until that
 lands, notifier-only mode (rule 7 refuses) is the only safe mode, which is the build order below anyway.
 
+## Soft and hard stops (board 216)
+
+CireSnave ruled "216: yes" (2026-10-15, relayed by the PM): a **soft** stop carries an implied restart grant.
+The launch spec records `stop_kind`, written by every stop:
+
+| `stop_kind` | meaning | who writes it | the launcher may start it |
+|---|---|---|---|
+| `hard` (the default) | a person or the PM stopped it on purpose | `lane-restart stop` (PM), `agentlife stop`, `agentlife park` | never |
+| `soft` | the lane ended in the course of its own work | `lane-restart stop --self` (always), or `--soft` by the PM; `agentlife stop --soft` (a person) | yes, subject to rules 5-6 |
+| none (unclassified) | an older spec, a launch (`running`), a crash import | | never |
+
+A crash (`crashed` spec state, or a `running` spec whose process is gone) is soft by nature and needs no
+mark. A lane can never turn a hard stop into a soft one or start a hard-stopped role: `--self` refuses
+`--hard`, and only the PM or a person writes or clears a hard stop. This PR is the **writer** half; the
+launcher reading the kind (and `start-role`, caps and the ledger) follows in later PRs.
+
 ## Mapping the mechanism to Synapse (OverMind section 3)
 
 The mechanism answers in the `--json` vocabulary of `lane-restart start` (0.15.1) today:

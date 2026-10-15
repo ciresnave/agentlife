@@ -38,6 +38,8 @@ pub enum Command {
         confirm: Option<String>,
         yes: bool,
         timeout: Option<u64>,
+        /// `--soft`: record the stop as one a message may undo (board 216). Default hard.
+        soft: bool,
     },
     Unpark {
         agent: String,
@@ -457,10 +459,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         "park" | "stop" => {
             let (agent, tail) = one_agent(rest, cmd)?;
             let mut confirm = None;
-            let (mut yes, mut timeout) = (false, None);
+            let (mut yes, mut timeout, mut soft) = (false, None, false);
             let mut it = tail.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
+                    "--soft" if cmd == "stop" => soft = true,
                     "--confirm" => {
                         confirm =
                             Some(it.next().ok_or("--confirm needs the agent's name")?.clone());
@@ -492,6 +495,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                     confirm,
                     yes,
                     timeout,
+                    soft,
                 }
             })
         }
@@ -831,8 +835,17 @@ mod tests {
                 agent: "PM".into(),
                 confirm: Some("PM".into()),
                 yes: false,
-                timeout: None
+                timeout: None,
+                soft: false,
             })
+        );
+        assert!(matches!(
+            p(&["stop", "lane", "--soft"]),
+            Ok(Command::Stop { soft: true, .. })
+        ));
+        assert!(
+            p(&["park", "lane", "--soft"]).is_err(),
+            "a park is hard: it is kept forever"
         );
         assert!(p(&["park"]).is_err());
         assert!(p(&["park", "lane", "--confirm"]).is_err());

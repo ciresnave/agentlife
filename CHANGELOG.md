@@ -2,6 +2,22 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.10
+
+- **Every stop records whether it is soft or hard** (board 216, PM task 2026-10-15; CireSnave verbatim:
+  "216: yes"). New `stop_kind` (`soft` | `hard`) in the launch spec, written on both the `stopping` and the
+  `suspended` write. **Hard** is the default and means a person or the PM stopped the lane on purpose: no
+  launcher may undo it. **Soft** means the lane ended in the course of its own work. `lane-restart stop` takes
+  `--soft` / `--hard` (both is an error); `--self` is soft and `--self --hard` is refused ("a lane cannot
+  hard-stop itself"). `agentlife stop` takes `--soft` (a person only; it applies to ending a RUNNING session,
+  and `--soft` on a not-running agent is refused rather than ignored); `agentlife park` is always hard. A spec
+  with no `stop_kind` (written by an older build, by a launch, or by `specs import`) is **unclassified**; the
+  launcher built on top of this never starts it. `lane-restart status --json` shows `stop_kind`. Nothing
+  reads the kind yet: this is the writer half, so a launcher change can follow without a migration. The
+  field is additive (schema stays 1); an older build that rewrites a spec drops it, which reads as
+  unclassified, the safe side. Unit-tested on both write paths, the `--self` refusal and the park rule, with
+  each guard mutation-tested; not run against a real lane.
+
 ## 0.15.8
 
 - **`launcher` crate: `epoch` is a string.** Synapse's signal carries `epoch` as an opaque string and
