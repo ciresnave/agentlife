@@ -2,6 +2,18 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.6
+
+- **`agentlife unpark --no-start` reopens a stopped lane's launch spec.** A `lane-restart stop` or `agentlife
+  down` leaves the spec `suspended`; since 0.15.3 `restore` keeps such a lane out of its plan, and
+  `Wanted` + `suspended` is the same state as "the PM stopped it", so an unparked lane would never be restored.
+  `unpark --no-start` now rewrites a `suspended` or `stopping` spec to `crashed` (the existing "ended without a
+  stop" state), journals `spec_reopened`, and leaves a `running`/`crashed` spec or no spec alone. Best effort:
+  a failed write leaves the lane refused, the safe side. Also fixes the `install-task` help line that still
+  said a non-dry-run `restore` is not built. Found in review of #92; unit-tested over all four spec states and
+  the no-spec case, not run against a real lane. Regression from 0.15.3, which kept stopped lanes out of the plan
+  without giving a reopen a way back.
+
 ## 0.15.5
 
 - **New crate `launcher`: the decision engine of the launch-on-message service** (`docs/LAUNCHER-SERVICE.md`;
