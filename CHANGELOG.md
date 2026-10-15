@@ -10,7 +10,9 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   ancestor; `start` only (`stop` and a restart still require the PM, now tested with `overmind` refused); requires
   `--signal-id <role>:<id>` naming the role started, else `refused: no-signal`; each call ledgered with the signal
   id. Threat note: `docs/LAUNCH-ON-MESSAGE-THREAT.md`. No service writes the record yet (PR3); not run live.
-  Number proposed by the lane, the PM allocates.
+  **Stated limit:** the record is a same-user-forgeable local mirror of the Synapse `launcher_roles=overmind`
+  credential, which `lane-restart` cannot check; the gate bounds what that identity may do (start existing,
+  specced lanes only), not who can claim it. The rate cap lives in the service, not here.
 
 ## 0.15.1
 
