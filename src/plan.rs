@@ -73,8 +73,9 @@ pub enum Reason {
     NotSelected,
     /// Intent is closed or lazy, so restore leaves it alone.
     NotWanted,
-    /// The lane's launch spec is `suspended`: it was stopped on purpose (`lane-restart stop`,
-    /// `agentlife down`), and a deliberate stop survives logon. `lane-restart start` resumes it.
+    /// The lane's launch spec is `suspended` or `stopping`: it was stopped on purpose
+    /// (`lane-restart stop`, `agentlife down`), and a deliberate stop survives logon.
+    /// `lane-restart start` resumes it.
     SuspendedSpec,
     /// Already running; starting it again would be a duplicate.
     Running,

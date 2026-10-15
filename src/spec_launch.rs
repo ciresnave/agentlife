@@ -4,9 +4,15 @@
 //! flagged fallback**. One launch description for `lane-restart start` and for `restore`, so a lane
 //! that is resumable by one path is resumable by the other with the same allowlist and model pin.
 //!
-//! Only a **complete** spec is used (`SpecFile::check`: schema known, explicit non-Opus model, a
-//! plain role and name, no `;`). An incomplete, unreadable or missing one is `None`, and the planner
-//! then falls back to the registry record and says so on the entry.
+//! Only a **complete** spec is used to launch (`SpecFile::check`: schema known, explicit non-Opus
+//! model, a plain role and name, no `;`). An incomplete, unreadable or missing one is `None`, and the
+//! planner then falls back to the registry record and says so on the entry.
+//!
+//! **One exception, so a deliberate stop survives logon:** a spec that records `suspended` or
+//! `stopping` is returned (`suspended: true`) even when it is incomplete or cannot be fully read (a
+//! newer schema, a missing field), and the planner then excludes the lane instead of falling back to
+//! the registry record, which would relaunch it. A spec whose embedded role is not the requested one
+//! is not used at all.
 //!
 //! The spec is turned into a recorded-style argv and handed to the same `plan::rebuild` as a
 //! registry record's, so nothing here widens what is launched: the planner's allowlist, its model
@@ -22,9 +28,10 @@ pub struct SpecLaunch {
     pub cwd: String,
     /// A recorded-style argument list (no program name).
     pub argv: Vec<String>,
-    /// The spec's state is `suspended`: `lane-restart stop` or `agentlife down` ended this lane on
-    /// purpose. `restore` must leave it alone (a deliberate stop survives logon); only
-    /// `lane-restart start` resumes it.
+    /// The spec's state is `suspended` or `stopping`: `lane-restart stop` or `agentlife down` ended
+    /// (or was ending) this lane on purpose. `restore` must leave it alone (a deliberate stop survives
+    /// logon, including a stop whose final `suspended` write failed); only `lane-restart start`
+    /// resumes it. When true, `cwd`/`argv` may be empty.
     pub suspended: bool,
 }
 
@@ -47,20 +54,58 @@ pub fn from_spec(s: &spec::SpecFile) -> SpecLaunch {
     SpecLaunch {
         cwd: s.cwd.clone(),
         argv,
-        suspended: s.state == spec::SpecState::Suspended,
+        suspended: matches!(
+            s.state,
+            spec::SpecState::Suspended | spec::SpecState::Stopping
+        ),
     }
 }
 
 /// The role's complete spec in `lane_state_dir`, or `None` when there is none, it cannot be read,
-/// or it is not complete.
+/// it is not complete, or it belongs to another role. **Except** a spec that records a stop
+/// (`suspended`/`stopping`): that is returned with `suspended: true` even when incomplete or only
+/// partly readable, so the planner excludes the lane rather than relaunch it from the registry.
 pub fn load(lane_state_dir: &Path, role: &str) -> Option<SpecLaunch> {
-    let s = spec::read(lane_state_dir, role).ok()?;
-    // A suspended spec is reported as such even when it is not complete: it must never fall back
-    // to the registry record and be launched (the deliberate stop would not survive).
-    if s.check().is_err() && s.state != spec::SpecState::Suspended {
-        return None;
+    match spec::read(lane_state_dir, role) {
+        Ok(s) => {
+            if s.role != role {
+                return None;
+            }
+            let launch = from_spec(&s);
+            if s.check().is_err() && !launch.suspended {
+                return None;
+            }
+            Some(launch)
+        }
+        Err(_) => records_a_stop(lane_state_dir, role).then(|| SpecLaunch {
+            cwd: String::new(),
+            argv: Vec::new(),
+            suspended: true,
+        }),
     }
-    Some(from_spec(&s))
+}
+
+/// A spec file that `spec::read` rejects (newer schema, a required field missing) but whose raw
+/// JSON still says it is `suspended` or `stopping`, for this role.
+fn records_a_stop(dir: &Path, role: &str) -> bool {
+    if !lane_restart::relaunch::valid_identifier(role) {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(dir.join(format!("{role}.launch.json"))) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let named_here = v
+        .get("role")
+        .and_then(|r| r.as_str())
+        .is_none_or(|r| r == role);
+    named_here
+        && matches!(
+            v.get("state").and_then(|s| s.as_str()),
+            Some("suspended" | "stopping")
+        )
 }
 
 #[cfg(test)]
@@ -132,6 +177,30 @@ mod tests {
         )
         .unwrap();
         assert!(load(d.path(), "gamma").unwrap().suspended);
+        // stopping (the final suspended write failed): also a stop
+        let mut stopping = spec_of("eps", "sonnet");
+        stopping.state = spec::SpecState::Stopping;
+        spec::write_atomic(d.path(), &stopping).unwrap();
+        assert!(load(d.path(), "eps").unwrap().suspended);
+        // a file `spec::read` rejects but whose raw JSON says suspended: still a stop
+        std::fs::write(
+            d.path().join("zeta.launch.json"),
+            br#"{"role":"zeta","state":"suspended","schema":9999}"#,
+        )
+        .unwrap();
+        assert!(
+            spec::read(d.path(), "zeta").is_err(),
+            "control: read rejects it"
+        );
+        assert!(load(d.path(), "zeta").unwrap().suspended);
+        // another role's spec under this filename is not used
+        let other = spec_of("someone-else", "sonnet");
+        std::fs::write(
+            d.path().join("theta.launch.json"),
+            serde_json::to_vec_pretty(&other).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load(d.path(), "theta"), None);
         // incomplete + running: None, as before
         let mut opus_run = spec_of("delta", "opus");
         opus_run.state = spec::SpecState::Running;

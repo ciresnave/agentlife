@@ -114,7 +114,12 @@ pub fn unstarted_from(plan: &Plan) -> Vec<Unstarted> {
     out.extend(
         plan.excluded
             .iter()
-            .filter(|x| !matches!(x.reason, Reason::NotSelected | Reason::NotWanted))
+            .filter(|x| {
+                !matches!(
+                    x.reason,
+                    Reason::NotSelected | Reason::NotWanted | Reason::SuspendedSpec
+                )
+            })
             .map(|x| Unstarted {
                 agent_id: x.agent_id.clone(),
                 name: x.name.clone(),
