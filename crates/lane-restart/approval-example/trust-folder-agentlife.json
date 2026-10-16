@@ -1,0 +1,29 @@
+{
+  "id": "trust-folder-agentlife",
+  "match": {
+    "text_anchors": [
+      "Quick safety check"
+    ],
+    "lines": [
+      "Accessing workspace:",
+      "Yes, I trust this folder"
+    ],
+    "isolated_lines": [
+      "C:\\Projects\\agentlife"
+    ]
+  },
+  "action": "<Down><Enter>",
+  "scope": {
+    "roles": ["*"]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approvals": [
+      {
+        "said_on": "2026-10-14",
+        "quote": "I always trust our own projects because the only two people working on them are you and I.",
+        "approving": "Answering Claude Code's folder-trust dialog Yes for THIS folder only, on a session lane-restart relaunched: the dialog must show 'Accessing workspace:', the exact line 'C:\\Projects\\agentlife' followed by a blank row (a wrapped or longer path never matches), and 'Yes, I trust this folder'. The default selection is 'No, exit', so the keys are Down then Enter. One record per lane folder; no prefix, no wildcard."
+      }
+    ]
+  }
+}

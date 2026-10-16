@@ -13,6 +13,14 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   each agent's session `started_at`, so the next occurrence says whether a lane launched late, started late, had a slow or failed hook,
   or registered and was not seen.
 
+## 0.16.6
+
+- **`lane-restart`: handlers gain `match.isolated_lines`, and a folder-trust record template:** like `match.lines`, and the row
+  after the pinned row must be blank, so a trusted path exactly one column short of the screen width followed by a wrapped
+  suffix cannot pass as the trusted path. `MatchSpec` gains the field; `MatchReport.lines` also lists isolated pins.
+  New `docs/TRUST-DIALOG.md` (the captured dialog, the host PTY width: the console window size, 80 x 25 fallback, resized
+  with the terminal) and `approval-example/trust-folder-agentlife.json` (inert template and test fixture).
+
 ## 0.16.5
 
 - **Launch names are validated at record time (`lane-restart`):** a launch name that is not a safe token is
