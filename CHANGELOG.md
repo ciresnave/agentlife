@@ -10,6 +10,13 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   New `docs/TRUST-DIALOG.md` (the captured dialog, the host PTY width: the console window size, 80 x 25 fallback, resized
   with the terminal) and `approval-example/trust-folder-agentlife.json` (inert template and test fixture).
 
+## 0.16.3
+
+- **Test diagnostics, no behaviour change:** the `fake_claude` stand-in keeps each hook's exit code, time and stderr in
+  `FAKE_HOOKLOG`, and `launch_e2e` prints it when a lane does not come up. A Windows CI run (2026-10-16, run
+  38921949112) had one of two lanes launched together never register a session in 40 s, the rerun was clean, and
+  nothing recorded why; the cause is NOT found.
+
 ## 0.16.2
 
 - **Runner policy, widened (docs, script, new unpublished crate):** `docs/RUNNER-SETUP.md` records the policy
