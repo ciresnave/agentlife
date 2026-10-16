@@ -2,6 +2,17 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.7
+
+- **Test diagnostics, no behaviour change:** every `launch_e2e` failure message that prints the restore report now also prints the
+  hook log. The same signature (one lane of several launched together: `no session appeared within 40 s`) failed a second,
+  different test on the Windows CI leg (`twelve_real_stand_ins...`, run 38940546634, lane `l09` of a batch of five); the cause is
+  still NOT found. A stress test of 12 threads writing distinct files in one directory through `atomic::write_atomic` (a suspected
+  race in its shared scratch directory) did not fail in 3 runs, so that is not shown.
+  The stand-in now also logs `start`, `hook-begin` and `hook-end` with epoch-millisecond timestamps, and the failure message lists
+  each agent's session `started_at`, so the next occurrence says whether a lane launched late, started late, had a slow or failed hook,
+  or registered and was not seen.
+
 ## 0.16.6
 
 - **`lane-restart`: handlers gain `match.isolated_lines`, and a folder-trust record template:** like `match.lines`, and the row
