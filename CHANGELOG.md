@@ -2,6 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## Unreleased (version allocated at gate)
+
+- **Breaking for handler authors and API users (`lane-restart`):** a handler `action` is now a closed keystroke
+  grammar: at most 3 tokens, at most one letter or digit, ``, `<Enter>`, `<Down>`; no raw ESC, no free text. The
+  host sends `ESC [ B` for `<Down>` itself (`handlers::action_bytes`). `action_is_a_plain_keystroke` is replaced
+  by `action_is_allowed` / `parse_action`. `""` was refused before and is accepted now.
+
 ## 0.15.18
 
 - **Script and docs, no code change:** `scripts/synapsed-task.ps1`, the per-user logon task that starts the Synapse

@@ -912,8 +912,11 @@ This is the PM's refinement, approved verbatim in *"Yes on all fronts.  Proceed.
 CireSnave's own example: *"possibly asking about a password that should not be shown, much less stored
 in a public GitHub repo"*. It is enforced three ways, whether the approvals repo is public or private:
 
-- **The action cannot carry one.** `action` is at most one ASCII letter or digit plus an optional
-  `\r` (`action_is_a_plain_keystroke`). A password, token, PIN or code does not fit.
+- **The action cannot carry one.** `action` is a closed token grammar (`parse_action`): at most 3 tokens, each
+  one ASCII letter or digit (at most ONE such token, so no code like `123`), `\r`, `<Enter>` or `<Down>`
+  (2026-10-16, for the folder-trust dialog, where only Down then Enter answers Yes). No raw escape sequence
+  and no free text: the host turns `<Down>` into `ESC [ B` itself (`action_bytes`), so an ESC never appears in
+  a handler file. A password, token, PIN or code does not fit.
 - **An approval for a dialog about a secret is refused at load.** The file is refused if its `id`, any
   text anchor, or any field name or value contains a secret word. `SECRET_WORDS` includes `password`,
   `passphrase`, `passcode`, `pin`, `secret`, `token`, `credential`, `api key`, `private key`, `otp`,

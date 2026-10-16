@@ -274,7 +274,17 @@ pub fn check_and_inject(
 ) -> std::io::Result<()> {
     if let Some(handler) = handlers::find_matching_handler(handler_list, role, now, screen_text) {
         if matched_ids.insert(handler.id.clone()) {
-            input_writer.write_all(handler.action.as_bytes())?;
+            // Validated at load, so this cannot be None; if it ever is, send nothing.
+            let bytes = handlers::action_bytes(&handler.action).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "handler {} action is outside the keystroke grammar",
+                        handler.id
+                    ),
+                )
+            })?;
+            input_writer.write_all(&bytes)?;
             input_writer.flush()?;
             on_answered(HandlerAnswered {
                 handler_id: handler.id.clone(),
@@ -1079,7 +1089,7 @@ mod tests {
     #[test]
     fn check_and_inject_writes_the_action_on_an_exact_match() {
         let handler: HandlerSpec =
-            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\n")).unwrap();
+            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\r")).unwrap();
         let mut input = Vec::new();
         let mut matched = HashSet::new();
         let mut answered = Vec::new();
@@ -1093,14 +1103,41 @@ mod tests {
             &mut |a| answered.push(a.handler_id),
         )
         .unwrap();
-        assert_eq!(input, b"y\n");
+        assert_eq!(input, b"y\r");
         assert_eq!(answered, vec!["h1".to_string()]);
+    }
+
+    #[test]
+    fn check_and_inject_sends_down_then_enter_as_the_ansi_bytes() {
+        // The folder-trust dialog: only Down then Enter answers Yes.
+        let handler: HandlerSpec =
+            serde_json::from_str(&handler_json("trust", "CONFIRM DIALOG", "<Down><Enter>"))
+                .unwrap();
+        let mut input = Vec::new();
+        let mut matched = HashSet::new();
+        let mut answered = Vec::new();
+        check_and_inject(
+            &[handler],
+            "overmind",
+            chrono::Utc::now(),
+            "please CONFIRM DIALOG now",
+            &mut matched,
+            &mut input,
+            &mut |a| answered.push(a.injected_action),
+        )
+        .unwrap();
+        assert_eq!(input, b"\x1b[B\r");
+        assert_eq!(
+            answered,
+            vec!["<Down><Enter>".to_string()],
+            "the ledger keeps the declared text"
+        );
     }
 
     #[test]
     fn check_and_inject_never_fires_the_same_handler_twice() {
         let handler: HandlerSpec =
-            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\n")).unwrap();
+            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\r")).unwrap();
         let mut input = Vec::new();
         let mut matched = HashSet::new();
         let mut answered = Vec::new();
@@ -1116,14 +1153,14 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(input, b"y\n", "the action must be written exactly once");
+        assert_eq!(input, b"y\r", "the action must be written exactly once");
         assert_eq!(answered.len(), 1);
     }
 
     #[test]
     fn check_and_inject_does_nothing_when_no_handler_matches() {
         let handler: HandlerSpec =
-            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\n")).unwrap();
+            serde_json::from_str(&handler_json("h1", "CONFIRM DIALOG", "y\\r")).unwrap();
         let mut input = Vec::new();
         let mut matched = HashSet::new();
         let mut answered = Vec::new();
@@ -1594,7 +1631,7 @@ mod tests {
         let handler: HandlerSpec = serde_json::from_str(&handler_json(
             "echo-responder",
             "PROBE_MARKER_98765",
-            "INJECTED_REPLY\\r\\n",
+            "y\\r",
         ))
         .unwrap();
 
@@ -1659,7 +1696,7 @@ mod tests {
         let captured = outer_output.lock().unwrap().clone();
         let text = String::from_utf8_lossy(&captured);
         assert!(
-            text.contains("GOT:INJECTED_REPLY"),
+            text.contains("GOT:y"),
             "the real child must have received the real injected keystrokes \
              back on its own stdin - got {text:?}"
         );
@@ -1741,7 +1778,7 @@ mod tests {
         let handler: HandlerSpec = serde_json::from_str(&handler_json(
             "echo-responder",
             "PROBE_MARKER_98765",
-            "REPLY\\r\\n",
+            "y\\r",
         ))
         .unwrap();
 
