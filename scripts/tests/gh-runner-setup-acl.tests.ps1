@@ -90,6 +90,21 @@ try {
   $r = Preflight $clean -DryRun
   Check 'the dry run says the preflight is clean for a clean path' ($r.Text -like '*ACL preflight: clean*') $r.Text
 
+  # Board 223: the runner mode follows -Private unless -Ephemeral says otherwise.
+  function Mode([hashtable]$extra) {
+    return (& { try { & $setup @extra -ProtectedPaths $clean } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String)
+  }
+  $t = Mode @{ Repo = @('ciresnave/x'); Private = @('ciresnave/x') }
+  Check 'a repo declared private defaults to a persistent runner' ($t -like '*Runner mode   : persistent*every -Repo is declared in -Private*') $t
+  $t = Mode @{ Repo = @('ciresnave/x') }
+  Check 'an undeclared repo (public) defaults to an ephemeral runner' ($t -like '*Runner mode   : ephemeral*not declared in -Private*') $t
+  $t = Mode @{ Repo = @('ciresnave/x', 'ciresnave/y'); Private = @('ciresnave/x') }
+  Check 'a mix of private and undeclared stays ephemeral for the whole call' ($t -like '*Runner mode   : ephemeral*') $t
+  $t = Mode @{ Repo = @('ciresnave/x'); Private = @('ciresnave/x'); Ephemeral = $true }
+  Check 'an explicit -Ephemeral:$true wins over the private default' ($t -like '*Runner mode   : ephemeral*set by -Ephemeral*') $t
+  $t = Mode @{ Repo = @('ciresnave/x'); Ephemeral = $false }
+  Check 'an explicit -Ephemeral:$false is still refused for a public repo' ($t -like '*THREW:*refused for public repo*') $t
+
   # -AlsoGrant only changes the printed fix, and only to read-and-execute.
   $d = NewDir 'grant'; $made += $d
   icacls $d /grant "*S-1-5-11:(OI)(CI)M" | Out-Null

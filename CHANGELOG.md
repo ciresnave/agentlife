@@ -2,6 +2,15 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.10
+
+- **`gh-runner-setup.ps1`: private repos default to a persistent runner (board 223, ruled):** CireSnave, 2026-10-16: "Go with your
+  recommendations." With `-Ephemeral` unset the runner is persistent when every `-Repo` is named in `-Private`, ephemeral otherwise
+  (a public or undeclared repo in the call makes the whole call ephemeral). An explicit `-Ephemeral` still overrides, and
+  `-Ephemeral:$false` stays refused for a public repo. The dry run prints the mode and why. `docs/RUNNER-SETUP.md` records the ruling
+  and the Humboldt exception. Registration still waits on board 224 (ACL); nothing was registered or run elevated. Tested by the dry
+  run only (5 new cases in `scripts/tests/gh-runner-setup-acl.tests.ps1`, one mutation caught).
+
 ## 0.16.9
 
 - **`lane-restart assert-idle` (and the state hook) walk up to 8 shell layers, not 4:** `lane-restart assert-idle: no claude

@@ -84,13 +84,17 @@ all** until their jobs run here. The private-repo branch of the policy:
    lint's `--private` mode therefore does not require `environment:`. It **proves** the repo is private first
    (`gh api repos/$GITHUB_REPOSITORY --jq .private` must say `true`, else exit 2), because a public repo linted as
    private would pass a PR job with no environment; the same check runs in `gh-runner-setup.ps1 -Apply`.
-4. **Ephemeral or persistent for private repos: CireSnave's answer is a one-line switch** (board 223; public repos
-   stay ephemeral in both variants). An ephemeral runner takes ONE job, so a CI run of N jobs needs N registrations,
+4. **Ephemeral or persistent for private repos: RULED (board 223, CireSnave 2026-10-16: "Go with your recommendations.")
+   = Variant A, persistent, under the restricted `gh-runner` account; public repos stay ephemeral.** The script's
+   default now follows `-Private`: persistent when every `-Repo` is named in it, ephemeral otherwise (one public or
+   undeclared repo in the call makes the whole call ephemeral); `-Ephemeral` overrides either way, and `-Ephemeral:$false`
+   is still refused for a public repo. Registration still waits on board 224 (the ACL preflight). The comparison below is
+   kept as the reasoning behind the ruling. An ephemeral runner takes ONE job, so a CI run of N jobs needs N registrations,
    each with a fresh token; four repos' normal CI is dozens of jobs a day, which no one can hand-register.
 
-   | | Variant A: persistent (PM recommendation) | Variant B: ephemeral |
+   | | Variant A: persistent (**ruled**) | Variant B: ephemeral |
    |---|---|---|
-   | Command per private repo | `.\scripts\gh-runner-setup.ps1 -Repo <o>/<r> -Private <o>/<r> -Ephemeral:$false -Apply` | `.\scripts\gh-runner-setup.ps1 -Repo <o>/<r> -Private <o>/<r> -Apply` (the default) |
+   | Command per private repo | `.\scripts\gh-runner-setup.ps1 -Repo <o>/<r> -Private <o>/<r> -Apply` (the default; `-Ephemeral:$false` says the same) | `.\scripts\gh-runner-setup.ps1 -Repo <o>/<r> -Private <o>/<r> -Ephemeral:$true -Apply` |
    | Jobs per registration | unlimited: one registration, one service | one: a fresh token per job |
    | Works for normal CI today | yes | **no**, until re-registration is automated |
    | Automation needed | none | a token source (GitHub App or fine-grained PAT) and a re-register loop: a CireSnave decision |
@@ -98,8 +102,7 @@ all** until their jobs run here. The private-repo branch of the policy:
    | Why acceptable | no outsider can reach a private repo's runner (no forks, section 2b rule 2) | n/a |
    | Public repos | **refused by the script** | the only variant |
 
-   Nothing is registered by this PR; the switch is the `-Ephemeral:$false` argument, and the lint and the policy do
-   not change between the variants.
+   Nothing is registered by this change; the lint and the policy do not change between the variants.
 
    **Exception, stated: the two Humboldt runners that already exist** (section 8a) run under CireSnave's own account,
    which breaks rule 6. They stay as they are until a restricted replacement that can use Docker exists, because
@@ -285,7 +288,8 @@ None of these needs the GPU, so none gets `gpu`. Each repo's CI should also run 
 - The machine is a laptop: a runner is offline when it sleeps or is off, and a queued job waits (no hosted fallback
   unless the workflow is written with one).
 - A job can read anything `gh-runner` can read and use the GPU without limit. Jobs are isolated from each other only
-  by the ephemeral default (section 2a); with `-Ephemeral:$false`, `_work` is reused and nothing isolates them.
+  by the ephemeral default (section 2a) on public repos; on a private repo's persistent runner (the ruled default), `_work` is
+  reused and nothing isolates them.
 - Nothing in this change has run elevated. The script is verified only to parse, refuse a repo of another owner,
   refuse a persistent runner for a public repo, refuse a `-Private` entry that is not in `-Repo`, refuse without
   elevation, and print the dry-run plan. The `gh api` visibility check in `-Apply` has not run.
