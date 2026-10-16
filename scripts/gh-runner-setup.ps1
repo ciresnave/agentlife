@@ -35,7 +35,7 @@
 .PARAMETER Private       The -Repo entries that are PRIVATE (only these may use -Ephemeral:$false). -Apply verifies each with `gh api`.
 .PARAMETER Account       Local account name. Default gh-runner.
 .PARAMETER Root          Install root, ASCII path. Default C:\gh-runner.
-.PARAMETER Labels        Extra runner labels. Default gpu.
+.PARAMETER Labels        Extra runner labels, added to the automatic self-hosted, Windows, X64. Default NONE: add gpu only for a repo whose jobs need the GPU, so a plain-Windows job cannot queue behind (or be mistaken for) a GPU one.
 .PARAMETER RunnerVersion Runner release to install. Pinned with its hash; change both together.
 .PARAMETER RunnerSha256  SHA256 of actions-runner-win-x64-<RunnerVersion>.zip, from the release notes.
 .PARAMETER Ephemeral    Register with --ephemeral (default ON): the runner takes ONE job, then unregisters and its service stops, so a job cannot leave anything for the next. REQUIRED for the public repos (docs/RUNNER-SETUP.md section 2a); -Ephemeral:$false is refused for them.
@@ -49,7 +49,7 @@ param(
   [string[]]$Private = @(),
   [string]$Account = 'gh-runner',
   [string]$Root = 'C:\gh-runner',
-  [string[]]$Labels = @('gpu'),
+  [string[]]$Labels = @(),
   [string]$RunnerVersion = '2.338.0',
   [string]$RunnerSha256 = 'f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f',
   [bool]$Ephemeral = $true,
@@ -74,6 +74,8 @@ $zipName = "actions-runner-win-x64-$RunnerVersion.zip"
 $zipUrl = "https://github.com/actions/runner/releases/download/v$RunnerVersion/$zipName"
 $zipPath = Join-Path $Root $zipName
 $allLabels = ($Labels -join ',')
+$labelFlag = if ($Labels) { " --labels $allLabels" } else { '' }
+$labelArgs = if ($Labels) { @('--labels', $allLabels) } else { @() }
 foreach ($pr in $Private) { if ($Repo -notcontains $pr) { throw "-Private names '$pr', which is not in -Repo" } }
 # A repo is PUBLIC unless declared private: anyone can open a PR on a public repo, so a persistent runner is refused.
 if (-not $Ephemeral) {
@@ -98,7 +100,7 @@ if (-not $Apply) {
     if ($Remove) { Write-Host "  $dir\config.cmd remove --token <removal token>" }
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
-      Write-Host "      --labels $allLabels --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
+      Write-Host "     $labelFlag --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
       Write-Host "  read back: service ... StartName = .\$Account, State = Running"
     }
   }
@@ -188,7 +190,7 @@ foreach ($r in $Repo) {
   [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dir)
   $tok = [Net.NetworkCredential]::new('', (Read-Host "Registration token for $r (not stored)" -AsSecureString)).Password
   & "$dir\config.cmd" --unattended --url "https://github.com/$r" --token $tok --name "$($env:COMPUTERNAME)-$(Slug $r)" `
-    --labels $allLabels --work _work --replace$ephFlag --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
+   @labelArgs --work _work --replace$ephFlag --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
   $rc = $LASTEXITCODE
   $tok = $null
   if ($rc -ne 0) { throw "config.cmd exited $rc for $r" }

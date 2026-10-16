@@ -241,8 +241,27 @@ fn job_if(job: &Yaml) -> Option<String> {
     n.as_str().map(str::to_string)
 }
 
-/// Lints one workflow file's text. `file` is only a label for the findings.
+/// Which kind of repo the workflow lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// A public repo (the default, and the only safe assumption): a pull-request job on a runner needs the
+    /// same-repo condition AND an `environment:`.
+    #[default]
+    Public,
+    /// A private repo, whose PRs all come from inside it (it takes no outside forks; keep the fork-PR setting
+    /// off) and which on a Free plan cannot have an environment with a required reviewer. A pull-request job
+    /// on a runner needs the same-repo condition only. The caller must have PROVEN the repo private
+    /// (`runner-lint --private` does, with `gh api`): a public repo linted as private is a hole.
+    Private,
+}
+
+/// Lints one workflow file's text as a public repo's. `file` is only a label for the findings.
 pub fn lint(file: &str, text: &str) -> Report {
+    lint_as(file, text, Mode::Public)
+}
+
+/// Lints one workflow file's text as `mode`'s kind of repo.
+pub fn lint_as(file: &str, text: &str, mode: Mode) -> Report {
     let mut report = Report::default();
     let whole_file = |reason: String| Report {
         findings: vec![Finding {
@@ -317,7 +336,7 @@ pub fn lint(file: &str, text: &str) -> Report {
                     "`if: {SAME_REPO}` (alone or as one && term, no || ! or parentheses)"
                 ));
             }
-            if !env {
+            if !env && mode == Mode::Public {
                 missing.push("an `environment:` (with a required reviewer)".to_string());
             }
             if !missing.is_empty() {

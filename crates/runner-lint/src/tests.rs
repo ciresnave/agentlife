@@ -274,3 +274,50 @@ fn a_matrix_label_is_resolved_from_the_jobs_own_matrix() {
     let other = "    runs-on: ${{ inputs.runner }}\n    steps:\n      - run: x";
     assert_eq!(n(&wf("pull_request", other)), 1);
 }
+
+#[test]
+fn a_private_repo_needs_the_same_repo_condition_but_not_an_environment() {
+    let private = |text: &str| lint_as("w.yml", text, Mode::Private).findings.len();
+    for pr in [
+        "pull_request",
+        "pull_request_target",
+        "[push, pull_request]",
+    ] {
+        // The condition alone passes in private mode and still fails in public mode.
+        assert_eq!(
+            private(&wf(pr, &self_hosted(&[GATE]))),
+            0,
+            "{pr}: private, condition only"
+        );
+        assert_eq!(
+            n(&wf(pr, &self_hosted(&[GATE]))),
+            1,
+            "{pr}: public, condition only"
+        );
+        // Neither, or only the environment, fails in private mode too: the condition is the gate.
+        assert_eq!(
+            private(&wf(pr, &self_hosted(&[]))),
+            1,
+            "{pr}: private, neither"
+        );
+        assert_eq!(
+            private(&wf(pr, &self_hosted(&[ENV]))),
+            1,
+            "{pr}: private, environment only"
+        );
+        // Both passes everywhere.
+        assert_eq!(
+            private(&wf(pr, &self_hosted(&[GATE, ENV]))),
+            0,
+            "{pr}: private, both"
+        );
+    }
+    // Private mode relaxes only the environment: other triggers still fail.
+    for on in ["workflow_call", "workflow_run", "issue_comment"] {
+        assert_eq!(private(&wf(on, &self_hosted(&[GATE, ENV]))), 1, "{on}");
+    }
+    // A private repo's custom label (an existing `humboldt` runner) is a runner job: gated like any other.
+    let custom = "    runs-on: [self-hosted, humboldt]\n    steps:\n      - run: x";
+    assert_eq!(private(&wf("pull_request", custom)), 1);
+    assert_eq!(private(&wf("push", custom)), 0);
+}

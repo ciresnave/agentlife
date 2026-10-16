@@ -68,6 +68,42 @@ ruling, 2026-10-16: every repo that needs the PR path is public, where Free work
 so a private repo's workflow that uses the PR path would pass the lint and then wait forever for an environment
 that cannot exist.
 
+## 2b. Private repos (CireSnave, 2026-10-16, verbatim: *"Yes.  Use self-hosted runners for all private repos."*)
+
+GitHub-hosted Actions on our private repos fail in 2 seconds on a **billing** failure, so those repos have **no CI at
+all** until their jobs run here. The private-repo branch of the policy:
+
+1. **Every private repo uses the runner**, labels `self-hosted, Windows, X64` (automatic) and **nothing else unless
+   needed**: add `gpu` (`-Labels gpu`) only for a repo whose jobs need the GPU. Most of these jobs need none.
+2. **A pull-request job is allowed only if it is same-repo**: a private repo takes no outside fork PRs, and its
+   fork-PR-workflows setting stays **off**. The lint's `--private` mode still demands the `github.event.pull_request.
+   head.repo.full_name == github.repository` condition on such a job, so turning forks on later does not silently open
+   the runner. (The setting's exact label was not read today; the PM sets and reads it.)
+3. **No environment gate**: on GitHub Free, environments (required reviewers) exist only for public repos (section
+   2a). So a private repo's PR path rests on the same-repo condition and on there being no forks, nothing more. The
+   lint's `--private` mode therefore does not require `environment:`. It **proves** the repo is private first
+   (`gh api repos/$GITHUB_REPOSITORY --jq .private` must say `true`, else exit 2), because a public repo linted as
+   private would pass a PR job with no environment; the same check runs in `gh-runner-setup.ps1 -Apply`.
+4. **Ephemeral stays the default**, and it has a cost the PM should decide on: an ephemeral runner takes ONE job,
+   so a CI run of N jobs needs N registrations, each with a fresh token. Four repos' normal CI is dozens of jobs a
+   day, which no one can hand-register. Options: (a) automate re-registration (needs a token source: a GitHub App or
+   a fine-grained PAT, a CireSnave decision); (b) for PRIVATE repos only, a persistent runner (`-Private <repo>
+   -Ephemeral:$false`), which this policy permits because no outsider can reach it, at the price that jobs share
+   `_work` and a malicious same-repo change persists. **Recommendation: (b) for the private repos now, (a) later.**
+5. `docs` rule 6 still holds: no secrets beyond a job's needs, the restricted `gh-runner` account.
+
+What a plain Windows runner changes for a workflow written for `ubuntu-latest` (each is in the table in section 8a):
+- **No Linux and no macOS runner.** A matrix leg on `ubuntu-latest` or `macos-latest` has nowhere to run; dropping it
+  **loses that coverage**, and the doc below says so per job.
+- **The default `run:` shell is PowerShell**, not bash. POSIX steps need `shell: bash` (or `defaults.run.shell:
+  bash`). On this machine `bash` on the runner's PATH is the **WSL launcher** (`C:\Windows\System32\bash.exe`), which
+  shadows Git Bash: Humboldt's workflow already works around it (a step putting Git Bash ahead, or the full path
+  `C:\Program Files\Git\bin\bash.exe`). Whether the `gh-runner` service's PATH has the same trap is not measured.
+- **Container actions do not run** (`EmbarkStudios/cargo-deny-action` is one): install the tool in a step instead.
+- **The `gh-runner` account has no toolchains of its own.** `dtolnay/rust-toolchain`, `actions/setup-node` and
+  `actions/setup-python` install per job; machine-wide tools (MSVC, Git, `gh`, Docker) must be reachable by that
+  account. Not measured.
+
 ## 3. The runner binary
 
 Pinned in the script, from the official release notes (`actions/runner` v2.338.0, read 2026-10-16):
@@ -131,6 +167,9 @@ job: a condition that can be satisfied another way is not a gate. The lint canno
 reviewer (section 2). A job-level `uses:` of a reusable workflow is not read: it fails under a pull request trigger.
 It is **a lint, not a sandbox**: it reads what the file says, not what GitHub will do with it.
 
+`runner-lint --private` lints a private repo's workflows: a pull-request job needs the same-repo `if` but no
+`environment:` (section 2b). It refuses (exit 2) unless GitHub says the repo is private.
+
 Distribution: the lint is in this repo's workspace. Running it in another repo's CI needs it published to crates.io
 (a PM step), since a git or path dependency is not allowed.
 
@@ -165,6 +204,37 @@ be widened by a settings mistake, and ephemeral runners are one-job anyway, so s
 nothing. Revisit an organisation runner only if `ThinkersJournal` ends up with several repos needing devices and
 persistent runners on private repos; then use a **dedicated group, never Default**, public repos left excluded, and
 register with an explicit group. The script registers per repo only; an organisation runner is not implemented.
+
+## 8a. Private repos: what each workflow must change (read 2026-10-16 from each repo's default branch)
+
+**These repos are not edited here; their lanes do it.** `RO` = `runs-on: [self-hosted, windows]` (add `gpu` only where
+stated). "Fits" is a reading of the file, **not a run**: nothing below has executed on `gh-runner`.
+
+| Repo | Workflow | Job | Today | Change | Fits a plain Windows runner? |
+|---|---|---|---|---|---|
+| `ciresnave/HumboldtUnifiedKidTracker` | `ci.yml` | backend, frontend, rehearsal-smoke | `[self-hosted, humboldt]` | none while the existing `humboldt` runners (below) keep serving them; if `gh-runner` replaces them, register with `-Labels humboldt` or change to `RO` | **backend needs Docker** (`docker run postgres:16`): Docker access is root-equivalent on the host, which a restricted account must not have. Keep the existing runners for it, or do not move it |
+| | `ci.yml` | deny | `ubuntu-latest` | `RO`, and replace `EmbarkStudios/cargo-deny-action` (a container action; the file's own comment says a Windows runner cannot run it) with a step that installs `cargo-deny` | yes once installed in a step |
+| | `main-guard.yml` | guard | `ubuntu-latest` | `RO`; steps run `bash .github/scripts/main-guard.sh`: add `shell: bash` and mind the WSL trap; needs `gh` on PATH | probably; `GH_TOKEN` comes from `github.token` |
+| `ciresnave/ee-amt` | `ci.yml` | fmt, clippy, docs, msrv, proptest | `ubuntu-latest` | `RO` | yes (Rust via `dtolnay/rust-toolchain`) |
+| | `ci.yml` | test | matrix `ubuntu, windows, macos` | matrix `os: [self-hosted-windows]` i.e. one leg on `RO`; **ubuntu and macOS coverage is lost** | the Windows leg yes |
+| | `ci.yml` | miri | `ubuntu-latest`, `cargo miri` | `RO` | **unmeasured**: Miri runs on a Windows host but with a smaller supported surface than Linux |
+| | `ci.yml` | audit | `ubuntu-latest`, `rustsec/audit-check@v2` | `RO` | unmeasured (a JavaScript action that installs `cargo-audit`) |
+| | `bench.yml` | bench | `ubuntu-latest` | `RO` | runs, but timings on a shared laptop are noise |
+| | `msrv-check.yml` | msrv-consistency | `ubuntu-latest`, `set -euo pipefail` + awk | `RO` and `shell: bash` (the default shell would be PowerShell) | yes with Git Bash (it bundles awk) |
+| `ThinkersJournal/ThinkersFoundation-site` | `ci.yml` | freshness, check, build, test | `ubuntu-latest` | `RO` | yes: Node via `actions/setup-node`; **test runs Playwright**, whose browsers install per job: unmeasured on this account |
+| `ThinkersJournal/licence-tools` | `ci.yml` | spdx, fleet | `ubuntu-latest`, `python3 ...` | `RO`; `python3` may not exist on Windows (use `python`/`py`, or confirm `setup-python` provides it) | unmeasured; `fleet` checks out several repos and runs a bash heredoc: add `shell: bash` |
+| | `ci.yml` | tests | matrix `ubuntu, windows` x Python 3.11-3.13 | one `os` leg on `RO`; **the ubuntu leg is lost** | the Windows legs yes |
+
+**A runner for Humboldt already exists, and it does not meet this policy.** Read 2026-10-16 from this machine (not
+from GitHub, whose runner-list API returns 404 to the lane): `C:\actions-runners\humboldt` and `humboldt-2`, each
+configured (`.runner`) for `ciresnave/HumboldtUnifiedKidTracker`, each running as a `Runner.Listener.exe run`
+**process owned by `TUF-LAPTOP\cires` (CireSnave's own account)**, started 2026-10-10 08:44, persistent (not
+ephemeral), not a service. The label `humboldt` is held by GitHub and was not read. So that repo's jobs already run on
+CireSnave's account, which is the opposite of policy rule 6 (and why its `docker` use works). Moving them under
+`gh-runner` is a PM/CireSnave decision, and Docker (above) is the obstacle.
+
+None of these needs the GPU, so none gets `gpu`. Each repo's CI should also run `runner-lint --private` (section 6), with
+`GH_TOKEN` and `GITHUB_REPOSITORY` set.
 
 ## 9. Known limits
 

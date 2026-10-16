@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.4
+
+- **Runner policy for private repos (docs, script, `runner-lint`):** every private repo uses the runner
+  (CireSnave 2026-10-16). `runner-lint --private` lints as a private repo (a pull-request runner job needs the
+  same-repo `if` but no `environment:`) and exits 2 unless `gh api` says the repo is private. `gh-runner-setup.ps1`
+  no longer labels every runner `gpu`: `-Labels` defaults to none. `docs/RUNNER-SETUP.md` section 8a lists, per
+  private repo and job, what must change for a plain Windows runner.
+
 ## 0.16.2
 
 - **Runner policy, widened (docs, script, new unpublished crate):** `docs/RUNNER-SETUP.md` records the policy
