@@ -1,0 +1,96 @@
+# Throwaway spike for docs/RUNNER-SETUP.md section 5a. Goes in ciresnave/runner-spike (PRIVATE) as
+# .github/workflows/spike.yml. Measures what the `gh-runner` service account sees in session 0.
+#
+# Triggers: dispatch and push to main only (no pull_request, so the runner-lint policy passes without an environment).
+# No secrets, no third-party actions, no checkout: every step is a plain command. Each probe is allowed to fail and
+# says so in its own output; a missing tool is a finding, not an error.
+name: runner-spike
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, windows, gpu]
+    timeout-minutes: 10
+    steps:
+      - name: Who and where (session id 0 = a service with no desktop)
+        shell: powershell
+        run: |
+          "whoami            : $(whoami)"
+          "session id        : $([System.Diagnostics.Process]::GetCurrentProcess().SessionId)"
+          "interactive       : $([Environment]::UserInteractive)"
+          "computer          : $env:COMPUTERNAME"
+          "runner name / os  : $env:RUNNER_NAME / $env:RUNNER_OS"
+          "protected paths writable? (each must say False)"
+          foreach ($p in 'C:\Projects', 'C:\Projects\.claude-hooks', 'C:\Projects\.lane-state') {
+            $w = $false
+            try {
+              $f = Join-Path $p ("spike-write-test-" + [Guid]::NewGuid().ToString('N'))
+              [IO.File]::WriteAllText($f, 'x'); Remove-Item -LiteralPath $f -Force; $w = $true
+            } catch { }
+            "  $p : $w"
+          }
+
+      - name: nvidia-smi (is the NVIDIA GPU visible from this service?)
+        if: always()
+        shell: powershell
+        run: |
+          $c = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+          if (-not $c) { "nvidia-smi: NOT ON PATH for this account"; exit 0 }
+          "path: $($c.Source)"
+          nvidia-smi -L
+          "exit: $LASTEXITCODE"
+          nvidia-smi --query-gpu=name,driver_version,compute_mode,memory.total --format=csv
+          "exit: $LASTEXITCODE"
+
+      - name: vulkaninfo (are both Vulkan devices visible?)
+        if: always()
+        shell: powershell
+        run: |
+          $c = Get-Command vulkaninfo -ErrorAction SilentlyContinue
+          if (-not $c) { "vulkaninfo: NOT ON PATH for this account"; exit 0 }
+          "path: $($c.Source)"
+          vulkaninfo --summary
+          "exit: $LASTEXITCODE"
+
+      - name: CUDA (a real kernel launch, not just a version string)
+        if: always()
+        shell: powershell
+        run: |
+          # nvcc --version and nvidia-smi -q only prove NVML and the toolkit exist. A kernel proves a CUDA context
+          # can be created from session 0. Needs nvcc AND a host compiler (cl.exe) on this account's PATH; if either
+          # is missing the answer is "UNMEASURED", never "works".
+          $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+          $cl = Get-Command cl -ErrorAction SilentlyContinue
+          "nvcc: $(if ($nvcc) { $nvcc.Source } else { 'NOT ON PATH' })"
+          "cl  : $(if ($cl) { $cl.Source } else { 'NOT ON PATH' })"
+          if (-not $nvcc) { "CUDA kernel: UNMEASURED (no nvcc for this account)"; exit 0 }
+          $d = Join-Path $env:RUNNER_TEMP 'cuda-spike'
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          $src = @'
+          #include <cstdio>
+          __global__ void k(int *o) { o[threadIdx.x] = threadIdx.x * 2; }
+          int main() {
+            int *d, h[4] = {0, 0, 0, 0};
+            if (cudaMalloc(&d, sizeof h) != cudaSuccess) { printf("cudaMalloc FAILED\n"); return 2; }
+            k<<<1, 4>>>(d);
+            cudaError_t e = cudaDeviceSynchronize();
+            if (e != cudaSuccess) { printf("kernel FAILED: %s\n", cudaGetErrorString(e)); return 3; }
+            cudaMemcpy(h, d, sizeof h, cudaMemcpyDeviceToHost);
+            printf("kernel OK: %d %d %d %d\n", h[0], h[1], h[2], h[3]);
+            return (h[3] == 6) ? 0 : 4;
+          }
+          '@
+          Set-Content -LiteralPath (Join-Path $d 'k.cu') -Value $src
+          Push-Location $d
+          nvcc k.cu -o k.exe
+          "nvcc exit: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { "CUDA kernel: UNMEASURED (nvcc could not build; see above)"; exit 0 }
+          .\k.exe
+          "run exit: $LASTEXITCODE"
+          Pop-Location
