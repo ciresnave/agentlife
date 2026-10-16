@@ -2,6 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.8
+
+- **`lane-restart` `on_unhandled` tests start their window at the right moment (#113, OverMind):** a flaky test window
+  (one failure in 160 iterations of `a_blocked`, message not captured, cause NOT identified) is hardened. Soak after the
+  change: 0 failures in 520 iterations (2080 test runs) under CPU load; combined 1 in 680. No red-first test exists for the
+  original failure, so this is a hardening, not a proven fix.
+
 ## 0.16.7
 
 - **Test diagnostics, no behaviour change:** every `launch_e2e` failure message that prints the restore report now also prints the
