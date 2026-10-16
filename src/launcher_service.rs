@@ -92,6 +92,17 @@ pub fn map_error(e: synapsed_client::MailError) -> SourceError {
     }
 }
 
+/// The `outcome` string of `POST /v1/launch-result`. Synapse's daemon accepts EXACTLY these four
+/// (anything else is a 400 `malformed`); `dry-run` is never posted.
+pub fn outcome_wire(o: Outcome) -> &'static str {
+    match o {
+        Outcome::Started => "started",
+        Outcome::AlreadyRunning => "already-running",
+        Outcome::Refused => "refused",
+        Outcome::Failed => "failed",
+    }
+}
+
 /// The real daemon, as role [`LAUNCHER_ROLE`].
 pub struct SynapseSource {
     daemon: synapsed_client::Daemon,
@@ -144,12 +155,7 @@ impl Source for SynapseSource {
     }
 
     fn post(&self, r: &LaunchResult) -> Result<(), SourceError> {
-        let outcome = match r.outcome {
-            Outcome::Started => "started",
-            Outcome::AlreadyRunning => "already-running",
-            Outcome::Refused => "refused",
-            Outcome::Failed => "failed",
-        };
+        let outcome = outcome_wire(r.outcome);
         let reason = (!r.reason.is_empty()).then_some(r.reason.as_str());
         self.daemon
             .launch_result(

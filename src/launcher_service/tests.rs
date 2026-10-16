@@ -326,3 +326,25 @@ fn the_current_record_decides_intent_not_an_older_parked_one() {
     assert_eq!(dir.lane("revived"), Lane::Launchable);
     assert_eq!(dir.lane("retired"), Lane::ClosedOnPurpose);
 }
+
+// Synapse's daemon accepts exactly these four outcome strings on /v1/launch-result (its
+// `Outcome::parse`; PM/Synapse lane 2026-10-16). Anything else is a 400, so each of ours must be one.
+#[test]
+fn every_outcome_we_post_is_one_of_the_four_the_daemon_accepts() {
+    const ACCEPTED: [&str; 4] = ["started", "already-running", "refused", "failed"];
+    let all = [
+        Outcome::Started,
+        Outcome::AlreadyRunning,
+        Outcome::Refused,
+        Outcome::Failed,
+    ];
+    let wire: Vec<&str> = all.into_iter().map(outcome_wire).collect();
+    for w in &wire {
+        assert!(ACCEPTED.contains(w), "{w} is not accepted by Synapse");
+    }
+    // and all four are reachable, so none is silently merged into another
+    let mut sorted = wire.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 4);
+}
