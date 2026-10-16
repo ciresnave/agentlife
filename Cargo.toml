@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/lane-restart", "crates/lane-state", "crates/launcher", "crates/pin-plan"]
+members = [".", "crates/lane-restart", "crates/lane-state", "crates/launcher", "crates/pin-plan", "crates/runner-lint"]
 
 # One version for the whole project (CIRESNAVE-EXPECTATIONS.md 2.2): the higher of
 # agentlife (0.2.16) and lane-restart / lane-state (0.11.1), then bumped for each change.

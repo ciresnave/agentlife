@@ -1,14 +1,17 @@
 <#
 .SYNOPSIS
-  Set up self-hosted GitHub Actions runners for trusted repos, under a restricted local account (docs/RUNNER-SETUP.md).
+  Set up self-hosted GitHub Actions runners for our own repos (owned by ciresnave or ThinkersJournal), under a restricted local account (docs/RUNNER-SETUP.md).
 
 .DESCRIPTION
   DRY RUN BY DEFAULT: with no -Apply it prints the plan and the exact commands and changes nothing (no network,
   no account, no files). -Apply needs an ELEVATED PowerShell; the PM and CireSnave run it after review, a lane never does.
 
   What -Apply does, in order, and refuses at the first failure:
-    1. Refuses any -Repo not on the trusted list (-TrustedRepos). A runner runs whatever its repo's workflows say, so
-       the list is the whole security boundary: trusted repos only, never one that takes untrusted PRs.
+    1. Refuses any -Repo whose owner is not in -Owners (default ciresnave, ThinkersJournal): every repo of ours may
+       get a runner (CireSnave 2026-10-16), none of anyone else's. Each repo is named explicitly, each time. A runner
+       runs whatever its repo's workflows say, so the policy in docs/RUNNER-SETUP.md decides what those may be.
+       A repo is treated as PUBLIC unless you name it in -Private, and -Apply asks GitHub (gh api) and refuses a repo
+       declared private that is public: public means ephemeral only.
     2. Creates the local account (default gh-runner): standard user, never in Administrators, password a random
        32 characters generated in memory, passed to New-LocalUser and to the service configuration, never written to a
        file, never printed, never logged. An existing account is kept and its password is ROTATED the same way, so
@@ -28,7 +31,8 @@
   makes (docs/RUNNER-SETUP.md section 5); until it passes the runner is not trusted with GPU work.
 
 .PARAMETER Repo          One or more owner/name repos to register the runner for. Required.
-.PARAMETER TrustedRepos  The repos a runner may be registered for. Default: ciresnave/fuel, baracuda, lightbulb.
+.PARAMETER Owners        Account names whose repos may get a runner. Default ciresnave, ThinkersJournal.
+.PARAMETER Private       The -Repo entries that are PRIVATE (only these may use -Ephemeral:$false). -Apply verifies each with `gh api`.
 .PARAMETER Account       Local account name. Default gh-runner.
 .PARAMETER Root          Install root, ASCII path. Default C:\gh-runner.
 .PARAMETER Labels        Extra runner labels. Default gpu.
@@ -41,7 +45,8 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string[]]$Repo,
-  [string[]]$TrustedRepos = @('ciresnave/fuel', 'ciresnave/baracuda', 'ciresnave/lightbulb'),
+  [string[]]$Owners = @('ciresnave', 'ThinkersJournal'),
+  [string[]]$Private = @(),
   [string]$Account = 'gh-runner',
   [string]$Root = 'C:\gh-runner',
   [string[]]$Labels = @('gpu'),
@@ -56,7 +61,7 @@ $ErrorActionPreference = 'Stop'
 $nameRe = '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 foreach ($r in $Repo) {
   if ($r -notmatch $nameRe) { throw "Repo '$r' is not owner/name" }
-  if ($TrustedRepos -notcontains $r) { throw "Repo '$r' is not on the trusted list ($($TrustedRepos -join ', ')): a runner runs that repo's workflows as $Account" }
+  if ($Owners -notcontains $r.Split('/')[0]) { throw "Repo '$r' is not owned by one of ($($Owners -join ', ')): a runner runs that repo's workflows as $Account" }
 }
 if ($Account -notmatch '^[A-Za-z0-9_-]{1,20}$') { throw "Account '$Account' is not a plain local account name" }
 if ($Account -ieq $env:USERNAME) { throw 'Account must not be the account you run this as (it is not yours)' }
@@ -69,10 +74,10 @@ $zipName = "actions-runner-win-x64-$RunnerVersion.zip"
 $zipUrl = "https://github.com/actions/runner/releases/download/v$RunnerVersion/$zipName"
 $zipPath = Join-Path $Root $zipName
 $allLabels = ($Labels -join ',')
-# Every default trusted repo is PUBLIC (PM 2026-10-16): anyone can open a PR there, so a persistent runner is refused.
-$PublicRepos = @('ciresnave/fuel', 'ciresnave/baracuda', 'ciresnave/lightbulb')
+foreach ($pr in $Private) { if ($Repo -notcontains $pr) { throw "-Private names '$pr', which is not in -Repo" } }
+# A repo is PUBLIC unless declared private: anyone can open a PR on a public repo, so a persistent runner is refused.
 if (-not $Ephemeral) {
-  $pub = @($Repo | Where-Object { $PublicRepos -contains $_ })
+  $pub = @($Repo | Where-Object { $Private -notcontains $_ })
   if ($pub) { throw "-Ephemeral:`$false is refused for public repo(s): $($pub -join ', ')" }
 }
 $ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
@@ -81,7 +86,7 @@ function Svc([string]$r) { 'actions.runner.' + (Slug $r) + '.' + $env:COMPUTERNA
 
 if (-not $Apply) {
   Write-Host "DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.`n"
-  Write-Host "Trusted repos : $($TrustedRepos -join ', ')"
+  Write-Host "Owners        : $($Owners -join ', ')   private (persistent allowed): $(if ($Private) { $Private -join ', ' } else { 'none: every -Repo is treated as public, so ephemeral' })"
   Write-Host "Account       : $env:COMPUTERNAME\$Account (standard user; random 32-char password held in memory only)"
   Write-Host "Root          : $Root  (ACL: SYSTEM, Administrators, $Account)"
   Write-Host "Runner        : v$RunnerVersion  SHA256 $RunnerSha256`n  $zipUrl"
@@ -131,6 +136,13 @@ if ($Remove) {
     Write-Host "[$r] removed (read back: service absent). Directory $dir kept for you to delete."
   }
   return
+}
+
+# 1b. Visibility is read from GitHub, never taken on trust: a repo declared private that is public is refused.
+foreach ($r in $Repo) {
+  $isPrivate = (gh api "repos/$r" --jq .private 2>&1 | Out-String).Trim()
+  if ($isPrivate -ne 'true' -and $isPrivate -ne 'false') { throw "cannot read visibility of $r from gh api: $isPrivate" }
+  if (($Private -contains $r) -and $isPrivate -ne 'true') { throw "$r is declared -Private but GitHub says it is public" }
 }
 
 # 2. The account.

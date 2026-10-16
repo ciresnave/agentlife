@@ -9,6 +9,15 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   38921949112) had one of two lanes launched together never register a session in 40 s, the rerun was clean, and
   nothing recorded why; the cause is NOT found.
 
+## 0.16.2
+
+- **Runner policy, widened (docs, script, new unpublished crate):** `docs/RUNNER-SETUP.md` records the policy
+  (device tests on push/schedule/dispatch; a same-repo PR only behind the same-repo condition AND an environment;
+  never a fork PR). `scripts/gh-runner-setup.ps1` now accepts any repo owned by `ciresnave` or `ThinkersJournal`
+  (`-Owners`), treats a repo as public unless named in `-Private` (verified with `gh api`), and the 3-name
+  `-TrustedRepos` default is gone. New crate `runner-lint` (`publish = false`) fails a workflow job that can run on a
+  self-hosted runner and is reachable from a pull request or an unlisted trigger without both gates.
+
 ## 0.16.1
 
 - **`lane-restart`: handlers gain `match.lines`:** each pin must equal one whole screen line (trimmed), so a folder

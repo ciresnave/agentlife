@@ -1,0 +1,11 @@
+[package]
+name = "runner-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Lint for GitHub workflows: a job that can run on a self-hosted runner must not be reachable from a pull request without the same-repo condition and an environment gate (agentlife docs/RUNNER-SETUP.md)."
+
+[dependencies]
+saphyr = "0.2.2"
