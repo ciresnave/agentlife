@@ -20,10 +20,11 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   the launcher path's `restore.lock`/caps/floor (0.15.13) are in `main`.
 - **Dependency tree, on the lean client (rc.85):** `synapse` is taken with `default-features = false,
   features = ["native-base"]` (the same features `synapsed-client` uses; the default features bring
-  `jsonwebtoken` and so `rsa`, RUSTSEC-2023-0071). With that, `cargo deny` advisories are clean. **Still
-  failing, needing a PM disposition:** licences outside `deny.toml`'s allow list (BSD-3-Clause, ISC, MPL-2.0,
-  CDLA-Permissive-2.0, Zlib, 0BSD, CC0-1.0, from the TLS/crypto crates: ring, rustls-webpki, aws-lc-*,
-  curve25519-dalek and others). `deny.toml` is unchanged.
+  `jsonwebtoken` and so `rsa`, RUSTSEC-2023-0071; `cargo tree -i rsa` now matches nothing). **`deny.toml` (PM
+  ruling 2026-10-16):** allows BSD-3-Clause, ISC, Zlib, 0BSD, CC0-1.0 and CDLA-Permissive-2.0 globally; MPL-2.0
+  only through a `[[licenses.exceptions]]` entry for `attohttpc` 0.16.3, the one crate that carries it
+  (unmodified dependency, file-level copyleft, notices kept). `cargo deny check`: advisories, bans, licences
+  and sources ok.
 
 ## 0.15.13
 

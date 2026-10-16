@@ -15,7 +15,22 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Unicode-3.0",
+    # The TLS/crypto stack under synapsed-client (ring, rustls-webpki, aws-lc-*, the dalek crates):
+    # all permissive. PM ruling 2026-10-16 on #98.
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
 ]
+
+# MPL-2.0 is NOT allowed globally (PM ruling 2026-10-16): it is file-level copyleft, so it is allowed
+# for the one crate that carries it. Unmodified dependency, notices kept; auth-framework's deny.toml
+# allows it too.
+[[licenses.exceptions]]
+crate = "attohttpc"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "warn"
