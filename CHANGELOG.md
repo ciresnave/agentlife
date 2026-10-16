@@ -2,6 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.1
+
+- **`lane-restart`: handlers gain `match.lines`:** each pin must equal one whole screen line (trimmed), so a folder
+  pin cannot match a longer path (`C:\Projects\agentlife-evil`) as a text anchor would. A pin shorter than 8
+  characters, spanning lines or naming a secret is refused at load; a wrapped line fails closed. `MatchSpec` and
+  `MatchReport` gain a `lines` field.
+
 ## 0.16.0
 
 - **Breaking for handler authors and API users (`lane-restart`):** a handler `action` is now a closed keystroke

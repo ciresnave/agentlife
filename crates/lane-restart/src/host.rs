@@ -807,8 +807,8 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                 append_host_log(
                     &log_path_for_attempts,
                     &format!(
-                        "  handler={} active={} matched={} anchors={:?} fields={:?}",
-                        r.handler_id, r.active, r.matched, r.anchors, r.fields
+                        "  handler={} active={} matched={} anchors={:?} fields={:?} lines={:?}",
+                        r.handler_id, r.active, r.matched, r.anchors, r.fields, r.lines
                     ),
                 );
             }
