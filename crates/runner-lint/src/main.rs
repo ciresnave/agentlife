@@ -7,11 +7,46 @@
 
 use std::process::{Command, ExitCode};
 
+/// A repo is linted as private only when GitHub says it is: a public repo run with `--private` would pass
+/// pull-request jobs that have no environment.
+fn prove_private() -> Result<(), String> {
+    let repo = std::env::var("GITHUB_REPOSITORY")
+        .map_err(|_| "GITHUB_REPOSITORY is not set (owner/name)".to_string())?;
+    if repo.is_empty() || !repo.contains('/') || repo.contains(char::is_whitespace) {
+        return Err(format!("GITHUB_REPOSITORY {repo:?} is not owner/name"));
+    }
+    let out = Command::new("gh")
+        .args(["api", &format!("repos/{repo}"), "--jq", ".private"])
+        .output()
+        .map_err(|e| format!("cannot run gh: {e}"))?;
+    let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && said == "true" {
+        Ok(())
+    } else {
+        Err(format!(
+            "gh api repos/{repo} --jq .private did not say true (said {said:?}, exit {:?}, stderr {:?})",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
 fn main() -> ExitCode {
     let mut files: Vec<String> = std::env::args().skip(1).collect();
     if files.iter().any(|a| a == "-h" || a == "--help") {
-        println!("usage: runner-lint [FILE...]   (no FILE: git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')");
+        println!("usage: runner-lint [--private] [FILE...]   (no FILE: git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')\n  --private  lint as a PRIVATE repo (a pull-request runner job needs the same-repo `if` but no environment).\n             Proven, not trusted: needs GITHUB_REPOSITORY=owner/name and `gh` (GH_TOKEN), and exits 2 unless\n             `gh api repos/$GITHUB_REPOSITORY --jq .private` says true.");
         return ExitCode::SUCCESS;
+    }
+    let mut mode = runner_lint::Mode::Public;
+    if let Some(i) = files.iter().position(|a| a == "--private") {
+        files.remove(i);
+        match prove_private() {
+            Ok(()) => mode = runner_lint::Mode::Private,
+            Err(e) => {
+                eprintln!("runner-lint: --private refused: {e}");
+                return ExitCode::from(2);
+            }
+        }
     }
     if files.is_empty() {
         let out = Command::new("git")
@@ -54,7 +89,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        let r = runner_lint::lint(f, &text);
+        let r = runner_lint::lint_as(f, &text, mode);
         jobs += r.jobs;
         runner_jobs += r.runner_jobs;
         for finding in &r.findings {

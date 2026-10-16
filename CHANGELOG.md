@@ -2,13 +2,33 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.16.5
+## 0.16.6
 
 - **`lane-restart`: handlers gain `match.isolated_lines`, and a folder-trust record template:** like `match.lines`, and the row
   after the pinned row must be blank, so a trusted path exactly one column short of the screen width followed by a wrapped
   suffix cannot pass as the trusted path. `MatchSpec` gains the field; `MatchReport.lines` also lists isolated pins.
   New `docs/TRUST-DIALOG.md` (the captured dialog, the host PTY width: the console window size, 80 x 25 fallback, resized
   with the terminal) and `approval-example/trust-folder-agentlife.json` (inert template and test fixture).
+
+## 0.16.5
+
+- **Launch names are validated at record time (`lane-restart`):** a launch name that is not a safe token is
+  recorded as unnamed instead of stored (OverMind's `name-validate-at-record`, #115). A later event never fills in
+  an unsafe name, and a fresh launch replaces an older safe name with none.
+
+## 0.16.4
+
+- **Runner policy for private repos (docs, script, `runner-lint`):** every private repo uses the runner
+  (CireSnave 2026-10-16). `runner-lint --private` lints as a private repo (a pull-request runner job needs the
+  same-repo `if` but no `environment:`) and exits 2 unless `gh api` says the repo is private. `gh-runner-setup.ps1`
+  no longer labels every runner `gpu`: `-Labels` defaults to none. `docs/RUNNER-SETUP.md` section 8a lists, per
+  private repo and job, what must change for a plain Windows runner, and 2b gives the persistent and ephemeral
+  variants as a one-line switch.
+- **`gh-runner-setup.ps1` refuses to create the runner account while the lane tools are writable by it (board 224):**
+  `-ProtectedPaths` (`C:\Projects`, `.claude-hooks`, `with-secret.exe`, `lane-restart.exe`, `.lane-state`) must grant no write
+  right to Everyone, Authenticated Users, Users, Interactive or the account. New `-CheckAclsOnly`; the exact elevated `icacls` fix is
+  printed, never run, and `-AlsoGrant <group>` keeps read-and-execute (never write) for a named group in it. This machine fails
+  the check today. Tested by `tests/runner_setup_acl.rs` (Windows).
 
 ## 0.16.3
 
