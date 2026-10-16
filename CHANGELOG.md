@@ -5,7 +5,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 ## 0.15.14
 
 - **`agentlife launcher`: the launch-on-message service, notifier-only build** (`docs/LAUNCHER-SERVICE.md`,
-  build order step 1). Long-polls Synapse as role `agentlife-launcher` through `synapsed-client` 6.0.0-rc.80
+  build order step 1). Long-polls Synapse as role `agentlife-launcher` through `synapsed-client` 6.0.0-rc.85
   (`waiting`, `launch_result`, `launch_clear`, and `/v1/list` for the R7 online observation), decides each
   signal with the `launcher` engine, posts every result (refusals included) from an outbox, re-checks
   conditional refusals with `launch-clear`, and sends stall alarms to the `pm` lane over claude-peers. It
@@ -16,11 +16,14 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   own (`--init-store` once). `--once` runs a single cycle. Not run against a real daemon, lane or logon: unit
   tests use stand-ins and the wire shapes were read from Synapse's own tests at 3230c03.
 - **Not in this change:** the second Task Scheduler task (`install-task` does not register the service yet, so it
-  is run by hand), `start-role --json`, the per-role start lock, and the grant read (rule 7).
-- **New dependency tree (needs a PM disposition at gate):** `synapsed-client` pulls `synapse`, which brings
-  ~6000 lines of `Cargo.lock` and, on `cargo deny`, licences outside `deny.toml`'s allow list (BSD-3-Clause,
-  ISC, MPL-2.0, CDLA-Permissive-2.0, Zlib, 0BSD, BSL-1.0, CC0-1.0) and RUSTSEC-2023-0071 (`rsa` through
-  `jsonwebtoken` through `synapse`). `deny.toml` is unchanged.
+  is run by hand) and the grant read (rule 7). The per-role start lock (0.15.11), `stop_kind` (0.15.10-12) and
+  the launcher path's `restore.lock`/caps/floor (0.15.13) are in `main`.
+- **Dependency tree, on the lean client (rc.85):** `synapse` is taken with `default-features = false,
+  features = ["native-base"]` (the same features `synapsed-client` uses; the default features bring
+  `jsonwebtoken` and so `rsa`, RUSTSEC-2023-0071). With that, `cargo deny` advisories are clean. **Still
+  failing, needing a PM disposition:** licences outside `deny.toml`'s allow list (BSD-3-Clause, ISC, MPL-2.0,
+  CDLA-Permissive-2.0, Zlib, 0BSD, CC0-1.0, from the TLS/crypto crates: ring, rustls-webpki, aws-lc-*,
+  curve25519-dalek and others). `deny.toml` is unchanged.
 
 ## 0.15.13
 

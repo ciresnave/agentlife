@@ -121,6 +121,7 @@ fn spec_in(dir: &Path, role: &str, state: spec::SpecState) {
         stopped_session_id: None,
         stopped_pid_start_secs: None,
         stop_reason: None,
+        stop_kind: None,
         tool_version: "test".into(),
     };
     spec::write_atomic(dir, &s).unwrap();
