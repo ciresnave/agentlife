@@ -33,7 +33,7 @@
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory)][string]$Exe,
+  [string]$Exe,
   [string]$SynapseHome = (Join-Path $env:LOCALAPPDATA 'synapse'),
   [string]$Addr = '127.0.0.1:7920',
   [string]$LauncherRoles = '',
@@ -42,8 +42,8 @@ param(
   [switch]$Remove
 )
 $ErrorActionPreference = 'Stop'
-$TaskName = 'synapsed'
-if (-not $LogDir) { $LogDir = Join-Path $SynapseHome 'task' }
+# One task per Windows account: the task is per-user (the keystore is owner-only), so the name is too.
+$TaskName = 'synapsed-' + ($env:USERNAME -replace '[^A-Za-z0-9._-]', '_')
 
 if ($Register -and $Remove) { throw '-Register and -Remove are exclusive' }
 if ($Remove) {
@@ -55,17 +55,23 @@ if ($Remove) {
   return
 }
 
-if ($Addr -notmatch '^(127\.0\.0\.1|\[::1\]):\d{1,5}$') {
-  throw "Addr '$Addr' is not loopback host:port; synapsed exits 2 on anything else"
+if (-not $Exe) { throw '-Exe is required to print or register the task' }
+if ($Addr -notmatch '^(127\.0\.0\.1|\[::1\]):(\d{1,5})$' -or [int]$Matches[2] -lt 1 -or [int]$Matches[2] -gt 65535) {
+  throw "Addr '$Addr' is not loopback host:port (1-65535); synapsed exits 2 on anything else"
 }
 if ($LauncherRoles -match '[%"&|<>^\r\n]') { throw 'LauncherRoles holds a character the wrapper cannot carry' }
+if ($Exe -notmatch '^([A-Za-z]:\\|\\\\)') { throw 'Exe must be a full path (relative and drive-relative paths are refused)' }
+# The task runs from another working directory: make every path absolute now.
+$SynapseHome = [IO.Path]::GetFullPath($SynapseHome)
+$LogDir = [IO.Path]::GetFullPath($(if ($LogDir) { $LogDir } else { Join-Path $SynapseHome 'task' }))
 foreach ($p in @($Exe, $SynapseHome, $LogDir)) {
   if ($p -match '[%"&|<>^\r\n]') { throw "path '$p' holds a character the wrapper cannot carry" }
+  if ($p -match '[^\x20-\x7E]') { throw "path '$p' holds a non-ASCII character; the cmd wrapper is ASCII" }
 }
-if (-not [IO.Path]::IsPathRooted($Exe)) { throw 'Exe must be a full path' }
 if ($Register -and -not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "Exe not found: $Exe" }
 
-$wrapperPath = Join-Path $LogDir 'synapsed-run.cmd'
+# A distinct wrapper per registration: a failed or overlapping update never changes what the existing task runs.
+$wrapperPath = Join-Path $LogDir ('synapsed-run-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.cmd')
 $logPath = Join-Path $LogDir 'synapsed.log'
 $wrapper = @"
 @echo off
@@ -117,7 +123,8 @@ $xml = @"
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>$(Esc $wrapperPath)</Command>
+      <Command>cmd.exe</Command>
+      <Arguments>/d /c ""$(Esc $wrapperPath)""</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -131,6 +138,9 @@ if (-not $Register) {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+# The task runs this directory's files as you at every logon: only you may write there.
+icacls $LogDir /inheritance:r /grant:r "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls on $LogDir exited $LASTEXITCODE" }
 [IO.File]::WriteAllText($wrapperPath, $wrapper, [Text.Encoding]::ASCII)
 $xmlPath = Join-Path $LogDir 'synapsed-task.xml'
 [IO.File]::WriteAllText($xmlPath, $xml, [Text.Encoding]::Unicode)
@@ -138,8 +148,10 @@ schtasks /Create /TN $TaskName /XML $xmlPath /F
 if ($LASTEXITCODE -ne 0) { throw "schtasks /Create exited $LASTEXITCODE" }
 # Read the task back; an exit code is not a state read.
 $back = schtasks /Query /TN $TaskName /XML | Out-String
-foreach ($needle in @('<LogonTrigger>', '<RestartOnFailure>', 'synapsed-run.cmd')) {
+foreach ($needle in @('<LogonTrigger>', '<RestartOnFailure>', (Split-Path -Leaf $wrapperPath))) {
   if ($back -notlike "*$needle*") { throw "task read back without $needle" }
 }
+# The task now points at the new wrapper; older ones are dead files.
+Get-ChildItem -LiteralPath $LogDir -Filter 'synapsed-run-*.cmd' | Where-Object { $_.FullName -ne $wrapperPath } | Remove-Item -Force
 Write-Host "registered task $TaskName (read back: logon trigger, restart-on-failure, wrapper $wrapperPath)"
 Write-Host "start it now with: schtasks /Run /TN $TaskName ; then check: synapsectl list (same SYNAPSE_HOME=$SynapseHome)"

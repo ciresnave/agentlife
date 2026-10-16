@@ -42,12 +42,17 @@ unlock, and that `wt.exe` resolves from a task-launched process. Those are M6 (`
 
 Not an `agentlife` command: a script that starts the Synapse daemon at logon with a fixed environment
 (Synapse spec `2026-10-15-daemon-contract-and-pilot.md` section 1; agentlife owns the task). Dry run by
-default (prints the wrapper and the XML); `-Register` creates the task `synapsed`, `-Remove` deletes it.
+default (prints the wrapper and the XML); `-Register` creates the task `synapsed-<user>` (one per account), `-Remove` deletes it
+(no `-Exe` needed). The action is `cmd.exe /d /c <wrapper>`; the wrapper is a new timestamped file per registration, in a
+log directory locked to the registering user with `icacls`; paths must be absolute ASCII and the port 1-65535.
 Per-user and interactive like the two above. The task runs a wrapper `synapsed-run.cmd` that SETS
 `SYNAPSE_HOME`, `SYNAPSE_ADDR` (loopback only, checked) and `SYNAPSE_LAUNCHER_ROLES` (empty until the launch
 poller is live), appends stderr to `synapsed.log`, and maps `synapsed` exit 2 (refused to start: config, lock,
 second instance) to task exit 0 so Task Scheduler's restart-on-failure (3 times, 1 minute apart) never loops on
 it. Any other non-zero exit is restarted.
+**Known limit:** if a lane's auto-start wins the instance lock before the task, the task's `synapsed` exits 2, the task
+completes, and nothing restarts the lane-started daemon if it later dies (exit 2 cannot be told from any other lock
+problem). The task runs at logon, before lanes launch, so this needs a lane to start first.
 
 Measured 2026-10-16 (no task registered): dry run prints well-formed XML (parsed, `RestartOnFailure` count 3);
 the wrapper with a stand-in child returned 0->0, 1->1, 2->0, 3->3 and logged the exit-2 line; a non-loopback
