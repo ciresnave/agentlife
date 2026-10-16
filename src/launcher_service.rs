@@ -92,14 +92,16 @@ pub fn map_error(e: synapsed_client::MailError) -> SourceError {
     }
 }
 
-/// The `outcome` string of `POST /v1/launch-result`. Synapse's daemon accepts EXACTLY these four
-/// (anything else is a 400 `malformed`); `dry-run` is never posted.
-pub fn outcome_wire(o: Outcome) -> &'static str {
+/// The client's typed outcome for `POST /v1/launch-result`. Synapse's daemon accepts EXACTLY these
+/// four (anything else is a 400 `malformed`), and the client's enum can name no other; `dry-run` is
+/// never posted.
+pub fn outcome_wire(o: Outcome) -> synapsed_client::LaunchOutcome {
+    use synapsed_client::LaunchOutcome as W;
     match o {
-        Outcome::Started => "started",
-        Outcome::AlreadyRunning => "already-running",
-        Outcome::Refused => "refused",
-        Outcome::Failed => "failed",
+        Outcome::Started => W::Started,
+        Outcome::AlreadyRunning => W::AlreadyRunning,
+        Outcome::Refused => W::Refused,
+        Outcome::Failed => W::Failed,
     }
 }
 

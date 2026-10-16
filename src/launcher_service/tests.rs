@@ -338,7 +338,7 @@ fn every_outcome_we_post_is_one_of_the_four_the_daemon_accepts() {
         Outcome::Refused,
         Outcome::Failed,
     ];
-    let wire: Vec<&str> = all.into_iter().map(outcome_wire).collect();
+    let wire: Vec<&str> = all.into_iter().map(|o| outcome_wire(o).as_str()).collect();
     for w in &wire {
         assert!(ACCEPTED.contains(w), "{w} is not accepted by Synapse");
     }
