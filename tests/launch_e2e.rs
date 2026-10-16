@@ -62,6 +62,7 @@ struct Rig {
     host: PathBuf,
     conhost: PathBuf,
     envlog: PathBuf,
+    hooklog: PathBuf,
 }
 
 impl Rig {
@@ -91,6 +92,7 @@ impl Rig {
         }
         let home = dir.path().join("home");
         let envlog = dir.path().join("envlog.txt");
+        let hooklog = dir.path().join("hooklog.txt");
         Rig {
             dir,
             home,
@@ -98,6 +100,7 @@ impl Rig {
             host,
             conhost,
             envlog,
+            hooklog,
         }
     }
 
@@ -145,6 +148,7 @@ impl Rig {
             ("FAKE_AUTO_START".into(), "1".into()),
             ("FAKE_HOLD".into(), "40".into()),
             ("FAKE_ENVLOG".into(), self.envlog.display().to_string()),
+            ("FAKE_HOOKLOG".into(), self.hooklog.display().to_string()),
         ]
     }
 
@@ -968,7 +972,12 @@ fn restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_start
     };
     assert_eq!(report.plan_hash, plan.hash);
     for n in ["alpha", "beta"] {
-        assert!(outcome(&report, n).came_up(), "{n}: {report:#?}");
+        assert!(
+            outcome(&report, n).came_up(),
+            "{n}: {report:#?}\nhook log:\n{}\nenv log:\n{}",
+            std::fs::read_to_string(&rig.hooklog).unwrap_or_default(),
+            std::fs::read_to_string(&rig.envlog).unwrap_or_default()
+        );
     }
     assert!(report_path.unwrap().is_file());
     assert!(shown.borrow().contains("alpha"), "the list was shown first");
