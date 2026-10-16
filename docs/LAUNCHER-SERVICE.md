@@ -1,6 +1,8 @@
 # `agentlife launcher`: the always-on launch-on-message service (design)
 
-**Status: design, nothing built.** Written 2026-10-15 at `origin/main` 0.15.2 (0ad1a91).
+**Status: the notifier-only service is built (build order step 1; see `CHANGELOG.md`, Unreleased); steps 2
+and 3 are not.** Written 2026-10-15 at `origin/main` 0.15.2 (0ad1a91); the rest of this file is the design
+as written and still says "not built" in its tables.
 Inputs read by SHA: Synapse `docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md` (#172 @006c9a9,
 revised to cf0c5e5 by its lane) and OverMind `docs/LANE-LAUNCH-POLICY.md` (#145 @e4c6ae3). Where those two
 disagree with each other or with this repo, this file says so.
@@ -182,7 +184,9 @@ HeldForMemory, LockHeld, Failed, InvalidArgument) before section 3 can map witho
 
 ## Blockers (each is a decision or a build that is not this service's)
 
-1. **`synapsed-client` is not on crates.io.** `crates.io/crates/synapsed-client` is `0.0.0`, "Name reserved
+1. **RESOLVED 2026-10-15: `synapsed-client` 6.0.0-rc.80 is on crates.io** with `waiting`, `launch_result` and
+   `launch_clear` (not yanked). The text below is what was true when this was written; its cost is a large
+   dependency tree (see the changelog). Was: **`synapsed-client` is not on crates.io.** `crates.io/crates/synapsed-client` is `0.0.0`, "Name reserved
    for the Synapse project; no code yet" (checked 2026-10-15; owner `ciresnave`). The crate exists in the
    Synapse repo, and the rule is crates.io versions only, no path or git deps (CIRESNAVE-EXPECTATIONS 6.8). The
    Synapse lane told this lane not to hand-roll the signed claim. Needs: Synapse publishes it, or the PM

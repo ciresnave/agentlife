@@ -42,8 +42,8 @@ pub struct Signal {
     pub signal_id: String,
     pub attempt: u32,
     /// Synapse's opaque epoch string (bumped by a clear or a daemon restart); echoed back
-    /// verbatim in the result. Empty only in a stand-in that has none.
-    #[serde(default)]
+    /// verbatim in the result. Required: an entry without one cannot be answered (Synapse
+    /// cannot match the result), so it does not parse and is reported as skipped.
     pub epoch: String,
 }
 
@@ -586,11 +586,13 @@ impl<'a> Engine<'a> {
         self.save()
     }
 
-    /// `launch-stalled: <role> <reason>`, once per streak. `launch_wait` is Synapse's (120 s,
-    /// unmeasured).
-    pub fn alarms(&mut self, now: i64, launch_wait: i64) -> Vec<String> {
+    /// The `launch-stalled: <role> <reason>` alarms due now, as `(role, text)`, **without marking
+    /// them raised**: a caller delivers each and then calls [`Engine::mark_alarmed`], so an alarm
+    /// whose delivery failed (or whose process died first) is offered again next cycle rather than
+    /// lost. `launch_wait` is Synapse's (120 s, unmeasured).
+    pub fn pending_alarms(&self, now: i64, launch_wait: i64) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for (role, r) in self.data.roles.iter_mut() {
+        for (role, r) in self.data.roles.iter() {
             if r.alarmed {
                 continue;
             }
@@ -613,18 +615,38 @@ impl<'a> Engine<'a> {
                 None
             };
             if let Some(why) = reason {
+                out.push((role.clone(), format!("launch-stalled: {role} {why}")));
+            }
+        }
+        out
+    }
+
+    /// The alarm for `role` reached someone: once per streak from here on.
+    pub fn mark_alarmed(&mut self, role: &str) -> Result<(), StoreError> {
+        if let Some(r) = self.data.roles.get_mut(role) {
+            r.alarmed = true;
+        }
+        self.save()
+    }
+
+    /// Due alarms, marked raised at once (the texts only). For a caller that cannot fail to
+    /// deliver; the service uses [`Engine::pending_alarms`] and [`Engine::mark_alarmed`].
+    pub fn alarms(&mut self, now: i64, launch_wait: i64) -> Vec<String> {
+        let due = self.pending_alarms(now, launch_wait);
+        for (role, _) in &due {
+            if let Some(r) = self.data.roles.get_mut(role) {
                 r.alarmed = true;
-                out.push(format!("launch-stalled: {role} {why}"));
             }
         }
         let _ = self.save();
-        out
+        due.into_iter().map(|(_, text)| text).collect()
     }
 
     /// Conditional refusals whose condition has ended (rule 3 of section 4): their rows become
     /// `Clearing` and the roles are returned for `POST /v1/launch-clear`. Rows already `Clearing`
-    /// are returned again, so a failed clear is retried every cycle.
-    pub fn recheck(&mut self, now: i64) -> Vec<String> {
+    /// are returned again, so a failed clear is retried every cycle. An `Err` means the marks are
+    /// not durable: the caller must not clear this cycle.
+    pub fn recheck(&mut self, now: i64) -> Result<Vec<String>, StoreError> {
         let mut clear: BTreeSet<String> = BTreeSet::new();
         for i in 0..self.data.requests.len() {
             let (status, reason, role) = {
@@ -657,8 +679,11 @@ impl<'a> Engine<'a> {
                 _ => {}
             }
         }
-        let _ = self.save();
-        clear.into_iter().collect()
+        // The `Clearing` mark must be on disk before the caller sends `launch-clear`: if it were
+        // not, a crash after a failed clear could leave the row `Transient` with its condition no
+        // longer true, and nothing would ever retry the clear.
+        self.save()?;
+        Ok(clear.into_iter().collect())
     }
 
     /// `launch-clear` succeeded for `role`: only now are its `Clearing` rows deleted.
@@ -669,6 +694,8 @@ impl<'a> Engine<'a> {
         self.save()
     }
 }
+
+pub mod service;
 
 #[cfg(test)]
 mod tests;

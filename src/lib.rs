@@ -27,6 +27,7 @@ pub mod install;
 pub mod intent;
 pub mod journal;
 pub mod launch;
+pub mod launcher_service;
 pub mod list;
 pub mod lock;
 pub mod marks;

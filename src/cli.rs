@@ -71,6 +71,11 @@ pub enum Command {
         since: Option<String>,
         park: Vec<String>,
     },
+    /// `agentlife launcher`: the launch-on-message service (notifier-only build).
+    Launcher {
+        init_store: bool,
+        once: bool,
+    },
     /// `agentlife doctor`: read-only check of the installed host and hook binary (R16, R17).
     Doctor {
         exe: Option<String>,
@@ -168,6 +173,15 @@ USAGE:
         Uncommitted files are \"stale-dirty\" (ask first); a failed lookup is \"unknown\", never
         stale. Repos are the --repo paths, else the children of --root (default C:/Projects on Windows,
         ~/Projects elsewhere) with a .git directory. Needs git and gh. Read-only.
+
+    agentlife launcher [--init-store] [--once]
+        The launch-on-message service, NOTIFIER-ONLY build (docs/LAUNCHER-SERVICE.md). Long-polls
+        Synapse as role agentlife-launcher (which Synapse must list in SYNAPSE_LAUNCHER_ROLES),
+        decides each signal by the policy rules, and answers it. It never starts a lane: with no
+        standing grant (M5 unbuilt) every launchable signal is answered refused: no-grant. One
+        instance only (an OS lock on <state>/launcher.lock). The store
+        <state>/launcher-store.json is never created on its own: --init-store creates it once.
+        --once runs a single cycle without holding the poll, then exits.
 
     agentlife doctor [--exe <path>]
         Read-only. Reports the installed lane-restart host (the configured host_program, resolved as a
@@ -354,6 +368,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 since,
                 park,
             })
+        }
+        "launcher" => {
+            let (mut init_store, mut once) = (false, false);
+            for a in rest.iter() {
+                match a.as_str() {
+                    "--init-store" => init_store = true,
+                    "--once" => once = true,
+                    other => return Err(format!("unknown argument to launcher: {other:?}")),
+                }
+            }
+            Ok(Command::Launcher { init_store, once })
         }
         "doctor" => {
             let mut exe = None;
@@ -760,6 +785,26 @@ mod tests {
         );
         assert!(p(&["doctor", "--exe"]).is_err());
         assert!(p(&["doctor", "--fix"]).is_err());
+    }
+
+    #[test]
+    fn launcher_takes_only_its_two_flags() {
+        assert_eq!(
+            p(&["launcher"]),
+            Ok(Command::Launcher {
+                init_store: false,
+                once: false
+            })
+        );
+        assert_eq!(
+            p(&["launcher", "--init-store", "--once"]),
+            Ok(Command::Launcher {
+                init_store: true,
+                once: true
+            })
+        );
+        assert!(p(&["launcher", "--model", "opus"]).is_err());
+        assert!(p(&["launcher", "start"]).is_err());
         assert_eq!(
             p(&[
                 "worktrees",

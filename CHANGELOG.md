@@ -2,6 +2,47 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.14
+
+- **`agentlife launcher`: the launch-on-message service, notifier-only build** (`docs/LAUNCHER-SERVICE.md`,
+  build order step 1). Long-polls Synapse as role `agentlife-launcher` through `synapsed-client` 6.0.0-rc.85
+  (`waiting`, `launch_result`, `launch_clear`, and `/v1/list` for the R7 online observation), decides each
+  signal with the `launcher` engine, posts every result (refusals included) from an outbox, re-checks
+  conditional refusals with `launch-clear`, and sends stall alarms to the `pm` lane over claude-peers. It
+  **never starts a lane**: with no standing grant (M5 unbuilt, board 216) a launchable signal is answered
+  `refused: no-grant`, and the mechanism it hands the engine always fails closed. One instance (OS advisory
+  lock `<state>/launcher.lock`); the caller record `<state>/agentlife-launcher.launcher-caller` is written only
+  while a session is held and removed only if it still names this process; the store is never created on its
+  own (`--init-store` once). `--once` runs a single cycle. Not run against a real daemon, lane or logon: unit
+  tests use stand-ins and the wire shapes were read from Synapse's own tests at 3230c03.
+- **Not in this change:** the second Task Scheduler task (`install-task` does not register the service yet, so it
+  is run by hand) and the grant read (rule 7). The per-role start lock (0.15.11), `stop_kind` (0.15.10-12) and
+  the launcher path's `restore.lock`/caps/floor (0.15.13) are in `main`.
+- **Review fixes (Sourcery, 8 of 10 threads):** a launch spec that exists but cannot be used (corrupt,
+  incomplete, another role's) now fails closed (`closed-on-purpose`) instead of reading as launchable; a role's
+  intent is its newest registry record's, so an old parked agent no longer blocks a role that is wanted now;
+  a `/v1/waiting` entry without `epoch` no longer parses (it was answered with a blank epoch) and any
+  unreadable entry is named in the service log every poll; a stall alarm is marked raised only after it
+  reached the PM (`Engine::pending_alarms` + `mark_alarmed`; `alarms()` kept) so a failed delivery is retried;
+  `Engine::recheck` returns `Result` and the service does not send `launch-clear` unless the `Clearing`
+  mark saved; repeated poll trouble backs off 5/10/20/40/60 s and resets on a clean cycle; the caller record
+  is written to the state directory `lane-restart` reads (the platform one), not `lane_state_dir`.
+  `recheck` returning `Result` and `Signal.epoch` being required are source-incompatible for the (unpublished)
+  `launcher` crate. Answered with a reason, no change: conditional refusals are re-posted (the policy
+  re-evaluates a stored refusal after `launch-clear`), and no duplicate-result mapping (the client documents
+  only `stale_signal` for this endpoint).
+- **OPEN, found in review, not fixed here:** `synapsed-client`'s `launch_result` documents the outcomes
+  `launching`, `failed`, `refused`, `unreachable`, while `Outcome::Started`/`AlreadyRunning` serialise as
+  `started`/`already-running`. Notifier-only never posts those two, so nothing breaks today; it must be
+  settled with the Synapse lane before the mechanism is switched on.
+- **Dependency tree, on the lean client (rc.85):** `synapse` is taken with `default-features = false,
+  features = ["native-base"]` (the same features `synapsed-client` uses; the default features bring
+  `jsonwebtoken` and so `rsa`, RUSTSEC-2023-0071; `cargo tree -i rsa` now matches nothing). **`deny.toml` (PM
+  ruling 2026-10-16):** allows BSD-3-Clause, ISC, Zlib, 0BSD, CC0-1.0 and CDLA-Permissive-2.0 globally; MPL-2.0
+  only through a `[[licenses.exceptions]]` entry for `attohttpc` 0.16.3, the one crate that carries it
+  (unmodified dependency, file-level copyleft, notices kept). `cargo deny check`: advisories, bans, licences
+  and sources ok.
+
 ## 0.15.13
 
 - **The launcher path of `lane-restart start` holds `restore.lock`, the caps and the memory floor**
