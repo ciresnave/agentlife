@@ -40,6 +40,7 @@
 .PARAMETER RunnerSha256  SHA256 of actions-runner-win-x64-<RunnerVersion>.zip, from the release notes.
 .PARAMETER Ephemeral    Register with --ephemeral (default ON): the runner takes ONE job, then unregisters and its service stops, so a job cannot leave anything for the next. REQUIRED for the public repos (docs/RUNNER-SETUP.md section 2a); -Ephemeral:$false is refused for them.
 .PARAMETER ProtectedPaths  Paths the runner account must NOT be able to write, directly or through a broad group: the lane tools that run as the owner WITH vault access. Default C:\Projects, C:\Projects\.claude-hooks, with-secret.exe, lane-restart.exe, C:\Projects\.lane-state. -Apply refuses to create the account while any is writable by Everyone, Authenticated Users, Users, Interactive or the account itself (board 224).
+.PARAMETER AlsoGrant     Groups or accounts to keep READ-AND-EXECUTE (never write) on the protected paths in the printed icacls fix, e.g. -AlsoGrant CodexSandboxUsers. Only changes the text printed; Everyone, Authenticated Users, Users and Interactive are refused (they are the hole).
 .PARAMETER CheckAclsOnly Read-only: run the ACL check, print the exact elevated fix commands for what it finds, and throw if anything is exposed. Nothing else happens.
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account.
@@ -56,12 +57,19 @@ param(
   [string]$RunnerSha256 = 'f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f',
   [bool]$Ephemeral = $true,
   [string[]]$ProtectedPaths = @('C:\Projects', 'C:\Projects\.claude-hooks', 'C:\Projects\.claude-hooks\with-secret.exe', 'C:\Projects\.claude-hooks\lane-restart.exe', 'C:\Projects\.lane-state'),
+  [string[]]$AlsoGrant = @(),
   [switch]$CheckAclsOnly,
   [switch]$Apply,
   [switch]$Remove
 )
 $ErrorActionPreference = 'Stop'
 
+foreach ($g in $AlsoGrant) {
+  if ($g -notmatch '^[A-Za-z0-9_. \\-]{1,60}$') { throw "-AlsoGrant '$g' is not a plain group or account name" }
+  $bare = ($g -split '\\')[-1]
+  if ($bare -imatch '^(Everyone|Authenticated Users|Users|Interactive|INTERACTIVE|Guests|Anonymous Logon)$') { throw "-AlsoGrant '$g' is one of the broad principals the preflight exists to keep out" }
+  if ($bare -ieq $Account) { throw "-AlsoGrant '$g' is the runner account itself" }
+}
 $nameRe = '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 foreach ($r in $Repo) {
   if ($r -notmatch $nameRe) { throw "Repo '$r' is not owner/name" }
@@ -137,11 +145,13 @@ function Show-AclFix {
   Write-Host "The runner account (or a group every account is in) can WRITE these, and so could replace a tool that runs as $me with vault access:"
   foreach ($f in $Findings) { Write-Host ("  {0}  <-  {1} : {2}{3}" -f $f.Path, $f.Who, $f.Rights, $(if ($f.Inherited) { ' (inherited)' } else { '' })) }
   Write-Host "Fix, from an ELEVATED PowerShell by an administrator (this script never runs it). It cuts off inheritance on the top-level path,"
-  Write-Host "so everything under it inherits SYSTEM, Administrators and you only, and EVERY other local account loses access to it:"
+  Write-Host "so everything under it inherits SYSTEM, Administrators and you only$(if ($AlsoGrant.Count -gt 0) { ", plus read-and-execute for $($AlsoGrant -join ', ')" }), and EVERY other local account loses access to it (pass -AlsoGrant <group> to keep read for one):"
   # Only the outermost exposed paths: everything below inherits the fix (a child with its own entry shows up on the re-check).
   $all = @($Findings | ForEach-Object { $_.Path } | Sort-Object -Unique)
   $tops = @($all | Where-Object { $p = $_; -not ($all | Where-Object { $_ -ne $p -and $p.StartsWith($_.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) }) })
-  foreach ($t in $tops) { Write-Host ("  icacls `"{0}`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" `"{1}:(OI)(CI)F`"" -f $t, $me) }
+  $extra = ($AlsoGrant | ForEach-Object { " `"{0}:(OI)(CI)RX`"" -f $_ }) -join ''
+  foreach ($t in $tops) { Write-Host ("  icacls `"{0}`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" `"{1}:(OI)(CI)F`"{2}" -f $t, $me, $extra) }
+  if ($AlsoGrant.Count -gt 0) { Write-Host ("  (keeping read-and-execute, no write, for: {0})" -f ($AlsoGrant -join ', ')) }
   Write-Host "Then read it back: re-run this script with -CheckAclsOnly; it must pass. A child with its OWN (non-inherited) entry needs the same icacls."
 }
 $aclFindings = @()

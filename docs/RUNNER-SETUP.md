@@ -137,7 +137,7 @@ the runner account itself. It prints the exact **elevated** commands and runs no
 
 That makes everything under `C:\Projects` readable and writable only by SYSTEM, Administrators and the owner, and **every
 other local account loses access to it** (for example `CodexSandboxUsers` today has read access via `Users`): that is
-the point, and whether to do it is **CireSnave's call (board 224)**, not this script's. `-CheckAclsOnly` re-reads the
+the point, and whether to do it is **CireSnave's call (board 224)**; keeping read for one group is a flag: `-AlsoGrant CodexSandboxUsers`, not this script's. `-CheckAclsOnly` re-reads the
 state and must pass before `-Apply`; the dry run also shows whether `-Apply` would be refused. A child with its own
 (non-inherited) entry needs the same command. The check reads **Allow** entries only, so a Deny entry is not credited as
 a mitigation; it does not read group membership beyond the four broad groups and the account itself.

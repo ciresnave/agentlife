@@ -90,6 +90,19 @@ try {
   $r = Preflight $clean -DryRun
   Check 'the dry run says the preflight is clean for a clean path' ($r.Text -like '*ACL preflight: clean*') $r.Text
 
+  # -AlsoGrant only changes the printed fix, and only to read-and-execute.
+  $d = NewDir 'grant'; $made += $d
+  icacls $d /grant "*S-1-5-11:(OI)(CI)M" | Out-Null
+  $text = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $d -AlsoGrant CodexSandboxUsers -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
+  Check '-AlsoGrant puts the group in the fix as read-and-execute' ($text -like '*CodexSandboxUsers:(OI)(CI)RX*' -and $text -notlike '*CodexSandboxUsers:(OI)(CI)F*' -and $text -notlike '*CodexSandboxUsers:(OI)(CI)M*') $text
+  Check '-AlsoGrant does not weaken the check' ($text -like '*ACL preflight FAILED*') $text
+  foreach ($bad in 'Users', 'BUILTIN\Users', 'Authenticated Users', 'Everyone', 'gh-runner') {
+    $t = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -AlsoGrant $bad -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
+    Check "-AlsoGrant '$bad' is refused" ($t -like '*THREW:*-AlsoGrant*') $t
+  }
+  $t = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -AlsoGrant 'a;b' -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
+  Check '-AlsoGrant with shell characters is refused' ($t -like '*THREW:*plain group*') $t
+
   # -Apply without elevation never reaches account creation; with an exposed path it says so first when elevated.
   # (Elevation is not available here, so only the non-elevated refusal is asserted.)
   try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -Apply 6>&1 | Out-Null; $applied = $true } catch { $applied = $false; $msg = $_.Exception.Message }
