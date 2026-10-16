@@ -679,6 +679,9 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         Err(c) => return c,
     };
     let state_dir = state_dir_of(&app.cfg);
+    // `lane-restart start` looks for the caller record in ITS state directory (the platform one),
+    // whatever `lane_state_dir` the config names, so the record goes there.
+    let record_dir = lane_restart::state_dir();
     let log_file = Home::from_env().ok().map(|h| h.root().join("launcher.log"));
     let log = |text: &str| {
         let line = format!(
@@ -750,6 +753,7 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
     };
     let record = svc::own_record();
     let mut holding = false;
+    let mut failures = 0u32;
     log(&format!(
         "started, notifier-only, role {}",
         lane_restart::start::LAUNCHER_ROLE
@@ -760,7 +764,7 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         if !holding {
             match source.session_ok() {
                 Ok(()) => match &record {
-                    Some(r) => match svc::write_caller_record(&state_dir, r) {
+                    Some(r) => match svc::write_caller_record(&record_dir, r) {
                         Ok(()) => holding = true,
                         Err(e) => log(&format!("cannot write the caller record: {e}")),
                     },
@@ -799,7 +803,7 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         }
         if rep.session_lost {
             if let Some(r) = &record {
-                svc::remove_caller_record(&state_dir, r);
+                svc::remove_caller_record(&record_dir, r);
             }
             holding = false;
             log("session lost: caller record removed");
@@ -812,16 +816,21 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         if once {
             break ExitCode::SUCCESS;
         }
-        // A cycle that did not hold the poll (a daemon down, or signals waiting) must not spin.
-        std::thread::sleep(Duration::from_secs(if rep.notes.is_empty() {
+        // A cycle that did not hold the poll must not spin. Repeated trouble (a daemon down, a
+        // store that will not save) backs off 5, 10, 20, 40, then 60 seconds, and one clean
+        // cycle resets it.
+        let pause = if rep.notes.is_empty() {
+            failures = 0;
             1
         } else {
-            5
-        }));
+            failures = failures.saturating_add(1);
+            (5u64 << (failures - 1).min(4)).min(60)
+        };
+        std::thread::sleep(Duration::from_secs(pause));
     };
     if holding {
         if let Some(r) = &record {
-            svc::remove_caller_record(&state_dir, r);
+            svc::remove_caller_record(&record_dir, r);
         }
     }
     exit

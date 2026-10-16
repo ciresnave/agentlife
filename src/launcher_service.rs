@@ -95,6 +95,7 @@ pub fn map_error(e: synapsed_client::MailError) -> SourceError {
 /// The real daemon, as role [`LAUNCHER_ROLE`].
 pub struct SynapseSource {
     daemon: synapsed_client::Daemon,
+    notes: std::cell::RefCell<Vec<String>>,
 }
 
 impl SynapseSource {
@@ -102,7 +103,10 @@ impl SynapseSource {
     /// does) and proves it.
     pub fn connect(home: &Path) -> Result<Self, String> {
         synapsed_client::Daemon::connect(home)
-            .map(|daemon| SynapseSource { daemon })
+            .map(|daemon| SynapseSource {
+                daemon,
+                notes: std::cell::RefCell::new(Vec::new()),
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -123,6 +127,14 @@ impl Source for SynapseSource {
             .waiting(LAUNCHER_ROLE, wait_secs)
             .map_err(map_error)?;
         let (signals, skipped) = parse_signals(&reply);
+        if skipped > 0 {
+            // The readable entries are still answered; the unreadable ones are named in the log
+            // every poll they stay (they cannot be answered, so they are never dropped silently).
+            self.notes.borrow_mut().push(format!(
+                "waiting: {skipped} entr{} could not be read (no id, attempt or epoch) and was not answered",
+                if skipped == 1 { "y" } else { "ies" }
+            ));
+        }
         if skipped > 0 && signals.is_empty() {
             return Err(SourceError::Unavailable(format!(
                 "{skipped} waiting entries could not be read"
@@ -166,6 +178,10 @@ impl Source for SynapseSource {
             .map(|v| parse_online(&v))
             .map_err(map_error)
     }
+
+    fn drain_notes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notes.borrow_mut())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -180,6 +196,17 @@ pub struct RegistryDirectory<'a> {
 }
 
 impl RegistryDirectory<'_> {
+    /// The spec stops the launcher: it records a stop, or it exists but cannot be used (corrupt,
+    /// incomplete, another role's, a newer schema). Only a spec that is genuinely absent leaves
+    /// the decision to the registry (`lane-restart start` itself refuses a role with no spec).
+    /// An unusable spec fails closed because it may be hiding a deliberate stop.
+    fn spec_blocks(&self, role: &str) -> bool {
+        match lane_restart::spec::read(self.lane_state_dir, role) {
+            Err(lane_restart::spec::SpecError::NotFound(_)) => false,
+            _ => spec_launch::load(self.lane_state_dir, role).is_none_or(|s| s.suspended),
+        }
+    }
+
     fn records(&self, role: &str) -> Option<Vec<crate::registry::AgentRecord>> {
         let listing = self.registry.list().ok()?;
         Some(
@@ -198,14 +225,14 @@ impl Directory for RegistryDirectory<'_> {
             // An unreadable registry launches nothing.
             return Lane::Unknown;
         };
-        if recs.is_empty() {
+        // The role's intent is its CURRENT record's: the registry keeps one record per agent, so a
+        // parked old agent and a wanted newer one can share a role, and the old row must not
+        // override the lane that is wanted now. The newest by `first_seen` is the current one.
+        let Some(current) = recs.iter().max_by_key(|r| r.first_seen) else {
             return Lane::Unknown;
-        }
-        let closed = recs
-            .iter()
-            .any(|r| matches!(r.intent, Intent::Closed { .. }));
-        let stopped = spec_launch::load(self.lane_state_dir, role).is_some_and(|s| s.suspended);
-        if closed || stopped {
+        };
+        let closed = matches!(current.intent, Intent::Closed { .. });
+        if closed || self.spec_blocks(role) {
             Lane::ClosedOnPurpose
         } else {
             Lane::Launchable

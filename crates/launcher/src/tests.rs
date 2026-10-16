@@ -261,11 +261,11 @@ fn a_rate_refusal_is_cleared_once_a_slot_frees_and_deleted_only_after_the_clear_
             .unwrap();
     }
     e.handle(&sig("fuel", 9, 1), 200); // refused: rate
-    assert!(e.recheck(300).is_empty(), "no slot has freed yet");
+    assert!(e.recheck(300).unwrap().is_empty(), "no slot has freed yet");
     let later = 100 + HOUR_SECS + 1;
-    assert_eq!(e.recheck(later), vec!["fuel".to_string()]);
+    assert_eq!(e.recheck(later).unwrap(), vec!["fuel".to_string()]);
     // (q) the clear call failed: the row is still there and is offered again next cycle
-    assert_eq!(e.recheck(later + 30), vec!["fuel".to_string()]);
+    assert_eq!(e.recheck(later + 30).unwrap(), vec!["fuel".to_string()]);
     assert!(e
         .data()
         .requests
@@ -283,7 +283,7 @@ fn a_rate_refusal_is_cleared_once_a_slot_frees_and_deleted_only_after_the_clear_
 #[test]
 fn a_signal_with_a_model_field_launches_with_sonnet() {
     let s: Signal = serde_json::from_str(
-        r#"{"role":"fuel","signal_id":"fuel:1","attempt":1,"model":"claude-opus-4","token":"x"}"#,
+        r#"{"role":"fuel","signal_id":"fuel:1","attempt":1,"epoch":"e","model":"claude-opus-4","token":"x"}"#,
     )
     .unwrap();
     let (io, m, d) = (Mem::new(), started(), Dir::new());
@@ -444,10 +444,10 @@ fn three_spawns_without_a_claim_become_no_claim_and_being_seen_online_clears_it(
         got(&e.handle(&sig("fuel", 50, 1), 100)),
         res(Outcome::Refused, "no-claim")
     );
-    assert!(e.recheck(110).is_empty(), "still no claim");
+    assert!(e.recheck(110).unwrap().is_empty(), "still no claim");
     e.observe_online(&BTreeSet::from(["fuel".to_string()]), 120)
         .unwrap();
-    assert_eq!(e.recheck(130), vec!["fuel".to_string()]);
+    assert_eq!(e.recheck(130).unwrap(), vec!["fuel".to_string()]);
     assert_eq!(e.data().roles["fuel"].spawns_since_online, 0);
 }
 
@@ -618,7 +618,49 @@ fn a_rule_7_refusal_is_cleared_when_a_grant_appears() {
     d.grant.set(false);
     let mut e = open(&io, &m, &d);
     e.handle(&sig("fuel", 1, 1), 10);
-    assert!(e.recheck(20).is_empty());
+    assert!(e.recheck(20).unwrap().is_empty());
     d.grant.set(true);
-    assert_eq!(e.recheck(30), vec!["fuel".to_string()]);
+    assert_eq!(e.recheck(30).unwrap(), vec!["fuel".to_string()]);
+}
+
+// An alarm is only raised once it reached someone: until `mark_alarmed`, it is offered again.
+#[test]
+fn an_alarm_stays_pending_until_it_is_marked_delivered() {
+    let (io, m, d) = (Mem::new(), started(), Dir::new());
+    let mut e = open(&io, &m, &d);
+    e.handle(&sig("fuel", 1, 1), 100);
+    let due = e.pending_alarms(100 + 241, 120);
+    assert_eq!(
+        due,
+        vec![(
+            "fuel".to_string(),
+            "launch-stalled: fuel started-never-claimed".to_string()
+        )]
+    );
+    assert_eq!(
+        e.pending_alarms(100 + 242, 120),
+        due,
+        "an undelivered alarm is offered again"
+    );
+    e.mark_alarmed("fuel").unwrap();
+    assert!(e.pending_alarms(100 + 243, 120).is_empty());
+}
+
+// The `Clearing` mark must be durable before the caller clears: a save failure is reported, and
+// the next recheck offers the role again.
+#[test]
+fn recheck_reports_a_save_failure_so_the_caller_does_not_clear() {
+    let (io, m, d) = (Mem::new(), started(), Dir::new());
+    let mut e = open(&io, &m, &d);
+    for i in 0..RATE_PER_ROLE as u64 {
+        e.handle(&sig("fuel", i, 1), 100);
+        e.observe_online(&BTreeSet::from(["fuel".to_string()]), 100)
+            .unwrap();
+    }
+    e.handle(&sig("fuel", 9, 1), 200); // refused: rate
+    let later = 100 + HOUR_SECS + 1;
+    io.fail_save.set(true);
+    assert!(e.recheck(later).is_err(), "the Clearing mark did not save");
+    io.fail_save.set(false);
+    assert_eq!(e.recheck(later + 1).unwrap(), vec!["fuel".to_string()]);
 }

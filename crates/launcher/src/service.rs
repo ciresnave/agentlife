@@ -37,6 +37,11 @@ pub trait Source {
     fn clear(&self, role: &str) -> Result<(), SourceError>;
     /// Roles `/v1/list` shows online.
     fn online(&self) -> Result<BTreeSet<String>, SourceError>;
+    /// Anything the source noticed since the last call that the log should carry (an entry it
+    /// could not read and skipped). Default: nothing.
+    fn drain_notes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Where a stall alarm goes (the portfolio PM, through AgentLife's notify path).
@@ -79,7 +84,9 @@ pub fn cycle(
 ) -> Report {
     let mut rep = Report::default();
 
-    match src.waiting(wait_secs) {
+    let waiting = src.waiting(wait_secs);
+    rep.notes.extend(src.drain_notes());
+    match waiting {
         Ok(signals) => {
             for s in &signals {
                 if unposted_row_exists(engine, s) {
@@ -126,7 +133,17 @@ pub fn cycle(
         Err(e) => rep.notes.push(format!("list: {e:?}")),
     }
 
-    for role in engine.recheck(now) {
+    let to_clear = match engine.recheck(now) {
+        Ok(roles) => roles,
+        Err(e) => {
+            // The `Clearing` marks are not durable: clearing now could strand a refusal after a
+            // crash, so wait for the next cycle.
+            rep.notes
+                .push(format!("store: not clearing this cycle: {e}"));
+            Vec::new()
+        }
+    };
+    for role in to_clear {
         match src.clear(&role) {
             Ok(()) => match engine.cleared(&role) {
                 Ok(()) => rep.cleared += 1,
@@ -141,8 +158,15 @@ pub fn cycle(
         }
     }
 
-    for text in engine.alarms(now, launch_wait) {
+    // An alarm is marked raised only after it reached someone, so a failed delivery is offered
+    // again next cycle instead of being lost for the whole stall episode.
+    for (role, text) in engine.pending_alarms(now, launch_wait) {
         let reached = notify.alarm(&text);
+        if reached {
+            if let Err(e) = engine.mark_alarmed(&role) {
+                rep.notes.push(format!("store: {e}"));
+            }
+        }
         rep.alarms.push((text, reached));
     }
     rep
@@ -364,5 +388,46 @@ mod tests {
         assert_eq!(rep.cleared, 0);
         assert_eq!(r.src.posted.borrow()[0].reason, "unknown-role");
         assert_eq!(*r.mech.0.borrow(), 0);
+    }
+
+    /// A bell that can be made to fail.
+    struct FlakyBell {
+        works: RefCell<bool>,
+        rang: RefCell<u32>,
+    }
+    impl Notify for FlakyBell {
+        fn alarm(&self, _: &str) -> bool {
+            *self.rang.borrow_mut() += 1;
+            *self.works.borrow()
+        }
+    }
+
+    // A stall alarm that did not reach anyone is offered again next cycle; once delivered it is
+    // not raised again for the same stall.
+    #[test]
+    fn an_alarm_that_failed_to_deliver_is_retried_then_raised_once() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        r.src
+            .signals
+            .borrow_mut()
+            .push(signal("fuel", "s1", 1, "e"));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        cycle(&mut e, &r.src, &r.bell, 100, 120, 0); // started
+        r.src.signals.borrow_mut().clear();
+        let bell = FlakyBell {
+            works: RefCell::new(false),
+            rang: RefCell::new(0),
+        };
+        let a = cycle(&mut e, &r.src, &bell, 100 + 241, 120, 0);
+        assert_eq!(a.alarms.len(), 1);
+        assert!(!a.alarms[0].1, "delivery failed");
+        *bell.works.borrow_mut() = true;
+        let b = cycle(&mut e, &r.src, &bell, 100 + 242, 120, 0);
+        assert_eq!(b.alarms.len(), 1, "offered again");
+        assert!(b.alarms[0].1);
+        let c = cycle(&mut e, &r.src, &bell, 100 + 243, 120, 0);
+        assert!(c.alarms.is_empty(), "raised once, after it was delivered");
+        assert_eq!(*bell.rang.borrow(), 2);
     }
 }

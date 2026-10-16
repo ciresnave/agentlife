@@ -253,3 +253,76 @@ fn the_record_lane_restart_reads_is_the_one_written_here() {
     assert_eq!(rec.pid, std::process::id());
     assert_eq!(rec.role, LAUNCHER_ROLE);
 }
+
+// ---- review of #98 ----
+
+#[test]
+fn an_entry_without_an_epoch_is_skipped_not_answered_with_a_blank_one() {
+    let reply = json!({"roles": [
+        {"role": "alpha", "signal_id": "alpha:x", "attempt": 1}
+    ]});
+    let (s, skipped) = parse_signals(&reply);
+    assert_eq!((s.len(), skipped), (0, 1));
+}
+
+fn dir_over<'a>(reg: &'a Registry, state: &'a Path, table: &'a Nothing) -> RegistryDirectory<'a> {
+    RegistryDirectory {
+        registry: reg,
+        lane_state_dir: state,
+        table,
+    }
+}
+
+#[test]
+fn a_spec_that_exists_but_cannot_be_used_fails_closed_and_an_absent_one_does_not() {
+    let reg_dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let reg = Registry::new(reg_dir.path());
+    for role in ["absent", "corrupt", "other"] {
+        reg.create(&record(role, Intent::Wanted)).unwrap();
+    }
+    std::fs::write(state.path().join("corrupt.launch.json"), "{ not json").unwrap();
+    // a spec that is well formed but belongs to another role
+    spec_in(state.path(), "someone-else", spec::SpecState::Running);
+    std::fs::rename(
+        state.path().join("someone-else.launch.json"),
+        state.path().join("other.launch.json"),
+    )
+    .unwrap();
+    let table = Nothing;
+    let dir = dir_over(&reg, state.path(), &table);
+    assert_eq!(
+        dir.lane("absent"),
+        Lane::Launchable,
+        "no spec: the registry decides"
+    );
+    assert_eq!(dir.lane("corrupt"), Lane::ClosedOnPurpose);
+    assert_eq!(dir.lane("other"), Lane::ClosedOnPurpose);
+}
+
+#[test]
+fn the_current_record_decides_intent_not_an_older_parked_one() {
+    let reg_dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let reg = Registry::new(reg_dir.path());
+    let closed = || Intent::Closed {
+        how: ClosedHow::Parked,
+        by: "test".into(),
+        at: Utc::now(),
+    };
+    let long_ago = Utc::now() - chrono::Duration::days(3);
+    // an old parked agent, then a newer wanted one: the role is wanted
+    let mut old = record("revived", closed());
+    old.first_seen = long_ago;
+    reg.create(&old).unwrap();
+    reg.create(&record("revived", Intent::Wanted)).unwrap();
+    // an old wanted agent, then a newer parked one: the role is closed
+    let mut old = record("retired", Intent::Wanted);
+    old.first_seen = long_ago;
+    reg.create(&old).unwrap();
+    reg.create(&record("retired", closed())).unwrap();
+    let table = Nothing;
+    let dir = dir_over(&reg, state.path(), &table);
+    assert_eq!(dir.lane("revived"), Lane::Launchable);
+    assert_eq!(dir.lane("retired"), Lane::ClosedOnPurpose);
+}
