@@ -37,6 +37,17 @@ pub fn resolve_role(cwd: &str, lane_role_env: Option<&str>) -> String {
         .unwrap_or_else(|| cwd.to_lowercase())
 }
 
+/// The launch name to record (issue #110): the command line's `--name`, or `None` when it is not a
+/// safe identifier. The relaunch refuses an unsafe name (`valid_identifier`), so recording one would
+/// leave the lane unable to restart; unnamed makes the relaunch fall back to the role. The relaunch
+/// still refuses an unsafe name it finds in a file, so a tampered file stays fail-closed.
+fn recordable_name(cli_flags: &ClaudeCliFlags) -> Option<String> {
+    cli_flags
+        .name
+        .clone()
+        .filter(|n| crate::relaunch::valid_identifier(n))
+}
+
 /// `path` and each of its ancestors, nearest first, on either separator -
 /// not `Path::ancestors`, which on a non-Windows host would not split a
 /// Windows path.
@@ -177,7 +188,7 @@ fn bootstrap_state(
         pid,
         pid_start_secs: None,
         cwd,
-        name: cli_flags.name.clone(),
+        name: recordable_name(cli_flags),
         model: input.model.clone().map(ModelField::into_string),
         permission_mode: input
             .permission_mode
@@ -219,7 +230,7 @@ pub fn apply_event(
                 .as_ref()
                 .is_some_and(|a| !a.is_empty())
             {
-                cli_flags.name.clone()
+                recordable_name(cli_flags)
             } else {
                 existing.as_ref().and_then(|s| s.name.clone())
             },
@@ -297,7 +308,7 @@ pub fn apply_event(
         }
     }
     if state.name.is_none() {
-        state.name = cli_flags.name.clone();
+        state.name = recordable_name(cli_flags);
     }
     state.updated_at = now;
     state.updated_by_event = event.to_string();
@@ -2577,6 +2588,113 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.name.as_deref(), Some("pm"));
+    }
+
+    /// Issue #110: a launch name that is not a safe identifier (a space, a
+    /// `;`, too long) used to be recorded as given, and the relaunch then
+    /// refused it, so the lane could not be restarted. It is recorded as
+    /// unnamed instead, so the relaunch falls back to the role.
+    fn unsafe_names() -> Vec<String> {
+        vec![
+            "OverMind records".into(),
+            "a;b".into(),
+            "x\"y".into(),
+            "n".repeat(65),
+        ]
+    }
+
+    #[test]
+    fn session_start_records_an_unsafe_launch_name_as_unnamed() {
+        for bad in unsafe_names() {
+            let s = apply_event(
+                None,
+                "SessionStart",
+                &input("C:/Projects/OverMind"),
+                "overmind",
+                42,
+                &launched(&["claude", "--name", &bad]),
+                now(),
+            )
+            .unwrap();
+            assert_eq!(s.name, None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_fresh_launch_with_an_unsafe_name_replaces_an_old_safe_one_with_none() {
+        let named = apply_event(
+            None,
+            "SessionStart",
+            &input("C:/Projects/OverMind"),
+            "overmind",
+            42,
+            &launched(&["claude", "--name", "old"]),
+            now(),
+        )
+        .unwrap();
+        let relaunched = apply_event(
+            Some(named),
+            "SessionStart",
+            &input("C:/Projects/OverMind"),
+            "overmind",
+            77,
+            &launched(&["claude", "--name", "has space"]),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(relaunched.name, None);
+    }
+
+    #[test]
+    fn a_later_event_does_not_fill_in_an_unsafe_name() {
+        let unnamed = home_state("C:/Projects", 42);
+        let s = apply_event(
+            Some(unnamed),
+            "PreToolUse",
+            &input("C:/Projects"),
+            "pm",
+            42,
+            &launched(&["claude", "--name", "has space"]),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.name, None);
+    }
+
+    #[test]
+    fn an_event_with_no_prior_state_bootstraps_without_an_unsafe_name() {
+        let s = apply_event(
+            None,
+            "PreToolUse",
+            &input("C:/Projects/OverMind"),
+            "overmind",
+            42,
+            &launched(&["claude", "--name", "has space"]),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(s.name, None);
+    }
+
+    /// The other half of #110: the relaunch keeps refusing an unsafe name it
+    /// finds in a state file (tampering stays fail-closed), which the
+    /// existing `kill_and_relaunch_refuses_an_invalid_name_before_touching_the_process`
+    /// covers; a safe name is still recorded as given.
+    #[test]
+    fn a_safe_launch_name_is_still_recorded_as_given() {
+        for good in ["pm", "PM", "auth-framework-deps", "a_b-9"] {
+            let s = apply_event(
+                None,
+                "SessionStart",
+                &input("C:/Projects/OverMind"),
+                "overmind",
+                42,
+                &launched(&["claude", "--name", good]),
+                now(),
+            )
+            .unwrap();
+            assert_eq!(s.name.as_deref(), Some(good));
+        }
     }
 
     // -- the claude process's start time, beside its pid -------------------- //
