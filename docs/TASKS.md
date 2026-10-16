@@ -37,3 +37,19 @@ schtasks /Query  /TN agentlife-probe-unlock       -> ERROR: The system cannot fi
 The logon probe behaved the same (`<LogonTrigger>` present after create). The final failing query is the
 control that the delete took effect. **Not measured:** that the unlock trigger actually *fires* on a real
 unlock, and that `wt.exe` resolves from a task-launched process. Those are M6 (`docs/ACCEPTANCE.md`).
+
+## The `synapsed` task (`scripts/synapsed-task.ps1`)
+
+Not an `agentlife` command: a script that starts the Synapse daemon at logon with a fixed environment
+(Synapse spec `2026-10-15-daemon-contract-and-pilot.md` section 1; agentlife owns the task). Dry run by
+default (prints the wrapper and the XML); `-Register` creates the task `synapsed`, `-Remove` deletes it.
+Per-user and interactive like the two above. The task runs a wrapper `synapsed-run.cmd` that SETS
+`SYNAPSE_HOME`, `SYNAPSE_ADDR` (loopback only, checked) and `SYNAPSE_LAUNCHER_ROLES` (empty until the launch
+poller is live), appends stderr to `synapsed.log`, and maps `synapsed` exit 2 (refused to start: config, lock,
+second instance) to task exit 0 so Task Scheduler's restart-on-failure (3 times, 1 minute apart) never loops on
+it. Any other non-zero exit is restarted.
+
+Measured 2026-10-16 (no task registered): dry run prints well-formed XML (parsed, `RestartOnFailure` count 3);
+the wrapper with a stand-in child returned 0->0, 1->1, 2->0, 3->3 and logged the exit-2 line; a non-loopback
+`-Addr` is refused. **Not measured:** registering the task, that it fires at logon, that a real `synapsed`
+starts under it, and that restart-on-failure fires on a crash. Those are the PM's T-0 run.
