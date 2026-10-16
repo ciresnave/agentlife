@@ -338,10 +338,12 @@ fn every_outcome_we_post_is_one_of_the_four_the_daemon_accepts() {
         Outcome::Refused,
         Outcome::Failed,
     ];
-    let wire: Vec<&str> = all.into_iter().map(|o| outcome_wire(o).as_str()).collect();
+    let wire: Vec<&str> = all.into_iter().map(outcome_wire).collect();
     for w in &wire {
         assert!(ACCEPTED.contains(w), "{w} is not accepted by Synapse");
     }
+    // each outcome posts its own string, so a swap of two accepted strings is caught
+    assert_eq!(wire, ["started", "already-running", "refused", "failed"]);
     // and all four are reachable, so none is silently merged into another
     let mut sorted = wire.clone();
     sorted.sort_unstable();

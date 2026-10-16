@@ -92,10 +92,15 @@ pub fn map_error(e: synapsed_client::MailError) -> SourceError {
     }
 }
 
+/// The `outcome` string of `POST /v1/launch-result`: the client's own wire string for [`launch_outcome`].
+pub fn outcome_wire(o: Outcome) -> &'static str {
+    launch_outcome(o).as_str()
+}
+
 /// The client's typed outcome for `POST /v1/launch-result`. Synapse's daemon accepts EXACTLY these
 /// four (anything else is a 400 `malformed`), and the client's enum can name no other; `dry-run` is
 /// never posted.
-pub fn outcome_wire(o: Outcome) -> synapsed_client::LaunchOutcome {
+pub fn launch_outcome(o: Outcome) -> synapsed_client::LaunchOutcome {
     use synapsed_client::LaunchOutcome as W;
     match o {
         Outcome::Started => W::Started,
@@ -157,7 +162,7 @@ impl Source for SynapseSource {
     }
 
     fn post(&self, r: &LaunchResult) -> Result<(), SourceError> {
-        let outcome = outcome_wire(r.outcome);
+        let outcome = launch_outcome(r.outcome);
         let reason = (!r.reason.is_empty()).then_some(r.reason.as_str());
         self.daemon
             .launch_result(
