@@ -62,6 +62,7 @@ struct Rig {
     host: PathBuf,
     conhost: PathBuf,
     envlog: PathBuf,
+    hooklog: PathBuf,
 }
 
 impl Rig {
@@ -91,6 +92,7 @@ impl Rig {
         }
         let home = dir.path().join("home");
         let envlog = dir.path().join("envlog.txt");
+        let hooklog = dir.path().join("hooklog.txt");
         Rig {
             dir,
             home,
@@ -98,7 +100,38 @@ impl Rig {
             host,
             conhost,
             envlog,
+            hooklog,
         }
+    }
+
+    /// What each stand-in's hook said (exit code, time, stderr), for a failure message: a lane whose hook did
+    /// nothing looks like a session that never appeared.
+    fn hook_diag(&self) -> String {
+        // Per lane: when each session registered, to set beside the report's `launched_at` and the log's
+        // `start` / `hook-begin` / `hook-end` times (all UTC; `t=` is epoch milliseconds).
+        let mut registry = String::new();
+        for r in self.records() {
+            registry.push_str(&format!(
+                "  {:?} cwd={}: {}\n",
+                r.name,
+                r.launch_cwd,
+                r.sessions
+                    .iter()
+                    .map(|s| format!(
+                        "{} pid={} started_at={} (epoch ms {})",
+                        s.session_id,
+                        s.pid,
+                        s.started_at.format("%H:%M:%S%.3f"),
+                        s.started_at.timestamp_millis()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        format!(
+            "registry sessions:\n{registry}hook log (t= epoch ms):\n{}",
+            std::fs::read_to_string(&self.hooklog).unwrap_or_default()
+        )
     }
 
     fn root(&self) -> String {
@@ -145,6 +178,7 @@ impl Rig {
             ("FAKE_AUTO_START".into(), "1".into()),
             ("FAKE_HOLD".into(), "40".into()),
             ("FAKE_ENVLOG".into(), self.envlog.display().to_string()),
+            ("FAKE_HOOKLOG".into(), self.hooklog.display().to_string()),
         ]
     }
 
@@ -405,9 +439,18 @@ fn a_real_registry_is_planned_launched_through_a_host_and_each_agent_is_seen_com
     let r = &run.report;
 
     // alpha shows progress past SessionStart; the others are alive and silent with the channel flag.
-    assert_eq!(outcome(r, "alpha"), &Outcome::Working, "{r:#?}");
-    assert_eq!(outcome(r, "beta"), &Outcome::AwaitingDialog, "{r:#?}");
-    assert_eq!(outcome(r, "gamma"), &Outcome::AwaitingDialog, "{r:#?}");
+    let diag = rig.hook_diag();
+    assert_eq!(outcome(r, "alpha"), &Outcome::Working, "{r:#?}\n{diag}");
+    assert_eq!(
+        outcome(r, "beta"),
+        &Outcome::AwaitingDialog,
+        "{r:#?}\n{diag}"
+    );
+    assert_eq!(
+        outcome(r, "gamma"),
+        &Outcome::AwaitingDialog,
+        "{r:#?}\n{diag}"
+    );
     assert!(r
         .entries
         .iter()
@@ -589,7 +632,8 @@ fn twelve_real_stand_ins_are_paced_pm_first_and_never_more_than_a_batch_at_once(
     assert_eq!(
         r.summary.awaiting_dialog + r.summary.working + r.summary.started,
         12,
-        "{r:#?}"
+        "{r:#?}\n{}",
+        rig.hook_diag()
     );
     // Three delays of one second separate four batches.
     assert!(took >= Duration::from_secs(3), "{took:?}");
@@ -730,7 +774,8 @@ fn the_real_spawner_falls_back_to_a_console_host_and_the_agents_start_and_regist
         r.entries
             .iter()
             .all(|e| e.spawned_via == Some(SpawnVia::Conhost)),
-        "{r:#?}"
+        "{r:#?}\n{}",
+        rig.hook_diag()
     );
 }
 
@@ -968,7 +1013,12 @@ fn restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_start
     };
     assert_eq!(report.plan_hash, plan.hash);
     for n in ["alpha", "beta"] {
-        assert!(outcome(&report, n).came_up(), "{n}: {report:#?}");
+        assert!(
+            outcome(&report, n).came_up(),
+            "{n}: {report:#?}\nhook log:\n{}\nenv log:\n{}",
+            std::fs::read_to_string(&rig.hooklog).unwrap_or_default(),
+            std::fs::read_to_string(&rig.envlog).unwrap_or_default()
+        );
     }
     assert!(report_path.unwrap().is_file());
     assert!(shown.borrow().contains("alpha"), "the list was shown first");
