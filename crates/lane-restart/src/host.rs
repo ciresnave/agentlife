@@ -404,12 +404,18 @@ fn run_with_handlers_and_window(
         on_match_attempt,
         on_raw_io,
         None,
+        None,
     )
 }
 
 /// The implementation, with a `watch` hub (`crate::watch`, `attach --watch`): when present, the relay
 /// loop answers watchers' requests with the current screen and publishes every chunk to them. It
-/// reads nothing from them. `None` (every test, and Windows) is exactly the relay as it was.
+/// reads nothing from them. `None` (every test but those that gate the window) is exactly the relay as it was.
+///
+/// `window_gate` (issue #117): `None` starts the startup window at spawn, as production does.
+/// `Some(flag)` holds the window's clock until the flag is set, then runs it from that instant, so
+/// a test can start it when the child's first output has really arrived instead of guessing how
+/// long a loaded runner takes to start the child.
 #[allow(clippy::too_many_arguments)]
 fn run_with_handlers_and_window_watched(
     role: &str,
@@ -425,6 +431,7 @@ fn run_with_handlers_and_window_watched(
     mut on_match_attempt: impl FnMut(&str, &[handlers::MatchReport]) + Send + 'static,
     on_raw_io: impl Fn(&str, &[u8]) + Send + Sync + 'static,
     watch: Option<Arc<crate::watch::WatchHub>>,
+    window_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> std::io::Result<HostOutcome> {
     let on_raw_io = Arc::new(on_raw_io);
     let pty_system = native_pty_system();
@@ -573,9 +580,17 @@ fn run_with_handlers_and_window_watched(
     let mut parser = vt100::Parser::new(rows, cols, 0);
     let mut matched_ids: HashSet<String> = HashSet::new();
     let mut last_logged_screen: Option<String> = None;
-    let started = Instant::now();
+    // The window runs from spawn unless a test gated it (see `window_gate`).
+    let mut window_started = window_gate.is_none().then(Instant::now);
     loop {
-        let still_in_startup_window = started.elapsed() < startup_window;
+        if window_started.is_none()
+            && window_gate
+                .as_ref()
+                .is_some_and(|gate| gate.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            window_started = Some(Instant::now());
+        }
+        let still_in_startup_window = window_started.is_none_or(|t| t.elapsed() < startup_window);
         if !still_in_startup_window {
             if let Some(capture) = on_unhandled.take() {
                 if matched_ids.is_empty() {
@@ -825,6 +840,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             );
         },
         Some(watch_hub),
+        None,
     )
 }
 
@@ -955,6 +971,36 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), unix_script.to_string()]
         }
+    }
+
+    /// Issue #117: a gate for the startup window that opens when the child's output has
+    /// carried `marker`, and the `on_raw_io` hook that watches for it. A window measured from
+    /// spawn flaked whenever a loaded runner started `cmd.exe` after the window had closed; this
+    /// one starts only once the child has really printed, so the tests wait on what they
+    /// assert about, not on a guess at how long the child takes to start.
+    fn window_gate_on(
+        marker: &'static str,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        impl Fn(&str, &[u8]) + Send + Sync + 'static,
+    ) {
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let gate_for_hook = Arc::clone(&gate);
+        let hook = move |direction: &str, bytes: &[u8]| {
+            if direction != "child->relay" {
+                return;
+            }
+            if gate_for_hook.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let mut seen = seen.lock().unwrap();
+            seen.extend_from_slice(bytes);
+            if String::from_utf8_lossy(&seen).contains(marker) {
+                gate_for_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        (gate, hook)
     }
 
     // -- relay_chunk: the transparency property itself --------------------- //
@@ -1739,7 +1785,8 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_for_cb = Arc::clone(&captured);
 
-        let outcome = run_with_handlers_and_window(
+        let (gate, on_raw_io) = window_gate_on("PROBE_MARKER_98765");
+        let outcome = run_with_handlers_and_window_watched(
             "overmind",
             &child_argv,
             Vec::new(), // no handlers loaded - nothing can ever match
@@ -1755,9 +1802,11 @@ mod tests {
             // test rather than waiting out the real 60s STARTUP_WINDOW.
             Duration::from_millis(800),
             |_, _| {},
-            |_, _| {},
+            on_raw_io,
+            None,
+            Some(gate),
         )
-        .expect("run_with_handlers_and_window failed");
+        .expect("run_with_handlers_and_window_watched failed");
 
         let captures = captured.lock().unwrap();
         assert_eq!(
@@ -1771,6 +1820,56 @@ mod tests {
             captures[0]
         );
         assert!(outcome.child_exit_code.is_none() || outcome.child_exit_code.is_some());
+    }
+
+    /// Issue #117: the window is a wall-clock budget from spawn, so a child that
+    /// is slow to print (a loaded runner, a cold `cmd.exe`) is captured while
+    /// the screen is still blank. The child here prints its marker 2 s after
+    /// spawn, deterministically later than the 800 ms window.
+    #[test]
+    fn on_unhandled_captures_a_child_whose_first_output_is_late() {
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "choice /t 2 /d y >nul & echo PROBE_MARKER_98765 & choice /t 3 /d y >nul"
+                    .to_string(),
+            ],
+            "sleep 2; echo PROBE_MARKER_98765; sleep 3",
+        );
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_for_cb = Arc::clone(&captured);
+
+        let (gate, on_raw_io) = window_gate_on("PROBE_MARKER_98765");
+        run_with_handlers_and_window_watched(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            Cursor::new(b"[1;1R".to_vec()),
+            std::io::sink(),
+            |_| {},
+            move |text| captured_for_cb.lock().unwrap().push(text),
+            Duration::from_millis(800),
+            |_, _| {},
+            on_raw_io,
+            None,
+            Some(gate),
+        )
+        .expect("run_with_handlers_and_window_watched failed");
+
+        let captures = captured.lock().unwrap();
+        assert_eq!(
+            captures.len(),
+            1,
+            "must capture exactly once - got {captures:?}"
+        );
+        assert!(
+            captures[0].contains("PROBE_MARKER_98765"),
+            "the capture must hold the child's real output, not a blank screen - got {:?}",
+            captures[0]
+        );
     }
 
     #[test]
@@ -1807,7 +1906,8 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_for_cb = Arc::clone(&captured);
 
-        run_with_handlers_and_window(
+        let (gate, on_raw_io) = window_gate_on("PROBE_MARKER_98765");
+        run_with_handlers_and_window_watched(
             "overmind",
             &child_argv,
             vec![handler],
@@ -1819,9 +1919,11 @@ mod tests {
             move |text| captured_for_cb.lock().unwrap().push(text),
             Duration::from_millis(1500),
             |_, _| {},
-            |_, _| {},
+            on_raw_io,
+            None,
+            Some(gate),
         )
-        .expect("run_with_handlers_and_window failed");
+        .expect("run_with_handlers_and_window_watched failed");
 
         assert!(
             captured.lock().unwrap().is_empty(),
@@ -1831,8 +1933,9 @@ mod tests {
 
     /// Issue #96 (a): `on_unhandled` sends the PM ask over the claude-peers
     /// broker, and a stalled broker must not freeze the terminal. The
-    /// callback here blocks until released (or 10s); the child prints a
-    /// second marker ~2s after the window ends. That marker must reach the
+    /// callback here blocks until released (or 90s; the watcher's own 60s deadline
+    /// always decides first, so a slow runner cannot make the callback return on its own); the child prints a
+    /// second marker ~1s after the window ends. That marker must reach the
     /// outer terminal WHILE the callback is still blocked - inline on the
     /// relay thread, it can only arrive after the 10s timeout.
     #[test]
@@ -1869,7 +1972,7 @@ mod tests {
         let output_for_watch = Arc::clone(&outer_output);
         let returned_for_watch = Arc::clone(&callback_returned);
         let watcher = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + Duration::from_secs(60);
             let mut relayed_while_blocked = None;
             while Instant::now() < deadline {
                 let seen = String::from_utf8_lossy(&output_for_watch.lock().unwrap())
@@ -1885,7 +1988,8 @@ mod tests {
             relayed_while_blocked
         });
 
-        run_with_handlers_and_window(
+        let (gate, on_raw_io) = window_gate_on("PROBE_MARKER_98765");
+        run_with_handlers_and_window_watched(
             "overmind",
             &child_argv,
             Vec::new(),
@@ -1895,14 +1999,16 @@ mod tests {
             SharedVecWriter(Arc::clone(&outer_output)),
             |_| {},
             move |_text| {
-                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                let _ = release_rx.recv_timeout(Duration::from_secs(90));
                 returned_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
             },
             Duration::from_millis(800),
             |_, _| {},
-            |_, _| {},
+            on_raw_io,
+            None,
+            Some(gate),
         )
-        .expect("run_with_handlers_and_window failed");
+        .expect("run_with_handlers_and_window_watched failed");
 
         assert_eq!(
             watcher.join().unwrap(),
@@ -1925,14 +2031,15 @@ mod tests {
             vec![
                 "cmd.exe".to_string(),
                 "/c".to_string(),
-                "echo PROBE_MARKER_98765 & choice /t 1 /d y >nul".to_string(),
+                "echo PROBE_MARKER_98765 & choice /t 2 /d y >nul".to_string(),
             ],
-            "echo PROBE_MARKER_98765; sleep 1",
+            "echo PROBE_MARKER_98765; sleep 2",
         );
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished_for_cb = Arc::clone(&finished);
 
-        run_with_handlers_and_window(
+        let (gate, on_raw_io) = window_gate_on("PROBE_MARKER_98765");
+        run_with_handlers_and_window_watched(
             "overmind",
             &child_argv,
             Vec::new(),
@@ -1942,14 +2049,16 @@ mod tests {
             std::io::sink(),
             |_| {},
             move |_text| {
-                std::thread::sleep(Duration::from_secs(3));
+                std::thread::sleep(Duration::from_secs(4));
                 finished_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
             },
             Duration::from_millis(300),
             |_, _| {},
-            |_, _| {},
+            on_raw_io,
+            None,
+            Some(gate),
         )
-        .expect("run_with_handlers_and_window failed");
+        .expect("run_with_handlers_and_window_watched failed");
 
         assert!(
             finished.load(std::sync::atomic::Ordering::SeqCst),
