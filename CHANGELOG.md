@@ -2,11 +2,24 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (version at gate)
+## 0.16.3
 
-- **Test diagnostics, no behaviour change:** the `fake_claude` stand-in keeps each hook's exit code, time and stderr in `FAKE_HOOKLOG`, and
-  `launch_e2e` prints it when a lane does not come up. A Windows CI run (2026-10-16, run 38921949112) had one of two lanes
-  launched together never register a session in 40 s, the rerun was clean, and nothing recorded why; the cause is NOT found.
+- **Test diagnostics, no behaviour change:** the `fake_claude` stand-in keeps each hook's exit code, time and stderr in
+  `FAKE_HOOKLOG`, and `launch_e2e` prints it when a lane does not come up. A Windows CI run (2026-10-16, run
+  38921949112) had one of two lanes launched together never register a session in 40 s, the rerun was clean, and
+  nothing recorded why; the cause is NOT found.
+
+## 0.16.0
+
+- **Breaking for handler authors and API users (`lane-restart`):** a handler `action` is now a closed keystroke
+  grammar: at most 3 tokens, at most one letter or digit, `\r`, `<Enter>`, `<Down>`; no raw ESC, no free text. The
+  host sends `ESC [ B` for `<Down>` itself (`handlers::action_bytes`). `action_is_a_plain_keystroke` is replaced
+  by `action_is_allowed` / `parse_action`. `"\r\r"` was refused before and is accepted now.
+
+## 0.15.19
+
+- **Script and docs, no code change:** `scripts/gh-runner-setup.ps1` and `docs/RUNNER-SETUP.md`, self-hosted GitHub
+  runner setup (dry run by default; ephemeral runners; trusted repos only). Nothing registers a runner by itself.
 
 ## 0.15.18
 
