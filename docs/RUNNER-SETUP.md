@@ -27,6 +27,25 @@ workflows*: require approval for all outside collaborators; workflow permissions
 **A public repo is the dangerous case**: anyone can open a PR, so for a public trusted repo the lint and "no
 `pull_request` job on a self-hosted label" are the only thing between a stranger and the machine.
 
+## 2a. Public repos: REQUIRED before any `-Apply` (PM 2026-10-16)
+
+`ciresnave/fuel`, `ciresnave/baracuda` and `ciresnave/lightbulb` are all **public**: anyone can fork, open a PR and
+read every workflow. All five of these must hold before `-Apply` on any of them; the go/no-go is CireSnave's.
+
+1. **Ephemeral runner.** The script registers with `--ephemeral` by default and refuses `-Ephemeral:$false` for these
+   repos. The runner takes one job, unregisters and its service stops, so one job cannot leave a file, a process or a
+   poisoned cache for the next. **Cost:** one job per registration, and each registration needs a fresh token from
+   the PM. Automating re-registration needs a token source and is a separate decision; until then a GPU job is a
+   manual `-Apply`.
+2. **Repo setting** Actions > General > *Fork pull request workflows from outside collaborators*: **Require approval
+   for all outside collaborators**.
+3. **The lint** (section 6) in that repo's CI, passing.
+4. **No secrets** reachable by the account or named by a self-hosted job.
+5. **Triggers** only `push` to `main`, `schedule`, `workflow_dispatch`, as in section 1.
+
+Even then a push to `main` runs on the machine, so write access to the repo is the remaining trust boundary: anyone
+who can push a workflow to `main` runs code as `gh-runner`.
+
 ## 3. The runner binary
 
 Pinned in the script, from the official release notes (`actions/runner` v2.338.0, read 2026-10-16):
@@ -85,7 +104,7 @@ workflows are reported as unverifiable rather than passed. It runs in the CI of 
 
 - The machine is a laptop: a runner is offline when it sleeps or is off, and a queued job waits (no hosted fallback
   unless the workflow is written with one).
-- A job can read anything `gh-runner` can read and use the GPU without limit; nothing isolates two jobs from each
-  other (`_work` is reused, no ephemeral runner). Ephemeral (`--ephemeral`) runners are a later hardening.
-- Nothing in this change has run elevated. The script is verified only to parse, refuse an untrusted repo, refuse
+- A job can read anything `gh-runner` can read and use the GPU without limit. Jobs are isolated from each other only
+  by the ephemeral default (section 2a); with `-Ephemeral:$false`, `_work` is reused and nothing isolates them.
+- Nothing in this change has run elevated. The script is verified only to parse, refuse an untrusted repo, refuse a persistent runner for a public repo, refuse
   without elevation, and print the dry-run plan.

@@ -34,6 +34,7 @@
 .PARAMETER Labels        Extra runner labels. Default gpu.
 .PARAMETER RunnerVersion Runner release to install. Pinned with its hash; change both together.
 .PARAMETER RunnerSha256  SHA256 of actions-runner-win-x64-<RunnerVersion>.zip, from the release notes.
+.PARAMETER Ephemeral    Register with --ephemeral (default ON): the runner takes ONE job, then unregisters and its service stops, so a job cannot leave anything for the next. REQUIRED for the public repos (docs/RUNNER-SETUP.md section 2a); -Ephemeral:$false is refused for them.
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account.
 #>
@@ -46,6 +47,7 @@ param(
   [string[]]$Labels = @('gpu'),
   [string]$RunnerVersion = '2.338.0',
   [string]$RunnerSha256 = 'f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f',
+  [bool]$Ephemeral = $true,
   [switch]$Apply,
   [switch]$Remove
 )
@@ -67,6 +69,13 @@ $zipName = "actions-runner-win-x64-$RunnerVersion.zip"
 $zipUrl = "https://github.com/actions/runner/releases/download/v$RunnerVersion/$zipName"
 $zipPath = Join-Path $Root $zipName
 $allLabels = ($Labels -join ',')
+# Every default trusted repo is PUBLIC (PM 2026-10-16): anyone can open a PR there, so a persistent runner is refused.
+$PublicRepos = @('ciresnave/fuel', 'ciresnave/baracuda', 'ciresnave/lightbulb')
+if (-not $Ephemeral) {
+  $pub = @($Repo | Where-Object { $PublicRepos -contains $_ })
+  if ($pub) { throw "-Ephemeral:`$false is refused for public repo(s): $($pub -join ', ')" }
+}
+$ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
 function Slug([string]$r) { $r -replace '/', '-' }
 function Svc([string]$r) { 'actions.runner.' + (Slug $r) + '.' + $env:COMPUTERNAME + '-' + (Slug $r) }
 
@@ -84,7 +93,7 @@ if (-not $Apply) {
     if ($Remove) { Write-Host "  $dir\config.cmd remove --token <removal token>" }
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
-      Write-Host "      --labels $allLabels --work _work --replace --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
+      Write-Host "      --labels $allLabels --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
       Write-Host "  read back: service ... StartName = .\$Account, State = Running"
     }
   }
@@ -167,7 +176,7 @@ foreach ($r in $Repo) {
   [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dir)
   $tok = [Net.NetworkCredential]::new('', (Read-Host "Registration token for $r (not stored)" -AsSecureString)).Password
   & "$dir\config.cmd" --unattended --url "https://github.com/$r" --token $tok --name "$($env:COMPUTERNAME)-$(Slug $r)" `
-    --labels $allLabels --work _work --replace --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
+    --labels $allLabels --work _work --replace$ephFlag --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
   $rc = $LASTEXITCODE
   $tok = $null
   if ($rc -ne 0) { throw "config.cmd exited $rc for $r" }
