@@ -2,6 +2,11 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.18
+
+- **Script and docs, no code change:** `scripts/synapsed-task.ps1`, the per-user logon task that starts the Synapse
+  daemon with a fixed environment (dry run by default; not registered by anything). See `docs/TASKS.md`.
+
 ## 0.15.17
 
 - **Dependency bump, no behaviour change:** `synapsed-client` and `synapse` 6.0.0-rc.85 -> rc.89 (the
