@@ -46,8 +46,8 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 persistant = "0.4.4"
 user-request = "0.11.1"
 launcher = { path = "crates/launcher" }
-synapsed-client = "6.0.0-rc.80"
-synapse = "6.0.0-rc.80"
+synapsed-client = "6.0.0-rc.85"
+synapse = { version = "6.0.0-rc.85", default-features = false, features = ["native-base"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
