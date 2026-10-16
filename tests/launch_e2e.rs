@@ -107,8 +107,29 @@ impl Rig {
     /// What each stand-in's hook said (exit code, time, stderr), for a failure message: a lane whose hook did
     /// nothing looks like a session that never appeared.
     fn hook_diag(&self) -> String {
+        // Per lane: when each session registered, to set beside the report's `launched_at` and the log's
+        // `start` / `hook-begin` / `hook-end` times (all UTC; `t=` is epoch milliseconds).
+        let mut registry = String::new();
+        for r in self.records() {
+            registry.push_str(&format!(
+                "  {:?} cwd={}: {}\n",
+                r.name,
+                r.launch_cwd,
+                r.sessions
+                    .iter()
+                    .map(|s| format!(
+                        "{} pid={} started_at={} (epoch ms {})",
+                        s.session_id,
+                        s.pid,
+                        s.started_at.format("%H:%M:%S%.3f"),
+                        s.started_at.timestamp_millis()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
         format!(
-            "hook log:\n{}",
+            "registry sessions:\n{registry}hook log (t= epoch ms):\n{}",
             std::fs::read_to_string(&self.hooklog).unwrap_or_default()
         )
     }

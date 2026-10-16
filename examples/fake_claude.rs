@@ -20,7 +20,10 @@
 //!
 //! Launched by the restore launcher the stand-in has no flags of its own (the launcher builds its argv),
 //! so each setting also has an environment fallback: `FAKE_AGENTLIFE`, `FAKE_REPORT`, `FAKE_HOLD`, and
-//! `FAKE_HOOKLOG=<file>` appends one line per hook it runs: pid, cwd, event, exit code, milliseconds, stderr.
+//! `FAKE_HOOKLOG=<file>` appends timestamped lines (`t=` is milliseconds since the epoch, `pid`, `cwd`): `start`
+//! when the process begins, `hook-begin`/`hook-end` around each hook it runs (end: event, exit code, milliseconds, stderr).
+//! Read with the registry's `started_at` and the report's `launched_at`, they split a lane that never registered into
+//! launched late, started late, hook slow, hook failed, or registered and not seen.
 //! `FAKE_AUTO_START=1`, which runs a `SessionStart` hook for itself with a payload it builds (session id
 //! `sess-<pid>-<nanos>`, unique even when Windows hands a pid to a new process, `cwd` = its own working directory). `FAKE_ENVLOG=<file>` appends one line saying which
 //! agent id and which session-identity variables this process was started with.
@@ -63,7 +66,30 @@ fn long_child(shell: bool) -> Child {
         .expect("start a long-lived child")
 }
 
+/// Appends one timestamped line to `FAKE_HOOKLOG` if it is set. One `write_all` of the whole line.
+fn hook_log(msg: &str) {
+    let Ok(log) = std::env::var("FAKE_HOOKLOG") else {
+        return;
+    };
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let line = format!("t={t} pid={} cwd={cwd} {msg}\n", std::process::id());
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn main() {
+    hook_log("start");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let env_for = |flag: &str| -> Option<String> {
         let key = match flag {
@@ -225,6 +251,7 @@ fn main() {
             if reason != "-" {
                 cmd.args(["--reason", reason]);
             }
+            hook_log(&format!("hook-begin event={event}"));
             let started = Instant::now();
             let mut child = cmd
                 .stdin(Stdio::piped())
@@ -243,25 +270,12 @@ fn main() {
             // The hook never fails a session, so a hook that did nothing looks like a session that never
             // appeared. FAKE_HOOKLOG keeps what it said (a flaky launch_e2e on the Windows CI leg: one
             // of two lanes launched together never registered, and nothing recorded why).
-            if let Ok(log) = std::env::var("FAKE_HOOKLOG") {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log)
-                {
-                    let line = format!(
-                        "pid={} cwd={} event={event} exit={} millis={} stderr={:?}\n",
-                        std::process::id(),
-                        std::env::current_dir()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                        status.code().unwrap_or(-1),
-                        started.elapsed().as_millis(),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    let _ = f.write_all(line.as_bytes());
-                }
-            }
+            hook_log(&format!(
+                "hook-end event={event} exit={} millis={} stderr={:?}",
+                status.code().unwrap_or(-1),
+                started.elapsed().as_millis(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
             report.push_str(&format!(
                 "{event}\t{}\t{}\n",
                 started.elapsed().as_millis(),
