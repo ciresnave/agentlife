@@ -9,6 +9,11 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   host sends `ESC [ B` for `<Down>` itself (`handlers::action_bytes`). `action_is_a_plain_keystroke` is replaced
   by `action_is_allowed` / `parse_action`. `"\r\r"` was refused before and is accepted now.
 
+## 0.15.19
+
+- **Script and docs, no code change:** `scripts/gh-runner-setup.ps1` and `docs/RUNNER-SETUP.md`, self-hosted GitHub
+  runner setup (dry run by default; ephemeral runners; trusted repos only). Nothing registers a runner by itself.
+
 ## 0.15.18
 
 - **Script and docs, no code change:** `scripts/synapsed-task.ps1`, the per-user logon task that starts the Synapse
