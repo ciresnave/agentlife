@@ -260,6 +260,23 @@ pub enum StartRefusal {
     /// stop that a person or the PM made on purpose (`stop-hard`) or none (`stop-unclassified`).
     /// Terminal: asking again changes nothing until a person or the PM starts the lane.
     StopNotSoft(&'static str),
+    /// A launcher start reached a cap (0.15.13): `refused`, terminal until a slot frees.
+    RateCap(crate::launcher_gate::CapHit),
+    /// Free memory is below the floor `agentlife restore` holds (0.15.13): `failed`, may succeed later.
+    HeldForMemory {
+        free_gb: f64,
+        floor_gb: f64,
+    },
+    /// `restore.lock` is held by a live `agentlife restore` or another launcher start (0.15.13).
+    RestoreLockHeld {
+        pid: u32,
+    },
+    /// A launcher gate could not be read, so nothing was launched (fail closed, 0.15.13): the
+    /// ledger, the floor's config, or the lock file. `reason` is the vocabulary-A code.
+    GateUnavailable {
+        reason: &'static str,
+        why: String,
+    },
     Launch(RelaunchError),
 }
 
@@ -299,6 +316,10 @@ impl StartRefusal {
             StartRefusal::StopNotSoft(reason) => ("refused", reason),
             StartRefusal::StartLockHeld => ("already-running", "start-lock-held"),
             StartRefusal::StartLockUnavailable(_) => ("failed", "start-lock-unavailable"),
+            StartRefusal::RateCap(hit) => ("refused", hit.reason()),
+            StartRefusal::HeldForMemory { .. } => ("failed", "held-for-memory"),
+            StartRefusal::RestoreLockHeld { .. } => ("failed", "lock-held"),
+            StartRefusal::GateUnavailable { reason, .. } => ("failed", reason),
             StartRefusal::DuplicateRisk(DuplicateRefusal::Live(_)) => ("failed", "duplicate-risk"),
             StartRefusal::DuplicateRisk(DuplicateRefusal::Unreadable(_)) => {
                 ("failed", "process-table-unreadable")
@@ -361,6 +382,21 @@ impl std::fmt::Display for StartRefusal {
                 f,
                 "the lane's stop is not classified (no stop_kind); the launcher starts only a soft                  stop or a crash"
             ),
+            StartRefusal::RateCap(hit) => write!(
+                f,
+                "the launcher's rate cap is reached: {hit}; a person may start the lane"
+            ),
+            StartRefusal::HeldForMemory { free_gb, floor_gb } => write!(
+                f,
+                "held for memory: {free_gb:.1} GB free, floor {floor_gb} GB"
+            ),
+            StartRefusal::RestoreLockHeld { pid } => write!(
+                f,
+                "another restore or launcher start holds restore.lock (pid {pid})"
+            ),
+            StartRefusal::GateUnavailable { why, .. } => {
+                write!(f, "a launcher gate could not be read, nothing was started: {why}")
+            }
             StartRefusal::Launch(e) => write!(f, "{e}"),
         }
     }

@@ -75,7 +75,7 @@ the plan is frozen and asked about; with 0.15.3 a stopped lane is not in it.
 |---|---|---|
 | Poll, decision rules 1-6, store, R7 alarm, results | AgentLife (this service) | not built |
 | Synapse access and the bearer session | `synapsed-client` | **not usable: see Blockers** |
-| Mechanism: start one lane by role, `--model sonnet`, reports one of 8 results | AgentLife | `lane-restart start` (0.15.0-0.15.2) covers the spec/duplicate path; `start-role` on the launcher path (memory floor, `restore.lock`) not built |
+| Mechanism: start one lane by role, `--model sonnet`, reports one of 8 results | AgentLife | `lane-restart start` (0.15.0-0.15.2) covers the spec/duplicate path; since 0.15.13 the launcher path also holds `restore.lock`, the caps and the memory floor (not run against a real lane) |
 | Consent: standing grant for rule 7 | AgentLife (M5) + CireSnave ruling | **unbuilt; board 216** |
 | Policy numbers (caps 3/12 per hour, no-claim 3, replay 5 min) | OverMind | proposals, unmeasured |
 
@@ -158,8 +158,18 @@ mark. A lane can never turn a hard stop into a soft one or start a hard-stopped 
 **Reader (0.15.12):** for a launcher caller `lane-restart start` starts a `suspended`/`stopping` spec only if
 `stop_kind` is `soft` (`stop-hard` / `stop-unclassified` otherwise, `refused`), and a `crashed` or dead
 `running` spec without a mark. The spec, not the registry, is read: `agentlife stop --soft` leaves registry
-intent `Closed{exited}` and writes `soft` here. A launch clears `stop_kind`. Caps, the ledger line and the
-memory floor / `restore.lock` on this path are still to build.
+intent `Closed{exited}` and writes `soft` here. A launch clears `stop_kind`.
+
+## Caps, ledger line, memory floor and `restore.lock` (0.15.13)
+
+For a launcher caller, `lane-restart start` applies these after every spec refusal and before anything
+spawns, in this order: `restore.lock` (`failed: lock-held`), the caps (`refused: rate` at 3 spawns of a role
+or 12 overall in the last hour; `refused: rate-daily` at 8 of a role in the last day, a proposal), the
+memory floor (`failed: held-for-memory`). A gate that cannot be read fails closed (`store-unavailable`,
+`config-unreadable`, `restore-lock-unavailable`). Caps are counted from `restart.log` rows where a launcher
+caller's `start` set `spawned: true`; refusals and non-spawns consume nothing. Each `start` row carries
+`signal_id`, `result` and `spawned`. `restore.lock` is the file `agentlife restore` takes, so the two
+exclude each other. Not run against a real lane.
 
 ## Mapping the mechanism to Synapse (OverMind section 3)
 
@@ -180,8 +190,8 @@ HeldForMemory, LockHeld, Failed, InvalidArgument) before section 3 can map witho
 2. **No standing grant (M5) and no ruling (board 216).** Without them rule 7 answers `refused: no-grant` for
    every signal: the service is a notifier (PM notice to the portfolio PM through AgentLife's notify path)
    and a person starts the lane. That is a valid first deliverable and should ship alone.
-3. **`start-role`** (above). Until it exists the service could only call `lane-restart start`, which skips the
-   memory floor and `restore.lock`. Not recommended.
+3. **`start-role`** (above) **is built as the launcher path of `lane-restart start` (0.15.13)**; before it the service could only have called `lane-restart start`, which skipped the
+   memory floor and `restore.lock`.
 4. **`epoch` in the signal** (OverMind asked Synapse; unbuilt). Until then the 5-minute window separates a
    replay from a new request, as OverMind's section 1 says.
 

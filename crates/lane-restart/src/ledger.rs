@@ -27,6 +27,15 @@ pub struct Row {
     pub model: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The Synapse signal a launcher start answered (0.15.13).
+    #[serde(default)]
+    pub signal_id: Option<String>,
+    /// The `--json` result of a start, `<outcome>:<reason>` in vocabulary A (0.15.13).
+    #[serde(default)]
+    pub result: Option<String>,
+    /// Whether a spawn was attempted: what the launcher's caps count (0.15.13).
+    #[serde(default)]
+    pub spawned: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

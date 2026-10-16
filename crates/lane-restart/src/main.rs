@@ -657,10 +657,16 @@ fn verified_start_caller(facts: &SysinfoFacts) -> Result<String, start::CallerEr
 
 /// `lane-restart start --role R --reason <text> [--model sonnet|haiku] [--signal-id <id>]
 /// [--dry-run] [--json]` - 14.5.
+///
+/// A launcher caller (and only one) is also held to `restore.lock`, the caps and the memory floor
+/// (`launcher_gate`); the PM's own start is not.
 fn run_start_cmd(args: StartArgs) -> ExitCode {
     let facts = SysinfoFacts::new(claude_config_dir());
     let caller = verified_start_caller(&facts);
     let caller_role = caller.as_ref().ok().cloned();
+    let is_launcher = caller_role
+        .as_deref()
+        .is_some_and(start::is_launcher_caller);
     let requested_by = caller_role
         .clone()
         .unwrap_or_else(|| "unverified".to_string());
@@ -672,21 +678,30 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
     .chars()
     .take(start::REASON_MAX_CHARS)
     .collect();
-    let ledger = |model: Option<&str>, outcome: &str, acted: bool| {
-        log_ledger(
+    // One ledger line and, under `--json`, one stdout line, from one `(outcome, reason)` so the two
+    // cannot disagree. `spawned` is whether a spawn was attempted: what the launcher caps count.
+    // `--json`: `{role,outcome,reason[,launch_to_live_secs]}`; the human lines stay on stderr and
+    // the exit codes do not change.
+    let finish = |model: Option<&str>,
+                  text: &str,
+                  acted: bool,
+                  outcome: &str,
+                  reason: &str,
+                  spawned: bool,
+                  secs: Option<u64>| {
+        let result = format!("{outcome}:{reason}");
+        log_ledger_start(
             &requested_by,
             &args.role,
-            "start",
             caller_role.as_deref(),
             model,
             Some(&reason_for_log),
-            outcome,
+            text,
             acted,
+            args.signal_id.as_deref(),
+            &result,
+            spawned,
         );
-    };
-    // `--json`: one line on stdout, `{role,outcome,reason[,launch_to_live_secs]}`; the human
-    // lines stay on stderr and the exit codes do not change.
-    let emit = |outcome: &str, reason: &str, secs: Option<u64>| {
         if args.json {
             let mut v = serde_json::json!({
                 "role": args.role, "outcome": outcome, "reason": reason,
@@ -696,6 +711,20 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
             }
             println!("{v}");
         }
+    };
+    let refuse = |refusal: &start::StartRefusal| -> ExitCode {
+        eprintln!("lane-restart start: refused - {refusal}");
+        let (o, r) = refusal.outcome();
+        finish(
+            None,
+            &format!("refused: {refusal}"),
+            false,
+            o,
+            r,
+            false,
+            None,
+        );
+        ExitCode::from(refusal.exit_code())
     };
     let req = start::StartRequest {
         role: &args.role,
@@ -710,28 +739,23 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
     } else {
         match start::take_start_lock(&state_dir(), &args.role) {
             Ok(lock) => lock,
-            Err(refusal) => {
-                eprintln!("lane-restart start: refused - {refusal}");
-                ledger(None, &format!("refused: {refusal}"), false);
-                let (o, r) = refusal.outcome();
-                emit(o, r, None);
-                return ExitCode::from(refusal.exit_code());
-            }
+            Err(refusal) => return refuse(&refusal),
         }
     };
     let plan = match start::plan_start(&state_dir(), &req, caller, &facts) {
         Ok(p) => p,
-        Err(refusal) => {
-            eprintln!("lane-restart start: refused - {refusal}");
-            ledger(None, &format!("refused: {refusal}"), false);
-            let (o, r) = refusal.outcome();
-            emit(o, r, None);
-            return ExitCode::from(refusal.exit_code());
-        }
+        Err(refusal) => return refuse(&refusal),
     };
     if let Err(refusal) = disk_gate("start") {
-        ledger(None, &format!("refused: {refusal}"), false);
-        emit("failed", "disk-floor", None);
+        finish(
+            None,
+            &format!("refused: {refusal}"),
+            false,
+            "failed",
+            "disk-floor",
+            false,
+            None,
+        );
         return ExitCode::FAILURE;
     }
     let pin_note = plan
@@ -759,14 +783,46 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
             cmdline.join(" "),
             plan.launch.cwd
         );
-        ledger(
+        finish(
             Some(&plan.model),
             &format!("dry run - no action taken{pin_note}"),
             false,
+            "dry-run",
+            "dry-run",
+            false,
+            None,
         );
-        emit("dry-run", "dry-run", None);
         return ExitCode::SUCCESS;
     }
+    // The launcher path's own gates, after every spec refusal (so `already-running` is still
+    // `already-running` on a full machine) and before anything spawns. `restore.lock` is taken
+    // first and held to the end, so two launcher starts cannot both read a count of 11 spawns.
+    // A dry run took none of this and says so only by not reporting it.
+    let _restore_lock = if is_launcher {
+        let home = lane_restart::launcher_gate::agentlife_home(
+            std::env::var("AGENTLIFE_HOME").ok().as_deref(),
+        );
+        let lock = match lane_restart::launcher_gate::take_restore_lock(&home, &facts) {
+            Ok(l) => l,
+            Err(refusal) => return refuse(&refusal),
+        };
+        let floor = lane_restart::launcher_gate::resolve_floor_gb(
+            &home.join("config.json"),
+            std::env::var("AGENTLIFE_FREE_RAM_FLOOR_GB").ok().as_deref(),
+        );
+        if let Err(refusal) = lane_restart::launcher_gate::decide(
+            lane_restart::launcher_gate::load_rows(&log_path()),
+            &args.role,
+            chrono::Utc::now(),
+            floor,
+            lane_restart::launcher_gate::free_memory_gb(),
+        ) {
+            return refuse(&refusal);
+        }
+        Some(lock)
+    } else {
+        None
+    };
     eprintln!(
         "lane-restart start: launching {} on {}...",
         args.role, plan.model
@@ -815,22 +871,28 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
             let live = secs
                 .map(|s| format!(" launch-to-live:{s}s"))
                 .unwrap_or_default();
-            ledger(
+            finish(
                 Some(&plan.model),
                 &format!("{what}{pin_note}{warn}{live}"),
                 true,
+                "started",
+                reason,
+                true,
+                secs,
             );
-            emit("started", reason, secs);
             exit
         }
         Err(e) => {
             eprintln!("lane-restart start: {e}");
-            ledger(
+            finish(
                 Some(&plan.model),
                 &format!("action failed: {e}{pin_note}"),
                 false,
+                "failed",
+                "spawn-failed",
+                true,
+                None,
             );
-            emit("failed", "spawn-failed", None);
             ExitCode::FAILURE
         }
     }
@@ -2046,6 +2108,43 @@ fn log_ledger(
         caller_role,
         model,
         reason,
+        signal_id: None,
+        result: None,
+        spawned: None,
+    };
+    if let Err(e) = log::append(&log_path(), &entry) {
+        eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");
+    }
+}
+
+/// A `start` ledger line: `log_ledger`'s fields plus the signal it answered, its vocabulary-A
+/// result and whether a spawn was attempted (what the launcher's caps count).
+#[allow(clippy::too_many_arguments)]
+fn log_ledger_start(
+    requested_by: &str,
+    role: &str,
+    caller_role: Option<&str>,
+    model: Option<&str>,
+    reason: Option<&str>,
+    outcome: &str,
+    acted: bool,
+    signal_id: Option<&str>,
+    result: &str,
+    spawned: bool,
+) {
+    let entry = log::Entry {
+        timestamp: chrono::Utc::now(),
+        requested_by,
+        role,
+        outcome: outcome.to_string(),
+        acted,
+        kind: Some("start"),
+        caller_role,
+        model,
+        reason,
+        signal_id,
+        result: Some(result),
+        spawned: Some(spawned),
     };
     if let Err(e) = log::append(&log_path(), &entry) {
         eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");

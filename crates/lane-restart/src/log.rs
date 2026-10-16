@@ -37,6 +37,15 @@ pub struct Entry<'a> {
     /// Why a lane was started (required by `lane-start`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'a str>,
+    /// The Synapse signal a launcher start answered (0.15.13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_id: Option<&'a str>,
+    /// A start's `--json` result as `<outcome>:<reason>` (0.15.13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<&'a str>,
+    /// Whether a start tried to spawn; the launcher caps count rows where this is true (0.15.13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawned: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -80,6 +89,9 @@ mod tests {
             caller_role: None,
             model: None,
             reason: None,
+            signal_id: None,
+            result: None,
+            spawned: None,
         }
     }
 
@@ -94,7 +106,15 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        for k in ["kind", "caller_role", "model", "reason"] {
+        for k in [
+            "kind",
+            "caller_role",
+            "model",
+            "reason",
+            "signal_id",
+            "result",
+            "spawned",
+        ] {
             assert!(!keys.contains(&k), "{k} serialised when None: {keys:?}");
         }
     }
