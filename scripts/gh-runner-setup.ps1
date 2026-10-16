@@ -38,7 +38,7 @@
 .PARAMETER Labels        Extra runner labels, added to the automatic self-hosted, Windows, X64. Default NONE: add gpu only for a repo whose jobs need the GPU, so a plain-Windows job cannot queue behind (or be mistaken for) a GPU one.
 .PARAMETER RunnerVersion Runner release to install. Pinned with its hash; change both together.
 .PARAMETER RunnerSha256  SHA256 of actions-runner-win-x64-<RunnerVersion>.zip, from the release notes.
-.PARAMETER Ephemeral    Register with --ephemeral (default ON): the runner takes ONE job, then unregisters and its service stops, so a job cannot leave anything for the next. REQUIRED for the public repos (docs/RUNNER-SETUP.md section 2a); -Ephemeral:$false is refused for them.
+.PARAMETER Ephemeral    Register with --ephemeral: the runner takes ONE job, then unregisters and its service stops, so a job cannot leave anything for the next. REQUIRED for the public repos (docs/RUNNER-SETUP.md section 2a); -Ephemeral:$false is refused for them. Default (board 223, CireSnave 2026-10-16): PERSISTENT when every -Repo is named in -Private, EPHEMERAL otherwise (any public or undeclared repo in the call makes the whole call ephemeral). Pass the switch to override either way.
 .PARAMETER ProtectedPaths  Paths the runner account must NOT be able to write, directly or through a broad group: the lane tools that run as the owner WITH vault access. Default C:\Projects, C:\Projects\.claude-hooks, with-secret.exe, lane-restart.exe, C:\Projects\.lane-state. -Apply refuses to create the account while any is writable by Everyone, Authenticated Users, Users, Interactive or the account itself (board 224).
 .PARAMETER AlsoGrant     Groups or accounts to keep READ-AND-EXECUTE (never write) on the protected paths in the printed icacls fix, e.g. -AlsoGrant CodexSandboxUsers. Only changes the text printed; Everyone, Authenticated Users, Users and Interactive are refused (they are the hole).
 .PARAMETER CheckAclsOnly Read-only: run the ACL check, print the exact elevated fix commands for what it finds, and throw if anything is exposed. Nothing else happens.
@@ -55,7 +55,7 @@ param(
   [string[]]$Labels = @(),
   [string]$RunnerVersion = '2.338.0',
   [string]$RunnerSha256 = 'f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f',
-  [bool]$Ephemeral = $true,
+  [Nullable[bool]]$Ephemeral = $null,
   [string[]]$ProtectedPaths = @('C:\Projects', 'C:\Projects\.claude-hooks', 'C:\Projects\.claude-hooks\with-secret.exe', 'C:\Projects\.claude-hooks\lane-restart.exe', 'C:\Projects\.lane-state'),
   [string[]]$AlsoGrant = @(),
   [switch]$CheckAclsOnly,
@@ -89,6 +89,14 @@ $allLabels = ($Labels -join ',')
 $labelFlag = if ($Labels) { " --labels $allLabels" } else { '' }
 $labelArgs = if ($Labels) { @('--labels', $allLabels) } else { @() }
 foreach ($pr in $Private) { if ($Repo -notcontains $pr) { throw "-Private names '$pr', which is not in -Repo" } }
+# Board 223 (CireSnave, 2026-10-16: "Go with your recommendations."): private repos get a persistent runner, public repos an
+# ephemeral one. Unset -Ephemeral therefore follows -Private: persistent only if EVERY -Repo is declared private.
+$ephemeralDefaulted = ($null -eq $Ephemeral)
+if ($ephemeralDefaulted) {
+  $undeclared = @($Repo | Where-Object { $Private -notcontains $_ })
+  $Ephemeral = ($undeclared.Count -gt 0)
+}
+$Ephemeral = [bool]$Ephemeral
 # A repo is PUBLIC unless declared private: anyone can open a PR on a public repo, so a persistent runner is refused.
 if (-not $Ephemeral) {
   $pub = @($Repo | Where-Object { $Private -notcontains $_ })
@@ -165,6 +173,7 @@ if ($CheckAclsOnly) {
 if (-not $Apply) {
   Write-Host "DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.`n"
   Write-Host "Owners        : $($Owners -join ', ')   private (persistent allowed): $(if ($Private) { $Private -join ', ' } else { 'none: every -Repo is treated as public, so ephemeral' })"
+  Write-Host "Runner mode   : $(if ($Ephemeral) { 'ephemeral (one job per registration)' } else { 'persistent (one registration, many jobs)' })$(if ($ephemeralDefaulted) { ' [default: ' + $(if ($Ephemeral) { 'a -Repo is not declared in -Private' } else { 'every -Repo is declared in -Private' }) + ']' } else { ' [set by -Ephemeral]' })"
   Write-Host "Account       : $env:COMPUTERNAME\$Account (standard user; random 32-char password held in memory only)"
   Write-Host "Root          : $Root  (ACL: SYSTEM, Administrators, $Account)"
   Write-Host "Runner        : v$RunnerVersion  SHA256 $RunnerSha256`n  $zipUrl"
