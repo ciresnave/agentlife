@@ -2,17 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.16.4
+## 0.16.3
 
-- **Runner policy for private repos (docs, script, `runner-lint`):** every private repo uses the runner
-  (CireSnave 2026-10-16). `runner-lint --private` lints as a private repo (a pull-request runner job needs the
-  same-repo `if` but no `environment:`) and exits 2 unless `gh api` says the repo is private. `gh-runner-setup.ps1`
-  no longer labels every runner `gpu`: `-Labels` defaults to none. `docs/RUNNER-SETUP.md` section 8a lists, per
-  private repo and job, what must change for a plain Windows runner.
-- **`gh-runner-setup.ps1` refuses to create the runner account while the lane tools are writable by it (board 224):**
-  `-ProtectedPaths` (`C:\Projects`, `.claude-hooks`, `with-secret.exe`, `lane-restart.exe`, `.lane-state`) must grant no write
-  right to Everyone, Authenticated Users, Users, Interactive or the account. New `-CheckAclsOnly`; the exact elevated `icacls` fix is
-  printed, never run. This machine fails the check today. Tested by `tests/runner_setup_acl.rs` (Windows).
+- **Test diagnostics, no behaviour change:** the `fake_claude` stand-in keeps each hook's exit code, time and stderr in
+  `FAKE_HOOKLOG`, and `launch_e2e` prints it when a lane does not come up. A Windows CI run (2026-10-16, run
+  38921949112) had one of two lanes launched together never register a session in 40 s, the rerun was clean, and
+  nothing recorded why; the cause is NOT found.
 
 ## 0.16.2
 
