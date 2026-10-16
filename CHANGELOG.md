@@ -2,12 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## Unreleased (version allocated at gate)
+## 0.16.0
 
 - **Breaking for handler authors and API users (`lane-restart`):** a handler `action` is now a closed keystroke
-  grammar: at most 3 tokens, at most one letter or digit, ``, `<Enter>`, `<Down>`; no raw ESC, no free text. The
+  grammar: at most 3 tokens, at most one letter or digit, `\r`, `<Enter>`, `<Down>`; no raw ESC, no free text. The
   host sends `ESC [ B` for `<Down>` itself (`handlers::action_bytes`). `action_is_a_plain_keystroke` is replaced
-  by `action_is_allowed` / `parse_action`. `""` was refused before and is accepted now.
+  by `action_is_allowed` / `parse_action`. `"\r\r"` was refused before and is accepted now.
 
 ## 0.15.18
 
