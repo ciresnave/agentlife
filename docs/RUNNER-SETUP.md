@@ -84,12 +84,27 @@ all** until their jobs run here. The private-repo branch of the policy:
    lint's `--private` mode therefore does not require `environment:`. It **proves** the repo is private first
    (`gh api repos/$GITHUB_REPOSITORY --jq .private` must say `true`, else exit 2), because a public repo linted as
    private would pass a PR job with no environment; the same check runs in `gh-runner-setup.ps1 -Apply`.
-4. **Ephemeral stays the default**, and it has a cost the PM should decide on: an ephemeral runner takes ONE job,
-   so a CI run of N jobs needs N registrations, each with a fresh token. Four repos' normal CI is dozens of jobs a
-   day, which no one can hand-register. Options: (a) automate re-registration (needs a token source: a GitHub App or
-   a fine-grained PAT, a CireSnave decision); (b) for PRIVATE repos only, a persistent runner (`-Private <repo>
-   -Ephemeral:$false`), which this policy permits because no outsider can reach it, at the price that jobs share
-   `_work` and a malicious same-repo change persists. **Recommendation: (b) for the private repos now, (a) later.**
+4. **Ephemeral or persistent for private repos: CireSnave's answer is a one-line switch** (board 223; public repos
+   stay ephemeral in both variants). An ephemeral runner takes ONE job, so a CI run of N jobs needs N registrations,
+   each with a fresh token; four repos' normal CI is dozens of jobs a day, which no one can hand-register.
+
+   | | Variant A: persistent (PM recommendation) | Variant B: ephemeral |
+   |---|---|---|
+   | Command per private repo | `.\scripts\gh-runner-setup.ps1 -Repo <o>/<r> -Private <o>/<r> -Ephemeral:$false -Apply` | `.\scripts\gh-runner-setup.ps1 -Repo <o>/<r> -Private <o>/<r> -Apply` (the default) |
+   | Jobs per registration | unlimited: one registration, one service | one: a fresh token per job |
+   | Works for normal CI today | yes | **no**, until re-registration is automated |
+   | Automation needed | none | a token source (GitHub App or fine-grained PAT) and a re-register loop: a CireSnave decision |
+   | Isolation between jobs | none: `_work` is reused, and a malicious same-repo change persists on the runner | each job on a fresh runner registration |
+   | Why acceptable | no outsider can reach a private repo's runner (no forks, section 2b rule 2) | n/a |
+   | Public repos | **refused by the script** | the only variant |
+
+   Nothing is registered by this PR; the switch is the `-Ephemeral:$false` argument, and the lint and the policy do
+   not change between the variants.
+
+   **Exception, stated: the two Humboldt runners that already exist** (section 8a) run under CireSnave's own account,
+   which breaks rule 6. They stay as they are until a restricted replacement that can use Docker exists, because
+   moving them under `gh-runner` would either break the backend job (no Docker) or give a restricted account
+   root-equivalent Docker access. This is a recorded exception, not a precedent; no other repo gets one.
 5. `docs` rule 6 still holds: no secrets beyond a job's needs, the restricted `gh-runner` account.
 
 What a plain Windows runner changes for a workflow written for `ubuntu-latest` (each is in the table in section 8a):
