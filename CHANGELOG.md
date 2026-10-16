@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.5
+
+- **Launch names are validated at record time (`lane-restart`):** a launch name that is not a safe token is
+  recorded as unnamed instead of stored (OverMind's `name-validate-at-record`, #115). A later event never fills in
+  an unsafe name, and a fresh launch replaces an older safe name with none.
+
 ## 0.16.4
 
 - **Runner policy for private repos (docs, script, `runner-lint`):** every private repo uses the runner
