@@ -8,6 +8,11 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
   (Unix) waited for `role.txt` to exist, but the shell creates it before writing, so it could read an empty
   file (seen once on CI at #103, passed on rerun). It now waits for the whole expected text. Only a Linux run
   exercises it.
+- **launch-result outcome vocabulary settled (Synapse lane, 2026-10-16):** the daemon accepts exactly
+  `started | already-running | refused | failed` (anything else is a 400); `launching`/`unreachable` are its
+  own list states and are never sent, so the OPEN note under 0.15.14 is closed: our `Outcome` already matches.
+  The mapping is now `launcher_service::outcome_wire`, with a test that each of our outcomes is one of the four
+  (mutation-checked); `dry-run` is never posted.
 
 ## 0.15.14
 
