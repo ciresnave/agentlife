@@ -2,6 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.15
+
+- **Test fix, no behaviour change:** `launch::tests::a_direct_spawn_runs_the_hosted_command_in_the_tabs_directory`
+  (Unix) waited for `role.txt` to exist, but the shell creates it before writing, so it could read an empty
+  file (seen once on CI at #103, passed on rerun). It now waits for the whole expected text. Only a Linux run
+  exercises it.
+
 ## 0.15.14
 
 - **`agentlife launcher`: the launch-on-message service, notifier-only build** (`docs/LAUNCHER-SERVICE.md`,

@@ -780,7 +780,10 @@ mod tests {
         assert_eq!(via, SpawnVia::Direct);
         let f = dir.path().join("role.txt");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !f.exists() && Instant::now() < deadline {
+        // The shell creates `role.txt` before it writes into it: wait for content, not existence.
+        while std::fs::read_to_string(&f).map_or(true, |t| t.trim().is_empty())
+            && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert_eq!(std::fs::read_to_string(&f).unwrap().trim(), "lane");
