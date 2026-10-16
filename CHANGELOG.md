@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.6
+
+- **Test diagnostics, no behaviour change:** every `launch_e2e` failure message that prints the restore report now also prints the
+  hook log. The same signature (one lane of several launched together: `no session appeared within 40 s`) failed a second,
+  different test on the Windows CI leg (`twelve_real_stand_ins...`, run 38940546634, lane `l09` of a batch of five); the cause is
+  still NOT found. A stress test of 12 threads writing distinct files in one directory through `atomic::write_atomic` (a suspected
+  race in its shared scratch directory) did not fail in 3 runs, so that is not shown.
+
 ## 0.16.3
 
 - **Test diagnostics, no behaviour change:** the `fake_claude` stand-in keeps each hook's exit code, time and stderr in

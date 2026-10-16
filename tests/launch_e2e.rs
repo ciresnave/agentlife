@@ -104,6 +104,15 @@ impl Rig {
         }
     }
 
+    /// What each stand-in's hook said (exit code, time, stderr), for a failure message: a lane whose hook did
+    /// nothing looks like a session that never appeared.
+    fn hook_diag(&self) -> String {
+        format!(
+            "hook log:\n{}",
+            std::fs::read_to_string(&self.hooklog).unwrap_or_default()
+        )
+    }
+
     fn root(&self) -> String {
         self.dir.path().display().to_string()
     }
@@ -409,9 +418,18 @@ fn a_real_registry_is_planned_launched_through_a_host_and_each_agent_is_seen_com
     let r = &run.report;
 
     // alpha shows progress past SessionStart; the others are alive and silent with the channel flag.
-    assert_eq!(outcome(r, "alpha"), &Outcome::Working, "{r:#?}");
-    assert_eq!(outcome(r, "beta"), &Outcome::AwaitingDialog, "{r:#?}");
-    assert_eq!(outcome(r, "gamma"), &Outcome::AwaitingDialog, "{r:#?}");
+    let diag = rig.hook_diag();
+    assert_eq!(outcome(r, "alpha"), &Outcome::Working, "{r:#?}\n{diag}");
+    assert_eq!(
+        outcome(r, "beta"),
+        &Outcome::AwaitingDialog,
+        "{r:#?}\n{diag}"
+    );
+    assert_eq!(
+        outcome(r, "gamma"),
+        &Outcome::AwaitingDialog,
+        "{r:#?}\n{diag}"
+    );
     assert!(r
         .entries
         .iter()
@@ -593,7 +611,8 @@ fn twelve_real_stand_ins_are_paced_pm_first_and_never_more_than_a_batch_at_once(
     assert_eq!(
         r.summary.awaiting_dialog + r.summary.working + r.summary.started,
         12,
-        "{r:#?}"
+        "{r:#?}\n{}",
+        rig.hook_diag()
     );
     // Three delays of one second separate four batches.
     assert!(took >= Duration::from_secs(3), "{took:?}");
@@ -734,7 +753,8 @@ fn the_real_spawner_falls_back_to_a_console_host_and_the_agents_start_and_regist
         r.entries
             .iter()
             .all(|e| e.spawned_via == Some(SpawnVia::Conhost)),
-        "{r:#?}"
+        "{r:#?}\n{}",
+        rig.hook_diag()
     );
 }
 
