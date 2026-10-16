@@ -26,10 +26,12 @@ pub struct HandlerSpec {
     pub id: String,
     #[serde(rename = "match")]
     pub match_spec: MatchSpec,
-    /// The literal keystrokes sent on an exact match, verbatim. Restricted
-    /// to at most one ASCII letter or digit plus an optional `\r`
-    /// ([`action_is_a_plain_keystroke`]) - short enough that no secret can
-    /// ride in it (§12.3a).
+    /// The keystrokes sent on an exact match, written in a CLOSED token
+    /// grammar ([`parse_action`]): at most three tokens, each one ASCII
+    /// letter or digit (at most one such token), `\r`, `<Enter>` or
+    /// `<Down>`. Never a raw escape sequence, never free text - short and
+    /// closed enough that no secret can ride in it (§12.3a). The host sends
+    /// [`action_bytes`], not this text.
     pub action: String,
     pub scope: ScopeSpec,
     pub provenance: Provenance,
@@ -136,12 +138,76 @@ pub fn secret_word_in(text: &str) -> Option<&'static str> {
         .find(|w| padded.contains(&format!(" {w} ")))
 }
 
-/// Whether `action` is one plain keystroke: at most one ASCII letter or
-/// digit, then an optional `\r`, and not empty. Nothing longer is ever
-/// sent, so no password, token or code can be carried by an action.
-pub fn action_is_a_plain_keystroke(action: &str) -> bool {
-    let body = action.strip_suffix('\r').unwrap_or(action);
-    !action.is_empty() && body.len() <= 1 && body.chars().all(|c| c.is_ascii_alphanumeric())
+/// Most tokens an action may hold.
+pub const MAX_ACTION_TOKENS: usize = 3;
+
+/// One key of the closed action grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyToken {
+    /// One ASCII letter or digit.
+    Char(char),
+    /// Enter: `\r` or `<Enter>`.
+    Enter,
+    /// The Down arrow: `<Down>`.
+    Down,
+}
+
+/// Parses `action` in the closed grammar, or `None`. At most
+/// [`MAX_ACTION_TOKENS`] tokens, at most ONE of them a letter or digit (so
+/// no code such as "123" can be typed), and nothing else: no ESC or other
+/// control byte, no other `<...>` name, no space, no free text.
+pub fn parse_action(action: &str) -> Option<Vec<KeyToken>> {
+    let mut tokens = Vec::new();
+    let mut rest = action;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("<Down>") {
+            tokens.push(KeyToken::Down);
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("<Enter>") {
+            tokens.push(KeyToken::Enter);
+            rest = r;
+        } else {
+            let c = rest.chars().next()?;
+            if c == '\r' {
+                tokens.push(KeyToken::Enter);
+            } else if c.is_ascii_alphanumeric() {
+                tokens.push(KeyToken::Char(c));
+            } else {
+                return None;
+            }
+            rest = &rest[c.len_utf8()..];
+        }
+        if tokens.len() > MAX_ACTION_TOKENS {
+            return None;
+        }
+    }
+    let chars = tokens
+        .iter()
+        .filter(|t| matches!(t, KeyToken::Char(_)))
+        .count();
+    (!tokens.is_empty() && chars <= 1).then_some(tokens)
+}
+
+/// Whether `action` is in the closed grammar ([`parse_action`]).
+pub fn action_is_allowed(action: &str) -> bool {
+    parse_action(action).is_some()
+}
+
+/// The bytes the host writes for a valid `action`: a letter or digit as
+/// itself, Enter as `\r`, Down as the ANSI cursor-down sequence `ESC [ B`
+/// (measured by OverMind through ConPTY to answer the folder-trust dialog).
+/// `None` for an action outside the grammar. The ESC lives only here, never
+/// in a handler file.
+pub fn action_bytes(action: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for t in parse_action(action)? {
+        match t {
+            KeyToken::Char(c) => out.push(c as u8),
+            KeyToken::Enter => out.push(b'\r'),
+            KeyToken::Down => out.extend_from_slice(b"\x1b[B"),
+        }
+    }
+    Some(out)
 }
 
 /// Whether `id` is usable as a file stem and a log key: 1-64 characters of
@@ -181,10 +247,10 @@ pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
             "text anchor {a:?} is shorter than {MIN_ANCHOR_LEN} characters"
         ));
     }
-    if !action_is_a_plain_keystroke(&handler.action) {
+    if !action_is_allowed(&handler.action) {
         return Some(format!(
-            "action {:?} is not one plain keystroke (one letter or digit, optional \\r) - \
-             secrets are never approvals",
+            "action {:?} is not a keystroke sequence of at most 3 tokens (at most one letter or \
+             digit, \\r, <Enter>, <Down>) - secrets are never approvals",
             handler.action
         ));
     }
@@ -448,15 +514,47 @@ mod tests {
 
     #[test]
     fn refuses_an_action_long_enough_to_carry_a_secret() {
-        for bad in ["hunter2\r", "1234\r", "", "\r\r", "yes\r", "1\n", "\u{1b}"] {
+        for bad in [
+            "hunter2\r",
+            "1234\r",
+            "",
+            "yes\r",
+            "1\n",
+            "\u{1b}",
+            "\u{1b}[B",
+            "<Down>\u{1b}",
+            "<Esc>",
+            "<down>",
+            "<Up>",
+            "<Down><Down><Down><Enter>",
+            "<Down>\r\r\r",
+            "12",
+            "1<Enter>2",
+            "<Down> ",
+            "<Down><Enter",
+            "\u{e9}",
+        ] {
             let json = with(&format!(
                 r#""action": {}"#,
                 serde_json::to_string(bad).unwrap()
             ));
             let err = parse_and_validate(&json).unwrap_err();
-            assert!(err.contains("plain keystroke"), "{bad:?}: {err}");
+            assert!(err.contains("keystroke"), "{bad:?}: {err}");
         }
-        for good in ["1\r", "y", "\r", "Y\r", "2"] {
+        for good in [
+            "1\r",
+            "y",
+            "\r",
+            "Y\r",
+            "2",
+            "<Enter>",
+            "<Down>",
+            "<Down><Enter>",
+            "<Down>\r",
+            "y<Enter>",
+            "<Down><Down><Enter>",
+            "\r\r",
+        ] {
             let json = with(&format!(
                 r#""action": {}"#,
                 serde_json::to_string(good).unwrap()
@@ -466,6 +564,36 @@ mod tests {
                 "{good:?} must be allowed"
             );
         }
+    }
+
+    #[test]
+    fn action_bytes_maps_each_token_and_only_down_carries_an_escape() {
+        assert_eq!(action_bytes("<Down><Enter>").unwrap(), b"\x1b[B\r");
+        assert_eq!(action_bytes("<Down>\r").unwrap(), b"\x1b[B\r");
+        assert_eq!(action_bytes("1\r").unwrap(), b"1\r");
+        assert_eq!(action_bytes("y").unwrap(), b"y");
+        assert_eq!(
+            action_bytes("<Down><Down><Enter>").unwrap(),
+            b"\x1b[B\x1b[B\r"
+        );
+        // Every accepted action's bytes hold an ESC only as part of `ESC [ B`.
+        for a in ["<Down>", "<Down><Enter>", "<Down><Down><Down>", "1<Down>"] {
+            let b = action_bytes(a).unwrap();
+            let escs = b.iter().filter(|&&x| x == 0x1b).count();
+            let downs = b.windows(3).filter(|w| *w == b"\x1b[B").count();
+            assert_eq!(escs, downs, "{a}");
+        }
+        assert_eq!(action_bytes("\u{1b}[B"), None);
+    }
+
+    #[test]
+    fn a_trust_dialog_handler_loads_with_down_enter() {
+        let json = with(r#""action": "<Down><Enter>""#);
+        let h = parse_and_validate(&json).unwrap();
+        assert_eq!(
+            parse_action(&h.action).unwrap(),
+            vec![KeyToken::Down, KeyToken::Enter]
+        );
     }
 
     #[test]
