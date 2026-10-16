@@ -119,6 +119,35 @@ What a plain Windows runner changes for a workflow written for `ubuntu-latest` (
   `actions/setup-python` install per job; machine-wide tools (MSVC, Git, `gh`, Docker) must be reachable by that
   account. Not measured.
 
+## 2c. HARD REQUIREMENT: the lane tools must not be writable by the runner account (board 224)
+
+OverMind's `icacls` finding, **reproduced on this machine 2026-10-16** (`scripts\gh-runner-setup.ps1 -Repo <r>
+-CheckAclsOnly`): `C:\Projects`, `C:\Projects\.claude-hooks` (with `with-secret.exe` and `lane-restart.exe`) and
+`C:\Projects\.lane-state` carry `NT AUTHORITY\Authenticated Users: Modify`, **inherited from `C:\`**. Any local
+account, `gh-runner` included, could replace `with-secret.exe` or `lane-restart.exe` and have it run as `cires` **with
+vault access**, which turns "a repo's workflow runs code as `gh-runner`" into "as the owner, with the vault". It is
+also why a restricted runner account is worth nothing while these ACLs stay as they are.
+
+So the script **refuses to create or change the account** (`-Apply`) while any `-ProtectedPaths` entry (default: the
+five above) has an Allow entry granting a write-capable right (write data, append, attributes, delete, change
+permissions, take ownership, or the generic write/all bits) to Everyone, Authenticated Users, Users, Interactive or
+the runner account itself. It prints the exact **elevated** commands and runs none of them:
+
+    icacls "C:\Projects" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "<you>:(OI)(CI)F"
+
+That makes everything under `C:\Projects` readable and writable only by SYSTEM, Administrators and the owner, and **every
+other local account loses access to it** (for example `CodexSandboxUsers` today has read access via `Users`): that is
+the point, and whether to do it is **CireSnave's call (board 224)**, not this script's. `-CheckAclsOnly` re-reads the
+state and must pass before `-Apply`; the dry run also shows whether `-Apply` would be refused. A child with its own
+(non-inherited) entry needs the same command. The check reads **Allow** entries only, so a Deny entry is not credited as
+a mitigation; it does not read group membership beyond the four broad groups and the account itself.
+
+Tested on real ACLs in a temp directory (`scripts\tests\gh-runner-setup-acl.tests.ps1`, run by
+`tests\runner_setup_acl.rs` on the Windows CI leg): each broad principal with each write right is refused with the path
+and the fix named; read-only grants, a missing path and a clean directory pass; a file is checked as well as a
+directory; the dry run reports without throwing. Two mutations (an empty write mask; dropping the Authenticated Users SID) make it fail. It passes under Windows PowerShell 5.1 and PowerShell 7; the ACL is read with `GetAccessRules`, not `Get-Acl` or `.Access` (the first cannot load under a mismatched `PSModulePath`, the second is `$null` on a raw security object and would read as a silent "clean"). **Not
+tested:** the `-Apply` refusal when elevated, which needs an elevated shell and would otherwise create the account.
+
 ## 3. The runner binary
 
 Pinned in the script, from the official release notes (`actions/runner` v2.338.0, read 2026-10-16):

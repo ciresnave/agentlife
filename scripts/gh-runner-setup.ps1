@@ -39,6 +39,8 @@
 .PARAMETER RunnerVersion Runner release to install. Pinned with its hash; change both together.
 .PARAMETER RunnerSha256  SHA256 of actions-runner-win-x64-<RunnerVersion>.zip, from the release notes.
 .PARAMETER Ephemeral    Register with --ephemeral (default ON): the runner takes ONE job, then unregisters and its service stops, so a job cannot leave anything for the next. REQUIRED for the public repos (docs/RUNNER-SETUP.md section 2a); -Ephemeral:$false is refused for them.
+.PARAMETER ProtectedPaths  Paths the runner account must NOT be able to write, directly or through a broad group: the lane tools that run as the owner WITH vault access. Default C:\Projects, C:\Projects\.claude-hooks, with-secret.exe, lane-restart.exe, C:\Projects\.lane-state. -Apply refuses to create the account while any is writable by Everyone, Authenticated Users, Users, Interactive or the account itself (board 224).
+.PARAMETER CheckAclsOnly Read-only: run the ACL check, print the exact elevated fix commands for what it finds, and throw if anything is exposed. Nothing else happens.
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account.
 #>
@@ -53,6 +55,8 @@ param(
   [string]$RunnerVersion = '2.338.0',
   [string]$RunnerSha256 = 'f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f',
   [bool]$Ephemeral = $true,
+  [string[]]$ProtectedPaths = @('C:\Projects', 'C:\Projects\.claude-hooks', 'C:\Projects\.claude-hooks\with-secret.exe', 'C:\Projects\.claude-hooks\lane-restart.exe', 'C:\Projects\.lane-state'),
+  [switch]$CheckAclsOnly,
   [switch]$Apply,
   [switch]$Remove
 )
@@ -86,12 +90,76 @@ $ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
 function Slug([string]$r) { $r -replace '/', '-' }
 function Svc([string]$r) { 'actions.runner.' + (Slug $r) + '.' + $env:COMPUTERNAME + '-' + (Slug $r) }
 
+# ACL preflight (board 224). A local account that can replace with-secret.exe or lane-restart.exe gets code run as
+# the owner WITH vault access, so none of the protected paths may be writable by any principal the runner account
+# is in. Read-only. "Authenticated Users: Modify" inherited from C:\ is the exact hole this exists for.
+# The ACL read goes straight to .NET, not through Get-Acl: Get-Acl lives in Microsoft.PowerShell.Security, which Windows
+# PowerShell 5.1 cannot load when it inherits a PowerShell 7 PSModulePath (seen under a test harness launched from pwsh).
+function Read-Acl([string]$Path) {
+  $isDir = Test-Path -LiteralPath $Path -PathType Container
+  if ($PSVersionTable.PSEdition -eq 'Core') {
+    if ($isDir) { return [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]::new($Path)) }
+    return [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]::new($Path))
+  }
+  if ($isDir) { return [System.IO.Directory]::GetAccessControl($Path) }
+  return [System.IO.File]::GetAccessControl($Path)
+}
+function Get-WriteExposure {
+  param([string[]]$Paths, [string]$AccountName)
+  # Everyone, Authenticated Users, Users, Interactive, plus the runner account itself if it exists.
+  $sids = New-Object System.Collections.Generic.HashSet[string]
+  foreach ($x in 'S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4') { [void]$sids.Add($x) }
+  try {
+    $acct = New-Object System.Security.Principal.NTAccount("$env:COMPUTERNAME\$AccountName")
+    [void]$sids.Add($acct.Translate([System.Security.Principal.SecurityIdentifier]).Value)
+  } catch { }
+  # WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, DeleteSubdirectoriesAndFiles, Delete,
+  # ChangePermissions, TakeOwnership, plus the generic GENERIC_ALL and GENERIC_WRITE bits some inherited ACEs carry.
+  $mask = 0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+  foreach ($path in $Paths) {
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    # GetAccessRules, never the `.Access` property: that property exists only on what Get-Acl returns, so on a raw
+    # security object it is $null and the loop would see no entries, i.e. a silent "clean". Rules come back as SIDs.
+    $rules = (Read-Acl $path).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+    if ($null -eq $rules) { throw "could not read the ACL of $path (refusing rather than assuming it is clean)" }
+    foreach ($ace in $rules) {
+      if ($ace.AccessControlType -ne 'Allow') { continue }
+      $sid = $ace.IdentityReference.Value
+      if (-not $sids.Contains($sid)) { continue }
+      if (($ace.FileSystemRights.value__ -band $mask) -eq 0) { continue }
+      [pscustomobject]@{ Path = $path; Who = $(try { $ace.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $ace.IdentityReference.Value }); Rights = $(if ("$($ace.FileSystemRights)" -match '^-?\d+$') { 'generic bits 0x{0:X8}' -f $ace.FileSystemRights.value__ } else { [string]$ace.FileSystemRights }); Inherited = $ace.IsInherited }
+    }
+  }
+}
+function Show-AclFix {
+  param($Findings)
+  $me = "$env:USERDOMAIN\$env:USERNAME"
+  Write-Host "The runner account (or a group every account is in) can WRITE these, and so could replace a tool that runs as $me with vault access:"
+  foreach ($f in $Findings) { Write-Host ("  {0}  <-  {1} : {2}{3}" -f $f.Path, $f.Who, $f.Rights, $(if ($f.Inherited) { ' (inherited)' } else { '' })) }
+  Write-Host "Fix, from an ELEVATED PowerShell by an administrator (this script never runs it). It cuts off inheritance on the top-level path,"
+  Write-Host "so everything under it inherits SYSTEM, Administrators and you only, and EVERY other local account loses access to it:"
+  # Only the outermost exposed paths: everything below inherits the fix (a child with its own entry shows up on the re-check).
+  $all = @($Findings | ForEach-Object { $_.Path } | Sort-Object -Unique)
+  $tops = @($all | Where-Object { $p = $_; -not ($all | Where-Object { $_ -ne $p -and $p.StartsWith($_.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) }) })
+  foreach ($t in $tops) { Write-Host ("  icacls `"{0}`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" `"{1}:(OI)(CI)F`"" -f $t, $me) }
+  Write-Host "Then read it back: re-run this script with -CheckAclsOnly; it must pass. A child with its OWN (non-inherited) entry needs the same icacls."
+}
+$aclFindings = @()
+if (-not $Remove) { $aclFindings = @(Get-WriteExposure -Paths $ProtectedPaths -AccountName $Account) }
+if ($CheckAclsOnly) {
+  if ($aclFindings.Count -gt 0) { Show-AclFix $aclFindings; throw "ACL preflight FAILED: $($aclFindings.Count) exposed entr(ies) on the protected paths" }
+  Write-Host "ACL preflight passed: none of ($($ProtectedPaths -join ', ')) is writable by Everyone, Authenticated Users, Users, Interactive or $Account."
+  return
+}
+
 if (-not $Apply) {
   Write-Host "DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.`n"
   Write-Host "Owners        : $($Owners -join ', ')   private (persistent allowed): $(if ($Private) { $Private -join ', ' } else { 'none: every -Repo is treated as public, so ephemeral' })"
   Write-Host "Account       : $env:COMPUTERNAME\$Account (standard user; random 32-char password held in memory only)"
   Write-Host "Root          : $Root  (ACL: SYSTEM, Administrators, $Account)"
   Write-Host "Runner        : v$RunnerVersion  SHA256 $RunnerSha256`n  $zipUrl"
+  if ($aclFindings.Count -gt 0) { Write-Host "`nACL PREFLIGHT WOULD REFUSE -Apply:"; Show-AclFix $aclFindings; Write-Host "" }
+  else { Write-Host "ACL preflight: clean (-Apply would proceed past it)" }
   foreach ($r in $Repo) {
     $dir = Join-Path $Root (Slug $r)
     Write-Host "`n[$r]"
@@ -110,6 +178,10 @@ if (-not $Apply) {
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   throw '-Apply needs an elevated PowerShell'
+}
+if ($aclFindings.Count -gt 0) {
+  Show-AclFix $aclFindings
+  throw "refusing to create or change the account: $($aclFindings.Count) exposed entr(ies) on the protected paths (board 224). Fix them, then run again."
 }
 
 function New-RandomPassword([int]$len = 32) {
