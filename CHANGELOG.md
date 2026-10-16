@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.5
+
+- **`lane-restart`: handlers gain `match.isolated_lines`, and a folder-trust record template:** like `match.lines`, and the row
+  after the pinned row must be blank, so a trusted path exactly one column short of the screen width followed by a wrapped
+  suffix cannot pass as the trusted path. `MatchSpec` gains the field; `MatchReport.lines` also lists isolated pins.
+  New `docs/TRUST-DIALOG.md` (the captured dialog, the host PTY width: the console window size, 80 x 25 fallback, resized
+  with the terminal) and `approval-example/trust-folder-agentlife.json` (inert template and test fixture).
+
 ## 0.16.2
 
 - **Runner policy, widened (docs, script, new unpublished crate):** `docs/RUNNER-SETUP.md` records the policy
