@@ -49,6 +49,14 @@ pub struct MatchSpec {
     /// `"{name}: {value}"` ending at a line boundary (§12.4).
     #[serde(default)]
     pub fields: HashMap<String, String>,
+    /// Whole-line pins: each must equal one screen line EXACTLY, after
+    /// trimming surrounding whitespace - never a substring or a prefix of
+    /// it. This is how a handler pins a value such as the folder path on a
+    /// trust dialog: the anchor `C:\Projects\agentlife` is a substring of
+    /// `C:\Projects\agentlife-evil`, the line pin is not. A line the
+    /// terminal wrapped can never match (it fails closed).
+    #[serde(default)]
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +255,16 @@ pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
             "text anchor {a:?} is shorter than {MIN_ANCHOR_LEN} characters"
         ));
     }
+    if let Some(l) = handler
+        .match_spec
+        .lines
+        .iter()
+        .find(|l| l.trim().chars().count() < MIN_ANCHOR_LEN || l.contains(['\r', '\n']))
+    {
+        return Some(format!(
+            "pinned line {l:?} is shorter than {MIN_ANCHOR_LEN} characters or spans lines"
+        ));
+    }
     if !action_is_allowed(&handler.action) {
         return Some(format!(
             "action {:?} is not a keystroke sequence of at most 3 tokens (at most one letter or \
@@ -256,6 +274,7 @@ pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
     }
     let mut texts: Vec<&str> = vec![handler.id.as_str()];
     texts.extend(handler.match_spec.text_anchors.iter().map(String::as_str));
+    texts.extend(handler.match_spec.lines.iter().map(String::as_str));
     for (name, value) in &handler.match_spec.fields {
         texts.push(name);
         texts.push(value);
@@ -330,6 +349,13 @@ fn field_matches(screen_text: &str, name: &str, value: &str) -> bool {
     false
 }
 
+/// Whether some line of `screen_text` equals `pinned` exactly once both are
+/// trimmed of surrounding whitespace.
+fn line_matches(screen_text: &str, pinned: &str) -> bool {
+    let pinned = pinned.trim();
+    !pinned.is_empty() && screen_text.lines().any(|l| l.trim() == pinned)
+}
+
 /// Exact-match only (§12.4): every `text_anchor` must appear verbatim,
 /// every `fields` entry must appear as `"{name}: {value}"` with nothing
 /// else appended to the value on the same line, and the screen must not
@@ -346,7 +372,12 @@ pub fn matches(handler: &HandlerSpec, screen_text: &str) -> bool {
         .fields
         .iter()
         .all(|(name, value)| field_matches(screen_text, name, value));
-    anchors_ok && fields_ok && secret_word_in(screen_text).is_none()
+    let lines_ok = handler
+        .match_spec
+        .lines
+        .iter()
+        .all(|l| line_matches(screen_text, l));
+    anchors_ok && fields_ok && lines_ok && secret_word_in(screen_text).is_none()
 }
 
 /// The first active, exactly-matching handler for `screen_text`, if any.
@@ -373,6 +404,8 @@ pub struct MatchReport {
     pub anchors: Vec<(String, bool)>,
     /// (field name, pinned value, whether it matched at a real boundary)
     pub fields: Vec<(String, String, bool)>,
+    /// (pinned line, whether some screen line equals it exactly)
+    pub lines: Vec<(String, bool)>,
     /// The secret word on screen that vetoed a match, if any.
     pub secret_word: Option<&'static str>,
     pub matched: bool,
@@ -397,16 +430,24 @@ pub fn match_report(
         .iter()
         .map(|(n, v)| (n.clone(), v.clone(), field_matches(screen_text, n, v)))
         .collect();
+    let lines: Vec<(String, bool)> = handler
+        .match_spec
+        .lines
+        .iter()
+        .map(|l| (l.clone(), line_matches(screen_text, l)))
+        .collect();
     let secret_word = secret_word_in(screen_text);
     let matched = active
         && anchors.iter().all(|(_, ok)| *ok)
         && fields.iter().all(|(_, _, ok)| *ok)
+        && lines.iter().all(|(_, ok)| *ok)
         && secret_word.is_none();
     MatchReport {
         handler_id: handler.id.clone(),
         active,
         anchors,
         fields,
+        lines,
         secret_word,
         matched,
     }
@@ -563,6 +604,73 @@ mod tests {
                 parse_and_validate(&json).is_ok(),
                 "{good:?} must be allowed"
             );
+        }
+    }
+
+    fn with_lines(lines: &str) -> HandlerSpec {
+        parse_and_validate(&format!(
+            r#"{{
+                "id": "trust",
+                "match": {{"text_anchors": ["Do you trust the files"], "lines": {lines}}},
+                "action": "<Down><Enter>",
+                "scope": {{"roles": ["*"]}},
+                "provenance": {PROVENANCE}
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pinned_line_matches_that_folder_and_not_a_longer_one() {
+        let h = with_lines(r#"["C:\\Projects\\agentlife"]"#);
+        let screen =
+            |path: &str| format!("Do you trust the files in this folder?\n  {path}  \n1. Yes");
+        // Positive control: the exact folder, with surrounding blanks, matches.
+        assert!(matches(&h, &screen(r"C:\Projects\agentlife")));
+        // The prefix hazard an anchor would have.
+        assert!(!matches(&h, &screen(r"C:\Projects\agentlife-evil")));
+        assert!(!matches(&h, &screen(r"C:\Projects\agentlife\sub")));
+        assert!(!matches(&h, &screen(r"X:C:\Projects\agentlife")));
+        // A wrapped path fails closed.
+        assert!(!matches(
+            &h,
+            "Do you trust the files in this folder?\nC:\\Projects\\agent\nlife"
+        ));
+        // The same pin as a plain anchor WOULD match the evil folder: the reason this field exists.
+        let anchor_only = parse_and_validate(&format!(
+            r#"{{"id":"a","match":{{"text_anchors":["C:\\Projects\\agentlife"]}},"action":"<Down><Enter>","scope":{{"roles":["*"]}},"provenance":{PROVENANCE}}}"#
+        ))
+        .unwrap();
+        assert!(matches(
+            &anchor_only,
+            &screen(r"C:\Projects\agentlife-evil")
+        ));
+    }
+
+    #[test]
+    fn match_report_names_a_pinned_line_that_missed() {
+        let h = with_lines(r#"["C:\\Projects\\agentlife"]"#);
+        let r = match_report(
+            &h,
+            "any",
+            chrono::Utc::now(),
+            "Do you trust the files here?\nC:\\Projects\\agentlife-evil",
+        );
+        assert_eq!(r.lines, vec![(r"C:\Projects\agentlife".to_string(), false)]);
+        assert!(!r.matched);
+    }
+
+    #[test]
+    fn refuses_a_pinned_line_that_is_short_or_spans_lines_or_names_a_secret() {
+        for bad in [
+            r#"["short"]"#,
+            r#"["line one\nline two here"]"#,
+            r#"["Enter your password here"]"#,
+        ] {
+            let json = format!(
+                r#"{{"id":"t","match":{{"text_anchors":["Do you trust the files"],"lines":{bad}}},"action":"<Down><Enter>","scope":{{"roles":["*"]}},"provenance":{PROVENANCE}}}"#
+            );
+            assert!(parse_and_validate(&json).is_err(), "{bad}");
         }
     }
 
