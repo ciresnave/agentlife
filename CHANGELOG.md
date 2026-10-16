@@ -2,6 +2,19 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.9
+
+- **`lane-restart assert-idle` (and the state hook) walk up to 8 shell layers, not 4:** `lane-restart assert-idle: no claude
+  process found within 4 shell hops` was raised in the coderipper lane by `(lane-restart assert-idle || lane-restart.exe
+  assert-idle) | tail -5` from the Bash tool: the subshell-in-a-pipeline adds a fifth bash layer above the exe (on this box a
+  plain call already sits under three). Reproduced in another lane with the same command; the plain call and `| tail` alone
+  pass. Red-first test `walks_a_subshell_inside_a_pipeline_five_shells_deep` fails at 4. A stranger image before `claude` is
+  still refused at once, so only depth is loosened; the exceeded-limit test now follows the constant.
+- **Not a defect:** a PM dry run reading `state file is Ns old, refusing as stale` on an *idle* lane. `STALE_STATE_AFTER` is
+  120 s and hooks write only on events, so an idle lane is always stale; the lane's own `--self` restart fires a hook first.
+  (coderipper: no transcript events after its 20:19:58Z compaction = the state file's last write.) The refusal text now says so
+  and names the `assert-idle` then `--self` path; the 120 s rule itself is unchanged, since a stale read must not pass as idle.
+
 ## 0.16.8
 
 - **`lane-restart` `on_unhandled` tests start their window at the right moment (#113, OverMind):** a flaky test window
