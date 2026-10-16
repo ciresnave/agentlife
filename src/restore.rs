@@ -1747,6 +1747,70 @@ mod tests {
         assert!(!home.root().join("restore.lock").exists());
     }
 
+    /// The launcher path (`lane_restart::launcher_gate`) and `agentlife restore` must exclude each
+    /// other through the one file: same name, same `<pid> <start>` body, same liveness rule.
+    #[test]
+    fn the_launcher_guard_and_the_restore_lock_see_each_other() {
+        use std::collections::HashMap;
+        struct Alive(HashMap<u32, u64>);
+        impl ProcessTable for Alive {
+            fn identity_of(&self, pid: u32) -> Option<ProcessIdentity> {
+                self.0.get(&pid).map(|s| ProcessIdentity {
+                    pid,
+                    start_secs: *s,
+                    exe: None,
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::new(dir.path()).unwrap();
+        // the launcher side: this very process, as the guard reads it from `SysinfoFacts`
+        let facts = lane_restart::facts::SysinfoFacts::new(dir.path().to_path_buf());
+        let me_pid = std::process::id();
+        let guard = lane_restart::launcher_gate::RestoreLockGuard::acquire(home.root(), &facts)
+            .expect("the launcher takes a free restore.lock");
+        let body = std::fs::read_to_string(home.root().join("restore.lock")).unwrap();
+        let start: u64 = body.split_whitespace().nth(1).unwrap().parse().unwrap();
+        // a restore run (another process) is told the launcher holds it
+        let other = ProcessIdentity {
+            pid: me_pid.wrapping_add(1),
+            start_secs: 1,
+            exe: None,
+        };
+        let table = Alive(HashMap::from([(me_pid, start), (other.pid, 1)]));
+        assert_eq!(
+            RestoreLock::acquire(&home, &other, &table).unwrap_err(),
+            LockProblem::Busy { pid: me_pid }
+        );
+        drop(guard);
+        // and the other way: a live owner (this process's parent, read from the real table) holds
+        // it, and the launcher is told so
+        let parent = facts_parent_identity();
+        std::fs::write(
+            home.root().join("restore.lock"),
+            format!("{} {}", parent.0, parent.1),
+        )
+        .unwrap();
+        let err = lane_restart::launcher_gate::RestoreLockGuard::acquire(home.root(), &facts)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            lane_restart::launcher_gate::RestoreLockError::Held { pid: parent.0 }
+        );
+    }
+
+    /// `(pid, start secs)` of this process's parent, read the way `identity::SysinfoTable` does.
+    fn facts_parent_identity() -> (u32, u64) {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let me = sys
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .unwrap();
+        let parent = me.parent().expect("a test process has a parent");
+        let p = sys.process(parent).expect("the parent is alive");
+        (parent.as_u32(), p.start_time())
+    }
+
     #[test]
     fn program_exists_checks_a_path_as_a_path_and_a_bare_name_on_the_path() {
         let dir = tempfile::tempdir().unwrap();

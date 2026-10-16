@@ -2,6 +2,35 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.13
+
+- **The launcher path of `lane-restart start` holds `restore.lock`, the caps and the memory floor**
+  (PM task 2026-10-15; OverMind `docs/LANE-LAUNCH-POLICY.md` @e4c6ae3 sections 2-3). For a launcher
+  caller only (the PM's own `start` is unchanged), after every spec refusal and before anything spawns:
+  1. **`restore.lock`**, the file `agentlife restore` takes (`<agentlife home>/restore.lock`, body
+     `<pid> <start secs>`), held to the end of the start. Held by a live owner: `failed` /
+     `lock-held`; unreadable: `failed` / `restore-lock-unavailable`. Two launcher starts of different
+     roles therefore serialise (the second is `lock-held` and Synapse retries it), and so do a launcher
+     start and a restore. A test in the root crate proves each side sees the other's file.
+  2. **Caps**, counted from `restart.log`: spawns by launcher callers in the last hour, 3 per role and
+     12 overall (`refused` / `rate`), and 8 per role in the last day (`refused` / `rate-daily`: **the
+     daily number is this lane's proposal; the policy names none**). Only a row where a spawn was
+     attempted counts, so refusals, `already-running`, `held-for-memory`, `lock-held` and dry runs never
+     consume budget; the check runs under `restore.lock`, so two starts cannot both read 11. A ledger
+     that is unreadable, or has a line that is not an entry, is `failed` / `store-unavailable` (fail
+     closed: a spawn row might be hiding in it; `lane-restart ledger` names the line).
+  3. **The memory floor** `agentlife restore` holds: `AGENTLIFE_FREE_RAM_FLOOR_GB`, else
+     `free_ram_floor_gb` in `<agentlife home>/config.json` (`AGENTLIFE_HOME` honoured), else 8. Below it:
+     `failed` / `held-for-memory`; a floor that cannot be read or is out of range: `failed` /
+     `config-unreadable`. Unmeasurable memory passes, as it does in `restore`.
+  Each `start` ledger line now also carries `signal_id`, `result` (`<outcome>:<reason>`, vocabulary A)
+  and `spawned` (new optional `log::Entry` / `ledger::Row` fields: a struct-literal `Entry` in external
+  code needs the three new fields). New `StartRefusal` variants `RateCap`, `HeldForMemory`,
+  `RestoreLockHeld`, `GateUnavailable`. New `lane_restart::launcher_gate`. Vocabulary A reasons added:
+  `rate`, `rate-daily`, `held-for-memory`, `lock-held`, `store-unavailable`, `config-unreadable`,
+  `restore-lock-unavailable`. Unit-tested and each guard mutation-tested; **not run against a real lane,
+  and `run_start_cmd`'s wiring is not unit-tested**. `--dry-run` takes no lock and applies no cap or floor.
+
 ## 0.15.12
 
 - **The launcher starts only a soft stop or a crash** (board 216, "216: yes"). For a launcher caller,
