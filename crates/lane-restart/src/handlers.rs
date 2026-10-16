@@ -57,6 +57,15 @@ pub struct MatchSpec {
     /// terminal wrapped can never match (it fails closed).
     #[serde(default)]
     pub lines: Vec<String>,
+    /// Like [`lines`](Self::lines), and the row right after it must be blank
+    /// (or the last row). A path the terminal HARD-wrapped at the screen
+    /// edge continues on the next row, which is not blank: so a trusted path
+    /// exactly one column short of the width, followed by more text that
+    /// wrapped, cannot pass as the trusted path. Use it for a value that can
+    /// be long (a folder path); a line followed by other text (a menu
+    /// entry) belongs in `lines`.
+    #[serde(default)]
+    pub isolated_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,6 +268,7 @@ pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
         .match_spec
         .lines
         .iter()
+        .chain(handler.match_spec.isolated_lines.iter())
         .find(|l| l.trim().chars().count() < MIN_ANCHOR_LEN || l.contains(['\r', '\n']))
     {
         return Some(format!(
@@ -275,6 +285,7 @@ pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
     let mut texts: Vec<&str> = vec![handler.id.as_str()];
     texts.extend(handler.match_spec.text_anchors.iter().map(String::as_str));
     texts.extend(handler.match_spec.lines.iter().map(String::as_str));
+    texts.extend(handler.match_spec.isolated_lines.iter().map(String::as_str));
     for (name, value) in &handler.match_spec.fields {
         texts.push(name);
         texts.push(value);
@@ -356,6 +367,19 @@ fn line_matches(screen_text: &str, pinned: &str) -> bool {
     !pinned.is_empty() && screen_text.lines().any(|l| l.trim() == pinned)
 }
 
+/// As [`line_matches`], and the next row must be blank or absent (see
+/// [`MatchSpec::isolated_lines`]).
+fn isolated_line_matches(screen_text: &str, pinned: &str) -> bool {
+    let pinned = pinned.trim();
+    if pinned.is_empty() {
+        return false;
+    }
+    let rows: Vec<&str> = screen_text.lines().collect();
+    rows.iter().enumerate().any(|(i, row)| {
+        row.trim() == pinned && rows.get(i + 1).is_none_or(|next| next.trim().is_empty())
+    })
+}
+
 /// Exact-match only (§12.4): every `text_anchor` must appear verbatim,
 /// every `fields` entry must appear as `"{name}: {value}"` with nothing
 /// else appended to the value on the same line, and the screen must not
@@ -376,7 +400,12 @@ pub fn matches(handler: &HandlerSpec, screen_text: &str) -> bool {
         .match_spec
         .lines
         .iter()
-        .all(|l| line_matches(screen_text, l));
+        .all(|l| line_matches(screen_text, l))
+        && handler
+            .match_spec
+            .isolated_lines
+            .iter()
+            .all(|l| isolated_line_matches(screen_text, l));
     anchors_ok && fields_ok && lines_ok && secret_word_in(screen_text).is_none()
 }
 
@@ -430,12 +459,18 @@ pub fn match_report(
         .iter()
         .map(|(n, v)| (n.clone(), v.clone(), field_matches(screen_text, n, v)))
         .collect();
-    let lines: Vec<(String, bool)> = handler
+    let mut lines: Vec<(String, bool)> = handler
         .match_spec
         .lines
         .iter()
         .map(|l| (l.clone(), line_matches(screen_text, l)))
         .collect();
+    lines.extend(handler.match_spec.isolated_lines.iter().map(|l| {
+        (
+            format!("(then a blank row) {l}"),
+            isolated_line_matches(screen_text, l),
+        )
+    }));
     let secret_word = secret_word_in(screen_text);
     let matched = active
         && anchors.iter().all(|(_, ok)| *ok)
@@ -669,6 +704,159 @@ mod tests {
         ] {
             let json = format!(
                 r#"{{"id":"t","match":{{"text_anchors":["Do you trust the files"],"lines":{bad}}},"action":"<Down><Enter>","scope":{{"roles":["*"]}},"provenance":{PROVENANCE}}}"#
+            );
+            assert!(parse_and_validate(&json).is_err(), "{bad}");
+        }
+    }
+
+    // -- the folder-trust dialog: OverMind's capture on claude 2.1.301 (pyte, 2026-10-16) ---------- //
+
+    const TRUST_EXAMPLE: &str = include_str!("../approval-example/trust-folder-agentlife.json");
+
+    /// The dialog as captured: one leading space on every text line; the path on its own row, HARD-wrapped at the
+    /// screen edge when it does not fit `cols` (the continuation row also has the one leading space).
+    fn trust_dialog(cols: usize, path: &str) -> String {
+        let mut rows = vec![
+            "\u{2500}".repeat(cols),
+            " Accessing workspace:".to_string(),
+            String::new(),
+        ];
+        let mut rest = format!(" {path}");
+        while rest.chars().count() > cols {
+            let head: String = rest.chars().take(cols).collect();
+            rows.push(head);
+            rest = format!(" {}", rest.chars().skip(cols).collect::<String>());
+        }
+        rows.push(rest);
+        rows.extend([
+            String::new(),
+            " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source".into(),
+            " project, or work from your team). If not, take a moment to review what's in this folder first.".into(),
+            String::new(),
+            " Claude Code'll be able to read, edit, and execute files here.".into(),
+            String::new(),
+            " Security guide".into(),
+            String::new(),
+            " \u{276f} No, exit".into(),
+            "   Yes, I trust this folder".into(),
+            String::new(),
+            " Enter to confirm \u{b7} Esc to cancel".into(),
+        ]);
+        rows.join("\n")
+    }
+
+    #[test]
+    fn the_trust_record_answers_its_own_folder_at_a_wide_screen_and_nothing_else() {
+        let h = parse_and_validate(TRUST_EXAMPLE).expect("the trust record must pass validation");
+        let ok = trust_dialog(120, r"C:\Projects\agentlife");
+        assert!(
+            matches(&h, &ok),
+            "positive control: the exact folder at 120 columns"
+        );
+        assert_eq!(action_bytes(&h.action).unwrap(), b"\x1b[B\r");
+        // A longer path, a path under it, and a different folder never match.
+        for other in [
+            r"C:\Projects\agentlife-evil",
+            r"C:\Projects\agentlife\sub",
+            r"C:\Projects\agentlife2",
+            r"D:\Projects\agentlife",
+            r"C:\Projects\other",
+        ] {
+            assert!(!matches(&h, &trust_dialog(120, other)), "{other}");
+        }
+        // The dialog's other lines are required too.
+        assert!(!matches(
+            &h,
+            &ok.replace("Yes, I trust this folder", "Yes, I trust that folder")
+        ));
+        assert!(!matches(
+            &h,
+            &ok.replace(" Accessing workspace:", " Accessing files:")
+        ));
+    }
+
+    #[test]
+    fn a_path_that_hard_wraps_at_a_narrow_screen_fails_closed() {
+        let h = parse_and_validate(TRUST_EXAMPLE).unwrap();
+        // 80 columns is the host's fallback size: a 79-character path no longer fits with its leading space.
+        let long = format!(r"C:\Projects\agentlife{}", "x".repeat(70));
+        assert!(!matches(&h, &trust_dialog(80, &long)));
+        // The record's own folder is short enough to match at 80 columns too.
+        assert!(matches(&h, &trust_dialog(80, r"C:\Projects\agentlife")));
+    }
+
+    #[test]
+    fn the_wrap_that_lands_exactly_on_the_trusted_path_needs_the_blank_row_pin() {
+        // A path exactly (columns - 1) long, plus a suffix: row 1 IS the trusted path, row 2 is its continuation.
+        let trusted = r"C:\Projects\agentlife";
+        let cols = trusted.len() + 1; // " " + path fills the row
+        let attacker = format!("{trusted}-evil");
+        let screen = trust_dialog(cols, &attacker);
+        assert!(
+            screen.lines().any(|l| l.trim() == trusted),
+            "the setup: the first wrapped row equals the trusted path"
+        );
+        // A plain line pin is fooled by that.
+        let mut with_plain = parse_and_validate(TRUST_EXAMPLE).unwrap();
+        let path_pin = with_plain.match_spec.isolated_lines.remove(0);
+        with_plain.match_spec.lines.push(path_pin);
+        assert!(
+            matches(&with_plain, &screen),
+            "residual: a plain `lines` pin is fooled at the exact width"
+        );
+        // The isolated pin is not: the next row is the non-blank continuation.
+        let isolated = parse_and_validate(TRUST_EXAMPLE).unwrap();
+        assert!(!matches(&isolated, &screen));
+        // And the same record still matches the honest dialog at that width.
+        assert!(matches(&isolated, &trust_dialog(cols + 1, trusted)));
+    }
+
+    #[test]
+    fn an_isolated_line_may_be_the_last_row() {
+        let h = parse_and_validate(TRUST_EXAMPLE).unwrap();
+        let mut screen = trust_dialog(120, r"C:\Projects\agentlife");
+        // Cut the dialog after the path row (nothing follows).
+        let cut = screen.find("\n\n Quick safety").unwrap();
+        screen.truncate(cut);
+        // The other pins are gone, so it must not match; drop them from the record to test only the isolation rule.
+        assert!(!matches(&h, &screen));
+        let mut only = h.clone();
+        only.match_spec.lines.clear();
+        only.match_spec.text_anchors = vec!["Accessing workspace:".into()];
+        assert!(
+            matches(&only, &screen),
+            "the pinned row is last: nothing follows to continue it"
+        );
+    }
+
+    #[test]
+    fn match_report_names_an_isolated_pin_that_missed() {
+        let h = parse_and_validate(TRUST_EXAMPLE).unwrap();
+        let r = match_report(
+            &h,
+            "any",
+            chrono::Utc::now(),
+            &trust_dialog(120, r"C:\Projects\agentlife-evil"),
+        );
+        assert!(!r.matched);
+        assert!(
+            r.lines
+                .iter()
+                .any(|(l, ok)| l.starts_with("(then a blank row)") && !ok),
+            "{:?}",
+            r.lines
+        );
+    }
+
+    #[test]
+    fn refuses_an_isolated_line_that_is_short_or_spans_lines_or_names_a_secret() {
+        for bad in [
+            r#"["short"]"#,
+            r#"["line one\nline two here"]"#,
+            r#"["Enter your password here"]"#,
+        ] {
+            let json = format!(
+                r#"{{"id":"t","match":{{"text_anchors":["Do you trust the files"],"isolated_lines":{bad}}},"action":"<Down><Enter>","scope":{{"roles":["*"]}},"provenance":{PROVENANCE}}}"#
             );
             assert!(parse_and_validate(&json).is_err(), "{bad}");
         }
