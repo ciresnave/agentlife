@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "agentlife"
-version = "0.15.16"
+version = "0.15.17"
 dependencies = [
  "chrono",
  "lane-restart",
@@ -2112,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.15.16"
+version = "0.15.17"
 dependencies = [
  "chrono",
  "lane-state",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.15.16"
+version = "0.15.17"
 dependencies = [
  "chrono",
  "rustix",
@@ -2141,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "launcher"
-version = "0.15.16"
+version = "0.15.17"
 dependencies = [
  "serde",
  "serde_json",
@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "pin-plan"
-version = "0.15.16"
+version = "0.15.17"
 
 [[package]]
 name = "pin-project"
@@ -3688,9 +3688,9 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.85"
+version = "6.0.0-rc.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a84378432634c574a05c67df959791a791d30663e7fe72e666214a9ca6e3a60"
+checksum = "206b9af87a4b51e5d84c57620e3e2c65b24e076a4d6b302d1b675f5e07b563d8"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -3758,9 +3758,9 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.85"
+version = "6.0.0-rc.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95437841d22f25bc9d638ba233c5c6e5518d2481a8c5f840a51ccf3083993226"
+checksum = "f73c37bc85373e15c8eb9ade6b0464a30f53c6f4d3005c3405b779a6feefe557"
 dependencies = [
  "chrono",
  "serde_json",
@@ -3769,9 +3769,9 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.85"
+version = "6.0.0-rc.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b463610e0ecec32119972a5f3269ccac3d24ca714641743a9498a1b2ed741462"
+checksum = "6bac7435ebfa37fc436baea242e661fef8c3cc898176ca8176a000934fd3269c"
 dependencies = [
  "base64 0.23.1",
  "chrono",

@@ -2,6 +2,11 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.15.17
+
+- **Dependency bump, no behaviour change:** `synapsed-client` and `synapse` 6.0.0-rc.85 -> rc.89 (the
+  launch-result vocabulary is pinned in the client; the workspace is now rsa-free).
+
 ## 0.15.16
 
 - **Test fix, no behaviour change:** `peers::tests::a_broker_that_is_not_there_is_an_error` bound a port,
