@@ -93,7 +93,10 @@ impl std::fmt::Display for Refusal {
             Refusal::StaleStateFile { role, age_secs } => {
                 write!(
                     f,
-                    "{role}: state file is {age_secs}s old, refusing as stale"
+                    "{role}: state file is {age_secs}s old, refusing as stale \
+                     (hooks write only on events, so an IDLE lane always reads stale; \
+                     the lane restarts itself with `lane-restart assert-idle` then `--self`, \
+                     and its own tool call refreshes the file)"
                 )
             }
             Refusal::ProcessNotIdentified(msg) => write!(f, "identity check failed: {msg}"),
@@ -431,6 +434,18 @@ mod tests {
     }
 
     // --- self-restart: no idle/shell check should ever run --------------- //
+
+    #[test]
+    fn the_stale_refusal_names_the_idle_lane_path() {
+        let text = Refusal::StaleStateFile {
+            role: "coderipper".to_string(),
+            age_secs: 9711,
+        }
+        .to_string();
+        assert!(text.contains("9711s old"), "{text}");
+        assert!(text.contains("IDLE lane"), "{text}");
+        assert!(text.contains("--self"), "{text}");
+    }
 
     #[test]
     fn self_restart_succeeds_even_if_busy() {

@@ -197,10 +197,12 @@ pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
 /// session, §10.3) refused every real interactive write.
 use crate::platform::names::{image_base, is_shell};
 
-/// How many shell layers this walk tolerates before giving up -
-/// RESTART-TOOL-DESIGN.md §11.1's real chain needed 2; this leaves margin
-/// without walking indefinitely.
-const MAX_ANCESTRY_HOPS: u32 = 4;
+/// How many shell layers this walk tolerates before giving up. The real chain needed 2
+/// (RESTART-TOOL-DESIGN.md §11.1), but a Bash-tool command's own shape adds layers: on this box
+/// `claude <- bash x3 <- lane-restart` for a plain call, and `( a || b ) | tail` adds a fifth, which
+/// the old limit of 4 refused (coderipper, 2026-10-16). 8 leaves room for nesting; a stranger image
+/// is still refused at once, so a larger limit loosens nothing but depth.
+const MAX_ANCESTRY_HOPS: u32 = 8;
 
 /// Walks up from `my_pid`, skipping ONLY known shell images, and returns
 /// the pid of the first `claude` found. Refuses (never skips past) any
@@ -382,17 +384,29 @@ mod tests {
     }
 
     #[test]
-    fn refuses_when_the_hop_limit_is_exceeded() {
-        // All shells, never reaching claude within MAX_ANCESTRY_HOPS.
+    fn walks_a_subshell_inside_a_pipeline_five_shells_deep() {
+        // coderipper, 2026-10-16: `(lane-restart assert-idle || lane-restart.exe assert-idle) | tail -5`
+        // from the Bash tool: the exe under four bash layers, then claude. Five hops, refused at 4.
         let lookup = FakeAncestry::chain(&[
             (1, 10, "bash"),
             (10, 20, "bash"),
             (20, 30, "bash"),
             (30, 40, "bash"),
-            (40, 50, "bash"),
+            (40, 99, "claude.exe"),
         ]);
+        assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+    }
+
+    #[test]
+    fn refuses_when_the_hop_limit_is_exceeded() {
+        // All shells, never reaching claude within MAX_ANCESTRY_HOPS.
+        let links: Vec<(u32, u32, &str)> = (0..=MAX_ANCESTRY_HOPS)
+            .map(|i| (i * 10 + 1, (i + 1) * 10 + 1, "bash"))
+            .collect();
+        let lookup = FakeAncestry::chain(&links);
+        let start = 1;
         assert!(matches!(
-            claude_parent_pid(1, &lookup),
+            claude_parent_pid(start, &lookup),
             Err(PidError::HopLimitExceeded)
         ));
     }
