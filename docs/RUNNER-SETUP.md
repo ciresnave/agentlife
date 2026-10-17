@@ -183,11 +183,18 @@ Vulkan or CUDA fails there, the alternative is an interactive runner (`run.cmd`)
 runner account: that needs the account to hold a desktop session next to CireSnave's, which is why it is the
 fallback, and it is **not implemented here**.
 
-### 5a. Spike workflow (not written yet)
+### 5a. Spike workflow (`docs/spike/runner-spike.yml`)
 
-One private, throwaway repo (the PM creates it). `on: workflow_dispatch` only, `runs-on: [self-hosted, windows,
-gpu]`, steps: `whoami`, session id, `nvidia-smi`, `vulkaninfo --summary`, and a CUDA call (`nvcc --version` is not
-enough: run a tiny kernel or `nvidia-smi -q`). Its result goes in this section with the date.
+One private, throwaway repo, `ciresnave/runner-spike` (the PM created it, 2026-10-16, on CireSnave's "Go for the throwaway
+spike"). The workflow goes in it as `.github/workflows/spike.yml`: `workflow_dispatch` and `push` to `main` only, `runs-on:
+[self-hosted, windows, gpu]`, no secrets, no third-party actions, no checkout. It passes `runner-lint` (0 findings). Steps:
+`whoami` and the **session id** (0 means a service with no desktop), a write attempt on the three protected paths (each must
+say False), `nvidia-smi -L` and a query, `vulkaninfo --summary`, and a **CUDA kernel launch** (compile and run a 4-thread
+kernel; `nvcc --version` or `nvidia-smi -q` would only show the toolkit and NVML exist). A missing tool prints `NOT ON PATH`
+or `UNMEASURED`, never a pass: the `gh-runner` account has none of CireSnave's PATH. **Results: not yet run.** Record them
+here with the date and the run URL; anything the run could not show stays UNMEASURED.
+
+The `gpu` label is added by `-Labels gpu` (the script adds no label by default).
 
 ## 6. The lint (`crates/runner-lint`)
 
@@ -224,7 +231,9 @@ Distribution: the lint is in this repo's workspace. Running it in another repo's
 
 1. Review this doc and the script; run the script **without** `-Apply` and read the plan.
 2. Elevated PowerShell: `.\scripts\gh-runner-setup.ps1 -Repo <owner>/<throwaway> -Private <owner>/<throwaway>
-   -Apply`; paste the token when prompted. Read back `gh api repos/<repo>/actions/runners` (labels `self-hosted`,
+   -Labels gpu -Apply`; paste the token when prompted. **`-Apply` reads the repo's visibility with `gh api`, and a private
+   repo answers 404 to `ciresnave-bot`** (not a collaborator), which throws "cannot read visibility". The PM sets
+   `$env:GH_TOKEN = (gh auth token --user ciresnave)` in that elevated shell first (per command, never `gh auth switch`). Read back `gh api repos/<repo>/actions/runners` (labels `self-hosted`,
    `Windows`, `X64`, `gpu`).
 3. Run the spike; record section 5.
 4. Only then register the first real repo, one `-Apply` each, with section 2a satisfied and the lint already in its CI.

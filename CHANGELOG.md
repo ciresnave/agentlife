@@ -2,6 +2,14 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.11
+
+- **Runner spike workflow written (`docs/spike/runner-spike.yml`, docs/RUNNER-SETUP.md 5a):** session id, protected-path write
+  attempts, `nvidia-smi`, `vulkaninfo --summary` and a real CUDA kernel launch, on `[self-hosted, windows, gpu]`, dispatch and
+  push-to-main only. `runner-lint` reports 0 findings; the script's dry run for `ciresnave/runner-spike` is clean. **Not run yet:**
+  the GPU-from-a-service question stays UNMEASURED until the PM registers the runner. Also documented: `-Apply` needs a
+  `GH_TOKEN` that can see a private repo, since `ciresnave-bot` gets 404 and the visibility check throws.
+
 ## 0.16.10
 
 - **`gh-runner-setup.ps1`: private repos default to a persistent runner (board 223, ruled):** CireSnave, 2026-10-16: "Go with your
