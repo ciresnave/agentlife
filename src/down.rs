@@ -38,7 +38,7 @@ use crate::identity::ProcessTable;
 use crate::journal::Journal;
 use crate::list::{liveness, Liveness};
 use crate::marks::pin_kind;
-use crate::peers::{peers_of_claude, Messenger, Peer};
+use crate::peers::{Messenger, Peer};
 use crate::readiness::{self, Evidence, LaneStateView, ProcTree};
 use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
 use chrono::{DateTime, Utc};
@@ -392,14 +392,8 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
     let by = by_label(r.caller, r.caller_rec, d.cfg);
 
     // 3. The peers that would be asked (a read), so the plan can name them.
-    let peers_result = d.messenger.peers();
-    let peers: Vec<Peer> = match &peers_result {
-        Ok(all) => peers_of_claude(all, d.parents, identity.pid)
-            .into_iter()
-            .cloned()
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let peers_result = d.messenger.recipients(&role, identity.pid, d.parents);
+    let peers: Vec<Peer> = peers_result.clone().unwrap_or_default();
     if !r.yes {
         let mut plan = vec![format!(
             "would stop {name} ({}), pid {} (started {}), after it wraps up",
@@ -407,7 +401,7 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
         )];
         plan.push(match &peers_result {
             Ok(_) if peers.is_empty() => {
-                "it has NO claude-peers session below its process, so it cannot be asked: this would fail"
+                "it has no live message recipient (claude-peers session below its process, or online Synapse role), so it cannot be asked: this would fail"
                     .to_string()
             }
             Ok(_) => format!(
@@ -415,7 +409,7 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
                 peers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "),
                 r.timeout.as_secs()
             ),
-            Err(e) => format!("the claude-peers broker cannot be reached ({e}): this would fail"),
+            Err(e) => format!("the message transport cannot be reached ({e}): this would fail"),
         });
         plan.push(format!(
             "would then record it {} and end exactly that process",
@@ -435,7 +429,7 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
     }
     if peers.is_empty() {
         return Err(DownError::CannotAsk(
-            "no claude-peers session was found below this agent's process".into(),
+            "no message recipient was found for this agent (claude-peers session below its process, or online Synapse role)".into(),
         ));
     }
     let asked_at = d.clock.now();

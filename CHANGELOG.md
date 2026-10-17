@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.16
+
+- **M8 phase 2: `agentlife down` and the logon-restore probe can leave the claude-peers broker (same `notify_transport` switch, default `broker`):** with `synapse`, `down` asks the lane to wrap up through the Synapse daemon as role `agentlife-cli` (claimed per run), addressed by the lane's spec role and only if that role is online (`/v1/list`), instead of joining a broker peer by process parent. `Messenger::recipients` carries the difference (default = the old join, so the broker path is unchanged). The restore wait probes the daemon's address from `<SYNAPSE_HOME>/synapsed.json` (never starting one). `down`'s messages no longer say "claude-peers". **Needs at T-0:** role `agentlife-cli` with `send`, and the target role must have claimed once. **Not run:** a real claim/send against a daemon. Still on the broker: `lane-restart status --peers` (`notify::list_all`).
+
 ## 0.16.15
 
 - **M8 phase 1: the notify path can leave the claude-peers broker (dual backend, default unchanged):** `notify_transport` in `~/.overmind/lane-restart.json` (`broker` default, or `synapse`). With `synapse`, a host's unmatched-dialog [ASK] is queued in `.lane-state/notify-outbox/` (temp file + rename, fixed `message_id`) instead of sent, and `agentlife launcher` relays the queue through the Synapse daemon as its own `agentlife-launcher` claim (`/v1/send` to role `pm`; a refused message stays queued, junk is renamed `*.bad`), and sends its stall alarms the same way. No per-host claims. `synapse` and `synapsed-client` pinned `=6.0.0-rc.101` (latest published). **Not run:** a real send/claim against a daemon (scratch-home test pending the recipe from the synapse lane), and `status --peers` and `src/peers.rs` still use the broker (next PR, 0.16.16). Unit tests: outbox order/retry/quarantine, transport parsing, send body, config fallback.

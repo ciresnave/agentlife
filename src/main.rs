@@ -571,7 +571,8 @@ fn approve_open(home: &Home, ids: &[String]) -> ExitCode {
 
 /// The real preconditions a logon restore waits for.
 struct SystemProbe {
-    broker: std::net::SocketAddr,
+    /// Where the message transport listens; `None` (Synapse with no `synapsed.json`) never holds.
+    broker: Option<std::net::SocketAddr>,
     host_program: String,
 }
 
@@ -585,11 +586,10 @@ impl task::Probe for SystemProbe {
                 .stderr(std::process::Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success()),
-            task::Precondition::Broker => std::net::TcpStream::connect_timeout(
-                &self.broker,
-                std::time::Duration::from_secs(2),
-            )
-            .is_ok(),
+            task::Precondition::Broker => self.broker.is_some_and(|addr| {
+                std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+                    .is_ok()
+            }),
             task::Precondition::HostProgram => program_exists(&self.host_program),
         }
     }
@@ -616,8 +616,18 @@ fn program_exists(program: &str) -> bool {
 fn wait_for_logon_preconditions() -> Result<(), String> {
     let home = Home::from_env().map_err(|e| e.to_string())?;
     let cfg = Config::load(&home, Layer::default()).map_err(|e| e.to_string())?;
+    // The same switch as the notify path: `notify_transport` (default broker). With `synapse` the
+    // probe reads the daemon's address from its home and never starts one.
+    let broker = match agentlife::launcher_service::notify_transport(
+        lane_restart::paths::home_dir().as_deref(),
+    ) {
+        lane_restart::notify::Transport::Broker => Some(cfg.peers_addr),
+        lane_restart::notify::Transport::Synapse => synapse::keystore::default_home()
+            .ok()
+            .and_then(|h| agentlife::peers::synapse_addr(&h)),
+    };
     let probe = SystemProbe {
-        broker: cfg.peers_addr,
+        broker,
         host_program: cfg.host_program.clone(),
     };
     let report = task::wait_ready(
@@ -1443,6 +1453,28 @@ fn run_down(
 ) -> ExitCode {
     let table = SnapshotTable::capture();
     let broker = Broker::new(app.cfg.peers_addr);
+    let synapse_messenger;
+    let messenger: &dyn agentlife::peers::Messenger =
+        match agentlife::launcher_service::notify_transport(
+            lane_restart::paths::home_dir().as_deref(),
+        ) {
+            lane_restart::notify::Transport::Broker => &broker,
+            lane_restart::notify::Transport::Synapse => {
+                let connected = synapse::keystore::default_home()
+                    .map_err(|e| format!("no Synapse home (set SYNAPSE_HOME): {e}"))
+                    .and_then(|h| agentlife::peers::SynapseMessenger::connect(&h));
+                match connected {
+                    Ok(m) => {
+                        synapse_messenger = m;
+                        &synapse_messenger
+                    }
+                    Err(e) => {
+                        eprintln!("agentlife {command}: cannot reach the Synapse daemon: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        };
     // One snapshot serves both the peer-to-lane join and the live-shell check.
     let tree = SnapshotParents::capture();
     let lane_state_dir = std::path::PathBuf::from(&app.cfg.lane_state_dir);
@@ -1456,7 +1488,7 @@ fn run_down(
             journal: &app.journal,
             cfg: &app.cfg,
             table: &table,
-            messenger: &broker,
+            messenger,
             parents: &tree,
             tree: &tree,
             facts: &facts,
