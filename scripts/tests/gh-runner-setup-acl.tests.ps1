@@ -142,6 +142,14 @@ try {
   $defaultAcct = ($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Account' }).DefaultValue.Value
   Check 'default -Account fits the 20-character local name limit' ($defaultAcct.Length -le 20) $defaultAcct
 
+  # Spike run 1 (2026-10-17): every `shell: powershell` step died on the Restricted execution policy. The dry run must show the
+  # .env step, and the script text must write the same variable it prints.
+  $dry = & { & $setup -Repo ciresnave/x -ProtectedPaths $clean } *>&1 | Out-String
+  Check 'dry run shows the runner .env with the execution-policy variable' ($dry -like '*.env*PSExecutionPolicyPreference=Bypass*') $dry
+  $src = Get-Content -LiteralPath $setup -Raw
+  Check 'the .env is written with Set-Content before config.cmd runs' (($src.IndexOf('Set-Content -LiteralPath "$dir\.env"')) -ge 0 -and ($src.IndexOf('Set-Content -LiteralPath "$dir\.env"')) -lt ($src.IndexOf('& "$dir\config.cmd" --unattended'))) 'order'
+  Check 'positive control: the control string finds config.cmd' ($src.IndexOf('& "$dir\config.cmd" --unattended') -ge 0) 'not found'
+
   # -Apply without elevation never reaches account creation; with an exposed path it says so first when elevated.
   # (Elevation is not available here, so only the non-elevated refusal is asserted.)
   try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -Apply 6>&1 | Out-Null; $applied = $true } catch { $applied = $false; $msg = $_.Exception.Message }
