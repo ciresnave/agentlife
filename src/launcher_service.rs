@@ -326,12 +326,7 @@ pub fn send_body(to_role: &str, message_id: &str, text: &str) -> Value {
 /// `broker` when the file is missing or unreadable (the claude-peers path stays the default
 /// until the cutover flips it).
 pub fn notify_transport(home: Option<&Path>) -> lane_restart::notify::Transport {
-    home.and_then(|h| {
-        lane_restart::approvals::load_config(&lane_restart::approvals::config_path(h)).ok()
-    })
-    .map_or(lane_restart::notify::Transport::Broker, |c| {
-        c.notify_transport
-    })
+    lane_restart::approvals::configured_transport(home)
 }
 
 /// Stall alarms to the PM lane, through the Synapse daemon as [`LAUNCHER_ROLE`].

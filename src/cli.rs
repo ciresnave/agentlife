@@ -11,6 +11,10 @@ pub enum Command {
         json: bool,
         all: bool,
     },
+    /// `status --peers`: the Synapse roles and whether each is online.
+    Status {
+        json: bool,
+    },
     Reconcile {
         dry_run: bool,
         json: bool,
@@ -122,6 +126,11 @@ USAGE:
     agentlife list [--json] [--all]
         The registry joined with the process table. Closed (parked/exited) agents are hidden
         unless --all. Read-only.
+
+    agentlife status --peers [--json]
+        The Synapse roles and whether each is online (last seen, queued mail, summary). Needs
+        notify_transport=synapse in ~/.overmind/lane-restart.json; on the broker use
+        `lane-restart status --peers`. Read-only.
 
     agentlife reconcile [--dry-run] [--json]
         For every agent that should be running but is not, say whether it was closed on purpose
@@ -279,6 +288,20 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 }
             }
             Ok(Command::List { json, all })
+        }
+        "status" => {
+            let (mut peers, mut json) = (false, false);
+            for a in rest {
+                match a.as_str() {
+                    "--peers" => peers = true,
+                    "--json" => json = true,
+                    other => return Err(format!("unknown argument to status: {other:?}")),
+                }
+            }
+            if !peers {
+                return Err("status: only --peers is built".into());
+            }
+            Ok(Command::Status { json })
         }
         "reconcile" => {
             let (mut dry_run, mut json) = (false, false);
@@ -639,6 +662,20 @@ mod tests {
     }
 
     #[test]
+    fn status_needs_peers_and_takes_json() {
+        assert_eq!(
+            p(&["status", "--peers"]),
+            Ok(Command::Status { json: false })
+        );
+        assert_eq!(
+            p(&["status", "--json", "--peers"]),
+            Ok(Command::Status { json: true })
+        );
+        assert!(p(&["status"]).is_err());
+        assert!(p(&["status", "--peers", "--wide"]).is_err());
+    }
+
+    #[test]
     fn list_flags_and_defaults() {
         assert_eq!(
             p(&["list"]),
@@ -982,6 +1019,7 @@ mod tests {
             "hook SessionStart",
             "hook SessionEnd",
             "list",
+            "status --peers",
             "reconcile",
             "restore --dry-run",
             "pending",
