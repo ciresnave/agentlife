@@ -151,6 +151,68 @@ and the fix named; read-only grants, a missing path and a clean directory pass; 
 directory; the dry run reports without throwing. Two mutations (an empty write mask; dropping the Authenticated Users SID) make it fail. It passes under Windows PowerShell 5.1 and PowerShell 7; the ACL is read with `GetAccessRules`, not `Get-Acl` or `.Access` (the first cannot load under a mismatched `PSModulePath`, the second is `$null` on a raw security object and would read as a silent "clean"). **Not
 tested:** the `-Apply` refusal when elevated, which needs an elevated shell and would otherwise create the account.
 
+## 2d. THE standard step: an MSVC environment for Windows jobs (measured gap, spike run 2, 2026-10-17)
+
+The `gh-runner` service has no Visual Studio developer environment, so `nvcc` dies with `Cannot find compiler 'cl.exe' in
+PATH` (the probe's CUDA step; measured). Any Windows job that needs `cl.exe`, `nvcc`, `lib.exe` or a `cc`-crate build must run
+this step **first**; it is our own code (no third-party action to pin). It finds Visual Studio with `vswhere` (component
+`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`), runs `VsDevCmd.bat -arch=x64` in a scratch `.cmd`, exports the environment
+to later steps through `GITHUB_ENV` and `GITHUB_PATH`, and **throws, naming the missing piece**, if vswhere, the component,
+`VsDevCmd.bat` or `cl.exe` is absent. Why not baracuda's approach: its forge passes a vswhere-located `cl.exe` to nvcc as
+`-ccbin`, which a `build.rs` that calls nvcc directly never gets (baracuda lane, 2026-10-17; the miss is unexplained), and its
+`cargo gpu-test` wrapper `call`s `vcvars64.bat >nul`, which hides a bad path. This step never discards the tool's output and
+checks `cl.exe` afterwards. The same text is the probe's step in `docs/spike/runner-spike.yml` (a test keeps them identical).
+
+```yaml
+      - name: MSVC environment (cl.exe for nvcc and cc-rs; fails loudly)
+        shell: powershell
+        run: |
+          # THE standard step for Windows jobs that need cl.exe/nvcc (docs/RUNNER-SETUP.md section 2d). Locates Visual Studio
+          # with vswhere, runs VsDevCmd.bat -arch=x64 in a scratch .cmd, and exports the resulting environment to LATER steps.
+          $ErrorActionPreference = 'Stop'
+          $component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw "MSVC env: vswhere.exe not found at $vswhere; install Visual Studio with the component $component" }
+          $vs = & $vswhere -latest -products '*' -requires $component -property installationPath | Select-Object -First 1
+          if (-not $vs) {
+            # vswhere hides an instance that is incomplete or waiting for a reboot unless -all is given (measured on this box:
+            # Visual Studio 2026 with isComplete=false, isRebootRequired=true). Its tools may still work: use it, say so, verify below.
+            $vs = & $vswhere -all -products '*' -requires $component -property installationPath | Select-Object -Last 1
+            if ($vs) { Write-Warning "MSVC env: $vs is incomplete or needs a reboot (vswhere shows it only with -all); using it anyway" }
+          }
+          if (-not $vs) { throw "MSVC env: no Visual Studio install has the component $component (MSVC x64/x86 build tools)" }
+          $bat = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $bat)) { throw "MSVC env: $bat does not exist" }
+          $env:VSCMD_SKIP_SENDTELEMETRY = '1'
+          $cmd = Join-Path $env:RUNNER_TEMP 'msvc-env.cmd'
+          Set-Content -LiteralPath $cmd -Encoding Ascii -Value @('@echo off', "call `"$bat`" -arch=x64 -host_arch=x64 -no_logo", 'if errorlevel 1 exit /b 1', 'set')
+          $dump = & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "MSVC env: VsDevCmd.bat failed (exit $LASTEXITCODE): $($dump -join ' | ')" }
+          $oldDirs = @($env:PATH -split ';')
+          $exported = 0
+          foreach ($line in $dump) {
+            if ($line -notmatch '^([^=\s][^=]*)=(.*)$') { continue }
+            $k = $Matches[1]; $v = $Matches[2]
+            if ($k -ieq 'PATH') {
+              $env:PATH = $v
+              foreach ($d in ($v -split ';')) {
+                if ($d -and ($oldDirs -notcontains $d)) { [IO.File]::AppendAllText($env:GITHUB_PATH, "$d`n"); $exported++ }
+              }
+            }
+            elseif ([Environment]::GetEnvironmentVariable($k) -ne $v) {
+              [IO.File]::AppendAllText($env:GITHUB_ENV, "$k=$v`n"); $exported++
+            }
+          }
+          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+          if (-not $cl) { throw "MSVC env: VsDevCmd ran under $vs but cl.exe is still not on PATH (is the component $component complete?)" }
+          "Visual Studio : $vs"
+          "cl.exe        : $($cl.Source)"
+          "exported      : $exported variables or PATH entries to later steps"
+```
+
+UNMEASURED until the rerun: that the service account can read the Visual Studio tree and that `VsDevCmd.bat` succeeds from
+session 0.
+
 ## 3. The runner binary
 
 Pinned in the script, from the official release notes (`actions/runner` v2.338.0, read 2026-10-16):

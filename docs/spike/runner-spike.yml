@@ -58,6 +58,51 @@ jobs:
           vulkaninfo --summary
           "exit: $LASTEXITCODE"
 
+      - name: MSVC environment (cl.exe for nvcc and cc-rs; fails loudly)
+        shell: powershell
+        run: |
+          # THE standard step for Windows jobs that need cl.exe/nvcc (docs/RUNNER-SETUP.md section 2d). Locates Visual Studio
+          # with vswhere, runs VsDevCmd.bat -arch=x64 in a scratch .cmd, and exports the resulting environment to LATER steps.
+          $ErrorActionPreference = 'Stop'
+          $component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw "MSVC env: vswhere.exe not found at $vswhere; install Visual Studio with the component $component" }
+          $vs = & $vswhere -latest -products '*' -requires $component -property installationPath | Select-Object -First 1
+          if (-not $vs) {
+            # vswhere hides an instance that is incomplete or waiting for a reboot unless -all is given (measured on this box:
+            # Visual Studio 2026 with isComplete=false, isRebootRequired=true). Its tools may still work: use it, say so, verify below.
+            $vs = & $vswhere -all -products '*' -requires $component -property installationPath | Select-Object -Last 1
+            if ($vs) { Write-Warning "MSVC env: $vs is incomplete or needs a reboot (vswhere shows it only with -all); using it anyway" }
+          }
+          if (-not $vs) { throw "MSVC env: no Visual Studio install has the component $component (MSVC x64/x86 build tools)" }
+          $bat = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $bat)) { throw "MSVC env: $bat does not exist" }
+          $env:VSCMD_SKIP_SENDTELEMETRY = '1'
+          $cmd = Join-Path $env:RUNNER_TEMP 'msvc-env.cmd'
+          Set-Content -LiteralPath $cmd -Encoding Ascii -Value @('@echo off', "call `"$bat`" -arch=x64 -host_arch=x64 -no_logo", 'if errorlevel 1 exit /b 1', 'set')
+          $dump = & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "MSVC env: VsDevCmd.bat failed (exit $LASTEXITCODE): $($dump -join ' | ')" }
+          $oldDirs = @($env:PATH -split ';')
+          $exported = 0
+          foreach ($line in $dump) {
+            if ($line -notmatch '^([^=\s][^=]*)=(.*)$') { continue }
+            $k = $Matches[1]; $v = $Matches[2]
+            if ($k -ieq 'PATH') {
+              $env:PATH = $v
+              foreach ($d in ($v -split ';')) {
+                if ($d -and ($oldDirs -notcontains $d)) { [IO.File]::AppendAllText($env:GITHUB_PATH, "$d`n"); $exported++ }
+              }
+            }
+            elseif ([Environment]::GetEnvironmentVariable($k) -ne $v) {
+              [IO.File]::AppendAllText($env:GITHUB_ENV, "$k=$v`n"); $exported++
+            }
+          }
+          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+          if (-not $cl) { throw "MSVC env: VsDevCmd ran under $vs but cl.exe is still not on PATH (is the component $component complete?)" }
+          "Visual Studio : $vs"
+          "cl.exe        : $($cl.Source)"
+          "exported      : $exported variables or PATH entries to later steps"
+
       - name: CUDA (a real kernel launch, not just a version string)
         if: always()
         shell: powershell
