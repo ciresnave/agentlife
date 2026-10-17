@@ -29,6 +29,11 @@ pub struct Config {
     /// (§12.6). Defaults to `pm`.
     #[serde(default = "default_notify_role")]
     pub notify_role: String,
+    /// How an [ASK] reaches `notify_role` (M8: claude-peers is going away). `broker` (default) is
+    /// the claude-peers broker; `synapse` queues the message in the notify outbox, which the
+    /// launcher service relays as role `agentlife-launcher`.
+    #[serde(default)]
+    pub notify_transport: crate::notify::Transport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

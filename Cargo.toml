@@ -4,7 +4,7 @@ members = [".", "crates/lane-restart", "crates/lane-state", "crates/launcher", "
 # One version for the whole project (CIRESNAVE-EXPECTATIONS.md 2.2): the higher of
 # agentlife (0.2.16) and lane-restart / lane-state (0.11.1), then bumped for each change.
 [workspace.package]
-version = "0.16.13"
+version = "0.16.15"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ciresnave/agentlife"
@@ -13,8 +13,8 @@ repository = "https://github.com/ciresnave/agentlife"
 # as by workspace path (cargo drops the path when it packages them). Same repo, so the
 # path is not a cross-repo dependency. Keep in step with the version above.
 [workspace.dependencies]
-lane-state = { version = "0.16.13", path = "crates/lane-state" }
-lane-restart = { version = "0.16.13", path = "crates/lane-restart" }
+lane-state = { version = "0.16.15", path = "crates/lane-state" }
+lane-restart = { version = "0.16.15", path = "crates/lane-restart" }
 
 [package]
 name = "agentlife"
@@ -45,9 +45,9 @@ sha2 = "0.11.0"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 persistant = "0.4.4"
 user-request = "0.11.1"
-launcher = { version = "0.16.13", path = "crates/launcher" }
-synapsed-client = "6.0.0-rc.89"
-synapse = { version = "6.0.0-rc.89", default-features = false, features = ["native-base"] }
+launcher = { version = "0.16.15", path = "crates/launcher" }
+synapsed-client = "=6.0.0-rc.101"
+synapse = { version = "=6.0.0-rc.101", default-features = false, features = ["native-base"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -748,8 +748,14 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
-    let notify = svc::PeerNotify {
+    let peer_notify = svc::PeerNotify {
         state_dir: &state_dir,
+    };
+    let synapse_notify = svc::SynapseNotify { source: &source };
+    let transport = svc::notify_transport(lane_restart::paths::home_dir().as_deref());
+    let notify: &dyn service::Notify = match transport {
+        lane_restart::notify::Transport::Broker => &peer_notify,
+        lane_restart::notify::Transport::Synapse => &synapse_notify,
     };
     let record = svc::own_record();
     let mut holding = false;
@@ -780,11 +786,17 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
                 }
             }
         }
+        let (relayed, queued) = svc::relay_outbox(&state_dir, &source);
+        if relayed + queued > 0 {
+            log(&format!(
+                "notify outbox: relayed={relayed} still-queued={queued}"
+            ));
+        }
         let wait = if once { 0 } else { svc::POLL_WAIT_SECS };
         let rep = service::cycle(
             &mut engine,
             &source,
-            &notify,
+            notify,
             now(),
             svc::LAUNCH_WAIT_SECS,
             wait,

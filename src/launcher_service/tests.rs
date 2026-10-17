@@ -350,3 +350,46 @@ fn every_outcome_we_post_is_one_of_the_four_the_daemon_accepts() {
     sorted.dedup();
     assert_eq!(sorted.len(), 4);
 }
+
+// ---- the notify path (M8) ----
+
+#[test]
+fn the_send_body_is_what_synapsectl_send_builds() {
+    let b = send_body("pm", "m-1", "hi ✓");
+    assert_eq!(b["to"], "pm");
+    assert_eq!(b["message_id"], "m-1");
+    // Standard base64 of the UTF-8 bytes, not the text.
+    assert_eq!(b["body_b64"], "aGkg4pyT");
+    assert_eq!(b.as_object().unwrap().len(), 3);
+}
+
+#[test]
+fn the_notify_transport_is_the_broker_unless_the_config_says_synapse() {
+    use lane_restart::notify::Transport;
+    assert_eq!(notify_transport(None), Transport::Broker);
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        notify_transport(Some(home.path())),
+        Transport::Broker,
+        "no file"
+    );
+    let path = lane_restart::approvals::config_path(home.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let write = |extra: &str| {
+        std::fs::write(
+            &path,
+            format!(r#"{{"approvals": {{"repo": "a/b", "path": "p"}}{extra}}}"#),
+        )
+        .unwrap()
+    };
+    write("");
+    assert_eq!(notify_transport(Some(home.path())), Transport::Broker);
+    write(r#", "notify_transport": "synapse""#);
+    assert_eq!(notify_transport(Some(home.path())), Transport::Synapse);
+    write(r#", "notify_transport": "carrier-pigeon""#);
+    assert_eq!(
+        notify_transport(Some(home.path())),
+        Transport::Broker,
+        "invalid falls back"
+    );
+}

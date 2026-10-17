@@ -130,6 +130,19 @@ impl SynapseSource {
 
     /// Holds a valid session for the role: the cached one, else a claim. The caller record is
     /// written only after this succeeds.
+    /// Sends one message to `to_role` as [`LAUNCHER_ROLE`]. `message_id` is the caller's, so a
+    /// resend is a duplicate at the daemon, not a second copy.
+    pub fn send(&self, to_role: &str, message_id: &str, text: &str) -> Result<(), String> {
+        self.daemon
+            .call(
+                LAUNCHER_ROLE,
+                "/v1/send",
+                Some(&send_body(to_role, message_id, text)),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn session_ok(&self) -> Result<(), SourceError> {
         self.daemon
             .session_info(LAUNCHER_ROLE)
@@ -273,6 +286,51 @@ impl Mechanism for NoMechanism {
     fn start(&self, _role: &str, _model: &str, _signal_id: &str) -> MechResult {
         MechResult::Failed("mechanism-not-built".into())
     }
+}
+
+/// The `/v1/send` request body (the shape `synapsectl send` builds).
+pub fn send_body(to_role: &str, message_id: &str, text: &str) -> Value {
+    serde_json::json!({
+        "to": to_role,
+        "message_id": message_id,
+        "body_b64": synapsed_client::encode_body(text.as_bytes()),
+    })
+}
+
+/// Which transport the notify path uses: `notify_transport` in `~/.overmind/lane-restart.json`,
+/// `broker` when the file is missing or unreadable (the claude-peers path stays the default
+/// until the cutover flips it).
+pub fn notify_transport(home: Option<&Path>) -> lane_restart::notify::Transport {
+    home.and_then(|h| {
+        lane_restart::approvals::load_config(&lane_restart::approvals::config_path(h)).ok()
+    })
+    .map_or(lane_restart::notify::Transport::Broker, |c| {
+        c.notify_transport
+    })
+}
+
+/// Stall alarms to the PM lane, through the Synapse daemon as [`LAUNCHER_ROLE`].
+pub struct SynapseNotify<'a> {
+    pub source: &'a SynapseSource,
+}
+
+impl Notify for SynapseNotify<'_> {
+    fn alarm(&self, text: &str) -> bool {
+        let id = format!(
+            "launcher-alarm-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            std::process::id()
+        );
+        self.source.send(ALARM_ROLE, &id, text).is_ok()
+    }
+}
+
+/// Relays what hosts queued (`lane_restart::notify::enqueue`) through the daemon; returns
+/// `(sent, kept)`. A refused message stays queued for the next pass.
+pub fn relay_outbox(state_dir: &Path, source: &SynapseSource) -> (usize, usize) {
+    lane_restart::notify::drain_outbox(state_dir, &mut |m| {
+        source.send(&m.to, &m.message_id, &m.text)
+    })
 }
 
 /// Stall alarms to the PM lane, over claude-peers.
