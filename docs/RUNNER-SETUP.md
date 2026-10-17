@@ -191,8 +191,33 @@ spike"). The workflow goes in it as `.github/workflows/spike.yml`: `workflow_dis
 `whoami` and the **session id** (0 means a service with no desktop), a write attempt on the three protected paths (each must
 say False), `nvidia-smi -L` and a query, `vulkaninfo --summary`, and a **CUDA kernel launch** (compile and run a 4-thread
 kernel; `nvcc --version` or `nvidia-smi -q` would only show the toolkit and NVML exist). A missing tool prints `NOT ON PATH`
-or `UNMEASURED`, never a pass: the `gh-runner` account has none of CireSnave's PATH. **Results: not yet run.** Record them
-here with the date and the run URL; anything the run could not show stays UNMEASURED.
+or `UNMEASURED`, never a pass: the `gh-runner` account has none of CireSnave's PATH. **Results below.**
+
+**Results, run 1 (2026-10-17, PM, `-Apply -Labels gpu` from agentlife 0.16.18 scripts, run
+https://github.com/ciresnave/runner-spike/actions/runs/39039080872): the setup worked, the job ran, every step FAILED, nothing
+was measured.** Setup: elevated `-Apply` created `gh-runner`, installed runner 2.338.0 (SHA256 verified), service Running as
+`.\gh-runner`, labels `self-hosted,Windows,X64,gpu`, online. The dispatched job was picked up, but each `shell: powershell` step
+died with "running scripts is disabled on this system" (PSSecurityException): the runner writes the step to a temp `.ps1` and
+dot-sources it, and the execution policy visible to the `gh-runner` account is Restricted (reported by the PM from the log; the
+policy scope that wins was not read). Session id, interactive flag, protected-path write test, `nvidia-smi`, `vulkaninfo` and the
+CUDA kernel are all **UNMEASURED**, and the section 5 decision rule cannot be applied yet.
+
+Consequence beyond the spike: **every `shell: powershell` step of every workflow moved onto this runner hits the same wall**
+(section 8a assumes the default shell works). Options, PM decides because it is a security setting:
+
+| | Option | Scope | Caveat |
+|---|---|---|---|
+| a | policy in `gh-runner`'s own registry hive | that account only | the account has never logged on, so its hive may not exist; needs load/unload of `NTUSER.DAT` |
+| b | `LocalMachine` `RemoteSigned` | every account on the machine | widens a machine setting for CireSnave's accounts too |
+| c | workflows use `shell: cmd`, or a custom `shell:` template | every workflow, edited | a custom template's temp-file extension under the runner is unverified |
+| d | `PSExecutionPolicyPreference=Bypass` in `<runner dir>\.env` (written by the setup script) | that runner's jobs only | unmeasured; a Group Policy `MachinePolicy` would still win |
+
+**Decision (PM, 2026-10-17): d.** The setup script will write `PSExecutionPolicyPreference=Bypass` to the runner's own `.env`
+(process scope, that runner only, no machine or hive change). It is **UNMEASURED** until a rerun proves it: the script change is a
+separate PR, then the PM re-runs the elevated `-Apply` (existing runner: `--replace`) and dispatches the probe again; record run 2 here.
+
+**Execution policy is not a security boundary here.** A job already runs arbitrary commands as `gh-runner`, so Bypass removes no
+protection that existed. The protection is the policy of section 1 and 2c: trusted repos only, no fork code, and the ACLs on the lane tools.
 
 The `gpu` label is added by `-Labels gpu` (the script adds no label by default).
 

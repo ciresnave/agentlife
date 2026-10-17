@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.19
+
+- **Docs: runner spike run 1 recorded (`docs/RUNNER-SETUP.md` 5a):** setup and registration worked; every `shell: powershell` step failed on the Restricted execution policy, so nothing was measured. Options a-d and a recommendation are listed; no script change yet.
+
 ## 0.16.18
 
 - **M8 phase 3: `agentlife status --peers` (Synapse transport):** one line (or `--json`) per Synapse role: online/offline, last seen, queued/leased mail, cleaned one-line summary. Role == lane, so there is no pid join. Needs `notify_transport=synapse`; otherwise it says to use the broker command. A daemon that cannot be read is an error, never an empty list. `lane-restart status --peers` keeps the broker and, when `notify_transport=synapse`, prints a one-line "moved: run `agentlife status --peers`" instead of querying a broker that is going away (the published `lane-restart` crate takes no Synapse dependency). The `/v1/list` entry shape (`global_id`, `online`, `last_seen`, `pending`) was seen on the scratch daemon of 2026-10-17; `summary` and `cwd` are read as optional and were null there. Run against a scratch daemon (rc.101) with a fake home: the Synapse table and `--json`, the lane-restart "moved" line, and the broker-config refusal all behaved as described; a lane that sets a `summary` was not exercised.
