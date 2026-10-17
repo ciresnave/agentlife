@@ -118,6 +118,30 @@ try {
   $t = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -AlsoGrant 'a;b' -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
   Check '-AlsoGrant with shell characters is refused' ($t -like '*THREW:*plain group*') $t
 
+  # New-LocalUser rejects over-long arguments only at run time, and the dry run never reaches it (2026-10-17: the real
+  # run died on a 61-character -Description, limit 48). So read every New-LocalUser call from the script's AST and hold
+  # each literal string argument to the cmdlet's documented limit.
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
+  $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ieq 'New-LocalUser' }, $true))
+  Check 'positive control: the script has a New-LocalUser call' ($calls.Count -ge 1) "found $($calls.Count)"
+  $limits = @{ Description = 48; FullName = 256; Name = 20 }
+  $checked = 0
+  foreach ($c in $calls) {
+    $els = $c.CommandElements
+    for ($i = 0; $i -lt $els.Count - 1; $i++) {
+      if ($els[$i] -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }
+      $p = $els[$i].ParameterName
+      $v = $els[$i + 1]
+      if ($limits.ContainsKey($p) -and $v -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+        $checked++
+        Check "New-LocalUser -$p literal fits its limit ($($limits[$p]))" ($v.Value.Length -le $limits[$p]) "length $($v.Value.Length): $($v.Value)"
+      }
+    }
+  }
+  Check 'positive control: at least one literal argument was length-checked' ($checked -ge 1) 'none checked'
+  $defaultAcct = ($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Account' }).DefaultValue.Value
+  Check 'default -Account fits the 20-character local name limit' ($defaultAcct.Length -le 20) $defaultAcct
+
   # -Apply without elevation never reaches account creation; with an exposed path it says so first when elevated.
   # (Elevation is not available here, so only the non-elevated refusal is asserted.)
   try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -Apply 6>&1 | Out-Null; $applied = $true } catch { $applied = $false; $msg = $_.Exception.Message }

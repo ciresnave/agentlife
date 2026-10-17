@@ -247,7 +247,7 @@ if ($existing) {
   Write-Host "account $Account exists: password rotated (nobody knows it)"
 } else {
   New-LocalUser -Name $Account -Password $secure -PasswordNeverExpires -UserMayNotChangePassword `
-    -AccountNeverExpires -Description 'GitHub Actions runner (agentlife scripts/gh-runner-setup.ps1)' | Out-Null
+    -AccountNeverExpires -Description 'GitHub Actions runner (agentlife setup script)' | Out-Null
   Write-Host "account $Account created"
 }
 Add-LocalGroupMember -Group 'Users' -Member $Account -ErrorAction SilentlyContinue
