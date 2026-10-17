@@ -888,9 +888,18 @@ fn handle_unhandled(
         approvals_source: config.map(|c| (c.approvals.repo.as_str(), c.approvals.path.as_str())),
         screen_text: &screen,
     };
-    let line = match notify::notify_role(notify::broker_addr(), state_dir, notify_role, &ask.text())
-    {
-        Ok(ids) => format!("[{now}] ASK SENT to {notify_role} peers {ids:?}"),
+    let transport = config.map_or(notify::Transport::Broker, |c| c.notify_transport);
+    let sent = match transport {
+        notify::Transport::Broker => {
+            notify::notify_role(notify::broker_addr(), state_dir, notify_role, &ask.text())
+                .map(|ids| format!("[{now}] ASK SENT to {notify_role} peers {ids:?}"))
+        }
+        // Queued, not sent: the launcher service relays it as `agentlife-launcher`.
+        notify::Transport::Synapse => notify::enqueue(state_dir, notify_role, &ask.text())
+            .map(|p| format!("[{now}] ASK QUEUED for {notify_role} at {}", p.display())),
+    };
+    let line = match sent {
+        Ok(line) => line,
         Err(e) => {
             eprintln!("lane-restart host: could not notify the {notify_role} lane: {e}");
             format!("[{now}] ASK FAILED to {notify_role}: {e}")

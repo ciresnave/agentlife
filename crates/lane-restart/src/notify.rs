@@ -186,6 +186,91 @@ pub fn notify_role(
     }
 }
 
+/// How a notification travels (`~/.overmind/lane-restart.json`, `notify_transport`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// The claude-peers broker on localhost (today's path).
+    #[default]
+    Broker,
+    /// The outbox below, relayed by the launcher service through the Synapse daemon.
+    Synapse,
+}
+
+/// Where a host leaves messages for the launcher service to send.
+pub fn outbox_dir(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join("notify-outbox")
+}
+
+/// One queued message. `message_id` is fixed at enqueue time so a resend after a crash is a
+/// duplicate at Synapse, not a second copy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct Outgoing {
+    pub to: String,
+    pub message_id: String,
+    pub text: String,
+}
+
+/// Queues `text` for `to_role`: written to a temp name then renamed, so a reader never sees half
+/// a file. Returns the file path.
+pub fn enqueue(state_dir: &Path, to_role: &str, text: &str) -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir = outbox_dir(state_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let stamp = format!(
+        "{}-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    );
+    let msg = Outgoing {
+        to: to_role.to_string(),
+        message_id: format!("lane-restart-{stamp}"),
+        text: text.to_string(),
+    };
+    let tmp = dir.join(format!("{stamp}.tmp"));
+    let dest = dir.join(format!("{stamp}.json"));
+    let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, json).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    Ok(dest)
+}
+
+/// Offers each queued message, oldest first, to `send`; a message `send` accepts is deleted, one
+/// it refuses stays for the next pass. A file that does not parse is renamed `*.bad` (kept, never
+/// retried, never silently dropped). Returns `(sent, kept)`.
+pub fn drain_outbox(
+    state_dir: &Path,
+    send: &mut dyn FnMut(&Outgoing) -> Result<(), String>,
+) -> (usize, usize) {
+    let Ok(rd) = std::fs::read_dir(outbox_dir(state_dir)) else {
+        return (0, 0);
+    };
+    let mut files: Vec<_> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    let (mut sent, mut kept) = (0, 0);
+    for p in files {
+        let msg = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Outgoing>(&t).ok());
+        let Some(msg) = msg else {
+            let _ = std::fs::rename(&p, p.with_extension("bad"));
+            kept += 1;
+            continue;
+        };
+        if send(&msg).is_ok() && std::fs::remove_file(&p).is_ok() {
+            sent += 1;
+        } else {
+            kept += 1;
+        }
+    }
+    (sent, kept)
+}
+
 /// Whether the lane `role` has shown real progress since `since`: its
 /// state file was written after `since` by an event other than
 /// `SessionStart` - the same "processed a prompt" signal the outer
@@ -420,6 +505,52 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         assert!(post_json(addr, "/x", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn transport_defaults_to_broker_and_parses_synapse() {
+        assert_eq!(Transport::default(), Transport::Broker);
+        let t: Transport = serde_json::from_str(r#""synapse""#).unwrap();
+        assert_eq!(t, Transport::Synapse);
+        assert!(serde_json::from_str::<Transport>(r#""peers""#).is_err());
+    }
+
+    #[test]
+    fn the_outbox_delivers_oldest_first_keeps_refusals_and_quarantines_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = enqueue(dir.path(), "pm", "first").unwrap();
+        let b = enqueue(dir.path(), "pm", "second").unwrap();
+        assert_ne!(a, b);
+        std::fs::write(outbox_dir(dir.path()).join("0-junk.json"), "not json").unwrap();
+        let mut seen = Vec::new();
+        let (sent, kept) = drain_outbox(dir.path(), &mut |m| {
+            seen.push(m.text.clone());
+            if m.text == "second" {
+                Err("daemon down".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!((sent, kept), (1, 2), "{seen:?}");
+        assert_eq!(seen, vec!["first", "second"]);
+        assert!(!a.exists() && b.exists());
+        assert!(outbox_dir(dir.path()).join("0-junk.bad").exists());
+        // The refused one is offered again, with the same id.
+        let mut ids = Vec::new();
+        let (sent, _) = drain_outbox(dir.path(), &mut |m| {
+            ids.push(m.message_id.clone());
+            Ok(())
+        });
+        assert_eq!(sent, 1);
+        assert!(ids[0].starts_with("lane-restart-"));
+        assert!(!b.exists());
+        assert_eq!(drain_outbox(dir.path(), &mut |_| Ok(())), (0, 0));
+    }
+
+    #[test]
+    fn draining_a_missing_outbox_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(drain_outbox(dir.path(), &mut |_| Ok(())), (0, 0));
     }
 
     #[test]

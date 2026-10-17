@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.15
+
+- **M8 phase 1: the notify path can leave the claude-peers broker (dual backend, default unchanged):** `notify_transport` in `~/.overmind/lane-restart.json` (`broker` default, or `synapse`). With `synapse`, a host's unmatched-dialog [ASK] is queued in `.lane-state/notify-outbox/` (temp file + rename, fixed `message_id`) instead of sent, and `agentlife launcher` relays the queue through the Synapse daemon as its own `agentlife-launcher` claim (`/v1/send` to role `pm`; a refused message stays queued, junk is renamed `*.bad`), and sends its stall alarms the same way. No per-host claims. `synapse` and `synapsed-client` pinned `=6.0.0-rc.101` (latest published). **Not run:** a real send/claim against a daemon (scratch-home test pending the recipe from the synapse lane), and `status --peers` and `src/peers.rs` still use the broker (next PR, 0.16.16). Unit tests: outbox order/retry/quarantine, transport parsing, send body, config fallback.
+
 ## 0.16.13
 
 - **CI: `cargo clippy --locked` (coderipper SUP-001, Q14):** the clippy step now refuses to resolve past `Cargo.lock`. Build and test steps are unchanged.
