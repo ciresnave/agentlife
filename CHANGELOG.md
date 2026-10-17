@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.21
+
+- **Docs: the standard MSVC-environment step for Windows runner jobs (RUNNER-SETUP 2d, `docs/spike/runner-spike.yml`):** the probe's CUDA step failed with `Cannot find compiler 'cl.exe' in PATH` (the service has no developer environment). The step finds Visual Studio with vswhere, runs `VsDevCmd.bat -arch=x64`, exports the env to later steps and fails loudly naming the missing component. UNMEASURED until the probe is rerun.
+
 ## 0.16.20
 
 - **Fix: `gh-runner-setup.ps1 -Apply` writes `PSExecutionPolicyPreference=Bypass` to the runner's `.env`:** spike run 1 died on the Restricted execution policy at every `shell: powershell` step. Process scope, that runner only; execution policy is not a security boundary here (RUNNER-SETUP 5a). UNMEASURED until the spike is rerun. An existing runner needs `-Remove` first.
