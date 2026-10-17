@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.20
+
+- **Fix: `gh-runner-setup.ps1 -Apply` writes `PSExecutionPolicyPreference=Bypass` to the runner's `.env`:** spike run 1 died on the Restricted execution policy at every `shell: powershell` step. Process scope, that runner only; execution policy is not a security boundary here (RUNNER-SETUP 5a). UNMEASURED until the spike is rerun. An existing runner needs `-Remove` first.
+
 ## 0.16.19
 
 - **Docs: runner spike run 1 recorded (`docs/RUNNER-SETUP.md` 5a):** setup and registration worked; every `shell: powershell` step failed on the Restricted execution policy, so nothing was measured. Options a-d and a recommendation are listed; no script change yet.

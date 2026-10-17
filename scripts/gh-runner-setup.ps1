@@ -22,7 +22,8 @@
        extracting a byte of it. A mismatch deletes the download and stops.
     5. Per repo: extracts to <Root>\<owner>-<repo>, asks for that repo's registration token (Read-Host -AsSecureString:
        the PM fetches it at run time, it expires in an hour, it is used once and never stored), and runs config.cmd
-       with labels self-hosted,windows,x64 (automatic) plus -Labels, as a Windows service under the account.
+       with labels self-hosted,windows,x64 (automatic) plus -Labels, as a Windows service under the account. Before
+       config.cmd it writes <dir>\.env with PSExecutionPolicyPreference=Bypass (this runner's jobs only; see RUNNER-SETUP 5a).
     6. Reads the service back (name, StartName, state): an exit code is not a state read.
   Triggers are the workflow's business, not the runner's: see docs/RUNNER-SETUP.md section 6. This script cannot
   stop a repo from adding a pull_request job that runs on the runner; the lint and the repo setting do.
@@ -103,6 +104,10 @@ if (-not $Ephemeral) {
   if ($pub) { throw "-Ephemeral:`$false is refused for public repo(s): $($pub -join ', ')" }
 }
 $ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
+# Written to <runner dir>\.env, which the runner loads for every job. Windows PowerShell's execution policy is Restricted on this
+# box, and the runner dot-sources a temp .ps1 for each `shell: powershell` step (spike run 1, 2026-10-17). The env var is process
+# scope: it touches this runner's jobs only, no machine or registry-hive setting. Not a security boundary (a job runs any command).
+$runnerEnv = @('PSExecutionPolicyPreference=Bypass')
 function Slug([string]$r) { $r -replace '/', '-' }
 function Svc([string]$r) { 'actions.runner.' + (Slug $r) + '.' + $env:COMPUTERNAME + '-' + (Slug $r) }
 
@@ -188,7 +193,8 @@ if (-not $Apply) {
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
       Write-Host "     $labelFlag --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
-      Write-Host "  read back: service ... StartName = .\$Account, State = Running"
+      Write-Host "  .env     -> $dir\.env: $($runnerEnv -join '; ') (before config.cmd, so the service starts with it)"
+      Write-Host "  read back: service ... StartName = .\$Account, State = Running; .env holds the policy line"
     }
   }
   return
@@ -279,6 +285,7 @@ foreach ($r in $Repo) {
   $dir = Join-Path $Root (Slug $r)
   if (Test-Path -LiteralPath "$dir\config.cmd") { throw "$dir already holds a runner; run with -Remove first" }
   [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dir)
+  Set-Content -LiteralPath "$dir\.env" -Value $runnerEnv -Encoding Ascii
   $tok = [Net.NetworkCredential]::new('', (Read-Host "Registration token for $r (not stored)" -AsSecureString)).Password
   & "$dir\config.cmd" --unattended --url "https://github.com/$r" --token $tok --name "$($env:COMPUTERNAME)-$(Slug $r)" `
    @labelArgs --work _work --replace$ephFlag --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
@@ -289,7 +296,8 @@ foreach ($r in $Repo) {
   $svc = Get-CimInstance Win32_Service -Filter "Name='$(Svc $r)'"
   if (-not $svc) { throw "service $(Svc $r) not found after configure" }
   if ($svc.StartName -ine ".\$Account") { throw "service runs as '$($svc.StartName)', expected .\$Account" }
-  Write-Host "[$r] service $($svc.Name) as $($svc.StartName), state $($svc.State)"
+  if ((Get-Content -LiteralPath "$dir\.env") -notcontains $runnerEnv[0]) { throw "$dir\.env does not hold $($runnerEnv[0])" }
+  Write-Host "[$r] service $($svc.Name) as $($svc.StartName), state $($svc.State); .env: $($runnerEnv -join '; ')"
 }
 $password = $null; $secure = $null
 Write-Host "`nNext: gh api repos/<owner>/<repo>/actions/runners  (labels must read self-hosted, Windows, X64, gpu), then run the spike (docs/RUNNER-SETUP.md section 5)."
