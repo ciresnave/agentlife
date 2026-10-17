@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.17
+
+- **Fix: Synapse sends were addressed by bare role, which a real daemon refuses:** `/v1/send` wants `role@account`; a bare `pm` is `404 unknown_recipient` (measured 2026-10-17 on a scratch `synapsed` rc.101; `synapsectl send` qualifies the name itself, which hid it). The 0.16.15 launcher relay and alarms and the 0.16.16 `agentlife down` send were wrong as merged (default transport is still `broker`, so nothing live was affected). Now the account is read from the home's keystore and the recipient is qualified (an address with `@` is kept). Re-measured on the scratch daemon: a launcher send, a `down` send and a relayed outbox message all reached `pm`; an unknown role is still 404. The scratch recipe is in `docs/LAUNCHER-SERVICE.md` ("Scratch-daemon check"); not in CI, it needs `synapsed`.
+
 ## 0.16.16
 
 - **M8 phase 2: `agentlife down` and the logon-restore probe can leave the claude-peers broker (same `notify_transport` switch, default `broker`):** with `synapse`, `down` asks the lane to wrap up through the Synapse daemon as role `agentlife-cli` (claimed per run), addressed by the lane's spec role and only if that role is online (`/v1/list`), instead of joining a broker peer by process parent. `Messenger::recipients` carries the difference (default = the old join, so the broker path is unchanged). The restore wait probes the daemon's address from `<SYNAPSE_HOME>/synapsed.json` (never starting one). `down`'s messages no longer say "claude-peers". **Needs at T-0:** role `agentlife-cli` with `send`, and the target role must have claimed once. **Not run:** a real claim/send against a daemon. Still on the broker: `lane-restart status --peers` (`notify::list_all`).
