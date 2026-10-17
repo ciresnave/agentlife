@@ -393,3 +393,9 @@ fn the_notify_transport_is_the_broker_unless_the_config_says_synapse() {
         "invalid falls back"
     );
 }
+
+#[test]
+fn a_bare_role_is_addressed_as_role_at_account() {
+    assert_eq!(qualify("pm", "scratch"), "pm@scratch");
+    assert_eq!(qualify("pm@other", "scratch"), "pm@other");
+}

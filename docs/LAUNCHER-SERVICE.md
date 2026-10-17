@@ -222,6 +222,17 @@ review of this design:
 
 Report when N >= 5 real launches; ship a provisional value marked UNMEASURED until then (PM ruling).
 
+## Scratch-daemon check (the Synapse send path)
+
+Unit tests cannot show what the daemon accepts: the 0.16.15/0.16.16 sends were wrong as merged and only a real daemon said so
+(`/v1/send` with a bare role is `unknown_recipient`; it wants `role@account`). To re-measure, in a throwaway home (never the pilot
+home): `cargo install synapsed synapsectl --version <pinned> --locked --root <scratch>`; `SYNAPSE_HOME` under `%LOCALAPPDATA%`
+(an ACL-inheriting folder is refused), `SYNAPSE_ADDR` a spare port; `synapse id init --account scratch`; claim the target
+(`synapse list --role pm`) and the sender (`synapse list --role agentlife-launcher`); then drive `SynapseSource::send`,
+`SynapseMessenger::{recipients,send}` and `relay_outbox` from a throwaway example and read `synapse inbox --role pm`. Stop the
+daemon by the pid in `synapsed.json` after checking its `ExecutablePath`, then delete the home. A recipient must have claimed once;
+it counts as `online` for 90 s after its last heartbeat. 2026-10-17 result: all three paths reached `pm`, an unknown role was 404.
+
 ## Build order
 
 1. Notifier-only service: poll, rules 1-6 and R7, store, results, `refused: no-grant`, notify. Needs blocker 1

@@ -166,14 +166,16 @@ pub const CLI_ROLE: &str = "agentlife-cli";
 /// must be online (a down lane has nothing to wrap up) and have claimed once on this daemon.
 pub struct SynapseMessenger {
     daemon: synapsed_client::Daemon,
+    account: String,
 }
 
 impl SynapseMessenger {
     /// Finds this home's daemon (starting `synapsed` if nothing answers, as every Synapse client
     /// does) and proves it. The role is claimed on first use.
     pub fn connect(home: &std::path::Path) -> Result<Self, String> {
+        let account = crate::launcher_service::account_of(home)?;
         synapsed_client::Daemon::connect(home)
-            .map(|daemon| Self { daemon })
+            .map(|daemon| Self { daemon, account })
             .map_err(|e| e.to_string())
     }
 
@@ -208,7 +210,11 @@ impl Messenger for SynapseMessenger {
             .call(
                 CLI_ROLE,
                 "/v1/send",
-                Some(&crate::launcher_service::send_body(to_id, &id, text)),
+                Some(&crate::launcher_service::send_body(
+                    &crate::launcher_service::qualify(to_id, &self.account),
+                    &id,
+                    text,
+                )),
             )
             .map(|_| ())
             .map_err(|e| e.to_string())

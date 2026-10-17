@@ -113,6 +113,9 @@ pub fn launch_outcome(o: Outcome) -> synapsed_client::LaunchOutcome {
 /// The real daemon, as role [`LAUNCHER_ROLE`].
 pub struct SynapseSource {
     daemon: synapsed_client::Daemon,
+    /// The home's account: `/v1/send` wants `role@account` (measured on a scratch daemon
+    /// 2026-10-17: a bare `pm` is `unknown_recipient`).
+    account: String,
     notes: std::cell::RefCell<Vec<String>>,
 }
 
@@ -120,9 +123,11 @@ impl SynapseSource {
     /// Finds this home's daemon (starting `synapsed` if nothing answers, as every Synapse client
     /// does) and proves it.
     pub fn connect(home: &Path) -> Result<Self, String> {
+        let account = account_of(home)?;
         synapsed_client::Daemon::connect(home)
             .map(|daemon| SynapseSource {
                 daemon,
+                account,
                 notes: std::cell::RefCell::new(Vec::new()),
             })
             .map_err(|e| e.to_string())
@@ -137,7 +142,11 @@ impl SynapseSource {
             .call(
                 LAUNCHER_ROLE,
                 "/v1/send",
-                Some(&send_body(to_role, message_id, text)),
+                Some(&send_body(
+                    &qualify(to_role, &self.account),
+                    message_id,
+                    text,
+                )),
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -285,6 +294,22 @@ pub struct NoMechanism;
 impl Mechanism for NoMechanism {
     fn start(&self, _role: &str, _model: &str, _signal_id: &str) -> MechResult {
         MechResult::Failed("mechanism-not-built".into())
+    }
+}
+
+/// The account of the Synapse home (`<home>/account`), read without starting a daemon.
+pub fn account_of(home: &Path) -> Result<String, String> {
+    synapse::keystore::Keystore::open(home)
+        .map(|k| k.account().account)
+        .map_err(|e| format!("cannot read the Synapse account in {}: {e}", home.display()))
+}
+
+/// `role` as the daemon addresses it: `role@account` (an address that already has an `@` is kept).
+pub fn qualify(to: &str, account: &str) -> String {
+    if to.contains('@') {
+        to.to_string()
+    } else {
+        format!("{to}@{account}")
     }
 }
 
