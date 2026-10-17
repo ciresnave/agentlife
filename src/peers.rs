@@ -36,6 +36,22 @@ pub struct Peer {
 pub trait Messenger {
     fn peers(&self) -> Result<Vec<Peer>, String>;
     fn send(&self, to_id: &str, text: &str) -> Result<(), String>;
+
+    /// Who to ask to wrap up for the lane `role` whose `claude` is `claude_pid`. The broker joins
+    /// by process parent; a role-addressed transport (Synapse) overrides this and answers with
+    /// the role itself, so `send` takes whichever `id` this returns.
+    fn recipients(
+        &self,
+        _role: &str,
+        claude_pid: u32,
+        parents: &dyn ParentProcess,
+    ) -> Result<Vec<Peer>, String> {
+        let all = self.peers()?;
+        Ok(peers_of_claude(&all, parents, claude_pid)
+            .into_iter()
+            .cloned()
+            .collect())
+    }
 }
 
 pub struct Broker {
@@ -142,6 +158,89 @@ impl Messenger for Broker {
     }
 }
 
+/// The role `agentlife down` sends as on Synapse: claimed per run (PM-run, rare), so it never
+/// collides with a lane's own role or the launcher service's.
+pub const CLI_ROLE: &str = "agentlife-cli";
+
+/// Asking a lane to wrap up through the Synapse daemon: addressed by role, no pid join. The role
+/// must be online (a down lane has nothing to wrap up) and have claimed once on this daemon.
+pub struct SynapseMessenger {
+    daemon: synapsed_client::Daemon,
+}
+
+impl SynapseMessenger {
+    /// Finds this home's daemon (starting `synapsed` if nothing answers, as every Synapse client
+    /// does) and proves it. The role is claimed on first use.
+    pub fn connect(home: &std::path::Path) -> Result<Self, String> {
+        synapsed_client::Daemon::connect(home)
+            .map(|daemon| Self { daemon })
+            .map_err(|e| e.to_string())
+    }
+
+    fn online(&self) -> Result<std::collections::BTreeSet<String>, String> {
+        self.daemon
+            .call(CLI_ROLE, "/v1/list", None)
+            .map(|v| crate::launcher_service::parse_online(&v))
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Messenger for SynapseMessenger {
+    fn peers(&self) -> Result<Vec<Peer>, String> {
+        Ok(self
+            .online()?
+            .into_iter()
+            .map(|role| Peer {
+                id: role,
+                pid: 0,
+                cwd: String::new(),
+            })
+            .collect())
+    }
+
+    fn send(&self, to_id: &str, text: &str) -> Result<(), String> {
+        let id = format!(
+            "agentlife-down-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            std::process::id()
+        );
+        self.daemon
+            .call(
+                CLI_ROLE,
+                "/v1/send",
+                Some(&crate::launcher_service::send_body(to_id, &id, text)),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn recipients(
+        &self,
+        role: &str,
+        claude_pid: u32,
+        _parents: &dyn ParentProcess,
+    ) -> Result<Vec<Peer>, String> {
+        Ok(self
+            .online()?
+            .contains(role)
+            .then(|| Peer {
+                id: role.to_string(),
+                pid: claude_pid,
+                cwd: String::new(),
+            })
+            .into_iter()
+            .collect())
+    }
+}
+
+/// Where this home's daemon says it listens (`<home>/synapsed.json`, `{"addr": ...}`), for a
+/// reachability probe that must not start a daemon. `None`: no such file, or no address in it.
+pub fn synapse_addr(home: &std::path::Path) -> Option<SocketAddr> {
+    let text = std::fs::read_to_string(home.join("synapsed.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("addr")?.as_str()?.parse().ok()
+}
+
 /// The peers whose MCP helper is a direct child of `claude_pid`.
 pub fn peers_of_claude<'a>(
     peers: &'a [Peer],
@@ -188,6 +287,54 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    #[test]
+    fn the_daemon_address_is_read_from_synapsed_json_or_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(synapse_addr(dir.path()), None, "no file");
+        let p = dir.path().join("synapsed.json");
+        std::fs::write(&p, r#"{"addr":"127.0.0.1:7920","instance_id":"x","pid":1}"#).unwrap();
+        assert_eq!(
+            synapse_addr(dir.path()),
+            Some(SocketAddr::from(([127, 0, 0, 1], 7920)))
+        );
+        std::fs::write(&p, r#"{"addr":"nonsense"}"#).unwrap();
+        assert_eq!(synapse_addr(dir.path()), None, "bad address");
+        std::fs::write(&p, "not json").unwrap();
+        assert_eq!(synapse_addr(dir.path()), None, "bad json");
+    }
+
+    struct Fixed(Vec<Peer>);
+    impl Messenger for Fixed {
+        fn peers(&self) -> Result<Vec<Peer>, String> {
+            Ok(self.0.clone())
+        }
+        fn send(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_default_recipients_are_the_peers_below_the_claude_process() {
+        let peers = vec![
+            Peer {
+                id: "a".into(),
+                pid: 1,
+                cwd: String::new(),
+            },
+            Peer {
+                id: "b".into(),
+                pid: 2,
+                cwd: String::new(),
+            },
+        ];
+        let parents = Parents(HashMap::from([
+            (1, (10, "claude.exe".to_string())),
+            (2, (20, "claude.exe".to_string())),
+        ]));
+        let got = Fixed(peers).recipients("pm", 10, &parents).unwrap();
+        assert_eq!(got.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["a"]);
     }
 
     #[test]
