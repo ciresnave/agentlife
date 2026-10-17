@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.22
+
+- **Docs: runner spike run 2 recorded (`docs/RUNNER-SETUP.md` 5a, 5, 2d):** as `gh-runner` in a Windows service (session 0, not interactive) the 4070 is visible to `nvidia-smi`, both GPUs to Vulkan, a CUDA kernel runs, the protected paths are not writable, and the MSVC step and the execution-policy `.env` worked. Decision rule: keep the service. Reboot/logoff behaviour is UNMEASURED.
+
 ## 0.16.21
 
 - **Docs: the standard MSVC-environment step for Windows runner jobs (RUNNER-SETUP 2d, `docs/spike/runner-spike.yml`):** the probe's CUDA step failed with `Cannot find compiler 'cl.exe' in PATH` (the service has no developer environment). The step finds Visual Studio with vswhere, runs `VsDevCmd.bat -arch=x64`, exports the env to later steps and fails loudly naming the missing component. UNMEASURED until the probe is rerun.

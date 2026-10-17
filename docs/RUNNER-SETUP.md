@@ -210,8 +210,8 @@ checks `cl.exe` afterwards. The same text is the probe's step in `docs/spike/run
           "exported      : $exported variables or PATH entries to later steps"
 ```
 
-UNMEASURED until the rerun: that the service account can read the Visual Studio tree and that `VsDevCmd.bat` succeeds from
-session 0.
+Measured in spike run 2 (section 5a): from session 0 as `gh-runner` the step found Visual Studio 2026 (incomplete / reboot pending,
+so via the `-all` fallback, with its warning) and `cl.exe` 14.51.36231 resolved; the CUDA kernel then built and ran.
 
 ## 3. The runner binary
 
@@ -228,7 +228,7 @@ and typed at the script's prompt (`Read-Host -AsSecureString`). It expires in an
 stored. `config.cmd` takes it on its command line, so it is visible to administrators for the length of the call.
 Removal needs a removal token the same way (`-Remove`).
 
-## 5. Service or interactive: UNMEASURED, and what to measure
+## 5. Service or interactive: MEASURED in spike run 2 (2026-10-17)
 
 The script installs a **Windows service** under `gh-runner`. The question is whether CUDA and Vulkan work from a
 service, which runs in session 0 with no desktop.
@@ -237,13 +237,16 @@ Measured 2026-10-16 on this box (RTX 4070 Laptop + AMD 610M iGPU, driver 617.42,
 **interactive session, as CireSnave's account**: `nvidia-smi -L` lists the 4070; `vulkaninfo --summary` lists both
 GPUs (NVIDIA Vulkan 1.4.351). That shows only that the machine has working drivers.
 
-**Not measured: session 0.** Registering a non-interactive (`S4U`) task to approximate it returned *Access is denied*
-without elevation, so a lane cannot take that read. The spike (section 5a) takes it as `gh-runner` in service mode.
+**Session 0, measured in spike run 2 (section 5a):** `gh-runner` in service mode sees the 4070 through `nvidia-smi`, both GPUs
+through Vulkan, and runs a CUDA kernel. (A non-interactive `S4U` task, tried first, returned *Access is denied* without elevation.)
 
 Decision rule: if the spike prints both GPUs from the service, keep the service (it survives logoff and reboot). If
 Vulkan or CUDA fails there, the alternative is an interactive runner (`run.cmd`) in a logged-on session of the
 runner account: that needs the account to hold a desktop session next to CireSnave's, which is why it is the
 fallback, and it is **not implemented here**.
+
+**Rule applied (2026-10-17): keep the service.** Run 2 printed both GPUs from the service and the kernel ran, so no interactive
+runner is needed. (CUDA covers the NVIDIA GPU only; the AMD 610M is visible to Vulkan, not CUDA.)
 
 ### 5a. Spike workflow (`docs/spike/runner-spike.yml`)
 
@@ -262,7 +265,7 @@ was measured.** Setup: elevated `-Apply` created `gh-runner`, installed runner 2
 died with "running scripts is disabled on this system" (PSSecurityException): the runner writes the step to a temp `.ps1` and
 dot-sources it, and the execution policy visible to the `gh-runner` account is Restricted (reported by the PM from the log; the
 policy scope that wins was not read). Session id, interactive flag, protected-path write test, `nvidia-smi`, `vulkaninfo` and the
-CUDA kernel are all **UNMEASURED**, and the section 5 decision rule cannot be applied yet.
+CUDA kernel are all **UNMEASURED** in run 1; run 2 (below) measured them.
 
 Consequence beyond the spike: **every `shell: powershell` step of every workflow moved onto this runner hits the same wall**
 (section 8a assumes the default shell works). Options, PM decides because it is a security setting:
@@ -275,12 +278,27 @@ Consequence beyond the spike: **every `shell: powershell` step of every workflow
 | d | `PSExecutionPolicyPreference=Bypass` in `<runner dir>\.env` (written by the setup script) | that runner's jobs only | unmeasured; a Group Policy `MachinePolicy` would still win |
 
 **Decision (PM, 2026-10-17): d.** The setup script will write `PSExecutionPolicyPreference=Bypass` to the runner's own `.env`
-(process scope, that runner only, no machine or hive change). It is **UNMEASURED** until a rerun proves it: the script change is a
-separate PR, then the PM re-runs the elevated `-Apply` (existing runner: `--replace`) and dispatches the probe again; record run 2 here.
+(process scope, that runner only, no machine or hive change). Run 2 proved it (below). The script change was a
+separate PR (0.16.20), then the PM re-applied and dispatched the probe again. The PM did not say whether the `.env` came from the
+script or by hand, so that path of the script itself is still not proven end to end.
 
 **Execution policy is not a security boundary here.** A job already runs arbitrary commands as `gh-runner`, so Bypass removes no
 protection that existed. The protection is the policy of section 1 and 2c: trusted repos only, no fork code, and the ACLs on the lane tools.
 
+**Results, run 2 (2026-10-17, PM; `ciresnave/runner-spike` ref `f5b051e`, run
+https://github.com/ciresnave/runner-spike/actions/runs/39048397061; push and dispatch both green), verbatim from the PM's relay of the job log:**
+
+- Execution policy: the `shell: powershell` steps ran, so the `.env` `PSExecutionPolicyPreference=Bypass` took effect for the service.
+- Identity: `whoami` = `tuf-laptop\gh-runner`, **session id 0**, **interactive False** (a service with no desktop).
+- Protected paths writable? `C:\Projects` False; `C:\Projects\.claude-hooks` False; `C:\Projects\.lane-state` False.
+- MSVC step (section 2d): Visual Studio 18 Community flagged incomplete / reboot pending, used via the `-all` warning path;
+  `cl.exe` = `...\MSVC\14.51.36231\bin\HostX64\x64\cl.exe`.
+- `nvidia-smi -L`: `GPU 0: NVIDIA GeForce RTX 4070 Laptop GPU`; driver 617.42, 8188 MiB (the PM's summary).
+- `vulkaninfo`: **both** `NVIDIA GeForce RTX 4070 Laptop GPU` (NVIDIA proprietary) and `AMD Radeon(TM) 610M` (AMD proprietary driver 26.8.1).
+- CUDA: `nvcc` = CUDA v13.3; `kernel OK: 0 2 4 6`, from session 0 on the 4070.
+
+Not shown by the relay, so still **UNMEASURED**: the full `nvidia-smi` query lines, the `vulkaninfo` API versions, a CUDA run on the
+AMD GPU (not applicable), behaviour after a reboot or logoff, and whether the Visual Studio reboot-pending state matters over time.
 The `gpu` label is added by `-Labels gpu` (the script adds no label by default).
 
 ## 6. The lint (`crates/runner-lint`)
