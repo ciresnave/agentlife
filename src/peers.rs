@@ -239,6 +239,85 @@ impl Messenger for SynapseMessenger {
     }
 }
 
+/// One role as `/v1/list` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RoleRow {
+    pub role: String,
+    pub online: bool,
+    pub last_seen: Option<String>,
+    pub queued: u64,
+    pub leased: u64,
+    /// Free text a lane wrote: one line, control characters dropped, cut at 100 characters.
+    pub summary: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// Rows out of a `/v1/list` reply (`{"roles": [...]}`), sorted by role. An entry without a
+/// `global_id` cannot be named and is skipped.
+pub fn parse_roles(reply: &serde_json::Value) -> Vec<RoleRow> {
+    let text =
+        |e: &serde_json::Value, k: &str| e.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let mut rows: Vec<RoleRow> = reply
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let gid = e.get("global_id")?.as_str()?;
+            let pending = |k: &str| {
+                e.get("pending")
+                    .and_then(|p| p.get(k))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            };
+            Some(RoleRow {
+                role: gid.split('@').next().unwrap_or(gid).to_string(),
+                online: e.get("online").and_then(|v| v.as_bool()) == Some(true),
+                last_seen: text(e, "last_seen"),
+                queued: pending("queued"),
+                leased: pending("leased"),
+                summary: text(e, "summary")
+                    .as_deref()
+                    .and_then(lane_restart::peers_join::clean_summary),
+                cwd: text(e, "cwd"),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.role.cmp(&b.role));
+    rows
+}
+
+/// `agentlife status --peers` as text: one line per role.
+pub fn render_roles(rows: &[RoleRow]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        out.push_str(&format!(
+            "{}\t{}\tqueued={} leased={}\tlast_seen={}\t{}\n",
+            r.role,
+            if r.online { "online" } else { "offline" },
+            r.queued,
+            r.leased,
+            r.last_seen.as_deref().unwrap_or("-"),
+            r.summary.as_deref().unwrap_or("")
+        ));
+    }
+    out
+}
+
+impl SynapseMessenger {
+    /// Every role the daemon knows, this run's own role left out.
+    pub fn roles(&self) -> Result<Vec<RoleRow>, String> {
+        let reply = self
+            .daemon
+            .call(CLI_ROLE, "/v1/list", None)
+            .map_err(|e| e.to_string())?;
+        Ok(parse_roles(&reply)
+            .into_iter()
+            .filter(|r| r.role != CLI_ROLE)
+            .collect())
+    }
+}
+
 /// Where this home's daemon says it listens (`<home>/synapsed.json`, `{"addr": ...}`), for a
 /// reachability probe that must not start a daemon. `None`: no such file, or no address in it.
 pub fn synapse_addr(home: &std::path::Path) -> Option<SocketAddr> {
@@ -293,6 +372,35 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    #[test]
+    fn roles_are_read_from_a_list_reply_sorted_and_summaries_cleaned() {
+        let reply = serde_json::json!({"roles": [
+            {"global_id": "pm@acct", "online": true, "last_seen": "t1",
+             "pending": {"queued": 2, "leased": 1, "dead": 0}, "summary": "a\nb\u{7}", "cwd": "C:\\Projects"},
+            {"global_id": "agentlife@acct", "online": false, "last_seen": null, "pending": {}},
+            {"online": true}
+        ]});
+        let rows = parse_roles(&reply);
+        assert_eq!(
+            rows.iter().map(|r| r.role.as_str()).collect::<Vec<_>>(),
+            ["agentlife", "pm"]
+        );
+        assert!(rows[1].online && !rows[0].online);
+        assert_eq!((rows[1].queued, rows[1].leased), (2, 1));
+        assert_eq!(rows[1].summary.as_deref(), Some("a b"));
+        assert_eq!(rows[0].last_seen, None);
+        let text = render_roles(&rows);
+        assert!(
+            text.starts_with("agentlife\toffline\tqueued=0 leased=0\tlast_seen=-\t\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pm\tonline\tqueued=2 leased=1\tlast_seen=t1\ta b\n"),
+            "{text}"
+        );
+        assert!(parse_roles(&serde_json::json!({})).is_empty());
     }
 
     #[test]

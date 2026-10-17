@@ -40,6 +40,7 @@ fn main() -> ExitCode {
         }
         Ok(Command::Hook { event, reason }) => run_hook(&event, reason.as_deref()),
         Ok(Command::List { json, all }) => run_list(json, all),
+        Ok(Command::Status { json }) => run_status_peers(json),
         Ok(Command::Reconcile { dry_run, json }) => run_reconcile(dry_run, json),
         Ok(Command::Pin { agent }) => run_mark(&agent, Mark::Pin),
         Ok(Command::Unpin { agent }) => run_mark(&agent, Mark::Unpin),
@@ -1073,6 +1074,43 @@ fn who_is_calling(app: &App) -> (Caller, Option<AgentRecord>) {
         _ => None,
     };
     (caller, rec)
+}
+
+/// `agentlife status --peers`: the Synapse roles. Read-only; claims `agentlife-cli` to ask.
+fn run_status_peers(json: bool) -> ExitCode {
+    if agentlife::launcher_service::notify_transport(lane_restart::paths::home_dir().as_deref())
+        != lane_restart::notify::Transport::Synapse
+    {
+        eprintln!(
+            "agentlife status --peers: notify_transport is not synapse; use `lane-restart status --peers` (the broker)"
+        );
+        return ExitCode::FAILURE;
+    }
+    let rows = synapse::keystore::default_home()
+        .map_err(|e| format!("no Synapse home (set SYNAPSE_HOME): {e}"))
+        .and_then(|h| agentlife::peers::SynapseMessenger::connect(&h))
+        .and_then(|m| m.roles());
+    match rows {
+        Ok(rows) if json => match serde_json::to_string_pretty(&rows) {
+            Ok(s) => {
+                println!("{s}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("agentlife status: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(rows) => {
+            print!("{}", agentlife::peers::render_roles(&rows));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            // Unreachable is not "no roles".
+            eprintln!("agentlife status --peers: cannot read the Synapse daemon: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_list(json: bool, all: bool) -> ExitCode {

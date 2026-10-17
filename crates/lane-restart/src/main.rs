@@ -402,7 +402,17 @@ fn run_status_cmd(json: bool, quiet_over: Option<i64>, with_peers: bool) -> Exit
         report.mark_quiet_over(secs);
     }
     lane_restart::duplicate::annotate(&mut report, &state_dir(), &facts);
-    if with_peers {
+    let peers_moved = with_peers
+        && lane_restart::approvals::configured_transport(
+            lane_restart::paths::home_dir().as_deref(),
+        ) == lane_restart::notify::Transport::Synapse;
+    if peers_moved {
+        // The published lane-restart crate does not depend on Synapse: the join moved.
+        eprintln!(
+            "lane-restart status --peers: moved (notify_transport is synapse): run `agentlife status --peers`"
+        );
+    }
+    if with_peers && !peers_moved {
         let parents = RealParentProcess::new();
         lane_restart::peers_join::annotate(
             &mut report,

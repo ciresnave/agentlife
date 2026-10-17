@@ -50,6 +50,13 @@ fn default_notify_role() -> String {
     "pm".to_string()
 }
 
+/// `notify_transport` from the config under `home`; `broker` when there is no home, no file or
+/// the file is invalid (the claude-peers path stays the default until the cutover flips it).
+pub fn configured_transport(home: Option<&Path>) -> crate::notify::Transport {
+    home.and_then(|h| load_config(&config_path(h)).ok())
+        .map_or(crate::notify::Transport::Broker, |c| c.notify_transport)
+}
+
 pub fn config_path(home: &Path) -> PathBuf {
     home.join(".overmind").join("lane-restart.json")
 }

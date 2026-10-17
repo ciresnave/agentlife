@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.18
+
+- **M8 phase 3: `agentlife status --peers` (Synapse transport):** one line (or `--json`) per Synapse role: online/offline, last seen, queued/leased mail, cleaned one-line summary. Role == lane, so there is no pid join. Needs `notify_transport=synapse`; otherwise it says to use the broker command. A daemon that cannot be read is an error, never an empty list. `lane-restart status --peers` keeps the broker and, when `notify_transport=synapse`, prints a one-line "moved: run `agentlife status --peers`" instead of querying a broker that is going away (the published `lane-restart` crate takes no Synapse dependency). The `/v1/list` entry shape (`global_id`, `online`, `last_seen`, `pending`) was seen on the scratch daemon of 2026-10-17; `summary` and `cwd` are read as optional and were null there. Run against a scratch daemon (rc.101) with a fake home: the Synapse table and `--json`, the lane-restart "moved" line, and the broker-config refusal all behaved as described; a lane that sets a `summary` was not exercised.
+
 ## 0.16.17
 
 - **Fix: Synapse sends were addressed by bare role, which a real daemon refuses:** `/v1/send` wants `role@account`; a bare `pm` is `404 unknown_recipient` (measured 2026-10-17 on a scratch `synapsed` rc.101; `synapsectl send` qualifies the name itself, which hid it). The 0.16.15 launcher relay and alarms and the 0.16.16 `agentlife down` send were wrong as merged (default transport is still `broker`, so nothing live was affected). Now the account is read from the home's keystore and the recipient is qualified (an address with `@` is kept). Re-measured on the scratch daemon: a launcher send, a `down` send and a relayed outbox message all reached `pm`; an unknown role is still 404. The scratch recipe is in `docs/LAUNCHER-SERVICE.md` ("Scratch-daemon check"); not in CI, it needs `synapsed`.
