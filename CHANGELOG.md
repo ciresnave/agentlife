@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.13
+
+- **CI: `cargo clippy --locked` (coderipper SUP-001, Q14):** the clippy step now refuses to resolve past `Cargo.lock`. Build and test steps are unchanged.
+
 ## 0.16.12
 
 - **`gh-runner-setup.ps1 -Apply` died creating the account; fixed:** the real spike run (2026-10-17) failed at `New-LocalUser`: `Description` was 61 characters, the limit is 48. Nothing was created. The dry run never reaches that cmdlet. Description shortened; red-first test (failed at length 61) now reads every `New-LocalUser` call from the script's AST and holds each literal `-Description` (48), `-FullName` (256) and `-Name` (20) to its limit, plus the default `-Account`. Still UNMEASURED: the rest of the `-Apply` path.
