@@ -574,7 +574,9 @@ mod tests {
         // deserialize into a HandlerSpec and make `check_and_inject` type "1\r" on any screen.
         let json = r#"{"id":"BAD ID","match":{"text_anchors":[]},"action":"1\r","scope":{"roles":["*"]},"provenance":{"approved_by":"","approvals":[]}}"#;
         assert!(parse_and_validate(json).is_err());
-        let err = serde_json::from_str::<HandlerSpec>(json).unwrap_err().to_string();
+        let err = serde_json::from_str::<HandlerSpec>(json)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("id"), "{err}");
         // Positive control: the same shape, valid, deserializes directly.
         assert!(serde_json::from_str::<HandlerSpec>(&sample_json("ok-id", None)).is_ok());
