@@ -16,13 +16,15 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// One handler, exactly as its own JSON file declares it. Every field
-/// except `expires_at` is required, and an unknown field is an error
+/// A handler's fields exactly as its JSON declares them, NOT yet checked by
+/// [`refusal_reason`]. It can only become a [`HandlerSpec`] through
+/// `HandlerSpec::try_from`, so nothing unchecked can reach the host. Every
+/// field except `expires_at` is required, and an unknown field is an error
 /// (`deny_unknown_fields`) - a typo such as `"expires"` must refuse the
 /// handler, never silently mean "no expiry" (§12.3).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HandlerSpec {
+pub struct RawHandlerSpec {
     pub id: String,
     #[serde(rename = "match")]
     pub match_spec: MatchSpec,
@@ -37,6 +39,34 @@ pub struct HandlerSpec {
     pub provenance: Provenance,
     #[serde(default)]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A handler that passed [`refusal_reason`]. The only ways to get one are
+/// `TryFrom<RawHandlerSpec>` and `Deserialize` (which goes through it), and
+/// the inner value is private and read-only (`Deref`), so a handler that was
+/// never checked, or was edited after the check, cannot be constructed
+/// (RESTART-TOOL-DESIGN.md §12.3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "RawHandlerSpec")]
+pub struct HandlerSpec(RawHandlerSpec);
+
+impl TryFrom<RawHandlerSpec> for HandlerSpec {
+    type Error = String;
+
+    fn try_from(raw: RawHandlerSpec) -> Result<Self, String> {
+        match refusal_reason(&raw) {
+            Some(reason) => Err(reason),
+            None => Ok(Self(raw)),
+        }
+    }
+}
+
+impl std::ops::Deref for HandlerSpec {
+    type Target = RawHandlerSpec;
+
+    fn deref(&self) -> &RawHandlerSpec {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -244,7 +274,7 @@ pub const MIN_ANCHOR_LEN: usize = 8;
 /// Why `handler` must be refused, or `None` if it may load (§12.3, §12.3a).
 /// Parsing already enforced the required fields; this enforces everything
 /// a well-formed but unsafe handler could still get wrong.
-pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
+fn refusal_reason(handler: &RawHandlerSpec) -> Option<String> {
     if !valid_id(&handler.id) {
         return Some(format!(
             "id {:?} must be 1-64 chars of a-z, 0-9 and '-'",
@@ -318,12 +348,9 @@ pub fn refusal_reason(handler: &HandlerSpec) -> Option<String> {
 /// Parses one handler file and refuses it (with the reason) if it fails
 /// to parse or fails [`refusal_reason`]. Never partially parsed.
 pub fn parse_and_validate(json: &str) -> Result<HandlerSpec, String> {
-    let handler: HandlerSpec =
+    let raw: RawHandlerSpec =
         serde_json::from_str(json).map_err(|e| format!("does not parse: {e}"))?;
-    match refusal_reason(&handler) {
-        Some(reason) => Err(reason),
-        None => Ok(handler),
-    }
+    HandlerSpec::try_from(raw)
 }
 
 /// Whether `handler` is even eligible to be checked at all: its `scope`
@@ -539,6 +566,20 @@ mod tests {
                 {json_fields}
             }}"#
         )
+    }
+
+    #[test]
+    fn an_unchecked_handler_cannot_be_deserialized_into_a_handler_spec() {
+        // Audit group 5 finding 1: this JSON (bad id, no anchors, empty provenance) used to
+        // deserialize into a HandlerSpec and make `check_and_inject` type "1\r" on any screen.
+        let json = r#"{"id":"BAD ID","match":{"text_anchors":[]},"action":"1\r","scope":{"roles":["*"]},"provenance":{"approved_by":"","approvals":[]}}"#;
+        assert!(parse_and_validate(json).is_err());
+        let err = serde_json::from_str::<HandlerSpec>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("id"), "{err}");
+        // Positive control: the same shape, valid, deserializes directly.
+        assert!(serde_json::from_str::<HandlerSpec>(&sample_json("ok-id", None)).is_ok());
     }
 
     #[test]
@@ -797,9 +838,10 @@ mod tests {
             "the setup: the first wrapped row equals the trusted path"
         );
         // A plain line pin is fooled by that.
-        let mut with_plain = parse_and_validate(TRUST_EXAMPLE).unwrap();
-        let path_pin = with_plain.match_spec.isolated_lines.remove(0);
-        with_plain.match_spec.lines.push(path_pin);
+        let mut raw: RawHandlerSpec = serde_json::from_str(TRUST_EXAMPLE).unwrap();
+        let path_pin = raw.match_spec.isolated_lines.remove(0);
+        raw.match_spec.lines.push(path_pin);
+        let with_plain = HandlerSpec::try_from(raw).unwrap();
         assert!(
             matches(&with_plain, &screen),
             "residual: a plain `lines` pin is fooled at the exact width"
@@ -820,9 +862,10 @@ mod tests {
         screen.truncate(cut);
         // The other pins are gone, so it must not match; drop them from the record to test only the isolation rule.
         assert!(!matches(&h, &screen));
-        let mut only = h.clone();
-        only.match_spec.lines.clear();
-        only.match_spec.text_anchors = vec!["Accessing workspace:".into()];
+        let mut raw: RawHandlerSpec = serde_json::from_str(TRUST_EXAMPLE).unwrap();
+        raw.match_spec.lines.clear();
+        raw.match_spec.text_anchors = vec!["Accessing workspace:".into()];
+        let only = HandlerSpec::try_from(raw).unwrap();
         assert!(
             matches(&only, &screen),
             "the pinned row is last: nothing follows to continue it"
@@ -1099,8 +1142,8 @@ mod tests {
         let quotes: Vec<String> = example_handler()
             .provenance
             .approvals
-            .into_iter()
-            .map(|a| a.quote)
+            .iter()
+            .map(|a| a.quote.clone())
             .collect();
         assert_eq!(
             quotes,
