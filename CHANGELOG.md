@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.18.0
+
+- **Breaking (pre-1.0): the `wt.exe` command line is checked as a whole, by type (audit group 5, finding 2b):** `wt.exe` reads `;` as its own command separator. `first_unsafe_argument` ran on the working directory and the claude argv in `prepare_launch`, but `spawn_launch(&LaunchSpec, &[String])` was public and unchecked, and `host_wrapped_argv` prepended `lane-restart.exe`'s own path AFTER the check, so a `;` in that path reached `wt.exe` unchecked. Now `relaunch::HostedArgv` is built only by `HostedArgv::new(cwd, role, claude_argv)`, which wraps the argv and refuses a `;` anywhere in cwd or the final line; `spawn_launch`, `spawn_relaunch`, `SpawnFn` and `PreparedLaunch.argv` take/hold it (it derefs to the claude argv). `first_unsafe_argument` stays public. Not done: `LaunchSpec.role`/`name` stay `String` (checked by `valid_identifier` in `prepare_launch`); retyping them to `Role` touches ~100 test constructions and is a separate, additive change. Lane-restart/lane-state/launcher tests pass locally; the root crate's `hook_e2e` tests fail here only because this shell runs under a claude process ("another claude is above this one"), so CI is the read for them.
+
 ## 0.17.1
 
 - **Audit group 5, finding 2a: one definition of a role (`lane_state::role`):** eleven hand-copied checks of `[A-Za-z0-9_-]{1,64}` (`relaunch::valid_identifier`, `launcher::valid_role`, `src/config.rs`, `src/launch.rs`, `AgentId::new`, `readiness.rs`, `run.rs`) now call `lane_state::role::is_valid`, and `Role` is a validated newtype (`new`/`FromStr`/`TryFrom<String>`/`Deserialize` all check). Additive; `launcher` gains a `lane-state` dependency. Not changed: `pending::check_id` (a request id: no length cap, a different rule) and `signal_names_role` (a signal id, allows `.` and `:`). `LaunchSpec.role`/`name` become `Role` in the 0.18.0 `WtArgv` change, which reshapes that struct anyway. UNMEASURED until built: written during a disk hold.

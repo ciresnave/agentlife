@@ -490,7 +490,7 @@ pub fn plan_start(
     Ok(StartPlan {
         model: effective.model.clone(),
         pinned_from,
-        argv: prepared.argv,
+        argv: prepared.argv.to_vec(),
         carries_dev_channels_flag: prepared.carries_dev_channels_flag,
         previous_session,
         launch,

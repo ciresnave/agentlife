@@ -330,6 +330,53 @@ pub fn first_unsafe_argument<'a>(elements: impl IntoIterator<Item = &'a str>) ->
     elements.into_iter().find(|e| e.contains(';'))
 }
 
+/// The command line a launch hands to `wt.exe` / `conhost.exe`, checked as a whole: the working
+/// directory and every element of the host-wrapped argv, including the `lane-restart.exe` path
+/// that [`host_wrapped_argv`] prepends. It can only be built by [`HostedArgv::new`], which refuses
+/// a `;` anywhere in it ([`first_unsafe_argument`]), and [`spawn_launch`] accepts nothing else, so
+/// an unchecked command line cannot be spawned (audit group 5, finding 2). It derefs to the CLAUDE
+/// argv (what the lane runs), which is what callers display and compare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedArgv {
+    cwd: String,
+    claude: Vec<String>,
+    hosted: Vec<String>,
+}
+
+impl HostedArgv {
+    pub fn new(cwd: &str, role: &str, claude_argv: Vec<String>) -> Result<Self, RelaunchError> {
+        let hosted = host_wrapped_argv(role, &claude_argv);
+        if let Some(bad) =
+            first_unsafe_argument(std::iter::once(cwd).chain(hosted.iter().map(String::as_str)))
+        {
+            return Err(RelaunchError::UnsafeArgument(bad.to_string()));
+        }
+        Ok(Self {
+            cwd: cwd.to_string(),
+            claude: claude_argv,
+            hosted,
+        })
+    }
+
+    /// The working directory the checked command line starts in.
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// `lane-restart host --role <role> -- <claude argv>`, exactly as it is spawned.
+    pub fn hosted(&self) -> &[String] {
+        &self.hosted
+    }
+}
+
+impl std::ops::Deref for HostedArgv {
+    type Target = [String];
+
+    fn deref(&self) -> &[String] {
+        &self.claude
+    }
+}
+
 /// PM finding, 2026-09-18 (second real-restart retest, real end-to-end
 /// proof via HANDOFF continuity): launching `claude.exe` directly, even
 /// under `CREATE_NEW_CONSOLE`, still inherited this process's own std
@@ -484,17 +531,17 @@ fn set_lane_role(cmd: &mut std::process::Command, role: &str) {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn launch_commands(
     spec: &LaunchSpec,
-    argv: &[String],
+    argv: &HostedArgv,
 ) -> (std::process::Command, std::process::Command) {
-    let hosted_argv = host_wrapped_argv(&spec.role, argv);
+    let hosted_argv = argv.hosted();
     let mut wt = std::process::Command::new("wt.exe");
-    wt.args(["-w", "new", "-d", &spec.cwd]);
-    wt.args(&hosted_argv);
+    wt.args(["-w", "new", "-d", argv.cwd()]);
+    wt.args(hosted_argv);
     strip_session_identity_env(&mut wt);
     set_lane_role(&mut wt, &spec.role);
 
     let mut conhost = std::process::Command::new("conhost.exe");
-    conhost.args(&hosted_argv);
+    conhost.args(hosted_argv);
     conhost.current_dir(&spec.cwd);
     strip_session_identity_env(&mut conhost);
     set_lane_role(&mut conhost, &spec.role);
@@ -537,9 +584,8 @@ pub fn direct_command(
 
 /// Starts [`direct_command`]. The child is not waited for: the caller watches for the new session
 /// the same way it does after a `wt.exe` launch.
-fn spawn_direct(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchError> {
-    let hosted_argv = host_wrapped_argv(&spec.role, argv);
-    spawn_direct_argv(spec, &hosted_argv, &crate::state_dir())
+fn spawn_direct(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), RelaunchError> {
+    spawn_direct_argv(spec, argv.hosted(), &crate::state_dir())
 }
 
 fn spawn_direct_argv(
@@ -558,7 +604,7 @@ fn spawn_direct_argv(
         .map_err(|e| RelaunchError::Spawn(e.to_string()))
 }
 
-pub fn spawn_launch(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchError> {
+pub fn spawn_launch(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), RelaunchError> {
     // Off Windows there is no `wt.exe`/`conhost.exe`: the lane host runs directly.
     if !cfg!(windows) {
         return spawn_direct(spec, argv);
@@ -578,7 +624,7 @@ pub fn spawn_launch(spec: &LaunchSpec, argv: &[String]) -> Result<(), RelaunchEr
         .map_err(|e| RelaunchError::Spawn(e.to_string()))
 }
 
-pub fn spawn_relaunch(state: &LaneState, argv: &[String]) -> Result<(), RelaunchError> {
+pub fn spawn_relaunch(state: &LaneState, argv: &HostedArgv) -> Result<(), RelaunchError> {
     spawn_launch(&LaunchSpec::from(state), argv)
 }
 
@@ -666,7 +712,7 @@ pub fn wait_for_relaunch_liveness(
 /// calls the EXACT SAME `claude_argv` the real launch calls, so the two
 /// can never drift apart again.
 pub fn describe_dry_run(state: &LaneState) -> Result<Vec<String>, RelaunchError> {
-    Ok(prepare(&LaunchSpec::from(state))?.argv)
+    Ok(prepare(&LaunchSpec::from(state))?.argv.to_vec())
 }
 
 /// `prepare_launch` with this machine's policy default model and the Opus
@@ -1071,7 +1117,8 @@ mod tests {
             ..LaunchSpec::from(&state_with_role("overmind"))
         };
         // An explicit set overrides whatever the spawner's own environment carries.
-        let (wt, conhost) = launch_commands(&spec, &strs(&["claude"]));
+        let argv = HostedArgv::new(&spec.cwd, &spec.role, strs(&["claude"])).unwrap();
+        let (wt, conhost) = launch_commands(&spec, &argv);
         for (what, cmd) in [("wt", &wt), ("conhost", &conhost)] {
             let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
             assert_eq!(
@@ -1517,6 +1564,35 @@ mod tests {
             first_unsafe_argument(["fine", "also fine", "not;fine"]),
             Some("not;fine")
         );
+    }
+
+    #[test]
+    fn a_hosted_argv_is_checked_whole_cwd_claude_args_and_the_prepended_host_part() {
+        // Positive control: a clean command line builds, and derefs to the claude argv.
+        let ok = HostedArgv::new("C:/Projects/x", "x", strs(&["claude", "go"])).unwrap();
+        assert_eq!(&*ok, &strs(&["claude", "go"])[..]);
+        assert_eq!(ok.cwd(), "C:/Projects/x");
+        // What is spawned is the host-wrapped line, which the check covered.
+        assert!(ok.hosted().ends_with(&strs(&["--", "claude", "go"])));
+        assert!(ok.hosted().iter().all(|a| !a.contains(';')));
+        // The same shape with a ';' in the cwd, or in a claude argument, is refused.
+        for (cwd, args) in [
+            ("C:/a;b", strs(&["claude"])),
+            ("C:/ok", strs(&["claude", "p;q"])),
+        ] {
+            assert!(
+                matches!(
+                    HostedArgv::new(cwd, "x", args),
+                    Err(RelaunchError::UnsafeArgument(_))
+                ),
+                "{cwd}"
+            );
+        }
+        // The role is part of the wrapped line too (callers validate it, this does not rely on that).
+        assert!(matches!(
+            HostedArgv::new("C:/ok", "a;b", strs(&["claude"])),
+            Err(RelaunchError::UnsafeArgument(_))
+        ));
     }
 
     #[test]

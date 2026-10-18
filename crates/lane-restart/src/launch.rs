@@ -7,8 +7,8 @@
 
 use crate::facts::SystemFacts;
 use crate::relaunch::{
-    allow_opus_from_env, extra_launch_args, first_unsafe_argument, has_dev_channels_flag,
-    policy_default_model, resolve_launch_model, spawn_launch, valid_identifier, RelaunchError,
+    allow_opus_from_env, extra_launch_args, has_dev_channels_flag, policy_default_model,
+    resolve_launch_model, spawn_launch, valid_identifier, HostedArgv, RelaunchError,
     RelaunchOutcome, StateReader,
 };
 use crate::state::LaneState;
@@ -44,12 +44,13 @@ impl From<&LaneState> for LaunchSpec {
 
 /// How a launch is spawned: given the spec and the argv, start the lane's
 /// window. The real one is `relaunch::spawn_launch`; tests pass a recorder.
-pub type SpawnFn = dyn Fn(&LaunchSpec, &[String]) -> Result<(), RelaunchError>;
+pub type SpawnFn = dyn Fn(&LaunchSpec, &HostedArgv) -> Result<(), RelaunchError>;
 
 /// A launch that passed every check and is ready to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedLaunch {
-    pub argv: Vec<String>,
+    /// The checked command line; derefs to the claude argv.
+    pub argv: HostedArgv,
     /// Whether the argv about to be launched carries the development-channels
     /// flag (the startup dialog a human must confirm).
     pub carries_dev_channels_flag: bool,
@@ -110,11 +111,9 @@ pub fn prepare_launch(
     let prompt = format!("read {} HANDOFF and continue", spec.role);
     let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, allow_opus)?;
     let argv = launch_argv(spec, &prompt, &model);
-    if let Some(bad) = first_unsafe_argument(
-        std::iter::once(spec.cwd.as_str()).chain(argv.iter().map(String::as_str)),
-    ) {
-        return Err(RelaunchError::UnsafeArgument(bad.to_string()));
-    }
+    // Checked as the FINAL command line (cwd + host-wrapped argv, the `lane-restart.exe` path
+    // included): `HostedArgv` is the only thing a spawn accepts.
+    let argv = HostedArgv::new(&spec.cwd, &spec.role, argv)?;
     // PM finding, 2026-09-19: judge the argv ABOUT TO BE LAUNCHED (it already
     // went through the allowlist), never the original launch flags.
     let carries_dev_channels_flag = has_dev_channels_flag(&argv);
