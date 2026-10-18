@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.20.0
+
+- **Breaking (pre-1.0): `Config` program and directory fields are typed (audit group 5, finding 4):** `host_program` and `claude_program` are `config::ProgramName`, `portfolio_root` and `lane_state_dir` are `config::DirName`. The rule (non-empty, no `;` which `wt.exe` reads as its command separator, and for programs no control character) was an inline closure at the one parse site; `new` now carries it and the types deref to `str`. Behaviour unchanged. `launch::Programs` stays `String`.
+
 ## 0.19.1
 
 - **runner-lint: `RunnerLabel` enum (audit group 5, finding 8):** the `RUNNER_LABELS` string slice is `enum RunnerLabel { SelfHosted, Gpu }` with a case-insensitive `parse`. Behaviour unchanged; additive, internal.
