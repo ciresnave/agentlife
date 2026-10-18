@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.19.1
+
+- **runner-lint: `RunnerLabel` enum (audit group 5, finding 8):** the `RUNNER_LABELS` string slice is `enum RunnerLabel { SelfHosted, Gpu }` with a case-insensitive `parse`. Behaviour unchanged; additive, internal.
+
 ## 0.19.0
 
 - **Breaking (pre-1.0): "never Opus" is a type, and it fails closed (audit group 5, finding 3):** the rule was `is_opus` (a substring test) plus an `allow_opus: bool` threaded through `prepare_launch`, `resolve_launch_model`, `launch_and_wait_with` and `kill_and_relaunch_*`; a new Opus id without "opus" in it passed, and any caller could pass `true`. Now `relaunch::Model` is built only by `Model::parse(name, Option<&OpusPermit>)`: only `sonnet`, `haiku`, `claude-sonnet-*` and `claude-haiku-*` (an optional `[...]` suffix ignored, and never any name containing "opus") parse without a permit; every other name, including future tiers such as `claude-fable-*`, is refused as `RelaunchError::ModelRefused` (replaces `OpusRefused`). `OpusPermit` has a private field and one constructor, `from_env()` (`LANE_RESTART_ALLOW_OPUS=1`), which is `pub(crate)` and called only by `launch_and_wait` and the interactive relaunch path: the launcher service, `lane-start`, spec import, the spec check and the stop path take `None`/no permit and cannot obtain one. `lane_stop` reads the recorded model with `recorded_launch_model` (plain text, no validation, nothing launches from it). `allow_opus_from_env` and `resolve_*(..., bool)` are gone. The environment variable remains an honest human gate: any process can set it, and a type cannot stop that.
