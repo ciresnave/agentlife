@@ -398,7 +398,23 @@ impl Layer {
     pub fn from_json(path: &Path, text: &str) -> Result<Self, ConfigError> {
         serde_json::from_str(text).map_err(|e| ConfigError::File {
             path: path.to_path_buf(),
-            why: e.to_string(),
+            why: Self::name_the_key(text).unwrap_or_else(|| e.to_string()),
+        })
+    }
+
+    /// serde's message for a typed value does not name its key, so find it: parse each top-level entry
+    /// alone and report the first that is refused, as `key: reason`. `None` when the text is not a JSON
+    /// object or every entry is fine on its own (the caller keeps serde's own message).
+    fn name_the_key(text: &str) -> Option<String> {
+        let serde_json::Value::Object(map) = serde_json::from_str(text).ok()? else {
+            return None;
+        };
+        map.into_iter().find_map(|(k, v)| {
+            let mut one = serde_json::Map::new();
+            one.insert(k.clone(), v);
+            serde_json::from_value::<Layer>(serde_json::Value::Object(one))
+                .err()
+                .map(|e| format!("{k}: {e}"))
         })
     }
 
@@ -757,6 +773,28 @@ mod tests {
         }
         // Control: the correctly spelled key is accepted.
         assert!(Layer::from_json(Path::new("c"), r#"{"free_ram_floor_gb": 4}"#).is_ok());
+    }
+
+    #[test]
+    fn a_bad_value_in_the_file_names_its_key() {
+        for (key, bad) in [
+            ("approval_default_duration", r#""forever""#),
+            ("pending_nag", r#""sometimes""#),
+            ("idle_stop_policy", r#""never""#),
+            ("peers_addr", r#""0.0.0.0:7899""#),
+            ("synapse_addr", r#""example.com:1""#),
+            ("host_program", r#""a;b""#),
+            ("portfolio_root", r#""""#),
+            ("tabs_per_window", r#""ten""#),
+        ] {
+            let json = format!(r#"{{"batch_size": 3, "{key}": {bad}}}"#);
+            match Layer::from_json(Path::new("c"), &json) {
+                Err(ConfigError::File { why, .. }) => {
+                    assert!(why.starts_with(&format!("{key}: ")), "{key}: {why}")
+                }
+                other => panic!("{key}: expected a refusal, got {other:?}"),
+            }
+        }
     }
 
     #[test]
