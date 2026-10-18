@@ -28,11 +28,7 @@ pub struct AgentId(String);
 impl AgentId {
     pub fn new(s: impl Into<String>) -> Result<Self, String> {
         let s = s.into();
-        if !s.is_empty()
-            && s.len() <= 64
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if lane_state::role::is_valid(&s) {
             Ok(Self(s))
         } else {
             Err(format!(

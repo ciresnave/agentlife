@@ -92,10 +92,7 @@ impl std::fmt::Display for BuildError {
 }
 
 fn valid_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    lane_state::role::is_valid(s)
 }
 
 /// The name the host files this agent under: its name, else its id.

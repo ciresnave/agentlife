@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.17.1
+
+- **Audit group 5, finding 2a: one definition of a role (`lane_state::role`):** eleven hand-copied checks of `[A-Za-z0-9_-]{1,64}` (`relaunch::valid_identifier`, `launcher::valid_role`, `src/config.rs`, `src/launch.rs`, `AgentId::new`, `readiness.rs`, `run.rs`) now call `lane_state::role::is_valid`, and `Role` is a validated newtype (`new`/`FromStr`/`TryFrom<String>`/`Deserialize` all check). Additive; `launcher` gains a `lane-state` dependency. Not changed: `pending::check_id` (a request id: no length cap, a different rule) and `signal_names_role` (a signal id, allows `.` and `:`). `LaunchSpec.role`/`name` become `Role` in the 0.18.0 `WtArgv` change, which reshapes that struct anyway. UNMEASURED until built: written during a disk hold.
+
 ## 0.17.0
 
 - **Audit group 5, finding 1: an unchecked handler cannot be constructed (`lane-restart` `handlers`):** `HandlerSpec` used to be a public, directly deserializable struct, and `refusal_reason` was a check callers had to remember. Reproduced: JSON with a bad id, no anchors and empty provenance deserialized into a `HandlerSpec`, and `check_and_inject` wrote its action on any screen (production was safe only because `approvals.rs` happened to call `parse_and_validate`). Now `RawHandlerSpec` is the unchecked shape, `HandlerSpec` is a private-inner newtype reachable only through `TryFrom<RawHandlerSpec>` / `Deserialize` (`serde(try_from)`), read via `Deref`, and `refusal_reason` is private. Breaking for library consumers that built `HandlerSpec` literals or mutated its fields; none in this workspace.
