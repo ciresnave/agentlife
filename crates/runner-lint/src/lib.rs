@@ -40,7 +40,22 @@ pub struct Report {
 pub const SAME_REPO: &str = "github.event.pull_request.head.repo.full_name == github.repository";
 
 /// Labels that mark a runner as ours. A job asking for one can only run on a self-hosted machine.
-const RUNNER_LABELS: &[&str] = &["self-hosted", "gpu"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerLabel {
+    SelfHosted,
+    Gpu,
+}
+
+impl RunnerLabel {
+    /// Case-insensitive, as GitHub matches labels.
+    fn parse(label: &str) -> Option<Self> {
+        match label.to_ascii_lowercase().as_str() {
+            "self-hosted" => Some(Self::SelfHosted),
+            "gpu" => Some(Self::Gpu),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Where {
@@ -124,7 +139,7 @@ fn classify_label(label: &str, job: Option<&Yaml>) -> Where {
         matrix_where(key, job)
     } else if label.contains("${{") {
         Where::Unknown
-    } else if RUNNER_LABELS.contains(&label.to_ascii_lowercase().as_str()) {
+    } else if RunnerLabel::parse(label).is_some() {
         Where::Runner
     } else if hosted_label(label) {
         Where::Hosted
