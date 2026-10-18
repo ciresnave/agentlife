@@ -221,7 +221,7 @@ mod tests {
     fn the_rule_follows_the_configuration() {
         let cfg = Config {
             pin_roles: vec!["lead".to_string()],
-            portfolio_root: "D:/ws".to_string(),
+            portfolio_root: crate::config::DirName::new("D:/ws".to_string()).unwrap(),
             ..Config::default()
         };
         assert_eq!(

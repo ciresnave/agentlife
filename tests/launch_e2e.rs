@@ -347,8 +347,8 @@ fn run_plan(
         lane_state_dir: &lane_state,
     };
     let programs = Programs {
-        host: cfg.host_program.clone(),
-        claude: cfg.claude_program.clone(),
+        host: cfg.host_program.to_string(),
+        claude: cfg.claude_program.to_string(),
     };
     let me = SysinfoTable
         .identity_of(std::process::id())
@@ -919,8 +919,8 @@ fn restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_start
     let table = SysinfoTable;
     let lane_state = rig.dir.path().join("lane-state");
     let programs = Programs {
-        host: cfg.host_program.clone(),
-        claude: cfg.claude_program.clone(),
+        host: cfg.host_program.to_string(),
+        claude: cfg.claude_program.to_string(),
     };
     let spawner = DirectSpawner::new(rig.env());
     let me = table

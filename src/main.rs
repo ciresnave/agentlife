@@ -330,8 +330,8 @@ fn run_with_runtime(
     let journal = Journal::new(home.journal_dir(), Arc::new(SystemClock));
     let lane_state_dir = std::path::PathBuf::from(&cfg.lane_state_dir);
     let programs = Programs {
-        host: cfg.host_program.clone(),
-        claude: cfg.claude_program.clone(),
+        host: cfg.host_program.to_string(),
+        claude: cfg.claude_program.to_string(),
     };
     let spawner = platform_spawner();
     let show = |text: &str| print!("{text}");
@@ -629,7 +629,7 @@ fn wait_for_logon_preconditions() -> Result<(), String> {
     };
     let probe = SystemProbe {
         broker,
-        host_program: cfg.host_program.clone(),
+        host_program: cfg.host_program.to_string(),
     };
     let report = task::wait_ready(
         &probe,
