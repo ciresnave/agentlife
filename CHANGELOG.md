@@ -2,7 +2,7 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.16.23
+## 0.17.0
 
 - **Audit group 5, finding 1: an unchecked handler cannot be constructed (`lane-restart` `handlers`):** `HandlerSpec` used to be a public, directly deserializable struct, and `refusal_reason` was a check callers had to remember. Reproduced: JSON with a bad id, no anchors and empty provenance deserialized into a `HandlerSpec`, and `check_and_inject` wrote its action on any screen (production was safe only because `approvals.rs` happened to call `parse_and_validate`). Now `RawHandlerSpec` is the unchecked shape, `HandlerSpec` is a private-inner newtype reachable only through `TryFrom<RawHandlerSpec>` / `Deserialize` (`serde(try_from)`), read via `Deref`, and `refusal_reason` is private. Breaking for library consumers that built `HandlerSpec` literals or mutated its fields; none in this workspace.
 
