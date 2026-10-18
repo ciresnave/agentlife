@@ -139,19 +139,19 @@ pub struct Config {
     pub waiting_mark_ttl_hours: u32,
     pub pin_roles: Vec<String>,
     /// The directory the portfolio's PM lane is launched in; with `pin_roles` it names the PM.
-    pub portfolio_root: String,
+    pub portfolio_root: DirName,
     /// The claude-peers broker (loopback only), used to ask a lane to wrap up.
     pub peers_addr: SocketAddr,
     /// OverMind's `lane-restart` state directory. agentlife only ever READS it.
-    pub lane_state_dir: String,
+    pub lane_state_dir: DirName,
     /// How long `park`/`stop` waits for a lane to write its HANDOFF and assert it is idle.
     pub down_timeout_secs: u64,
     pub down_poll_secs: u64,
     /// The program a restored agent runs under (it owns the terminal and answers the start-up
     /// dialog): `lane-restart`'s `host` subcommand. A name or a path; never run through a shell.
-    pub host_program: String,
+    pub host_program: ProgramName,
     /// The `claude` the host starts.
-    pub claude_program: String,
+    pub claude_program: ProgramName,
     /// A restore stops starting agents after this many batches in a row in which none came up.
     pub stop_after_failed_batches: u32,
     /// How long a started agent may show no progress before it is reported as waiting at its
@@ -188,13 +188,13 @@ impl Default for Config {
             user_recent_minutes: 30,
             waiting_mark_ttl_hours: 24,
             pin_roles: vec!["pm".to_string()],
-            portfolio_root: "C:/Projects".to_string(),
+            portfolio_root: DirName::trusted("C:/Projects"),
             peers_addr: SocketAddr::from(([127, 0, 0, 1], 7899)),
-            lane_state_dir: "C:/Projects/.lane-state".to_string(),
+            lane_state_dir: DirName::trusted("C:/Projects/.lane-state"),
             down_timeout_secs: 600,
             down_poll_secs: 2,
-            host_program: "lane-restart".to_string(),
-            claude_program: "claude".to_string(),
+            host_program: ProgramName::trusted("lane-restart"),
+            claude_program: ProgramName::trusted("claude"),
             stop_after_failed_batches: 2,
             progress_timeout_secs: 20,
             spawn_gap_ms: 1500,
@@ -421,17 +421,80 @@ where
     v.map(|s| parse::<T>(key, &s)).transpose()
 }
 
+/// Defines a validated string newtype: `new` checks, `trusted` is for built-in defaults and the platform
+/// paths (it asserts the same rule in debug builds), and it reads as a `str`.
+macro_rules! checked_string {
+    ($(#[$m:meta])* $name:ident, $what:literal, $ok:expr) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(v: String) -> Result<Self, String> {
+                let ok: fn(&str) -> bool = $ok;
+                if ok(&v) {
+                    Ok(Self(v))
+                } else {
+                    Err(format!("{v:?} is not a usable {}", $what))
+                }
+            }
+
+            fn trusted(v: &str) -> Self {
+                Self::new(v.to_string()).expect(concat!("built-in ", $what))
+            }
+        }
+
+        impl AsRef<std::path::Path> for $name {
+            fn as_ref(&self) -> &std::path::Path {
+                std::path::Path::new(&self.0)
+            }
+        }
+
+        impl AsRef<std::ffi::OsStr> for $name {
+            fn as_ref(&self) -> &std::ffi::OsStr {
+                std::ffi::OsStr::new(&self.0)
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+            fn deref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+checked_string!(
+    /// A program name or path to run (never through a shell): non-empty, no `;` (`wt.exe`'s command
+    /// separator), no control character.
+    ProgramName,
+    "program name",
+    |v| !v.is_empty() && !v.contains(';') && !v.chars().any(char::is_control)
+);
+
+checked_string!(
+    /// A directory name: non-empty and without `;`.
+    DirName,
+    "directory name",
+    |v| !v.is_empty() && !v.contains(';')
+);
+
 impl Config {
     /// `Config::default()` with `portfolio_root` and `lane_state_dir` taken from
     /// `lane_state::platform` for this OS. On Windows it equals `Config::default()`.
     pub fn platform_default() -> Config {
         Config {
-            portfolio_root: lane_state::platform::portfolio_root()
-                .to_string_lossy()
-                .into_owned(),
-            lane_state_dir: lane_state::platform::state_dir()
-                .to_string_lossy()
-                .into_owned(),
+            portfolio_root: DirName::trusted(
+                &lane_state::platform::portfolio_root().to_string_lossy(),
+            ),
+            lane_state_dir: DirName::trusted(&lane_state::platform::state_dir().to_string_lossy()),
             ..Config::default()
         }
     }
@@ -444,6 +507,11 @@ impl Config {
         macro_rules! field {
             ($f:ident) => {
                 pick(flags.$f, env.$f, file.$f).unwrap_or(d.$f)
+            };
+        }
+        macro_rules! text_field {
+            ($f:ident) => {
+                pick(flags.$f, env.$f, file.$f).unwrap_or_else(|| d.$f.to_string())
             };
         }
         let floor = field!(free_ram_floor_gb);
@@ -496,32 +564,16 @@ impl Config {
             }
             None => d.peers_addr,
         };
-        let lane_state_dir = field!(lane_state_dir);
-        if lane_state_dir.is_empty() || lane_state_dir.contains(';') {
-            return Err(ConfigError::Invalid {
-                key: "lane_state_dir",
-                why: format!("{lane_state_dir:?} is not a usable directory name"),
-            });
-        }
-        let program = |key: &'static str, v: String| {
-            if v.is_empty() || v.contains(';') || v.chars().any(char::is_control) {
-                Err(ConfigError::Invalid {
-                    key,
-                    why: format!("{v:?} is not a usable program name"),
-                })
-            } else {
-                Ok(v)
-            }
+        let dir = |key: &'static str, v: String| {
+            DirName::new(v).map_err(|why| ConfigError::Invalid { key, why })
         };
-        let host_program = program("host_program", field!(host_program))?;
-        let claude_program = program("claude_program", field!(claude_program))?;
-        let portfolio_root = field!(portfolio_root);
-        if portfolio_root.is_empty() || portfolio_root.contains(';') {
-            return Err(ConfigError::Invalid {
-                key: "portfolio_root",
-                why: format!("{portfolio_root:?} is not a usable directory name"),
-            });
-        }
+        let program = |key: &'static str, v: String| {
+            ProgramName::new(v).map_err(|why| ConfigError::Invalid { key, why })
+        };
+        let lane_state_dir = dir("lane_state_dir", text_field!(lane_state_dir))?;
+        let host_program = program("host_program", text_field!(host_program))?;
+        let claude_program = program("claude_program", text_field!(claude_program))?;
+        let portfolio_root = dir("portfolio_root", text_field!(portfolio_root))?;
         let synapse_account = field!(synapse_account);
         if !valid_identifier(&synapse_account) {
             return Err(ConfigError::Invalid {
@@ -646,8 +698,8 @@ mod tests {
         assert_eq!(c.lazy_after_idle_minutes, 120);
         assert_eq!(c.pin_roles, ["pm"]);
         if cfg!(windows) {
-            assert_eq!(c.portfolio_root, "C:/Projects");
-            assert_eq!(c.lane_state_dir, "C:/Projects/.lane-state");
+            assert_eq!(&*c.portfolio_root, "C:/Projects");
+            assert_eq!(&*c.lane_state_dir, "C:/Projects/.lane-state");
         } else {
             assert!(!c.portfolio_root.starts_with("C:"), "{}", c.portfolio_root);
             assert!(!c.lane_state_dir.starts_with("C:"), "{}", c.lane_state_dir);
@@ -655,7 +707,7 @@ mod tests {
         assert_eq!(c.peers_addr.to_string(), "127.0.0.1:7899");
         assert_eq!((c.down_timeout_secs, c.down_poll_secs), (600, 2));
         assert_eq!(
-            (c.host_program.as_str(), c.claude_program.as_str()),
+            (&*c.host_program, &*c.claude_program),
             ("lane-restart", "claude")
         );
         assert_eq!(

@@ -214,7 +214,7 @@ pub fn unpark_no_start(
     // state as "the PM stopped it", so a deliberate reopen has to change the spec too:
     // `crashed` is the existing "ended without a stop; the last known launch is the way back".
     // Best effort: if it cannot be written the lane stays refused, which is the safe side.
-    let spec = reopen_spec(Path::new(&cfg.lane_state_dir), &rec);
+    let spec = reopen_spec(Path::new(&*cfg.lane_state_dir), &rec);
     let _ = journal.append(
         "reopened",
         Some(id.as_str()),
@@ -583,7 +583,7 @@ mod tests {
         // a temp lane-state dir: this must never read or rewrite a real lane's spec
         let d = tempfile::tempdir().unwrap();
         let cfg = Config {
-            lane_state_dir: d.path().display().to_string(),
+            lane_state_dir: crate::config::DirName::new(d.path().display().to_string()).unwrap(),
             ..Config::default()
         };
         assert_eq!(
@@ -669,7 +669,8 @@ mod tests {
             let d = tempfile::tempdir().unwrap();
             spec::write_atomic(d.path(), &spec_in(role, before)).unwrap();
             let cfg = Config {
-                lane_state_dir: d.path().display().to_string(),
+                lane_state_dir: crate::config::DirName::new(d.path().display().to_string())
+                    .unwrap(),
                 ..Config::default()
             };
             let r = rig(&[agent("a1", "lane", "C:/Projects/lane", None, None)]);
@@ -701,7 +702,7 @@ mod tests {
         // no spec at all: reopening still works and writes nothing
         let d = tempfile::tempdir().unwrap();
         let cfg = Config {
-            lane_state_dir: d.path().display().to_string(),
+            lane_state_dir: crate::config::DirName::new(d.path().display().to_string()).unwrap(),
             ..Config::default()
         };
         let r = rig(&[agent("a1", "lane", "C:/Projects/lane", None, None)]);
