@@ -8,6 +8,7 @@ publish = false
 description = "The decision engine of agentlife's launch-on-message service: OverMind's policy (rules 1-7, the mechanism mapping, the replay and rate store, the launch-stalled alarm) behind traits, with no network and no process code."
 
 [dependencies]
+lane-state.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

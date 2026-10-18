@@ -263,11 +263,7 @@ impl StoreIo for FileStore {
 
 /// Rule 2: `[A-Za-z0-9_-]{1,64}`.
 pub fn valid_role(role: &str) -> bool {
-    !role.is_empty()
-        && role.len() <= 64
-        && role
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    lane_state::role::is_valid(role)
 }
 
 /// Section 3: the mechanism's answer as Synapse's `(outcome, reason)`, and whether a lane was

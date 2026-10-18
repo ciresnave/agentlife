@@ -80,10 +80,7 @@ pub fn entry_has_handoff(e: &plan::Entry) -> bool {
         return true;
     }
     e.name.as_deref().is_some_and(|n| {
-        let plain = !n.is_empty()
-            && n.len() <= 64
-            && n.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        let plain = lane_state::role::is_valid(n);
         plain
             && base
                 .join(format!("{}-HANDOFF.md", n.to_ascii_uppercase()))

@@ -28,10 +28,7 @@ use crate::stop::stop_lane;
 /// alone would have closed this; both together don't depend on staying
 /// right about which one actually mattered.
 pub fn valid_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    lane_state::role::is_valid(s)
 }
 
 #[derive(Debug)]

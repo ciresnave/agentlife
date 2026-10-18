@@ -61,11 +61,7 @@ pub fn handoff_candidates(rec: &AgentRecord) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
     {
-        let plain = !name.is_empty()
-            && name.len() <= 64
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        let plain = lane_state::role::is_valid(name);
         let candidate = base.join(format!("{}-HANDOFF.md", name.to_ascii_uppercase()));
         if plain && !out.contains(&candidate) {
             out.push(candidate);
