@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.21.0
+
+- **Breaking (pre-1.0): `config::Layer` fields are typed, and the loopback rule is a type (audit group 5, findings 5 and 4b):** the enum-valued keys (`approval_default_duration`, `pending_nag`, `idle_stop_policy`) were `Option<String>` parsed later by `typed()` in `resolve`; the address keys were parsed and loopback-checked by two copies of the same code with different messages. Now `Layer` holds `DurationChoice`, `PendingNag`, `IdleStopPolicy`, `ProgramName`, `DirName` and the new `LoopbackAddr` (`peers_addr`, `synapse_addr`, also the `Config` field types; deref to `SocketAddr`), and `resolve` only picks. A bad value is refused where it enters: `Layer::set` (flag), `from_env_with` (error names the `AGENTLIFE_*` variable) or the config file (`ConfigError::File`; serde's message does not name the key, only the offending value). `resolve` no longer sees a malformed typed value. The two loopback messages are now one. Not changed: `pin_roles` and `synapse_account` stay `String` (checked in `resolve`).
+
 ## 0.20.0
 
 - **Breaking (pre-1.0): `Config` program and directory fields are typed (audit group 5, finding 4):** `host_program` and `claude_program` are `config::ProgramName`, `portfolio_root` and `lane_state_dir` are `config::DirName`. The rule (non-empty, no `;` which `wt.exe` reads as its command separator, and for programs no control character) was an inline closure at the one parse site; `new` now carries it and the types deref to `str`. Behaviour unchanged. `launch::Programs` stays `String`.
