@@ -253,7 +253,7 @@ impl SpecFile {
         if self.model.trim().is_empty() {
             return Err(SpecError::Incomplete("no model".to_string()));
         }
-        prepare_launch(&self.launch_spec(), &self.model, false)
+        prepare_launch(&self.launch_spec(), &self.model, None)
             .map_err(|e: RelaunchError| SpecError::Incomplete(e.to_string()))
     }
 }

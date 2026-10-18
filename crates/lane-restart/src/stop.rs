@@ -127,7 +127,7 @@ mod tests {
             state,
             &identity(),
             "sonnet",
-            false,
+            None,
             &move |spec, argv| {
                 log.borrow_mut()
                     .push(format!("spawn {} {}", spec.role, argv[0]));
@@ -223,7 +223,7 @@ mod tests {
             state,
             &identity(),
             policy_default,
-            false,
+            None,
             specs,
             &move |spec, argv| {
                 log.borrow_mut()
@@ -339,7 +339,7 @@ mod tests {
             &st,
             &identity(),
             "sonnet",
-            false,
+            None,
             &store,
             &move |spec, _| {
                 *sp.borrow_mut() = Some(spec.clone());
@@ -394,7 +394,7 @@ mod tests {
             &st,
             &identity(),
             "sonnet",
-            false,
+            None,
             &store,
             &|_, _| Ok(()),
             &mut |_| {},
@@ -432,7 +432,7 @@ mod tests {
             &st,
             &identity(),
             "sonnet",
-            false,
+            None,
             &|_, _| Ok(()),
             &mut |_| slept += 1,
             &mut || awaiting += 1,
@@ -461,7 +461,7 @@ mod tests {
             &st,
             &identity(),
             "sonnet",
-            false,
+            None,
             &|_, _| Ok(()),
             &mut |_| {},
             &mut || {},
