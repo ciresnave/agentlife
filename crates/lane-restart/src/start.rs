@@ -484,8 +484,7 @@ pub fn plan_start(
     };
     effective.permission_mode = Some(START_PERMISSION_MODE.to_string());
     let launch = effective.launch_spec();
-    let prepared =
-        prepare_launch(&launch, &effective.model, false).map_err(StartRefusal::Launch)?;
+    let prepared = prepare_launch(&launch, &effective.model, None).map_err(StartRefusal::Launch)?;
     let previous_session = state::load(dir, req.role).ok().map(|s| s.session_id);
     Ok(StartPlan {
         model: effective.model.clone(),
@@ -550,7 +549,7 @@ pub fn execute_start(
         plan.previous_session.as_deref(),
         timing,
         &plan.model,
-        false,
+        None,
         spawn,
         sleep,
         on_awaiting,

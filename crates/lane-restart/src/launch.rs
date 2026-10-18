@@ -7,9 +7,9 @@
 
 use crate::facts::SystemFacts;
 use crate::relaunch::{
-    allow_opus_from_env, extra_launch_args, has_dev_channels_flag, policy_default_model,
-    resolve_launch_model, spawn_launch, valid_identifier, HostedArgv, RelaunchError,
-    RelaunchOutcome, StateReader,
+    extra_launch_args, has_dev_channels_flag, policy_default_model, resolve_launch_model,
+    spawn_launch, valid_identifier, HostedArgv, OpusPermit, RelaunchError, RelaunchOutcome,
+    StateReader,
 };
 use crate::state::LaneState;
 use std::time::Duration;
@@ -94,7 +94,7 @@ pub fn launch_argv(spec: &LaunchSpec, prompt: &str, model: &str) -> Vec<String> 
 pub fn prepare_launch(
     spec: &LaunchSpec,
     policy_default: &str,
-    allow_opus: bool,
+    permit: Option<&OpusPermit>,
 ) -> Result<PreparedLaunch, RelaunchError> {
     if !valid_identifier(&spec.role) {
         return Err(RelaunchError::InvalidIdentifier(format!(
@@ -109,8 +109,8 @@ pub fn prepare_launch(
         )));
     }
     let prompt = format!("read {} HANDOFF and continue", spec.role);
-    let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, allow_opus)?;
-    let argv = launch_argv(spec, &prompt, &model);
+    let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, permit)?;
+    let argv = launch_argv(spec, &prompt, model.as_str());
     // Checked as the FINAL command line (cwd + host-wrapped argv, the `lane-restart.exe` path
     // included): `HostedArgv` is the only thing a spawn accepts.
     let argv = HostedArgv::new(&spec.cwd, &spec.role, argv)?;
@@ -225,7 +225,7 @@ pub fn launch_and_wait_with(
     previous_session: Option<&str>,
     timing: &LivenessTiming,
     policy_default: &str,
-    allow_opus: bool,
+    permit: Option<&OpusPermit>,
     spawn: &SpawnFn,
     sleep: &mut dyn FnMut(Duration),
     on_awaiting: &mut dyn FnMut(),
@@ -233,7 +233,7 @@ pub fn launch_and_wait_with(
     let PreparedLaunch {
         argv,
         carries_dev_channels_flag,
-    } = prepare_launch(spec, policy_default, allow_opus)?;
+    } = prepare_launch(spec, policy_default, permit)?;
     let launched_after_secs = crate::stop::launched_after(facts.now());
     spawn(spec, &argv)?;
     wait_for_liveness(
@@ -269,7 +269,7 @@ pub fn launch_and_wait(
         previous_session,
         timing,
         &policy_default_model(&crate::state_dir()),
-        allow_opus_from_env(),
+        OpusPermit::from_env().as_ref(),
         &spawn_launch,
         &mut std::thread::sleep,
         on_awaiting,
@@ -382,13 +382,13 @@ mod tests {
     #[test]
     fn a_launch_is_refused_for_an_invalid_role_or_name() {
         assert!(matches!(
-            prepare_launch(&spec("a&calc"), "sonnet", false),
+            prepare_launch(&spec("a&calc"), "sonnet", None),
             Err(RelaunchError::InvalidIdentifier(_))
         ));
         let mut s = spec("overmind");
         s.name = "a|calc".into();
         assert!(matches!(
-            prepare_launch(&s, "sonnet", false),
+            prepare_launch(&s, "sonnet", None),
             Err(RelaunchError::InvalidIdentifier(_))
         ));
     }
@@ -398,13 +398,13 @@ mod tests {
         let mut s = spec("overmind");
         s.cwd = "C:/x;calc".into();
         assert!(matches!(
-            prepare_launch(&s, "sonnet", false),
+            prepare_launch(&s, "sonnet", None),
             Err(RelaunchError::UnsafeArgument(_))
         ));
         let mut s = spec("overmind");
         s.permission_mode = Some("a;b".into());
         assert!(matches!(
-            prepare_launch(&s, "sonnet", false),
+            prepare_launch(&s, "sonnet", None),
             Err(RelaunchError::UnsafeArgument(_))
         ));
     }
@@ -413,21 +413,26 @@ mod tests {
     #[test]
     fn a_launch_on_opus_is_refused_unless_overridden() {
         assert!(matches!(
-            prepare_launch(&spec("overmind"), "claude-opus-5", false),
-            Err(RelaunchError::OpusRefused(_))
+            prepare_launch(&spec("overmind"), "claude-opus-5", None),
+            Err(RelaunchError::ModelRefused(_))
         ));
-        let ok = prepare_launch(&spec("overmind"), "claude-opus-5", true).unwrap();
+        let ok = prepare_launch(
+            &spec("overmind"),
+            "claude-opus-5",
+            Some(&OpusPermit::for_test()),
+        )
+        .unwrap();
         assert!(ok.argv.contains(&"claude-opus-5".to_string()));
         // an explicit launch --model pin wins over the policy default
         let mut pinned = spec("overmind");
         pinned.launch_args = Some(strs(&["claude", "--model", "haiku"]));
-        let p = prepare_launch(&pinned, "claude-opus-5", false).unwrap();
+        let p = prepare_launch(&pinned, "claude-opus-5", None).unwrap();
         assert!(p.argv.contains(&"haiku".to_string()));
     }
 
     #[test]
     fn a_prepared_launch_knows_whether_it_carries_the_dev_channels_flag() {
-        let plain = prepare_launch(&spec("overmind"), "sonnet", false).unwrap();
+        let plain = prepare_launch(&spec("overmind"), "sonnet", None).unwrap();
         assert!(!plain.carries_dev_channels_flag);
         assert_eq!(plain.argv[0], "claude");
         let mut s = spec("overmind");
@@ -436,7 +441,7 @@ mod tests {
             "--dangerously-load-development-channels",
             "server:claude-peers",
         ]));
-        let p = prepare_launch(&s, "sonnet", false).unwrap();
+        let p = prepare_launch(&s, "sonnet", None).unwrap();
         assert!(p.carries_dev_channels_flag);
     }
 
@@ -637,7 +642,7 @@ mod tests {
             previous,
             &short(),
             "sonnet",
-            false,
+            None,
             &move |s, argv| {
                 lg.borrow_mut()
                     .push(format!("spawn {} {} {}", s.role, s.cwd, argv.join(" ")));
@@ -719,12 +724,12 @@ mod tests {
             None,
             &short(),
             "claude-opus-5",
-            false,
+            None,
             &|_, _| panic!("spawned an Opus launch"),
             &mut |_| {},
             &mut || {},
         );
-        assert!(matches!(out, Err(RelaunchError::OpusRefused(_))));
+        assert!(matches!(out, Err(RelaunchError::ModelRefused(_))));
         assert!(l.borrow().is_empty());
     }
 
@@ -740,7 +745,7 @@ mod tests {
             None,
             &short(),
             "sonnet",
-            false,
+            None,
             &|_, _| Err(RelaunchError::Spawn("no wt".into())),
             &mut |_| {},
             &mut || {},
@@ -767,7 +772,7 @@ mod tests {
             None,
             &short(),
             "sonnet",
-            false,
+            None,
             &|_, _| Ok(()),
             &mut |_| slept += 1,
             &mut || {},

@@ -19,7 +19,7 @@
 
 use crate::authorize::{self, Refusal, Request, Target};
 use crate::facts::{ProcessIdentity, SystemFacts};
-use crate::relaunch::{resolve_launch_model, valid_identifier, RelaunchError};
+use crate::relaunch::{recorded_launch_model, valid_identifier, RelaunchError};
 use crate::spec::{self, find_handoff, SpecFile, SpecState, SpecStore, StopKind};
 use crate::start::{validate_reason, CallerError, PM_ROLE};
 use crate::state::LaneState;
@@ -270,11 +270,10 @@ pub fn build_stop_plan(
         idle_claimed_at,
     )?;
     let launch = crate::launch::LaunchSpec::from(&state);
-    // `allow_opus = true` only to read the string: an Opus lane is suspended with its model
+    // Reads the recorded model name WITHOUT validating it (`recorded_launch_model`, no permit): an Opus lane is suspended with its model
     // *replaced* (`pin_model`), because the spec can never carry Opus and an Opus lane must
     // still be stoppable. The replacement is reported, never silent.
-    let resolved = resolve_launch_model(launch.launch_args.as_ref(), policy_default, true)
-        .map_err(|e: RelaunchError| StopRefusal::Spec(e.to_string()))?;
+    let resolved = recorded_launch_model(launch.launch_args.as_ref(), policy_default);
     let (model, pinned_from) = spec::pin_model(&resolved);
     let mut stopping = spec::build(&spec::SpecInputs {
         launch: &launch,

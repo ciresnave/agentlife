@@ -51,7 +51,8 @@ pub enum RelaunchError {
     SessionNeverProcessedPrompt,
     /// CireSnave, 2026-10-08: "I can't afford Opus." The resolved model
     /// id names Opus and no override was given.
-    OpusRefused(String),
+    /// A model that is not Sonnet or Haiku, without an [`OpusPermit`].
+    ModelRefused(String),
     /// RESTART-TOOL-DESIGN.md 14: the launch spec could not be written, complete and read back,
     /// so the lane was NOT stopped - a lane may be stopped only if it can be started again.
     SpecNotWritten(String),
@@ -104,10 +105,9 @@ impl std::fmt::Display for RelaunchError {
                 "refusing to stop - the launch spec could not be written, so the lane could \
                  not be started again: {why}"
             ),
-            RelaunchError::OpusRefused(model) => write!(
+            RelaunchError::ModelRefused(model) => write!(
                 f,
-                "refusing to relaunch on model {model:?} (an Opus model); set \
-                 {ALLOW_OPUS_ENV}=1 to override"
+                "refusing to relaunch on model {model:?}: only sonnet and haiku models run without {ALLOW_OPUS_ENV}=1 (an Opus or unknown name is refused, never guessed)"
             ),
         }
     }
@@ -446,8 +446,81 @@ pub fn policy_default_model(state_dir: &std::path::Path) -> String {
         .unwrap_or_else(|| "sonnet".to_string())
 }
 
-pub fn allow_opus_from_env() -> bool {
-    std::env::var(ALLOW_OPUS_ENV).is_ok_and(|v| v == "1")
+/// Permission to run an Opus (or any non-Sonnet, non-Haiku) model. Holding one is the only way
+/// [`Model::parse`] accepts such a name, and the only constructor is [`OpusPermit::from_env`], which
+/// is crate-private and called only by the interactive relaunch/launch entry points: the launcher
+/// service, `lane-start`, spec import and the stop path have no way to obtain one, so "Opus without
+/// permission" is a compile error there, not a `bool` somebody forgot to pass (audit group 5,
+/// finding 3). The permit is still an honest human gate, not a security boundary: any process can set
+/// the environment variable.
+#[derive(Debug, Clone, Copy)]
+pub struct OpusPermit(());
+
+impl OpusPermit {
+    /// `Some` only when [`ALLOW_OPUS_ENV`] is exactly `1` in this process's environment.
+    pub(crate) fn from_env() -> Option<Self> {
+        std::env::var(ALLOW_OPUS_ENV)
+            .is_ok_and(|v| v == "1")
+            .then_some(Self(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self(())
+    }
+}
+
+/// Whether `name` is a model that needs no permit: `sonnet`, `haiku`, `claude-sonnet-*` or
+/// `claude-haiku-*` (an optional `[...]` context suffix is ignored), and not an Opus name by any
+/// spelling. FAIL CLOSED: an unknown or future name is not on this list (CireSnave, 2026-10-08:
+/// "I can't afford Opus"; pin Sonnet or Haiku explicitly).
+pub fn is_permitted_model(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    let base = lower.split('[').next().unwrap_or("");
+    !lower.contains("opus")
+        && (base == "sonnet"
+            || base == "haiku"
+            || base.starts_with("claude-sonnet-")
+            || base.starts_with("claude-haiku-"))
+}
+
+/// A model name that [`Model::parse`] accepted. Holds a name only if it is permitted or the caller
+/// presented an [`OpusPermit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Model(String);
+
+impl Model {
+    pub fn parse(name: &str, permit: Option<&OpusPermit>) -> Result<Self, RelaunchError> {
+        if is_permitted_model(name) || permit.is_some() {
+            Ok(Self(name.to_string()))
+        } else {
+            Err(RelaunchError::ModelRefused(name.to_string()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for Model {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<&str> for Model {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::fmt::Display for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 pub fn is_opus(model: &str) -> bool {
@@ -464,26 +537,29 @@ fn explicit_launch_model(launch_args: Option<&Vec<String>>) -> Option<String> {
 }
 
 /// Model a relaunch is pinned to: explicit launch `--model`, else
-/// `policy_default`. Opus is refused unless `allow_opus`.
+/// `policy_default`. Anything but Sonnet or Haiku is refused without a permit.
 pub fn resolve_model(
     state: &LaneState,
     policy_default: &str,
-    allow_opus: bool,
-) -> Result<String, RelaunchError> {
-    resolve_launch_model(state.launch_args.as_ref(), policy_default, allow_opus)
+    permit: Option<&OpusPermit>,
+) -> Result<Model, RelaunchError> {
+    resolve_launch_model(state.launch_args.as_ref(), policy_default, permit)
 }
 
 /// `resolve_model`, from the launch flags alone (a `LaunchSpec` has no state).
 pub fn resolve_launch_model(
     launch_args: Option<&Vec<String>>,
     policy_default: &str,
-    allow_opus: bool,
-) -> Result<String, RelaunchError> {
-    let model = explicit_launch_model(launch_args).unwrap_or_else(|| policy_default.to_string());
-    if is_opus(&model) && !allow_opus {
-        return Err(RelaunchError::OpusRefused(model));
-    }
-    Ok(model)
+    permit: Option<&OpusPermit>,
+) -> Result<Model, RelaunchError> {
+    Model::parse(&recorded_launch_model(launch_args, policy_default), permit)
+}
+
+/// The model name a launch's flags (else the policy default) name, as plain text, UNCHECKED. Only
+/// for reading a lane that is already running (the stop path records and replaces it); nothing
+/// launches from this string - a launch needs a [`Model`].
+pub fn recorded_launch_model(launch_args: Option<&Vec<String>>, policy_default: &str) -> String {
+    explicit_launch_model(launch_args).unwrap_or_else(|| policy_default.to_string())
 }
 
 /// Read-only: one line per lane state file, its recorded model, Opus flagged.
@@ -721,7 +797,7 @@ fn prepare(spec: &LaunchSpec) -> Result<PreparedLaunch, RelaunchError> {
     prepare_launch(
         spec,
         &policy_default_model(&crate::state_dir()),
-        allow_opus_from_env(),
+        OpusPermit::from_env().as_ref(),
     )
 }
 
@@ -735,7 +811,7 @@ pub fn kill_and_relaunch_with(
     state: &LaneState,
     identity: &ProcessIdentity,
     policy_default: &str,
-    allow_opus: bool,
+    permit: Option<&OpusPermit>,
     spawn: &SpawnFn,
     sleep: &mut dyn FnMut(std::time::Duration),
     on_awaiting: &mut dyn FnMut(),
@@ -746,7 +822,7 @@ pub fn kill_and_relaunch_with(
         state,
         identity,
         policy_default,
-        allow_opus,
+        permit,
         &NoSpecStore,
         spawn,
         sleep,
@@ -769,7 +845,7 @@ pub fn kill_and_relaunch_persisting(
     state: &LaneState,
     identity: &ProcessIdentity,
     policy_default: &str,
-    allow_opus: bool,
+    permit: Option<&OpusPermit>,
     specs: &dyn SpecStore,
     spawn: &SpawnFn,
     sleep: &mut dyn FnMut(std::time::Duration),
@@ -779,11 +855,11 @@ pub fn kill_and_relaunch_persisting(
     // every check runs BEFORE anything is killed
     // Checked here, before anything is written or killed; the launch itself comes from the
     // spec below.
-    prepare_launch(&spec, policy_default, allow_opus)?;
-    let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, allow_opus)?;
+    prepare_launch(&spec, policy_default, permit)?;
+    let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, permit)?;
     let spec_inputs = |spec_state: SpecState, stopped: bool| spec::SpecInputs {
         launch: &spec,
-        model: &model,
+        model: model.as_str(),
         session_id: stopped.then_some(state.session_id.as_str()),
         pid_start_secs: stopped.then_some(identity.start_time_secs),
         state: spec_state,
@@ -803,7 +879,7 @@ pub fn kill_and_relaunch_persisting(
     let PreparedLaunch {
         argv,
         carries_dev_channels_flag,
-    } = prepare_launch(&from_spec, &stopping.model, false)?;
+    } = prepare_launch(&from_spec, &stopping.model, None)?;
     let stopped = stop_lane(facts, state.pid, identity, sleep)?;
     spawn(&from_spec, &argv)?;
     let outcome = wait_for_liveness(
@@ -844,7 +920,7 @@ pub fn kill_and_relaunch(
         state,
         identity,
         &policy_default_model(&crate::state_dir()),
-        allow_opus_from_env(),
+        OpusPermit::from_env().as_ref(),
         &DirSpecStore {
             dir: crate::state_dir(),
         },
@@ -1166,7 +1242,7 @@ mod tests {
         let mut state = state_with_role("overmind");
         state.model = Some("claude-opus-5-5".to_string());
         state.launch_args = None;
-        let model = resolve_model(&state, "sonnet", false).unwrap();
+        let model = resolve_model(&state, "sonnet", None).unwrap();
         assert_eq!(model, "sonnet");
         let argv = claude_argv("overmind", &state, "p", &model);
         assert!(!argv.iter().any(|a| a.contains("opus")), "got {argv:?}");
@@ -1179,7 +1255,7 @@ mod tests {
         let mut state = state_with_role("overmind");
         state.model = Some("claude-opus-5-5".to_string());
         state.launch_args = Some(strs(&["claude.exe", "--model", "haiku"]));
-        assert_eq!(resolve_model(&state, "sonnet", false).unwrap(), "haiku");
+        assert_eq!(resolve_model(&state, "sonnet", None).unwrap(), "haiku");
     }
 
     #[test]
@@ -1187,8 +1263,8 @@ mod tests {
         let mut state = state_with_role("overmind");
         state.launch_args = Some(strs(&["claude.exe", "--model", "opus"]));
         assert!(matches!(
-            resolve_model(&state, "sonnet", false),
-            Err(RelaunchError::OpusRefused(_))
+            resolve_model(&state, "sonnet", None),
+            Err(RelaunchError::ModelRefused(_))
         ));
     }
 
@@ -1196,8 +1272,8 @@ mod tests {
     fn a_policy_default_naming_opus_is_refused_without_the_override() {
         let state = state_with_role("overmind");
         assert!(matches!(
-            resolve_model(&state, "claude-opus-5-5", false),
-            Err(RelaunchError::OpusRefused(_))
+            resolve_model(&state, "claude-opus-5-5", None),
+            Err(RelaunchError::ModelRefused(_))
         ));
     }
 
@@ -1205,14 +1281,66 @@ mod tests {
     fn the_explicit_override_allows_opus() {
         let mut state = state_with_role("overmind");
         state.launch_args = Some(strs(&["claude.exe", "--model", "opus"]));
-        assert_eq!(resolve_model(&state, "sonnet", true).unwrap(), "opus");
+        assert_eq!(
+            resolve_model(&state, "sonnet", Some(&OpusPermit::for_test())).unwrap(),
+            "opus"
+        );
+    }
+
+    #[test]
+    fn only_sonnet_and_haiku_names_need_no_permit_and_everything_else_fails_closed() {
+        // Positive controls: the names this fleet pins.
+        for ok in [
+            "sonnet",
+            "haiku",
+            "Sonnet",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "sonnet[1m]",
+        ] {
+            assert_eq!(Model::parse(ok, None).unwrap(), ok, "{ok}");
+        }
+        // Opus in any spelling, and names this code has never heard of (a future tier), are refused.
+        for bad in [
+            "opus",
+            "Claude-OPUS-5",
+            "claude-opus-5-5",
+            "opus[1m]",
+            "claude-sonnet-opus",
+            "claude-fable-5-1",
+            "some-future-model",
+            "",
+            "sonnetx",
+        ] {
+            assert!(
+                matches!(Model::parse(bad, None), Err(RelaunchError::ModelRefused(_))),
+                "{bad:?}"
+            );
+            // The permit is what lets a refused name through.
+            assert_eq!(
+                Model::parse(bad, Some(&OpusPermit::for_test()))
+                    .unwrap()
+                    .as_str(),
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn the_stop_path_reads_the_recorded_model_without_a_permit_or_a_check() {
+        let args = strs(&["claude.exe", "--model", "claude-opus-5-5"]);
+        assert_eq!(
+            recorded_launch_model(Some(&args), "sonnet"),
+            "claude-opus-5-5"
+        );
+        assert_eq!(recorded_launch_model(None, "haiku"), "haiku");
     }
 
     #[test]
     fn the_opus_check_is_case_insensitive() {
         let mut state = state_with_role("overmind");
         state.launch_args = Some(strs(&["claude.exe", "--model", "Claude-OPUS-5"]));
-        assert!(resolve_model(&state, "sonnet", false).is_err());
+        assert!(resolve_model(&state, "sonnet", None).is_err());
     }
 
     #[test]
@@ -1619,7 +1747,8 @@ mod tests {
         let mut state = state_with_role("overmind");
         // The model now comes only from the launch's explicit --model
         // (or the policy file), never from state.model.
-        state.launch_args = Some(strs(&["claude.exe", "--model", "claude;calc"]));
+        // A permitted prefix, so the model check passes and the `;` guard is what refuses it.
+        state.launch_args = Some(strs(&["claude.exe", "--model", "claude-sonnet-5;calc"]));
         let result = kill_and_relaunch(
             &NeverCalled,
             &NeverCalledStateReader,

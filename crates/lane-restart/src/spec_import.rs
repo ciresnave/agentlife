@@ -87,7 +87,7 @@ fn import_one(
         return ImportOutcome::Refused(format!("cwd missing: {}", st.cwd));
     }
     // Opus is refused, not replaced: an import records what was; `lane-start` is what pins.
-    let model = match resolve_launch_model(st.launch_args.as_ref(), policy_default, false) {
+    let model = match resolve_launch_model(st.launch_args.as_ref(), policy_default, None) {
         Ok(m) => m,
         Err(e) => return ImportOutcome::Refused(e.to_string()),
     };
