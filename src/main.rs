@@ -622,7 +622,7 @@ fn wait_for_logon_preconditions() -> Result<(), String> {
     let broker = match agentlife::launcher_service::notify_transport(
         lane_restart::paths::home_dir().as_deref(),
     ) {
-        lane_restart::notify::Transport::Broker => Some(cfg.peers_addr),
+        lane_restart::notify::Transport::Broker => Some(*cfg.peers_addr),
         lane_restart::notify::Transport::Synapse => synapse::keystore::default_home()
             .ok()
             .and_then(|h| agentlife::peers::synapse_addr(&h)),
@@ -1490,7 +1490,7 @@ fn run_down(
     caller_rec: Option<&AgentRecord>,
 ) -> ExitCode {
     let table = SnapshotTable::capture();
-    let broker = Broker::new(app.cfg.peers_addr);
+    let broker = Broker::new(*app.cfg.peers_addr);
     let synapse_messenger;
     let messenger: &dyn agentlife::peers::Messenger =
         match agentlife::launcher_service::notify_transport(
