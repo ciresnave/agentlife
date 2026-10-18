@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.16.23
+
+- **Audit group 5, finding 1: an unchecked handler cannot be constructed (`lane-restart` `handlers`):** `HandlerSpec` used to be a public, directly deserializable struct, and `refusal_reason` was a check callers had to remember. Reproduced: JSON with a bad id, no anchors and empty provenance deserialized into a `HandlerSpec`, and `check_and_inject` wrote its action on any screen (production was safe only because `approvals.rs` happened to call `parse_and_validate`). Now `RawHandlerSpec` is the unchecked shape, `HandlerSpec` is a private-inner newtype reachable only through `TryFrom<RawHandlerSpec>` / `Deserialize` (`serde(try_from)`), read via `Deref`, and `refusal_reason` is private. Breaking for library consumers that built `HandlerSpec` literals or mutated its fields; none in this workspace.
+
 ## 0.16.22
 
 - **Docs: runner spike run 2 recorded (`docs/RUNNER-SETUP.md` 5a, 5, 2d):** as `gh-runner` in a Windows service (session 0, not interactive) the 4070 is visible to `nvidia-smi`, both GPUs to Vulkan, a CUDA kernel runs, the protected paths are not writable, and the MSVC step and the execution-policy `.env` worked. Decision rule: keep the service. Reboot/logoff behaviour is UNMEASURED.
