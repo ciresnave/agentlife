@@ -129,6 +129,11 @@ pub fn prepare_launch(
 pub struct LivenessTiming {
     /// How long without real progress before the process is checked.
     pub progress_timeout: Duration,
+    /// How long a launched process is given to APPEAR at all. A claude that has not been seen yet
+    /// at `progress_timeout` is waited for until this long; once seen, its disappearance is still
+    /// judged at `progress_timeout`. (2026-10-18: lanes whose claude appeared 8-28 s after the
+    /// spawn were declared dead at 20 s and left `stopping`, though they came up.)
+    pub appear_timeout: Duration,
     /// How long in all before giving up (or reporting the dialog as final).
     pub total_timeout: Duration,
     pub poll_interval: Duration,
@@ -138,6 +143,7 @@ impl Default for LivenessTiming {
     fn default() -> Self {
         LivenessTiming {
             progress_timeout: Duration::from_secs(20),
+            appear_timeout: Duration::from_secs(120),
             // "Configurable" per the PM's own spec; now it is, as a parameter.
             total_timeout: Duration::from_secs(15 * 60),
             poll_interval: Duration::from_secs(1),
@@ -170,6 +176,7 @@ pub fn wait_for_liveness(
 ) -> Result<RelaunchOutcome, RelaunchError> {
     let mut waited = std::time::Duration::ZERO;
     let mut reported_awaiting = false;
+    let mut seen_alive = false;
     loop {
         if let Some(state) = state_reader.read(role) {
             if previous_session.is_none_or(|old| state.session_id != old)
@@ -182,10 +189,12 @@ pub fn wait_for_liveness(
             let alive = facts
                 .find_claude_process_in(cwd, launched_after_secs)
                 .is_some();
-            if !alive {
+            if alive {
+                seen_alive = true;
+            } else if seen_alive || waited >= timing.appear_timeout {
                 return Err(RelaunchError::SessionNeverProcessedPrompt);
             }
-            if !reported_awaiting {
+            if alive && !reported_awaiting {
                 if !carries_dev_channels_flag {
                     // Alive, no progress, and nothing known to explain
                     // the stall - not the dialog case. Keep polling to
@@ -509,6 +518,7 @@ mod tests {
     fn short() -> LivenessTiming {
         LivenessTiming {
             progress_timeout: Duration::from_secs(2),
+            appear_timeout: Duration::from_secs(2),
             total_timeout: Duration::from_secs(5),
             poll_interval: Duration::from_secs(1),
         }
@@ -518,6 +528,7 @@ mod tests {
     fn the_default_timing_is_what_lane_restart_has_always_used() {
         let t = LivenessTiming::default();
         assert_eq!(t.progress_timeout, Duration::from_secs(20));
+        assert_eq!(t.appear_timeout, Duration::from_secs(120));
         assert_eq!(t.total_timeout, Duration::from_secs(15 * 60));
         assert_eq!(t.poll_interval, Duration::from_secs(1));
     }
@@ -543,6 +554,142 @@ mod tests {
         assert_eq!(out.unwrap(), RelaunchOutcome::AwaitingConfirmation);
         assert_eq!(slept, vec![Duration::from_secs(1); 5], "5 s in 1 s steps");
         assert_eq!(awaiting, 1, "reported once");
+    }
+
+    /// `find_claude_process_in` answers false for the first `n` asks, then true.
+    struct AppearsAfter(u32, std::cell::Cell<u32>);
+    impl SystemFacts for AppearsAfter {
+        fn is_alive_claude_process(&self, _: u32) -> bool {
+            unreachable!()
+        }
+        fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
+            unreachable!()
+        }
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            unreachable!()
+        }
+        fn process_identity(&self, _: u32) -> Option<crate::facts::ProcessIdentity> {
+            unreachable!()
+        }
+        fn kill_verified(
+            &self,
+            _: u32,
+            _: &crate::facts::ProcessIdentity,
+        ) -> Result<(), crate::facts::KillError> {
+            unreachable!()
+        }
+        fn find_claude_process_in(&self, _: &str, _: u64) -> Option<u32> {
+            let asked = self.1.get();
+            self.1.set(asked + 1);
+            (asked >= self.0).then_some(1)
+        }
+        fn has_live_shell_descendant(&self, _: u32) -> Result<bool, crate::facts::ShellCheckError> {
+            unreachable!()
+        }
+        fn transcript_is_recent(&self, _: &str, _: &str, _: Duration) -> bool {
+            unreachable!()
+        }
+        fn process_table(
+            &self,
+        ) -> Result<Vec<crate::facts::ProcEntry>, crate::facts::ShellCheckError> {
+            unreachable!()
+        }
+    }
+
+    fn wait_with(
+        facts: &dyn SystemFacts,
+        timing: &LivenessTiming,
+    ) -> Result<RelaunchOutcome, RelaunchError> {
+        wait_for_liveness(
+            facts,
+            &reader(vec![at("new", "SessionStart")]),
+            "C:/x",
+            "overmind",
+            Some("old"),
+            0,
+            true,
+            timing,
+            &mut |_| {},
+            &mut || {},
+        )
+    }
+
+    /// 2026-10-18: a claude that appeared after the progress timeout was declared dead.
+    #[test]
+    fn a_process_that_appears_late_is_waited_for_not_declared_dead() {
+        let timing = LivenessTiming {
+            appear_timeout: Duration::from_secs(4),
+            ..short()
+        };
+        // absent at the 2 s and 3 s checks, present from the third ask
+        let late = AppearsAfter(2, std::cell::Cell::new(0));
+        assert_eq!(
+            wait_with(&late, &timing).unwrap(),
+            RelaunchOutcome::AwaitingConfirmation
+        );
+        // control: never appearing still fails, at the appear timeout
+        let never = AppearsAfter(u32::MAX, std::cell::Cell::new(0));
+        assert!(matches!(
+            wait_with(&never, &timing),
+            Err(RelaunchError::SessionNeverProcessedPrompt)
+        ));
+        assert_eq!(never.1.get(), 3, "asked at 2 s, 3 s and 4 s, then gave up");
+    }
+
+    #[test]
+    fn a_process_seen_and_then_gone_fails_at_once() {
+        let timing = LivenessTiming {
+            appear_timeout: Duration::from_secs(4),
+            ..short()
+        };
+        let asked = std::cell::Cell::new(0u32);
+        // alive on the first ask, gone on the second
+        struct Facts<'a>(&'a std::cell::Cell<u32>);
+        impl SystemFacts for Facts<'_> {
+            fn is_alive_claude_process(&self, _: u32) -> bool {
+                unreachable!()
+            }
+            fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
+                unreachable!()
+            }
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                unreachable!()
+            }
+            fn process_identity(&self, _: u32) -> Option<crate::facts::ProcessIdentity> {
+                unreachable!()
+            }
+            fn kill_verified(
+                &self,
+                _: u32,
+                _: &crate::facts::ProcessIdentity,
+            ) -> Result<(), crate::facts::KillError> {
+                unreachable!()
+            }
+            fn find_claude_process_in(&self, _: &str, _: u64) -> Option<u32> {
+                let n = self.0.get();
+                self.0.set(n + 1);
+                (n == 0).then_some(1)
+            }
+            fn has_live_shell_descendant(
+                &self,
+                _: u32,
+            ) -> Result<bool, crate::facts::ShellCheckError> {
+                unreachable!()
+            }
+            fn transcript_is_recent(&self, _: &str, _: &str, _: Duration) -> bool {
+                unreachable!()
+            }
+            fn process_table(
+                &self,
+            ) -> Result<Vec<crate::facts::ProcEntry>, crate::facts::ShellCheckError> {
+                unreachable!()
+            }
+        }
+        assert!(matches!(
+            wait_with(&Facts(&asked), &timing),
+            Err(RelaunchError::SessionNeverProcessedPrompt)
+        ));
+        assert_eq!(asked.get(), 2, "gone at the second check, well before 4 s");
     }
 
     #[test]

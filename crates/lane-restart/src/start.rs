@@ -1377,6 +1377,7 @@ mod tests {
         );
         let short = LivenessTiming {
             progress_timeout: Duration::from_secs(2),
+            appear_timeout: Duration::from_secs(2),
             total_timeout: Duration::from_secs(5),
             poll_interval: Duration::from_secs(1),
         };
