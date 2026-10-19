@@ -15,7 +15,7 @@
 use crate::facts::SystemFacts;
 use crate::launch::LaunchSpec;
 use crate::relaunch::{resolve_launch_model, valid_identifier};
-use crate::spec::{self, SpecInputs, SpecState};
+use crate::spec::{self, SpecInputs, SpecState, WrittenBy};
 use crate::state;
 use chrono::{DateTime, Utc};
 use std::path::Path;
@@ -103,7 +103,7 @@ fn import_one(
         session_id: Some(&st.session_id),
         pid_start_secs: st.pid_start_secs,
         state: spec_state,
-        written_by: "import",
+        written_by: WrittenBy::Import,
         now,
     }) {
         Ok(f) => f,
@@ -298,7 +298,7 @@ mod tests {
             }]
         );
         let s = spec::read(d.path(), "baracuda").unwrap();
-        assert_eq!(s.written_by, "import");
+        assert_eq!(s.written_by, WrittenBy::Import);
         assert_eq!(s.state, SpecState::Crashed);
         assert_eq!(
             s.launch_args,

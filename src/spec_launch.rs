@@ -130,7 +130,7 @@ mod tests {
             handoff_mtime: None,
             state: spec::SpecState::Suspended,
             written_at: Utc::now(),
-            written_by: "test".into(),
+            written_by: lane_restart::spec::WrittenBy::Other("test".into()),
             stopped_session_id: None,
             stopped_pid_start_secs: None,
             stop_reason: None,
