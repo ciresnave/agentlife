@@ -178,6 +178,18 @@ pub fn wait_for_liveness(
     let mut waited = std::time::Duration::ZERO;
     let mut reported_awaiting = false;
     let mut seen_alive = false;
+    // The spawn has just returned; the margin covers the stub wait and the clock's step.
+    let since = std::time::SystemTime::now() - Duration::from_secs(10);
+    let failure = |seen_alive: bool| {
+        if seen_alive {
+            return RelaunchError::SessionNeverProcessedPrompt;
+        }
+        match state_reader.host_started(role, since) {
+            Some(false) => RelaunchError::HostNeverStarted,
+            Some(true) => RelaunchError::ClaudeNeverStarted,
+            None => RelaunchError::SessionNeverProcessedPrompt,
+        }
+    };
     loop {
         if let Some(state) = state_reader.read(role) {
             if previous_session.is_none_or(|old| state.session_id != old)
@@ -193,7 +205,7 @@ pub fn wait_for_liveness(
             if alive {
                 seen_alive = true;
             } else if seen_alive || waited >= timing.appear_timeout {
-                return Err(RelaunchError::SessionNeverProcessedPrompt);
+                return Err(failure(seen_alive));
             }
             if alive && !reported_awaiting {
                 if !carries_dev_channels_flag {
@@ -212,7 +224,7 @@ pub fn wait_for_liveness(
             return if reported_awaiting {
                 Ok(RelaunchOutcome::AwaitingConfirmation)
             } else {
-                Err(RelaunchError::SessionNeverProcessedPrompt)
+                Err(failure(seen_alive))
             };
         }
         sleep(timing.poll_interval);
@@ -639,6 +651,92 @@ mod tests {
             Err(RelaunchError::SessionNeverProcessedPrompt)
         ));
         assert_eq!(never.1.get(), 3, "asked at 2 s, 3 s and 4 s, then gave up");
+    }
+
+    /// A reader that knows whether the host left its boot record.
+    struct Booted(Option<bool>);
+    impl StateReader for Booted {
+        fn read(&self, _role: &str) -> Option<LaneState> {
+            at("new", "SessionStart")
+        }
+        fn host_started(&self, _role: &str, _since: std::time::SystemTime) -> Option<bool> {
+            self.0
+        }
+    }
+
+    fn wait_booted(
+        boot: Option<bool>,
+        alive: &dyn SystemFacts,
+    ) -> Result<RelaunchOutcome, RelaunchError> {
+        let timing = LivenessTiming {
+            appear_timeout: Duration::from_secs(4),
+            ..short()
+        };
+        wait_for_liveness(
+            alive,
+            &Booted(boot),
+            "C:/x",
+            "overmind",
+            Some("old"),
+            0,
+            true,
+            &timing,
+            &mut |_| {},
+            &mut || {},
+        )
+    }
+
+    /// 2026-10-18: three restarts failed with nothing to say whether the host ever ran.
+    #[test]
+    fn a_failure_names_the_stage_that_never_happened() {
+        let never = AppearsAfter(u32::MAX, std::cell::Cell::new(0));
+        assert!(matches!(
+            wait_booted(Some(false), &never),
+            Err(RelaunchError::HostNeverStarted)
+        ));
+        assert!(matches!(
+            wait_booted(Some(true), &never),
+            Err(RelaunchError::ClaudeNeverStarted)
+        ));
+        // a reader that cannot tell keeps the old, unnamed failure
+        assert!(matches!(
+            wait_booted(None, &never),
+            Err(RelaunchError::SessionNeverProcessedPrompt)
+        ));
+        for e in [
+            RelaunchError::HostNeverStarted,
+            RelaunchError::ClaudeNeverStarted,
+        ] {
+            assert!(e.to_string().starts_with("relaunch FAILED:"), "{e}");
+        }
+    }
+
+    /// A claude that WAS seen and then died is the session's failure, whatever the host did.
+    #[test]
+    fn a_session_that_was_seen_keeps_its_own_failure_whatever_the_boot_record_says() {
+        let alive = AppearsAfter(0, std::cell::Cell::new(0));
+        // seen alive at the progress check, so a later total-timeout failure is not a start failure
+        let timing = LivenessTiming {
+            appear_timeout: Duration::from_secs(4),
+            total_timeout: Duration::from_secs(3),
+            ..short()
+        };
+        let r = wait_for_liveness(
+            &alive,
+            &Booted(Some(false)),
+            "C:/x",
+            "overmind",
+            Some("old"),
+            0,
+            false,
+            &timing,
+            &mut |_| {},
+            &mut || {},
+        );
+        assert!(
+            matches!(r, Err(RelaunchError::SessionNeverProcessedPrompt)),
+            "{r:?}"
+        );
     }
 
     #[test]

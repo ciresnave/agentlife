@@ -149,7 +149,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 }
 
 /// One entry of a GitHub contents-API directory listing.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct DirEntry {
     pub name: String,
     #[serde(rename = "type")]
@@ -303,21 +303,119 @@ pub fn load_configured(home: &Path, reader: &dyn RepoReader) -> (Option<Config>,
 /// auth (so a private approvals repo works too). Every call has a hard
 /// timeout; `gh` is never allowed to prompt.
 pub struct GhReader {
+    /// The limit of one `gh` call.
     pub timeout: Duration,
+    /// The limit of ALL calls of this reader together, counted from its construction. A host loads
+    /// approvals before it starts claude, so this is how long a slow GitHub can delay a lane: the
+    /// per-call limit alone allowed `15 s x calls` (2026-10-17/18: 10 restarts hit the 20 s verdict
+    /// with the load at 19.5-44.5 s; it takes 4-8 s when GitHub answers).
+    pub budget: Duration,
+    started: Instant,
 }
+
+/// The default budget of a whole approvals load.
+pub const LOAD_BUDGET: Duration = Duration::from_secs(8);
 
 impl Default for GhReader {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(15),
+            budget: LOAD_BUDGET,
+            started: Instant::now(),
         }
     }
 }
 
 impl GhReader {
     fn gh(&self, args: &[&str]) -> Result<Vec<u8>, String> {
-        run_with_timeout("gh", args, self.timeout)
+        let left = self.budget.saturating_sub(self.started.elapsed());
+        if left.is_zero() {
+            return Err(format!(
+                "the {}s approvals budget is used up",
+                self.budget.as_secs()
+            ));
+        }
+        run_with_timeout("gh", args, self.timeout.min(left))
     }
+}
+
+/// A [`RepoReader`] that remembers directory listings and files by COMMIT SHA, which names
+/// immutable content: a hit needs no network, and a changed approvals folder is a new SHA, so it
+/// misses. Only the branch-tip lookup always goes out. Entries are named by a hash of
+/// `repo|path|commit`, never by the path itself. A cache that cannot be read or written is a miss.
+/// Nothing read from the cache skips validation: the caller parses and checks it as if fetched.
+pub struct CachingReader<R> {
+    inner: R,
+    dir: PathBuf,
+}
+
+impl<R: RepoReader> CachingReader<R> {
+    pub fn new(inner: R, dir: PathBuf) -> Self {
+        Self { inner, dir }
+    }
+
+    fn entry(&self, kind: &str, repo: &str, path: &str, commit: &str) -> Option<PathBuf> {
+        use sha2::{Digest, Sha256};
+        if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let h = Sha256::digest(format!("{kind}|{repo}|{path}|{commit}").as_bytes());
+        let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        Some(self.dir.join(format!("{hex}.cache")))
+    }
+
+    fn get(&self, p: &Option<PathBuf>) -> Option<Vec<u8>> {
+        std::fs::read(p.as_ref()?).ok()
+    }
+
+    fn put(&self, p: &Option<PathBuf>, bytes: &[u8]) {
+        let Some(p) = p else { return };
+        let _ = std::fs::create_dir_all(&self.dir);
+        let tmp = p.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+impl<R: RepoReader> RepoReader for CachingReader<R> {
+    fn default_branch_commit(&self, repo: &str) -> Result<String, String> {
+        self.inner.default_branch_commit(repo)
+    }
+
+    fn list_dir(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<DirEntry>, String> {
+        let p = self.entry("dir", repo, path, commit);
+        if let Some(entries) = self
+            .get(&p)
+            .and_then(|b| serde_json::from_slice::<Vec<DirEntry>>(&b).ok())
+        {
+            return Ok(entries);
+        }
+        let entries = self.inner.list_dir(repo, path, commit)?;
+        if let Ok(b) = serde_json::to_vec(&entries) {
+            self.put(&p, &b);
+        }
+        Ok(entries)
+    }
+
+    fn read_file(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<u8>, String> {
+        let p = self.entry("file", repo, path, commit);
+        if let Some(b) = self.get(&p) {
+            return Ok(b);
+        }
+        let b = self.inner.read_file(repo, path, commit)?;
+        self.put(&p, &b);
+        Ok(b)
+    }
+}
+
+/// The reader a host (and `lane-restart approvals`) uses: `gh` under [`LOAD_BUDGET`], cached by
+/// commit under `<home>/.overmind/lane-restart-approvals-cache`.
+pub fn default_reader(home: &Path) -> CachingReader<GhReader> {
+    CachingReader::new(
+        GhReader::default(),
+        home.join(".overmind").join("lane-restart-approvals-cache"),
+    )
 }
 
 #[derive(Deserialize)]
@@ -485,6 +583,100 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| "HTTP 404".to_string())
         }
+    }
+
+    /// Counts what reaches the network behind a cache.
+    struct Counting {
+        inner: FakeRepo,
+        dir_calls: std::cell::Cell<u32>,
+        file_calls: std::cell::Cell<u32>,
+    }
+
+    impl RepoReader for Counting {
+        fn default_branch_commit(&self, repo: &str) -> Result<String, String> {
+            self.inner.default_branch_commit(repo)
+        }
+        fn list_dir(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<DirEntry>, String> {
+            self.dir_calls.set(self.dir_calls.get() + 1);
+            self.inner.list_dir(repo, path, commit)
+        }
+        fn read_file(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<u8>, String> {
+            self.file_calls.set(self.file_calls.get() + 1);
+            self.inner.read_file(repo, path, commit)
+        }
+    }
+
+    fn counting() -> Counting {
+        Counting {
+            inner: FakeRepo::with_files(&[("one.json", &approval("one"))]),
+            dir_calls: Default::default(),
+            file_calls: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_second_load_of_the_same_commit_makes_no_listing_or_file_request() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = CachingReader::new(counting(), d.path().to_path_buf());
+        let first = load(&source(), &cache);
+        assert_eq!((first.handlers.len(), first.error.as_deref()), (1, None));
+        assert_eq!(
+            (cache.inner.dir_calls.get(), cache.inner.file_calls.get()),
+            (1, 1)
+        );
+        let second = load(&source(), &cache);
+        assert_eq!(second.handlers.len(), 1, "{second:?}");
+        assert_eq!(
+            (cache.inner.dir_calls.get(), cache.inner.file_calls.get()),
+            (1, 1),
+            "the second load must come from the cache"
+        );
+    }
+
+    #[test]
+    fn the_cache_is_keyed_by_commit_so_a_new_commit_misses() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = CachingReader::new(counting(), d.path().to_path_buf());
+        cache.read_file("o/r", "a/b/one.json", SHA).unwrap();
+        let other = "f".repeat(40);
+        // The fake refuses any other commit; reaching it proves the cache did not answer.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache.read_file("o/r", "a/b/one.json", &other);
+        }));
+        assert!(r.is_err(), "a different commit was served from the cache");
+    }
+
+    #[test]
+    fn a_corrupt_listing_in_the_cache_is_a_miss_and_a_non_sha_commit_is_never_cached() {
+        let d = tempfile::tempdir().unwrap();
+        let cache = CachingReader::new(counting(), d.path().to_path_buf());
+        cache.list_dir("o/r", "a/b", SHA).unwrap();
+        for e in std::fs::read_dir(d.path()).unwrap() {
+            std::fs::write(e.unwrap().path(), b"{not json").unwrap();
+        }
+        assert_eq!(cache.list_dir("o/r", "a/b", SHA).unwrap().len(), 1);
+        assert_eq!(cache.inner.dir_calls.get(), 2, "a corrupt entry is a miss");
+        assert!(cache.entry("file", "o/r", "a/b/x", "main").is_none());
+        assert!(cache
+            .entry("file", "o/r", "../x", &"a".repeat(40))
+            .is_some());
+        let name = cache.entry("file", "o/r", "../x", &"a".repeat(40)).unwrap();
+        assert_eq!(
+            name.parent().unwrap(),
+            d.path(),
+            "the path never reaches the file name"
+        );
+    }
+
+    #[test]
+    fn a_reader_whose_budget_is_used_up_refuses_without_running_gh() {
+        let r = GhReader {
+            timeout: Duration::from_secs(15),
+            budget: Duration::ZERO,
+            started: Instant::now(),
+        };
+        let e = r.default_branch_commit("o/r").unwrap_err();
+        assert!(e.contains("budget"), "{e}");
     }
 
     fn source() -> ApprovalsSource {
