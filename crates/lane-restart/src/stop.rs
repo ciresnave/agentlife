@@ -261,6 +261,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_restart_whose_launch_fails_marks_the_spec_failed_relaunch_not_stopping() {
+        let l = log();
+        let facts = RecordingFacts::new(&l);
+        let store = LoggingStore {
+            log: std::rc::Rc::clone(&l),
+            fail: false,
+        };
+        let st = state_at("overmind", "old", "Stop");
+        let reader = ScriptedReader::new(&l, vec![]);
+        let err = kill_and_relaunch_persisting(
+            &facts,
+            &reader,
+            &st,
+            &identity(),
+            "sonnet",
+            None,
+            &store,
+            &|_, _| Err(RelaunchError::Spawn("wt.exe missing".to_string())),
+            &mut |_| {},
+            &mut || {},
+        )
+        .unwrap_err();
+        assert!(matches!(err, RelaunchError::Spawn(_)), "{err:?}");
+        assert_eq!(
+            *l.borrow(),
+            vec![
+                "spec Stopping",
+                "kill 4242 start=99",
+                "now",
+                "spec FailedRelaunch"
+            ],
+            "the failure is recorded after the kill, and never as running"
+        );
+    }
+
     /// THE INVARIANT: at the moment of the kill the spec is on disk, parses, is `stopping`, and
     /// passes `prepare_launch`. Mutation target: remove the `specs.write(&stopping)` call (or move
     /// it after `stop_lane`) and this fails with "spec must exist at kill".
@@ -378,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_whose_start_never_comes_up_is_left_with_a_stopping_spec_that_is_startable() {
+    fn a_lane_whose_start_never_comes_up_is_left_with_a_failed_relaunch_spec_that_is_startable() {
         let dir = tempfile::tempdir().unwrap();
         let l = log();
         let mut facts = RecordingFacts::new(&l);
@@ -404,7 +440,7 @@ mod tests {
         let s = spec::role_status(dir.path(), "overmind", &RecordingFacts::new(&log()));
         assert_eq!(
             (s.state, s.startable),
-            (spec::Lifecycle::Crashed, true),
+            (spec::Lifecycle::FailedRelaunch, true),
             "{s:?}"
         );
     }

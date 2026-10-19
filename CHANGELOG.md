@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.24.0
+
+- **Breaking (pre-1.0): `SpecState::FailedRelaunch` and `Lifecycle::FailedRelaunch` (a failed restart is retryable):** when `lane-restart` stopped a lane and the new session never came up (`relaunch FAILED`, or the spawn itself failed), the spec stayed `stopping` with no `stop_kind`: the launcher refuses that as `stop-unclassified`, and `status` read it as `crashed`. The restart now writes `failed_relaunch` (best effort; the launch error is still what is returned). The launcher treats it like a crash, so no stop kind is needed and `lane-restart start` / a message / `agentlife restore` is the retry; `status` reports `failed_relaunch`, startable. The enum variants are the break (exhaustive matches). Not done: no automatic second spawn inside the restart, because a claude that is merely late would then run twice.
+
 ## 0.23.0
 
 - **Breaking (pre-1.0): `LivenessTiming.appear_timeout`; a slow-starting lane is no longer declared dead (PM finding 2026-10-19):** `lane-restart --self` gave up on a relaunch when no claude process had appeared 20 s after the spawn (`progress_timeout`), logged `relaunch FAILED: session never processed its prompt` and left `launch.json` at `stopping`. On 2026-10-18 unpopped, synapse and lightbulb failed exactly 20-23 s after the spec was written with no host log for the new session; thinkersjournal-community's claude started 8 s AFTER its verdict (host 08:41:56, claude 08:42:24, verdict 08:42:16 local) and the lane came up. Now a process not yet seen is waited for up to `appear_timeout` (default 120 s) before the failure; once seen, its disappearance still fails at once. `total_timeout` (15 min) is unchanged. The new field is the break (struct literals). Not found: why claude starts that late (`wt.exe` and conhost start, load); unpopped's host log shows no new session at all, so a lane that never starts still fails, now after 120 s, and the `stopping` spec still reads as `crashed`.
