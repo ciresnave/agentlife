@@ -44,7 +44,8 @@ fn the_argv_of_a_plain_relaunch_is_what_it_was() {
             &st,
             "read overmind HANDOFF and continue",
             "sonnet"
-        ),
+        )
+        .unwrap(),
         strs(&[
             "claude",
             "read overmind HANDOFF and continue",
@@ -75,7 +76,7 @@ fn launch_flags_carry_over_through_the_allowlist_only() {
     ]);
     st.launch_args = Some(launch.clone());
     assert_eq!(
-        claude_argv("pm", &st, "p", "claude-sonnet-5"),
+        claude_argv("pm", &st, "p", "claude-sonnet-5").unwrap(),
         strs(&[
             "claude",
             "p",

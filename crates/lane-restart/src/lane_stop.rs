@@ -269,7 +269,8 @@ pub fn build_stop_plan(
         identity.start_time_secs,
         idle_claimed_at,
     )?;
-    let launch = crate::launch::LaunchSpec::from(&state);
+    let launch = crate::launch::LaunchSpec::try_from(&state)
+        .map_err(|e| StopRefusal::InvalidRole(e.to_string()))?;
     // Reads the recorded model name WITHOUT validating it (`recorded_launch_model`, no permit): an Opus lane is suspended with its model
     // *replaced* (`pin_model`), because the spec can never carry Opus and an Opus lane must
     // still be stoppable. The replacement is reported, never silent.

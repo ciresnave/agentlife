@@ -39,7 +39,7 @@ pub struct SpecLaunch {
 pub fn from_spec(s: &spec::SpecFile) -> SpecLaunch {
     let mut argv = vec![
         "--name".to_string(),
-        s.name.clone(),
+        s.name.to_string(),
         "--model".to_string(),
         s.model.clone(),
     ];
@@ -68,7 +68,7 @@ pub fn from_spec(s: &spec::SpecFile) -> SpecLaunch {
 pub fn load(lane_state_dir: &Path, role: &str) -> Option<SpecLaunch> {
     match spec::read(lane_state_dir, role) {
         Ok(s) => {
-            if s.role != role {
+            if s.role.as_str() != role {
                 return None;
             }
             let launch = from_spec(&s);
@@ -116,8 +116,8 @@ mod tests {
     fn spec_of(role: &str, model: &str) -> spec::SpecFile {
         spec::SpecFile {
             schema: spec::SCHEMA,
-            role: role.into(),
-            name: role.into(),
+            role: lane_state::role::Role::new(role).unwrap(),
+            name: lane_state::role::Role::new(role).unwrap(),
             cwd: format!("C:/Projects/{role}"),
             model: model.into(),
             permission_mode: Some("auto".into()),

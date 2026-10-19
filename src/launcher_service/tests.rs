@@ -106,8 +106,8 @@ fn record(role: &str, intent: Intent) -> AgentRecord {
 fn spec_in(dir: &Path, role: &str, state: spec::SpecState) {
     let s = spec::SpecFile {
         schema: spec::SCHEMA,
-        role: role.into(),
-        name: role.into(),
+        role: lane_state::role::Role::new(role).unwrap(),
+        name: lane_state::role::Role::new(role).unwrap(),
         cwd: format!("C:/Projects/{role}"),
         model: "sonnet".into(),
         permission_mode: None,

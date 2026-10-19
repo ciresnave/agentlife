@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.26.0
+
+- **Breaking (pre-1.0): `LaunchSpec.role` and `.name` (and `SpecFile.role` and `.name`) are `lane_state::role::Role` (audit group 5, finding 7):** both were `String`, checked with `valid_identifier` in `prepare_launch` and `spec::build` after the value was already held. A `LaunchSpec` now cannot hold anything but a plain identifier, so those two checks are gone and the refusal happens where the value enters: `From<&LaneState>` became `TryFrom<&LaneState>` (error `RelaunchError::InvalidIdentifier`, as before), so a restart, `lane-stop` or `specs import` of a state with a bad role or name is refused before anything is written or killed, and a `<role>.launch.json` whose `role` or `name` is not an identifier no longer parses (it reads as an invalid spec). `relaunch::claude_argv` returns `Result` for the same reason. On disk the strings are unchanged. Not done: `StopReason` (free text from `--reason`).
+
 ## 0.25.0
 
 - **Breaking (pre-1.0): `lane_state::permission_mode::PermissionMode` replaces the permission-mode strings (audit group 5, finding 7):** `LaneState`, `HookInput`, `CliFlags`, `LaunchSpec`, `SpecFile`, `AgentRecord`, the list row and the plan `Entry` carried `permission_mode`/`mode` as `Option<String>`, and `plan.rs` and `summary.rs` each kept their own copy of the known-mode list. It is now `Default`, `AcceptEdits`, `Auto`, `BypassPermissions` or `Other(String)`, with `as_str()`, `is_known()` and `rank()`; the one list lives in the type. On disk and in hook payloads it is the same plain string, and a spelling this build does not know reads as `Other` (kept verbatim, still flagged `mode-needs-a-person`, still ranked as widened), never refused and never guessed. `START_PERMISSION_MODE` is a `PermissionMode`. Behaviour unchanged. Also lists `failed_relaunch` in `lane-restart status --help`. Not done: `StopReason` (free text from `--reason`) and `LaunchSpec.role`/`name` -> `Role`.
