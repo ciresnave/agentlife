@@ -778,9 +778,9 @@ impl StateReader for RealStateReader<'_> {
 ///   stuck returns `AwaitingConfirmation` as the FINAL outcome (real,
 ///   acted work - the kill and relaunch both genuinely happened - not
 ///   an error).
-/// - **`Err(SessionNeverProcessedPrompt)`**: the process died, or never
-///   came up, before `PROGRESS_TIMEOUT` with no dev-channels flag to
-///   explain the stall - or died at any point thereafter.
+/// - **`Err(SessionNeverProcessedPrompt)`**: the process died after being seen, never
+///   appeared within `appear_timeout` (120 s), or stayed up to `TOTAL_TIMEOUT` with no
+///   progress and no dev-channels flag to explain the stall.
 ///
 /// `sleep` is injected so this whole polling protocol (including the
 /// ~15 minute total) is testable without a real wait; `on_awaiting` is
@@ -2010,8 +2010,9 @@ mod tests {
             result,
             Err(RelaunchError::SessionNeverProcessedPrompt)
         ));
-        // Gives up at the 20s progress-check, not the full ~15 minutes.
-        assert_eq!(slept.len(), 20);
+        // A process never seen is given the 120 s appear timeout (it was 20 s: a slow-starting
+        // claude was declared dead), not the full ~15 minutes.
+        assert_eq!(slept.len(), 120);
     }
 
     #[test]

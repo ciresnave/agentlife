@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.23.0
+
+- **Breaking (pre-1.0): `LivenessTiming.appear_timeout`; a slow-starting lane is no longer declared dead (PM finding 2026-10-19):** `lane-restart --self` gave up on a relaunch when no claude process had appeared 20 s after the spawn (`progress_timeout`), logged `relaunch FAILED: session never processed its prompt` and left `launch.json` at `stopping`. On 2026-10-18 unpopped, synapse and lightbulb failed exactly 20-23 s after the spec was written with no host log for the new session; thinkersjournal-community's claude started 8 s AFTER its verdict (host 08:41:56, claude 08:42:24, verdict 08:42:16 local) and the lane came up. Now a process not yet seen is waited for up to `appear_timeout` (default 120 s) before the failure; once seen, its disappearance still fails at once. `total_timeout` (15 min) is unchanged. The new field is the break (struct literals). Not found: why claude starts that late (`wt.exe` and conhost start, load); unpopped's host log shows no new session at all, so a lane that never starts still fails, now after 120 s, and the `stopping` spec still reads as `crashed`.
+
 ## 0.22.0
 
 - **Breaking (pre-1.0): `SpecFile.written_by` is `spec::WrittenBy`, and the launch-arg allow-list is `LaunchFlag` (audit group 5, finding 7):** `written_by` was a free `String` (`SpecInputs.written_by` a `&str`); it is now `Restart`, `Launch`, `Stop`, `Import`, `Unpark` or `Other(String)`. On disk it is the same plain string, and a spelling this build does not know (an older or newer build's) reads as `Other` rather than refusing the file. The launch-arg allow-list was a `(&str, FlagArity)` table; it is `LaunchFlag { DevChannels, AddDir, McpConfig, Settings }` with `token()`, `arity()` and an exact-match `from_token()`, so an allowed flag cannot lack a token or arity. Behaviour unchanged. Also fixes a regression of 0.21.0: an error in `config.json` names the offending key again (`peers_addr: ...`). Not done: `stop_reason` is free text from `--reason`, and `permission_mode` crosses hook payloads and the mode lists in `plan.rs` and `summary.rs`.
