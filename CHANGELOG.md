@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.22.0
+
+- **Breaking (pre-1.0): `SpecFile.written_by` is `spec::WrittenBy`, and the launch-arg allow-list is `LaunchFlag` (audit group 5, finding 7):** `written_by` was a free `String` (`SpecInputs.written_by` a `&str`); it is now `Restart`, `Launch`, `Stop`, `Import`, `Unpark` or `Other(String)`. On disk it is the same plain string, and a spelling this build does not know (an older or newer build's) reads as `Other` rather than refusing the file. The launch-arg allow-list was a `(&str, FlagArity)` table; it is `LaunchFlag { DevChannels, AddDir, McpConfig, Settings }` with `token()`, `arity()` and an exact-match `from_token()`, so an allowed flag cannot lack a token or arity. Behaviour unchanged. Also fixes a regression of 0.21.0: an error in `config.json` names the offending key again (`peers_addr: ...`). Not done: `stop_reason` is free text from `--reason`, and `permission_mode` crosses hook payloads and the mode lists in `plan.rs` and `summary.rs`.
+
 ## 0.21.0
 
 - **Breaking (pre-1.0): `config::Layer` fields are typed, and the loopback rule is a type (audit group 5, findings 5 and 4b):** the enum-valued keys (`approval_default_duration`, `pending_nag`, `idle_stop_policy`) were `Option<String>` parsed later by `typed()` in `resolve`; the address keys were parsed and loopback-checked by two copies of the same code with different messages. Now `Layer` holds `DurationChoice`, `PendingNag`, `IdleStopPolicy`, `ProgramName`, `DirName` and the new `LoopbackAddr` (`peers_addr`, `synapse_addr`, also the `Config` field types; deref to `SocketAddr`), and `resolve` only picks. A bad value is refused where it enters: `Layer::set` (flag), `from_env_with` (error names the `AGENTLIFE_*` variable) or the config file (`ConfigError::File`; serde's message does not name the key, only the offending value). `resolve` no longer sees a malformed typed value. The two loopback messages are now one. Not changed: `pin_roles` and `synapse_account` stay `String` (checked in `resolve`).
