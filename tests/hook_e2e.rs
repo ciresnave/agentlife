@@ -261,7 +261,7 @@ fn a_session_start_through_the_real_chain_registers_the_agent_and_list_sees_it_a
     let r = &recs.records[0];
     assert_eq!(r.name.as_deref(), Some("e2e-lane"));
     assert_eq!(r.model, None, "no model in this payload, none invented");
-    assert_eq!(r.permission_mode.as_deref(), Some("auto"));
+    assert_eq!(r.permission_mode.as_ref().map(|m| m.as_str()), Some("auto"));
     assert!(
         paths_equal(&r.launch_cwd, &rig.cwd()),
         "{} vs {}",
@@ -1030,7 +1030,7 @@ fn write_launch_spec(lane_state: &Path, rig: &Rig, role: &str) {
         name: "target".to_string(),
         cwd,
         model: "sonnet".to_string(),
-        permission_mode: Some("auto".to_string()),
+        permission_mode: Some("auto".into()),
         remote_control: false,
         launch_args: vec![],
         handoff_path: None,
@@ -1391,7 +1391,7 @@ fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_o
         name: "e2e-lane".to_string(),
         cwd: rig.cwd(),
         model: "haiku".to_string(),
-        permission_mode: Some("auto".to_string()),
+        permission_mode: Some("auto".into()),
         remote_control: false,
         launch_args: vec![
             "--dangerously-load-development-channels".to_string(),

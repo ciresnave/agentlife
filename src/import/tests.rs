@@ -97,7 +97,10 @@ fn a_recent_lane_under_the_root_is_imported_with_its_recorded_fields() {
     assert_eq!(rec.role.as_deref(), Some("overmind"));
     assert_eq!(rec.launch_cwd, "C:/Projects/OverMind");
     assert_eq!(rec.origin, Origin::Imported);
-    assert_eq!(rec.permission_mode.as_deref(), Some("auto"));
+    assert_eq!(
+        rec.permission_mode.as_ref().map(|m| m.as_str()),
+        Some("auto")
+    );
     assert_eq!(rec.model.as_deref(), Some("claude-sonnet-5-5"));
     assert_eq!(rec.intent, Intent::Wanted);
     assert_eq!(rec.launch_args.as_ref().unwrap()[0], "claude");
@@ -170,7 +173,11 @@ fn one_record_per_name_and_directory_and_the_newest_file_wins() {
     let r = run(vec![a, b]);
     assert_eq!(imported(&r), ["auth-2"]);
     assert_eq!(
-        r.out.imports[0].record.permission_mode.as_deref(),
+        r.out.imports[0]
+            .record
+            .permission_mode
+            .as_ref()
+            .map(|m| m.as_str()),
         Some("default")
     );
     assert!(reasons(&r).contains(&("auth".to_string(), SkipReason::Superseded)));
@@ -307,7 +314,11 @@ fn an_imported_bypass_for_a_non_pm_is_refused_not_downgraded() {
     )]);
     // The importer copies the recorded mode; it is the plan that refuses.
     assert_eq!(
-        r.out.imports[0].record.permission_mode.as_deref(),
+        r.out.imports[0]
+            .record
+            .permission_mode
+            .as_ref()
+            .map(|m| m.as_str()),
         Some("bypassPermissions")
     );
     let p = plan_for(&records_of(&r), &Alive(vec![]));
@@ -325,7 +336,10 @@ fn an_imported_pm_keeps_bypass() {
     )]);
     let p = plan_for(&records_of(&r), &Alive(vec![]));
     assert!(p.entries[0].pm);
-    assert_eq!(p.entries[0].mode.as_deref(), Some("bypassPermissions"));
+    assert_eq!(
+        p.entries[0].mode.as_ref().map(|m| m.as_str()),
+        Some("bypassPermissions")
+    );
 }
 
 #[test]

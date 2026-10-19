@@ -12,6 +12,7 @@
 use crate::atomic::{is_temp_name, write_atomic};
 use crate::lock::{FileLock, LockError, DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_STALE_AFTER};
 use chrono::{DateTime, Utc};
+use lane_state::permission_mode::PermissionMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -173,7 +174,7 @@ pub struct AgentRecord {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     #[serde(default)]
     pub remote_control: bool,
     #[serde(default)]

@@ -10,6 +10,7 @@ use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
 use crate::marks::{is_waiting, pin_kind, PinKind};
 use crate::registry::{AgentRecord, ClosedHow, Intent};
 use chrono::{DateTime, Utc};
+use lane_state::permission_mode::PermissionMode;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -28,7 +29,7 @@ pub struct Row {
     pub intent: String,
     pub liveness: Liveness,
     pub pid: Option<u32>,
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     pub model: Option<String>,
     pub origin: String,
     pub launch_cwd: String,
@@ -168,7 +169,9 @@ pub fn render_text(rows: &[Row]) -> String {
                 r.pinned.clone().unwrap_or_else(|| "-".into()),
                 if r.waiting { "yes".into() } else { "-".into() },
                 r.pid.map_or("-".into(), |p| p.to_string()),
-                r.permission_mode.clone().unwrap_or_else(|| "-".into()),
+                r.permission_mode
+                    .as_ref()
+                    .map_or_else(|| "-".into(), |m| m.as_str().into()),
                 r.origin.clone(),
                 r.last_activity
                     .map_or("-".into(), |t| t.format("%Y-%m-%d %H:%MZ").to_string()),

@@ -6,6 +6,7 @@
 //! `LaneState`: `LaunchSpec` is what a launch actually reads.
 
 use crate::facts::SystemFacts;
+use crate::permission_mode::PermissionMode;
 use crate::relaunch::{
     extra_launch_args, has_dev_channels_flag, policy_default_model, resolve_launch_model,
     spawn_launch, valid_identifier, HostedArgv, OpusPermit, RelaunchError, RelaunchOutcome,
@@ -23,7 +24,7 @@ pub struct LaunchSpec {
     /// else its role.
     pub name: String,
     pub cwd: String,
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     pub remote_control: bool,
     /// The flags of the ORIGINAL launch; only the allowlisted ones carry over.
     pub launch_args: Option<Vec<String>>,
@@ -68,7 +69,7 @@ pub fn launch_argv(spec: &LaunchSpec, prompt: &str, model: &str) -> Vec<String> 
     argv.push(model.to_string());
     if let Some(permission_mode) = &spec.permission_mode {
         argv.push("--permission-mode".to_string());
-        argv.push(permission_mode.clone());
+        argv.push(permission_mode.as_str().to_string());
     }
     if spec.remote_control {
         argv.push("--remote-control".to_string());
@@ -303,7 +304,7 @@ mod tests {
             cwd: "C:/x".to_string(),
             name: None,
             model: Some("claude-sonnet-5".to_string()),
-            permission_mode: Some("prompting".to_string()),
+            permission_mode: Some("prompting".into()),
             remote_control: false,
             busy: false,
             subagents_running: 0,
@@ -327,7 +328,10 @@ mod tests {
         assert_eq!(s.role, "overmind");
         assert_eq!(s.name, "overmind");
         assert_eq!(s.cwd, "C:/x");
-        assert_eq!(s.permission_mode.as_deref(), Some("prompting"));
+        assert_eq!(
+            s.permission_mode.as_ref().map(|m| m.as_str()),
+            Some("prompting")
+        );
         assert!(s.remote_control);
         assert_eq!(s.launch_args, st.launch_args);
         // control: a recorded name wins over the role

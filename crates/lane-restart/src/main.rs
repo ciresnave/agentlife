@@ -1541,7 +1541,7 @@ USAGE:
         --quiet-over marks (QUIET>Ns; activity.quiet_over in JSON) each live
         role whose last hook write is older than <secs>. Opt-in, nothing is
         enforced and there is no default; the PM's recommended value is 120.
-        Read-only: each role's state (running, suspended, crashed, never_run,
+        Read-only: each role's state (running, suspended, crashed, failed_relaunch, never_run,
         unknown), whether its launch spec (<role>.launch.json, written before a
         restart's kill and at a confirmed launch) is complete, and whether it can
         be started again from it. RESTART-TOOL-DESIGN.md section 14.

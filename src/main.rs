@@ -1238,7 +1238,11 @@ fn run_import(write: bool, json: bool, since: Option<String>, park: Vec<String>)
                 "{} {:<26} mode={:<18} {}{}",
                 if write { "imported" } else { "would import" },
                 i.record.name.as_deref().unwrap_or("-"),
-                i.record.permission_mode.as_deref().unwrap_or("-"),
+                i.record
+                    .permission_mode
+                    .as_ref()
+                    .map(|m| m.as_str())
+                    .unwrap_or("-"),
                 i.record.launch_cwd,
                 if matches!(i.record.intent, agentlife::registry::Intent::Wanted) {
                     ""

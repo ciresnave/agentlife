@@ -7,6 +7,7 @@
 //! visibility changes agentlife's copy had: `ModelField::into_string` and
 //! `transcript_project_dir` are `pub`.
 
+use crate::permission_mode::PermissionMode;
 use crate::state::LaneState;
 use serde::Deserialize;
 
@@ -53,7 +54,7 @@ pub struct HookInput {
     pub hook_event_name: String,
     pub session_id: String,
     pub cwd: String,
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     pub model: Option<ModelField>,
     /// `~/.claude/projects/<launch dir, encoded>/<session_id>.jsonl` - the
     /// one field that still names the LAUNCH directory after the session
@@ -133,7 +134,7 @@ pub struct ClaudeCliFlags {
     pub remote_control: bool,
     /// `--name`, `--name=` or `-n`: how a person recognises the session.
     pub name: Option<String>,
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     /// The full argv this was parsed from, retained verbatim - PM finding,
     /// 2026-09-18 (CireSnave, via the PM): a relaunch that only reconstructs
     /// `--model`/`--permission-mode`/`--remote-control` silently drops
@@ -160,7 +161,7 @@ pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
     let mut iter = cmdline.iter();
     while let Some(arg) = iter.next() {
         if let Some(v) = arg.strip_prefix("--permission-mode=") {
-            flags.permission_mode = Some(v.to_string());
+            flags.permission_mode = Some(v.into());
             continue;
         }
         if let Some(v) = arg.strip_prefix("--name=") {
@@ -175,11 +176,11 @@ pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
                 }
             }
             "--dangerously-skip-permissions" => {
-                flags.permission_mode = Some("bypassPermissions".to_string())
+                flags.permission_mode = Some(PermissionMode::BypassPermissions)
             }
             "--permission-mode" => {
                 if let Some(v) = iter.next() {
-                    flags.permission_mode = Some(v.clone());
+                    flags.permission_mode = Some(v.as_str().into());
                 }
             }
             _ => {}
@@ -451,7 +452,7 @@ mod tests {
             ClaudeCliFlags {
                 remote_control: false,
                 name: None,
-                permission_mode: Some("prompting".to_string()),
+                permission_mode: Some("prompting".into()),
                 launch_args: Some(cmdline.clone()),
             }
         );
@@ -465,7 +466,7 @@ mod tests {
         let cmdline = strs(&["claude.exe", "--permission-mode=bypassPermissions"]);
         assert_eq!(
             parse_claude_cli_flags(&cmdline).permission_mode,
-            Some("bypassPermissions".to_string())
+            Some(PermissionMode::BypassPermissions)
         );
     }
 
@@ -474,7 +475,7 @@ mod tests {
         let cmdline = strs(&["claude.exe", "--dangerously-skip-permissions"]);
         assert_eq!(
             parse_claude_cli_flags(&cmdline).permission_mode,
-            Some("bypassPermissions".to_string())
+            Some(PermissionMode::BypassPermissions)
         );
     }
 
@@ -504,7 +505,7 @@ mod tests {
             ClaudeCliFlags {
                 remote_control: true,
                 name: None,
-                permission_mode: Some("bypassPermissions".to_string()),
+                permission_mode: Some(PermissionMode::BypassPermissions),
                 launch_args: Some(cmdline.clone()),
             }
         );

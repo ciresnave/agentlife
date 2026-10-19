@@ -259,7 +259,7 @@ fn the_planner_invariants_hold_on_many_generated_registries() {
                 e.argv.iter().all(|a| !a.contains(';')),
                 "a semicolon got through: {ctx}"
             );
-            if e.mode.as_deref() == Some("bypassPermissions") {
+            if e.mode.as_ref().map(|m| m.as_str()) == Some("bypassPermissions") {
                 assert!(e.pm, "bypass for a non-PM: {ctx}");
             }
             assert!(e.cwd.starts_with("C:/Projects"), "{ctx}");

@@ -8,6 +8,7 @@
 //! that matter for safety (pid, cwd, session_id) against the OS rather than
 //! trusting this file alone - see RESTART-TOOL-DESIGN.md §2.
 
+use crate::permission_mode::PermissionMode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -37,7 +38,7 @@ pub struct LaneState {
     /// live input). A relaunch omits `--permission-mode` entirely when this
     /// is `None`, the same way `model` is omitted - the new session gets
     /// Claude Code's own default rather than a guessed value.
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     pub remote_control: bool,
     pub busy: bool,
     pub subagents_running: u32,

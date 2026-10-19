@@ -6,21 +6,17 @@
 //! plan of the last approved restore to compare against.
 
 use crate::plan::{Entry, Plan};
+use lane_state::permission_mode::PermissionMode;
 use std::collections::HashMap;
 use std::fmt::Write;
 
 /// How many lines each section shows before saying how many more there are.
 pub const DEFAULT_CAP: usize = 10;
 
-const MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions"];
-
 /// Wider is higher. No mode means the default; a mode agentlife does not know is ranked above every
 /// known one, so it is always shown as widened.
-fn rank(mode: Option<&str>) -> usize {
-    match mode {
-        None => 0,
-        Some(m) => MODES.iter().position(|k| *k == m).unwrap_or(MODES.len()),
-    }
+fn rank(mode: Option<&PermissionMode>) -> usize {
+    mode.unwrap_or(&PermissionMode::Default).rank()
 }
 
 /// Recorded values are written by other processes. A newline or escape in one could forge or hide
@@ -82,12 +78,12 @@ pub fn render(plan: &Plan, previous: Option<&Plan>, cap: usize, pending_id: &str
         .iter()
         .filter_map(|e| {
             let old = before.get(e.agent_id.as_str())?;
-            (rank(e.mode.as_deref()) > rank(old.mode.as_deref())).then(|| {
+            (rank(e.mode.as_ref()) > rank(old.mode.as_ref())).then(|| {
                 format!(
                     "{}: {} -> {}",
                     name(e),
-                    clean(old.mode.as_deref().unwrap_or("default")),
-                    clean(e.mode.as_deref().unwrap_or("default"))
+                    clean(old.mode.as_ref().map_or("default", |m| m.as_str())),
+                    clean(e.mode.as_ref().map_or("default", |m| m.as_str()))
                 )
             })
         })

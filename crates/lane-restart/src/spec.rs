@@ -18,6 +18,7 @@
 
 use crate::facts::SystemFacts;
 use crate::launch::{prepare_launch, LaunchSpec, PreparedLaunch};
+use crate::permission_mode::PermissionMode;
 use crate::relaunch::{extra_launch_args, valid_identifier, RelaunchError};
 use crate::state;
 use chrono::{DateTime, Utc};
@@ -137,7 +138,7 @@ pub struct SpecFile {
     pub cwd: String,
     /// The explicit `--model` value a start passes.
     pub model: String,
-    pub permission_mode: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
     pub remote_control: bool,
     /// Only what `relaunch::extra_launch_args` allows; never the raw argv.
     pub launch_args: Vec<String>,
@@ -971,7 +972,7 @@ mod tests {
             role: role.to_string(),
             name: role.to_string(),
             cwd: "C:/Projects/x".to_string(),
-            permission_mode: Some("auto".to_string()),
+            permission_mode: Some("auto".into()),
             remote_control: false,
             launch_args: Some(
                 [

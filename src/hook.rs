@@ -762,7 +762,10 @@ mod tests {
         assert!(created);
         let rec = r.registry.get(&agent_id).unwrap().unwrap();
         assert_eq!(rec.name.as_deref(), Some("synapse"));
-        assert_eq!(rec.permission_mode.as_deref(), Some("auto"));
+        assert_eq!(
+            rec.permission_mode.as_ref().map(|m| m.as_str()),
+            Some("auto")
+        );
         assert!(rec.remote_control);
         assert_eq!(rec.origin, Origin::Hand);
         assert_eq!(rec.intent, Intent::Wanted);

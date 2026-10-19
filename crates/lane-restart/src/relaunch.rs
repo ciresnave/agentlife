@@ -1072,7 +1072,7 @@ mod tests {
             cwd: "C:/x".to_string(),
             name: None,
             model: Some("claude-sonnet-5".to_string()),
-            permission_mode: Some("prompting".to_string()),
+            permission_mode: Some("prompting".into()),
             remote_control: false,
             busy: false,
             subagents_running: 0,
@@ -1828,7 +1828,7 @@ mod tests {
     #[test]
     fn kill_and_relaunch_refuses_a_permission_mode_containing_a_semicolon() {
         let mut state = state_with_role("overmind");
-        state.permission_mode = Some("prompting;calc".to_string());
+        state.permission_mode = Some("prompting;calc".into());
         let result = kill_and_relaunch(
             &NeverCalled,
             &NeverCalledStateReader,
