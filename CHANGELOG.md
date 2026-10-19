@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.3
+
+- **`lane-restart start`, `stop`, `specs import`, `specs retire`, `assert-idle` and `approvals` parse their arguments with clap derive (audit group 5, row 6, slice 2):** same method and guarantees as 0.27.2. The old and new parsers were compared over all 111,151 argument sequences of up to 4 tokens from an 18-token pool and agreed on accept/reject and on every parsed value; exit 1 on every refusal, all spellings, last-wins repeats, `--soft` with `--hard` refused, a missing `--reason` still reaching `start::validate_reason`. The refusal TEXT for these is now clap's; `ArgError::MissingValue` and `Conflict` are gone. Still hand-written: `host`, `state`, `attach`, the restart flags, `--help`/`--version`. No API change.
+
 ## 0.27.2
 
 - **`lane-restart install`, `ledger` and `status` parse their arguments with clap derive (audit group 5, row 6, first slice):** the three hand-written `match arg.as_str()` loops are `crates/lane-restart/src/cli.rs`. Spellings, last-wins repeats, a flag value taken verbatim even when it starts with `-`, `--quiet-over` refused twice, and exit 1 on every refusal are unchanged: the old and new parsers were compared over all 245,411 argument sequences of up to 4 tokens from a 22-token pool and agreed on accept/reject and on every parsed value. The refusal TEXT for these three is now clap's. `--help`/`--version`, `state`, `host`, `start`, `stop`, `specs`, `assert-idle`, `approvals`, `attach` and the restart flags stay hand-written. No API change.

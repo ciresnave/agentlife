@@ -58,9 +58,6 @@ enum ArgError {
     RoleRequired,
     Unknown(String),
     MissingChildArgv,
-    MissingValue(&'static str),
-    /// Two flags that exclude each other were both given.
-    Conflict(&'static str, &'static str),
 }
 
 impl std::fmt::Display for ArgError {
@@ -72,8 +69,6 @@ impl std::fmt::Display for ArgError {
             ArgError::MissingChildArgv => {
                 write!(f, "expected `-- <child argv...>` after --role <name>")
             }
-            ArgError::MissingValue(flag) => write!(f, "{flag} requires a value"),
-            ArgError::Conflict(a, b) => write!(f, "{a} and {b} exclude each other"),
         }
     }
 }
@@ -520,54 +515,6 @@ struct StartArgs {
     signal_id: Option<String>,
 }
 
-/// `start --role R --reason <text> [--model sonnet|haiku] [--dry-run]`. A missing `--reason` is
-/// not an argument error: it reaches `start::validate_reason`, so there is one message for it.
-fn parse_start_args(rest: &[String]) -> Result<StartArgs, ArgError> {
-    let mut role = None;
-    let mut reason = String::new();
-    let mut model = None;
-    let mut dry_run = false;
-    let mut json = false;
-    let mut signal_id = None;
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--json" => json = true,
-            "--signal-id" => {
-                signal_id = Some(
-                    iter.next()
-                        .ok_or(ArgError::MissingValue("--signal-id"))?
-                        .clone(),
-                )
-            }
-            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
-            "--reason" => {
-                reason = iter
-                    .next()
-                    .ok_or(ArgError::MissingValue("--reason"))?
-                    .clone()
-            }
-            "--model" => {
-                model = Some(
-                    iter.next()
-                        .ok_or(ArgError::MissingValue("--model"))?
-                        .clone(),
-                )
-            }
-            "--dry-run" => dry_run = true,
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    Ok(StartArgs {
-        role: role.ok_or(ArgError::RoleRequired)?,
-        reason,
-        model,
-        dry_run,
-        json,
-        signal_id,
-    })
-}
-
 /// The disk floor (`disk.rs`), checked before any launch. A refusal is printed as `kind: refused -
 /// ...` and the caller exits 1 and logs it; an unreadable probe is a warning, not a refusal.
 fn disk_gate(kind: &str) -> Result<(), lane_restart::disk::Refusal> {
@@ -582,41 +529,6 @@ fn disk_gate(kind: &str) -> Result<(), lane_restart::disk::Refusal> {
             Err(refusal)
         }
     }
-}
-
-/// `specs import [--role R] [--dry-run] [--verbose]` -> `(role, dry_run, verbose)`.
-fn parse_specs_import_args(rest: &[String]) -> Result<(Option<String>, bool, bool), ArgError> {
-    let mut role = None;
-    let mut dry_run = false;
-    let mut verbose = false;
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
-            "--dry-run" => dry_run = true,
-            "--verbose" => verbose = true,
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    Ok((role, dry_run, verbose))
-}
-
-/// `specs retire --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
-fn parse_specs_retire_args(rest: &[String]) -> Result<(Vec<String>, bool), ArgError> {
-    let mut roles = Vec::new();
-    let mut dry_run = false;
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => roles.push(iter.next().ok_or(ArgError::MissingRole)?.clone()),
-            "--dry-run" => dry_run = true,
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    if roles.is_empty() {
-        return Err(ArgError::RoleRequired);
-    }
-    Ok((roles, dry_run))
 }
 
 /// The role whose `claude` session is running this command, verified by pid and start time
@@ -894,49 +806,6 @@ struct StopArgs {
     confirmed: bool,
     /// `--soft` / `--hard`; `None` takes the default (soft for `--self`, hard otherwise).
     kind: Option<StopKind>,
-}
-
-/// `stop --role R --reason <text> [--self] [--soft|--hard] [--dry-run] [--yes]`. As with `start`, a missing
-/// `--reason` reaches `start::validate_reason`, so there is one message for it.
-fn parse_stop_args(rest: &[String]) -> Result<StopArgs, ArgError> {
-    let mut role = None;
-    let mut reason = String::new();
-    let (mut target_self, mut dry_run, mut confirmed) = (false, false, false);
-    let (mut soft, mut hard) = (false, false);
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
-            "--soft" => soft = true,
-            "--hard" => hard = true,
-            "--reason" => {
-                reason = iter
-                    .next()
-                    .ok_or(ArgError::MissingValue("--reason"))?
-                    .clone()
-            }
-            "--self" => target_self = true,
-            "--dry-run" => dry_run = true,
-            "--yes" => confirmed = true,
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    if soft && hard {
-        return Err(ArgError::Conflict("--soft", "--hard"));
-    }
-    let kind = match (soft, hard) {
-        (true, _) => Some(StopKind::Soft),
-        (_, true) => Some(StopKind::Hard),
-        _ => None,
-    };
-    Ok(StopArgs {
-        role: role.ok_or(ArgError::RoleRequired)?,
-        reason,
-        target_self,
-        dry_run,
-        confirmed,
-        kind,
-    })
 }
 
 /// `lane-restart stop --role R --reason <text> [--self] [--dry-run] [--yes]` - 14.3. Suspends a
@@ -1400,18 +1269,6 @@ fn run_ledger_cmd(
     ExitCode::SUCCESS
 }
 
-fn parse_assert_idle_args(rest: &[String]) -> Result<Option<String>, ArgError> {
-    let mut role = None;
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    Ok(role)
-}
-
 const USAGE: &str = "\
 lane-restart - a bulletproof session-restart tool. RESTART-TOOL-DESIGN.md.
 
@@ -1582,7 +1439,7 @@ fn main() -> ExitCode {
     }
     if let Some((first, rest)) = argv.split_first() {
         if first == "assert-idle" {
-            return match parse_assert_idle_args(rest) {
+            return match cli::assert_idle(rest) {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
@@ -1602,7 +1459,7 @@ fn main() -> ExitCode {
             };
         }
         if first == "start" {
-            return match parse_start_args(rest) {
+            return match cli::start(rest) {
                 Ok(a) => run_start_cmd(a),
                 Err(e) => {
                     eprintln!("lane-restart start: {e}");
@@ -1611,7 +1468,7 @@ fn main() -> ExitCode {
             };
         }
         if first == "stop" {
-            return match parse_stop_args(rest) {
+            return match cli::stop(rest) {
                 Ok(a) => run_stop_cmd(a),
                 Err(e) => {
                     eprintln!("lane-restart stop: {e}");
@@ -1621,14 +1478,14 @@ fn main() -> ExitCode {
         }
         if first == "specs" {
             return match rest.split_first() {
-                Some((sub, tail)) if sub == "import" => match parse_specs_import_args(tail) {
+                Some((sub, tail)) if sub == "import" => match cli::specs_import(tail) {
                     Ok((role, dry_run, verbose)) => run_specs_import_cmd(role, dry_run, verbose),
                     Err(e) => {
                         eprintln!("lane-restart specs import: {e}");
                         ExitCode::FAILURE
                     }
                 },
-                Some((sub, tail)) if sub == "retire" => match parse_specs_retire_args(tail) {
+                Some((sub, tail)) if sub == "retire" => match cli::specs_retire(tail) {
                     Ok((roles, dry_run)) => run_specs_retire_cmd(roles, dry_run),
                     Err(e) => {
                         eprintln!("lane-restart specs retire: {e}");
@@ -1668,7 +1525,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         if first == "approvals" {
-            return match parse_assert_idle_args(rest) {
+            return match cli::assert_idle(rest) {
                 Ok(role) => run_approvals_cmd(role),
                 Err(e) => {
                     eprintln!("lane-restart approvals: {e}");
@@ -2130,31 +1987,25 @@ mod cli_tests {
 
     #[test]
     fn assert_idle_with_no_args_has_no_role_override() {
-        assert_eq!(parse_assert_idle_args(&[]), Ok(None));
+        assert_eq!(cli::assert_idle(&[]), Ok(None));
     }
 
     #[test]
     fn assert_idle_role_flag_is_extracted() {
         assert_eq!(
-            parse_assert_idle_args(&strs(&["--role", "pm"])),
+            cli::assert_idle(&strs(&["--role", "pm"])),
             Ok(Some("pm".to_string()))
         );
     }
 
     #[test]
     fn assert_idle_role_flag_with_no_value_is_an_error() {
-        assert_eq!(
-            parse_assert_idle_args(&strs(&["--role"])),
-            Err(ArgError::MissingRole)
-        );
+        assert!(cli::assert_idle(&strs(&["--role"])).is_err());
     }
 
     #[test]
     fn assert_idle_rejects_an_unknown_flag() {
-        assert_eq!(
-            parse_assert_idle_args(&strs(&["--bogus"])),
-            Err(ArgError::Unknown("--bogus".to_string()))
-        );
+        assert!(cli::assert_idle(&strs(&["--bogus"])).is_err());
     }
 
     /// ⚠️ PM finding, 2026-09-18: `--help` printed "unrecognised argument:
@@ -2204,7 +2055,7 @@ mod cli_tests {
     #[test]
     fn start_args_carry_role_reason_model_and_dry_run() {
         assert_eq!(
-            parse_start_args(&strs(&[
+            cli::start(&strs(&[
                 "--role",
                 "baracuda",
                 "--reason",
@@ -2231,35 +2082,23 @@ mod cli_tests {
     /// as an empty string rather than failing here with a second message.
     #[test]
     fn start_without_a_reason_parses_to_an_empty_reason() {
-        let a = parse_start_args(&strs(&["--role", "baracuda"])).unwrap();
+        let a = cli::start(&strs(&["--role", "baracuda"])).unwrap();
         assert_eq!(a.reason, "");
         assert!(start::validate_reason(&a.reason).is_err());
     }
 
     #[test]
     fn start_requires_a_role_and_values_for_its_flags() {
-        assert_eq!(
-            parse_start_args(&strs(&["--reason", "x"])),
-            Err(ArgError::RoleRequired)
-        );
-        assert_eq!(
-            parse_start_args(&strs(&["--role", "a", "--reason"])),
-            Err(ArgError::MissingValue("--reason"))
-        );
-        assert_eq!(
-            parse_start_args(&strs(&["--role", "a", "--model"])),
-            Err(ArgError::MissingValue("--model"))
-        );
-        assert_eq!(
-            parse_start_args(&strs(&["--role", "a", "--bogus"])),
-            Err(ArgError::Unknown("--bogus".into()))
-        );
+        assert!(cli::start(&strs(&["--reason", "x"])).is_err());
+        assert!(cli::start(&strs(&["--role", "a", "--reason"])).is_err());
+        assert!(cli::start(&strs(&["--role", "a", "--model"])).is_err());
+        assert!(cli::start(&strs(&["--role", "a", "--bogus"])).is_err());
     }
 
     #[test]
     fn stop_args_are_role_reason_self_dry_run_and_yes() {
         assert_eq!(
-            parse_stop_args(&strs(&[
+            cli::stop(&strs(&[
                 "--role",
                 "baracuda",
                 "--reason",
@@ -2278,62 +2117,40 @@ mod cli_tests {
             })
         );
         assert_eq!(
-            parse_stop_args(&strs(&["--role", "a", "--soft"]))
-                .unwrap()
-                .kind,
+            cli::stop(&strs(&["--role", "a", "--soft"])).unwrap().kind,
             Some(StopKind::Soft)
         );
         assert_eq!(
-            parse_stop_args(&strs(&["--role", "a", "--hard"]))
-                .unwrap()
-                .kind,
+            cli::stop(&strs(&["--role", "a", "--hard"])).unwrap().kind,
             Some(StopKind::Hard)
         );
-        assert_eq!(
-            parse_stop_args(&strs(&["--role", "a", "--soft", "--hard"])),
-            Err(ArgError::Conflict("--soft", "--hard"))
-        );
-        let a = parse_stop_args(&strs(&["--role", "baracuda"])).unwrap();
+        assert!(cli::stop(&strs(&["--role", "a", "--soft", "--hard"])).is_err());
+        let a = cli::stop(&strs(&["--role", "baracuda"])).unwrap();
         assert_eq!(a.reason, "", "a missing reason reaches validate_reason");
         assert!(!a.target_self && !a.dry_run && !a.confirmed);
-        assert_eq!(
-            parse_stop_args(&strs(&["--reason", "x"])),
-            Err(ArgError::RoleRequired)
-        );
-        assert_eq!(
-            parse_stop_args(&strs(&["--role", "a", "--reason"])),
-            Err(ArgError::MissingValue("--reason"))
-        );
-        assert_eq!(
-            parse_stop_args(&strs(&["--role", "a", "--model", "sonnet"])),
-            Err(ArgError::Unknown("--model".into()))
-        );
+        assert!(cli::stop(&strs(&["--reason", "x"])).is_err());
+        assert!(cli::stop(&strs(&["--role", "a", "--reason"])).is_err());
+        assert!(cli::stop(&strs(&["--role", "a", "--model", "sonnet"])).is_err());
     }
 
     #[test]
     fn specs_import_args_are_role_and_dry_run() {
-        assert_eq!(parse_specs_import_args(&[]), Ok((None, false, false)));
+        assert_eq!(cli::specs_import(&[]), Ok((None, false, false)));
         assert_eq!(
-            parse_specs_import_args(&strs(&["--role", "baracuda", "--dry-run", "--verbose"])),
+            cli::specs_import(&strs(&["--role", "baracuda", "--dry-run", "--verbose"])),
             Ok((Some("baracuda".into()), true, true))
         );
-        assert_eq!(
-            parse_specs_import_args(&strs(&["--yes"])),
-            Err(ArgError::Unknown("--yes".into()))
-        );
+        assert!(cli::specs_import(&strs(&["--yes"])).is_err());
     }
 
     #[test]
     fn specs_retire_args_need_a_role_and_repeat() {
-        assert_eq!(parse_specs_retire_args(&[]), Err(ArgError::RoleRequired));
+        assert!(cli::specs_retire(&[]).is_err());
         assert_eq!(
-            parse_specs_retire_args(&strs(&["--role", "a", "--role", "b", "--dry-run"])),
+            cli::specs_retire(&strs(&["--role", "a", "--role", "b", "--dry-run"])),
             Ok((vec!["a".to_string(), "b".to_string()], true))
         );
-        assert_eq!(
-            parse_specs_retire_args(&strs(&["--all"])),
-            Err(ArgError::Unknown("--all".into()))
-        );
+        assert!(cli::specs_retire(&strs(&["--all"])).is_err());
         assert!(USAGE.contains("lane-restart specs retire"));
     }
 
