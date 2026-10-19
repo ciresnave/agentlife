@@ -51,10 +51,18 @@ pub const KEYS: &[&str] = &[
     "synapse_account",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub enum DurationChoice {
     Hour,
     Day,
+}
+
+impl TryFrom<String> for DurationChoice {
+    type Error = String;
+    fn try_from(v: String) -> Result<Self, String> {
+        v.trim().parse()
+    }
 }
 
 impl FromStr for DurationChoice {
@@ -69,11 +77,19 @@ impl FromStr for DurationChoice {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub enum PendingNag {
     Quiet,
     OncePerUnlock,
     EveryMinutes(u32),
+}
+
+impl TryFrom<String> for PendingNag {
+    type Error = String;
+    fn try_from(v: String) -> Result<Self, String> {
+        v.trim().parse()
+    }
 }
 
 impl FromStr for PendingNag {
@@ -95,12 +111,20 @@ impl FromStr for PendingNag {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub enum IdleStopPolicy {
     FreshElseAsk,
     FreshOnly,
     Ask,
     Skip,
+}
+
+impl TryFrom<String> for IdleStopPolicy {
+    type Error = String;
+    fn try_from(v: String) -> Result<Self, String> {
+        v.trim().parse()
+    }
 }
 
 impl FromStr for IdleStopPolicy {
@@ -141,7 +165,7 @@ pub struct Config {
     /// The directory the portfolio's PM lane is launched in; with `pin_roles` it names the PM.
     pub portfolio_root: DirName,
     /// The claude-peers broker (loopback only), used to ask a lane to wrap up.
-    pub peers_addr: SocketAddr,
+    pub peers_addr: LoopbackAddr,
     /// OverMind's `lane-restart` state directory. agentlife only ever READS it.
     pub lane_state_dir: DirName,
     /// How long `park`/`stop` waits for a lane to write its HANDOFF and assert it is idle.
@@ -164,7 +188,7 @@ pub struct Config {
     pub wake_poll_secs: u64,
     pub max_wakes_per_agent_per_hour: u32,
     pub max_wakes_per_minute: u32,
-    pub synapse_addr: SocketAddr,
+    pub synapse_addr: LoopbackAddr,
     pub synapse_account: String,
 }
 
@@ -189,7 +213,7 @@ impl Default for Config {
             waiting_mark_ttl_hours: 24,
             pin_roles: vec!["pm".to_string()],
             portfolio_root: DirName::trusted("C:/Projects"),
-            peers_addr: SocketAddr::from(([127, 0, 0, 1], 7899)),
+            peers_addr: LoopbackAddr::trusted(SocketAddr::from(([127, 0, 0, 1], 7899))),
             lane_state_dir: DirName::trusted("C:/Projects/.lane-state"),
             down_timeout_secs: 600,
             down_poll_secs: 2,
@@ -201,7 +225,7 @@ impl Default for Config {
             wake_poll_secs: 10,
             max_wakes_per_agent_per_hour: 6,
             max_wakes_per_minute: 10,
-            synapse_addr: SocketAddr::from(([127, 0, 0, 1], 7920)),
+            synapse_addr: LoopbackAddr::trusted(SocketAddr::from(([127, 0, 0, 1], 7920))),
             synapse_account: "ciresnave".to_string(),
         }
     }
@@ -250,29 +274,29 @@ pub struct Layer {
     pub batch_delay_secs: Option<u64>,
     pub liveness_timeout_secs: Option<u64>,
     pub network_wait_secs: Option<u64>,
-    pub approval_default_duration: Option<String>,
-    pub pending_nag: Option<String>,
+    pub approval_default_duration: Option<DurationChoice>,
+    pub pending_nag: Option<PendingNag>,
     pub lazy_enabled: Option<bool>,
     pub lazy_after_idle_minutes: Option<u32>,
     pub idle_sweep_secs: Option<u64>,
-    pub idle_stop_policy: Option<String>,
+    pub idle_stop_policy: Option<IdleStopPolicy>,
     pub user_recent_minutes: Option<u32>,
     pub waiting_mark_ttl_hours: Option<u32>,
     pub pin_roles: Option<Vec<String>>,
-    pub portfolio_root: Option<String>,
-    pub peers_addr: Option<String>,
-    pub lane_state_dir: Option<String>,
+    pub portfolio_root: Option<DirName>,
+    pub peers_addr: Option<LoopbackAddr>,
+    pub lane_state_dir: Option<DirName>,
     pub down_timeout_secs: Option<u64>,
     pub down_poll_secs: Option<u64>,
-    pub host_program: Option<String>,
-    pub claude_program: Option<String>,
+    pub host_program: Option<ProgramName>,
+    pub claude_program: Option<ProgramName>,
     pub stop_after_failed_batches: Option<u32>,
     pub progress_timeout_secs: Option<u64>,
     pub spawn_gap_ms: Option<u64>,
     pub wake_poll_secs: Option<u64>,
     pub max_wakes_per_agent_per_hour: Option<u32>,
     pub max_wakes_per_minute: Option<u32>,
-    pub synapse_addr: Option<String>,
+    pub synapse_addr: Option<LoopbackAddr>,
     pub synapse_account: Option<String>,
 }
 
@@ -303,13 +327,13 @@ impl Layer {
             "liveness_timeout_secs" => self.liveness_timeout_secs = Some(parse(key, value)?),
             "network_wait_secs" => self.network_wait_secs = Some(parse(key, value)?),
             "approval_default_duration" => {
-                self.approval_default_duration = Some(value.trim().to_string())
+                self.approval_default_duration = Some(parse(key, value)?)
             }
-            "pending_nag" => self.pending_nag = Some(value.trim().to_string()),
+            "pending_nag" => self.pending_nag = Some(parse(key, value)?),
             "lazy_enabled" => self.lazy_enabled = Some(parse(key, value)?),
             "lazy_after_idle_minutes" => self.lazy_after_idle_minutes = Some(parse(key, value)?),
             "idle_sweep_secs" => self.idle_sweep_secs = Some(parse(key, value)?),
-            "idle_stop_policy" => self.idle_stop_policy = Some(value.trim().to_string()),
+            "idle_stop_policy" => self.idle_stop_policy = Some(parse(key, value)?),
             "user_recent_minutes" => self.user_recent_minutes = Some(parse(key, value)?),
             "waiting_mark_ttl_hours" => self.waiting_mark_ttl_hours = Some(parse(key, value)?),
             "pin_roles" => {
@@ -326,14 +350,14 @@ impl Layer {
                 self.max_wakes_per_agent_per_hour = Some(parse(key, value)?)
             }
             "max_wakes_per_minute" => self.max_wakes_per_minute = Some(parse(key, value)?),
-            "synapse_addr" => self.synapse_addr = Some(value.trim().to_string()),
-            "portfolio_root" => self.portfolio_root = Some(value.trim().to_string()),
-            "peers_addr" => self.peers_addr = Some(value.trim().to_string()),
-            "lane_state_dir" => self.lane_state_dir = Some(value.trim().to_string()),
+            "synapse_addr" => self.synapse_addr = Some(parse(key, value)?),
+            "portfolio_root" => self.portfolio_root = Some(parse(key, value)?),
+            "peers_addr" => self.peers_addr = Some(parse(key, value)?),
+            "lane_state_dir" => self.lane_state_dir = Some(parse(key, value)?),
             "down_timeout_secs" => self.down_timeout_secs = Some(parse(key, value)?),
             "down_poll_secs" => self.down_poll_secs = Some(parse(key, value)?),
-            "host_program" => self.host_program = Some(value.trim().to_string()),
-            "claude_program" => self.claude_program = Some(value.trim().to_string()),
+            "host_program" => self.host_program = Some(parse(key, value)?),
+            "claude_program" => self.claude_program = Some(parse(key, value)?),
             "stop_after_failed_batches" => {
                 self.stop_after_failed_batches = Some(parse(key, value)?)
             }
@@ -414,19 +438,13 @@ fn at_least_one<T: PartialOrd + From<u8> + fmt::Display>(
     }
 }
 
-fn typed<T: FromStr>(key: &str, v: Option<String>) -> Result<Option<T>, ConfigError>
-where
-    T::Err: fmt::Display,
-{
-    v.map(|s| parse::<T>(key, &s)).transpose()
-}
-
 /// Defines a validated string newtype: `new` checks, `trusted` is for built-in defaults and the platform
 /// paths (it asserts the same rule in debug builds), and it reads as a `str`.
 macro_rules! checked_string {
     ($(#[$m:meta])* $name:ident, $what:literal, $ok:expr) => {
         $(#[$m])*
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -441,6 +459,20 @@ macro_rules! checked_string {
 
             fn trusted(v: &str) -> Self {
                 Self::new(v.to_string()).expect(concat!("built-in ", $what))
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = String;
+            fn try_from(v: String) -> Result<Self, String> {
+                Self::new(v)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = String;
+            fn from_str(v: &str) -> Result<Self, String> {
+                Self::new(v.to_string())
             }
         }
 
@@ -486,6 +518,52 @@ checked_string!(
     |v| !v.is_empty() && !v.contains(';')
 );
 
+/// A socket address on a loopback interface: the claude-peers broker and Synapse are local only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct LoopbackAddr(SocketAddr);
+
+impl LoopbackAddr {
+    pub fn new(a: SocketAddr) -> Result<Self, String> {
+        if a.ip().is_loopback() {
+            Ok(Self(a))
+        } else {
+            Err(format!("{a} is not a loopback address; it is local only"))
+        }
+    }
+
+    fn trusted(a: SocketAddr) -> Self {
+        Self::new(a).expect("built-in loopback address")
+    }
+}
+
+impl std::ops::Deref for LoopbackAddr {
+    type Target = SocketAddr;
+    fn deref(&self) -> &SocketAddr {
+        &self.0
+    }
+}
+
+impl fmt::Display for LoopbackAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for LoopbackAddr {
+    type Err = String;
+    fn from_str(v: &str) -> Result<Self, String> {
+        Self::new(v.parse::<SocketAddr>().map_err(|e| e.to_string())?)
+    }
+}
+
+impl TryFrom<String> for LoopbackAddr {
+    type Error = String;
+    fn try_from(v: String) -> Result<Self, String> {
+        v.trim().parse()
+    }
+}
+
 impl Config {
     /// `Config::default()` with `portfolio_root` and `lane_state_dir` taken from
     /// `lane_state::platform` for this OS. On Windows it equals `Config::default()`.
@@ -509,11 +587,6 @@ impl Config {
                 pick(flags.$f, env.$f, file.$f).unwrap_or(d.$f)
             };
         }
-        macro_rules! text_field {
-            ($f:ident) => {
-                pick(flags.$f, env.$f, file.$f).unwrap_or_else(|| d.$f.to_string())
-            };
-        }
         let floor = field!(free_ram_floor_gb);
         if !floor.is_finite() || floor < 0.0 {
             return Err(ConfigError::Invalid {
@@ -521,23 +594,6 @@ impl Config {
                 why: format!("must be a finite number >= 0, got {floor}"),
             });
         }
-        let synapse_addr = match pick(
-            flags.synapse_addr.clone(),
-            env.synapse_addr.clone(),
-            file.synapse_addr.clone(),
-        ) {
-            Some(s) => {
-                let a: SocketAddr = parse("synapse_addr", &s)?;
-                if !a.ip().is_loopback() {
-                    return Err(ConfigError::Invalid {
-                        key: "synapse_addr",
-                        why: format!("{a} is not a loopback address; Synapse binds loopback only"),
-                    });
-                }
-                a
-            }
-            None => d.synapse_addr,
-        };
         let pin_roles = field!(pin_roles);
         if let Some(bad) = pin_roles.iter().find(|r| !valid_identifier(r)) {
             return Err(ConfigError::Invalid {
@@ -545,35 +601,6 @@ impl Config {
                 why: format!("{bad:?} is not a plain identifier"),
             });
         }
-        let peers_addr = match pick(
-            flags.peers_addr.clone(),
-            env.peers_addr.clone(),
-            file.peers_addr.clone(),
-        ) {
-            Some(s) => {
-                let a: SocketAddr = parse("peers_addr", &s)?;
-                if !a.ip().is_loopback() {
-                    return Err(ConfigError::Invalid {
-                        key: "peers_addr",
-                        why: format!(
-                            "{a} is not a loopback address; the claude-peers broker is local only"
-                        ),
-                    });
-                }
-                a
-            }
-            None => d.peers_addr,
-        };
-        let dir = |key: &'static str, v: String| {
-            DirName::new(v).map_err(|why| ConfigError::Invalid { key, why })
-        };
-        let program = |key: &'static str, v: String| {
-            ProgramName::new(v).map_err(|why| ConfigError::Invalid { key, why })
-        };
-        let lane_state_dir = dir("lane_state_dir", text_field!(lane_state_dir))?;
-        let host_program = program("host_program", text_field!(host_program))?;
-        let claude_program = program("claude_program", text_field!(claude_program))?;
-        let portfolio_root = dir("portfolio_root", text_field!(portfolio_root))?;
         let synapse_account = field!(synapse_account);
         if !valid_identifier(&synapse_account) {
             return Err(ConfigError::Invalid {
@@ -597,46 +624,22 @@ impl Config {
                 field!(liveness_timeout_secs),
             )?,
             network_wait_secs: field!(network_wait_secs),
-            approval_default_duration: typed(
-                "approval_default_duration",
-                pick(
-                    flags.approval_default_duration.clone(),
-                    env.approval_default_duration.clone(),
-                    file.approval_default_duration.clone(),
-                ),
-            )?
-            .unwrap_or(d.approval_default_duration),
-            pending_nag: typed(
-                "pending_nag",
-                pick(
-                    flags.pending_nag.clone(),
-                    env.pending_nag.clone(),
-                    file.pending_nag.clone(),
-                ),
-            )?
-            .unwrap_or(d.pending_nag),
+            approval_default_duration: field!(approval_default_duration),
+            pending_nag: field!(pending_nag),
             lazy_enabled: field!(lazy_enabled),
             lazy_after_idle_minutes: field!(lazy_after_idle_minutes),
             idle_sweep_secs: at_least_one("idle_sweep_secs", field!(idle_sweep_secs))?,
-            idle_stop_policy: typed(
-                "idle_stop_policy",
-                pick(
-                    flags.idle_stop_policy.clone(),
-                    env.idle_stop_policy.clone(),
-                    file.idle_stop_policy.clone(),
-                ),
-            )?
-            .unwrap_or(d.idle_stop_policy),
+            idle_stop_policy: field!(idle_stop_policy),
             user_recent_minutes: field!(user_recent_minutes),
             waiting_mark_ttl_hours: field!(waiting_mark_ttl_hours),
             pin_roles,
-            portfolio_root,
-            peers_addr,
-            lane_state_dir,
+            portfolio_root: field!(portfolio_root),
+            peers_addr: field!(peers_addr),
+            lane_state_dir: field!(lane_state_dir),
             down_timeout_secs: at_least_one("down_timeout_secs", field!(down_timeout_secs))?,
             down_poll_secs: at_least_one("down_poll_secs", field!(down_poll_secs))?,
-            host_program,
-            claude_program,
+            host_program: field!(host_program),
+            claude_program: field!(claude_program),
             stop_after_failed_batches: at_least_one(
                 "stop_after_failed_batches",
                 field!(stop_after_failed_batches),
@@ -655,7 +658,7 @@ impl Config {
                 "max_wakes_per_minute",
                 field!(max_wakes_per_minute),
             )?,
-            synapse_addr,
+            synapse_addr: field!(synapse_addr),
             synapse_account,
         })
     }
@@ -679,6 +682,13 @@ mod tests {
         let mut l = Layer::default();
         l.set(key, value).unwrap();
         l
+    }
+
+    /// Sets one key and resolves: a typed key is refused by `set` itself, the rest by `resolve`.
+    fn set_and_resolve(key: &str, value: &str) -> Result<Config, ConfigError> {
+        let mut l = Layer::default();
+        l.set(key, value)?;
+        Config::resolve(l, Layer::default(), Layer::default())
     }
 
     fn file(json: &str) -> Layer {
@@ -917,9 +927,12 @@ mod tests {
             ("free_ram_floor_gb", "NaN"),
             ("free_ram_floor_gb", "inf"),
         ] {
-            let r = Config::resolve(layer(k, v), Layer::default(), Layer::default());
+            let r = set_and_resolve(k, v);
             assert!(
-                matches!(r, Err(ConfigError::Invalid { .. })),
+                matches!(
+                    r,
+                    Err(ConfigError::Invalid { .. } | ConfigError::BadValue { .. })
+                ),
                 "{k}={v}: {r:?}"
             );
         }
@@ -939,18 +952,9 @@ mod tests {
 
     #[test]
     fn forever_can_never_be_the_default_duration() {
-        let r = Config::resolve(
-            layer("approval_default_duration", "forever"),
-            Layer::default(),
-            Layer::default(),
-        );
+        let r = set_and_resolve("approval_default_duration", "forever");
         assert!(matches!(r, Err(ConfigError::BadValue { .. })), "{r:?}");
-        assert!(Config::resolve(
-            layer("approval_default_duration", "1d"),
-            Layer::default(),
-            Layer::default()
-        )
-        .is_ok());
+        assert!(set_and_resolve("approval_default_duration", "1d").is_ok());
     }
 
     #[test]
@@ -961,23 +965,21 @@ mod tests {
             "example.com:7920",
             "nonsense",
         ] {
-            let r = Config::resolve(
-                layer("synapse_addr", bad),
-                Layer::default(),
-                Layer::default(),
-            );
+            let r = set_and_resolve("synapse_addr", bad);
             assert!(r.is_err(), "{bad} must be refused");
+            // The same rule holds for the broker's address, and for a config file's text.
+            assert!(set_and_resolve("peers_addr", bad).is_err(), "{bad}");
+            let json = format!(r#"{{"synapse_addr": "{bad}"}}"#);
+            assert!(
+                matches!(
+                    Layer::from_json(Path::new("c"), &json),
+                    Err(ConfigError::File { .. })
+                ),
+                "{bad} in a file"
+            );
         }
         for good in ["127.0.0.1:7920", "[::1]:7920"] {
-            assert!(
-                Config::resolve(
-                    layer("synapse_addr", good),
-                    Layer::default(),
-                    Layer::default()
-                )
-                .is_ok(),
-                "{good}"
-            );
+            assert!(set_and_resolve("synapse_addr", good).is_ok(), "{good}");
         }
     }
 
