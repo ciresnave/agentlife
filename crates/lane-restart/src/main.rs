@@ -305,7 +305,7 @@ fn run_approvals_cmd(role: Option<String>) -> ExitCode {
         eprintln!("lane-restart approvals: no home directory");
         return ExitCode::FAILURE;
     };
-    let (_, loaded) = approvals::load_configured(&home, &approvals::GhReader::default());
+    let (_, loaded) = approvals::load_configured(&home, &approvals::default_reader(&home));
     println!("approvals: {}", loaded.summary());
     let now = chrono::Utc::now();
     for (h, hash) in &loaded.handlers {
@@ -1759,6 +1759,8 @@ fn main() -> ExitCode {
             return run_attach_cmd(rest);
         }
         if first == "host" {
+            // Before anything can fail or wait: a restart that finds no record knows the host never ran.
+            lane_restart::host_boot::record(&state_dir(), &argv[1..]);
             return match parse_host_args(rest) {
                 Ok((role, child_argv)) => run_host_cmd(&role, &child_argv),
                 Err(e) => {

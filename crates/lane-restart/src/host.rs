@@ -721,7 +721,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
 
     eprintln!("lane-restart host: loading approvals...");
     let (config, loaded) = match crate::paths::home_dir() {
-        Some(home) => approvals::load_configured(&home, &approvals::GhReader::default()),
+        Some(home) => approvals::load_configured(&home, &approvals::default_reader(&home)),
         None => (
             None,
             approvals::Loaded {

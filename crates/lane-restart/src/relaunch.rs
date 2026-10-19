@@ -50,6 +50,12 @@ pub enum RelaunchError {
     /// known dialog" case, which is `RelaunchOutcome::AwaitingConfirmation`
     /// instead (a real, expected outcome, never an error).
     SessionNeverProcessedPrompt,
+    /// No `lane-restart host` process left a boot record (`host_boot`) after the spawn: `wt.exe`
+    /// opened no window, or the host died before its first act.
+    HostNeverStarted,
+    /// The host left its boot record but no claude appeared: it is still loading approvals, or it
+    /// died before it started claude.
+    ClaudeNeverStarted,
     /// CireSnave, 2026-10-08: "I can't afford Opus." The resolved model
     /// id names Opus and no override was given.
     /// A model that is not Sonnet or Haiku, without an [`OpusPermit`].
@@ -101,6 +107,16 @@ impl std::fmt::Display for RelaunchError {
             RelaunchError::SessionNeverProcessedPrompt => {
                 write!(f, "relaunch FAILED: session never processed its prompt")
             }
+            RelaunchError::HostNeverStarted => write!(
+                f,
+                "relaunch FAILED: host never started: no `lane-restart host` for this role left a boot \
+                 record after the spawn (the wt.exe result is in spawn.log in the state directory)"
+            ),
+            RelaunchError::ClaudeNeverStarted => write!(
+                f,
+                "relaunch FAILED: the host started but no claude appeared (the host loads its \
+                 approvals before it starts claude; see host-<role>-<pid>.log)"
+            ),
             RelaunchError::SpecNotWritten(why) => write!(
                 f,
                 "refusing to stop - the launch spec could not be written, so the lane could \
@@ -724,18 +740,92 @@ pub fn spawn_launch(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), Relaunch
         return spawn_direct(spec, argv);
     }
     let (mut wt, mut conhost) = launch_commands(spec, argv);
+    let dir = crate::state_dir();
     match wt.spawn() {
-        Ok(_) => return Ok(()),
+        Ok(mut child) => {
+            // `wt.exe` is a stub that hands the window to Windows Terminal. A spawn that returned
+            // says nothing about a window, so its exit code is recorded (2026-10-18: three lanes
+            // whose host never started, and nothing recorded how `wt.exe` ended).
+            let how = stub_result(
+                &mut || {
+                    child.try_wait().map(|o| {
+                        o.map(|s| {
+                            format!(
+                                "exit {}",
+                                s.code().map_or("none".to_string(), |c| c.to_string())
+                            )
+                        })
+                    })
+                },
+                STUB_WAIT,
+                &mut std::thread::sleep,
+            );
+            append_spawn_log(&dir, spec.role.as_str(), &format!("wt.exe {how}"));
+            return Ok(());
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // fall through to the conhost.exe fallback below
+            append_spawn_log(
+                &dir,
+                spec.role.as_str(),
+                "wt.exe not found; using conhost.exe",
+            );
         }
-        Err(e) => return Err(RelaunchError::Spawn(e.to_string())),
+        Err(e) => {
+            append_spawn_log(
+                &dir,
+                spec.role.as_str(),
+                &format!("wt.exe spawn failed: {e}"),
+            );
+            return Err(RelaunchError::Spawn(e.to_string()));
+        }
     }
 
     conhost
         .spawn()
         .map(|_| ())
         .map_err(|e| RelaunchError::Spawn(e.to_string()))
+}
+
+/// How long a launch waits to see how the `wt.exe` stub ended.
+const STUB_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Polls `poll` (a `try_wait` that says how the process ended) every 50 ms for up to `limit`.
+/// Testable: the poll and the sleep are injected.
+fn stub_result(
+    poll: &mut dyn FnMut() -> std::io::Result<Option<String>>,
+    limit: std::time::Duration,
+    sleep: &mut dyn FnMut(std::time::Duration),
+) -> String {
+    let step = std::time::Duration::from_millis(50);
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        match poll() {
+            Ok(Some(how)) => return format!("{how} after {} ms", waited.as_millis()),
+            Err(e) => return format!("wait failed: {e}"),
+            Ok(None) if waited >= limit => {
+                return format!("still running after {} ms", waited.as_millis())
+            }
+            Ok(None) => {
+                sleep(step);
+                waited += step;
+            }
+        }
+    }
+}
+
+/// One line in `spawn.log` in the state directory: when, which role, how the spawn ended.
+/// Best effort; the log is a diagnostic, never a reason to fail a launch.
+fn append_spawn_log(dir: &std::path::Path, role: &str, what: &str) {
+    use std::io::Write as _;
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("spawn.log"))
+    {
+        let _ = writeln!(f, "{} role={role} {what}", chrono::Utc::now().to_rfc3339());
+    }
 }
 
 pub fn spawn_relaunch(state: &LaneState, argv: &HostedArgv) -> Result<(), RelaunchError> {
@@ -748,6 +838,12 @@ pub fn spawn_relaunch(state: &LaneState, argv: &HostedArgv) -> Result<(), Relaun
 /// real process.
 pub trait StateReader {
     fn read(&self, role: &str) -> Option<LaneState>;
+
+    /// Whether a host for `role` left its boot record at or after `since`; `None` when this
+    /// reader cannot tell (a failed launch is then reported without naming the stage).
+    fn host_started(&self, _role: &str, _since: std::time::SystemTime) -> Option<bool> {
+        None
+    }
 }
 
 pub struct RealStateReader<'a> {
@@ -757,6 +853,10 @@ pub struct RealStateReader<'a> {
 impl StateReader for RealStateReader<'_> {
     fn read(&self, role: &str) -> Option<LaneState> {
         crate::state::load(self.state_dir, role).ok()
+    }
+
+    fn host_started(&self, role: &str, since: std::time::SystemTime) -> Option<bool> {
+        Some(crate::host_boot::started_since(self.state_dir, role, since))
     }
 }
 
@@ -1237,6 +1337,50 @@ mod tests {
             std::fs::canonicalize(pwd.trim()).unwrap(),
             std::fs::canonicalize(dir.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn the_stub_result_reports_an_exit_or_that_it_was_still_running() {
+        let slept = std::cell::Cell::new(0u32);
+        let mut sleep = |_: std::time::Duration| slept.set(slept.get() + 1);
+        let mut polls = 0;
+        let mut exits_on_third = || {
+            polls += 1;
+            Ok((polls == 3).then(|| "exit 7".to_string()))
+        };
+        let how = stub_result(
+            &mut exits_on_third,
+            std::time::Duration::from_secs(2),
+            &mut sleep,
+        );
+        assert_eq!(how, "exit 7 after 100 ms");
+        let mut never = || Ok(None);
+        let how = stub_result(
+            &mut never,
+            std::time::Duration::from_millis(100),
+            &mut sleep,
+        );
+        assert_eq!(how, "still running after 100 ms");
+        let mut broken = || Err(std::io::Error::other("gone"));
+        assert_eq!(
+            stub_result(&mut broken, std::time::Duration::from_secs(2), &mut sleep),
+            "wait failed: gone"
+        );
+    }
+
+    #[test]
+    fn the_spawn_log_gets_one_line_per_launch_with_the_role() {
+        let d = tempfile::tempdir().unwrap();
+        append_spawn_log(d.path(), "fuel", "wt.exe exit 0 after 150 ms");
+        append_spawn_log(d.path(), "kiss", "wt.exe not found; using conhost.exe");
+        let log = std::fs::read_to_string(d.path().join("spawn.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].ends_with("role=fuel wt.exe exit 0 after 150 ms"),
+            "{log}"
+        );
+        assert!(lines[1].contains("role=kiss "), "{log}");
     }
 
     #[test]
