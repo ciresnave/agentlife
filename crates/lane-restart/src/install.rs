@@ -121,6 +121,37 @@ pub fn install(
     })
 }
 
+/// Makes room at `bak` for the exe about to be renamed onto it. Nothing there: nothing to do. An
+/// old `.bak` is deleted; one that cannot be deleted (it is running) is renamed to
+/// `<bak>.<now_secs>`, and that name is returned. If neither works the install is refused before
+/// anything changed, saying exactly what is in the way. The two file operations are injected.
+fn free_bak(
+    bak: &Path,
+    now_secs: u64,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Option<PathBuf>, String> {
+    if !bak.exists() {
+        return Ok(None);
+    }
+    if remove(bak).is_ok() {
+        return Ok(None);
+    }
+    let mut name = bak.as_os_str().to_owned();
+    name.push(format!(".{now_secs}"));
+    let aside = PathBuf::from(name);
+    match rename(bak, &aside) {
+        Ok(()) => Ok(Some(aside)),
+        Err(e) => Err(format!(
+            "{} exists, cannot be deleted (it is probably running) and cannot be renamed to {}: {e}. \
+             Rename or remove {} by hand, then run the install again",
+            bak.display(),
+            aside.display(),
+            bak.display()
+        )),
+    }
+}
+
 /// `install` with the copy injected, so a copy that lands wrong bytes can be tested.
 fn install_with(
     hooks_dir: &Path,
@@ -183,8 +214,27 @@ fn install_with(
         });
     }
 
-    // The rename replaces any earlier `.bak`, so there is only ever the one.
+    // The rename replaces an earlier `.bak`, so there is normally only the one. Windows refuses
+    // that when the earlier `.bak` is itself a RUNNING exe (a host started before the previous
+    // install still runs from it): "Access is denied" (2026-10-19, installing 0.27.0). A running
+    // exe can be renamed but not replaced or deleted, so it is moved aside instead.
     if had_previous {
+        if let Some(aside) = free_bak(
+            &bak,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            &|p| std::fs::remove_file(p),
+            &|a, b| std::fs::rename(a, b),
+        )
+        .map_err(refuse)?
+        {
+            eprintln!(
+                "lane-restart install: the earlier {} is still in use; moved it to {}",
+                bak.display(),
+                aside.display()
+            );
+        }
         std::fs::rename(&target, &bak).map_err(|e| {
             refuse(format!(
                 "cannot move the installed exe to {}: {e}",
@@ -302,6 +352,72 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, [EXE_NAME, BAK_NAME, SHA_NAME]);
+    }
+
+    #[test]
+    fn free_bak_deletes_an_old_bak_moves_a_running_one_aside_and_refuses_when_neither_works() {
+        let d = tempdir().unwrap();
+        let bak = d.path().join(BAK_NAME);
+        let deny = |_: &Path| Err(std::io::Error::other("Access is denied"));
+        let deny2 = |_: &Path, _: &Path| Err(std::io::Error::other("Access is denied"));
+        // nothing there: nothing done, and nothing asked of the file system
+        assert_eq!(free_bak(&bak, 7, &deny, &deny2), Ok(None));
+        // deletable: deleted
+        std::fs::write(&bak, b"OLD").unwrap();
+        assert_eq!(
+            free_bak(&bak, 7, &|p| std::fs::remove_file(p), &deny2),
+            Ok(None)
+        );
+        assert!(!bak.exists());
+        // not deletable (running): renamed aside, contents kept
+        std::fs::write(&bak, b"RUNNING").unwrap();
+        let aside = free_bak(&bak, 7, &deny, &|a, b| std::fs::rename(a, b))
+            .unwrap()
+            .unwrap();
+        assert_eq!(aside, d.path().join(format!("{BAK_NAME}.7")));
+        assert_eq!(std::fs::read(&aside).unwrap(), b"RUNNING");
+        assert!(!bak.exists());
+        // neither works: refused, naming the file
+        std::fs::write(&bak, b"STUCK").unwrap();
+        let why = free_bak(&bak, 7, &deny, &deny2).unwrap_err();
+        assert!(why.contains(BAK_NAME) && why.contains("by hand"), "{why}");
+    }
+
+    /// The real failure of 2026-10-19: the earlier `.bak` is the image of a running process.
+    #[cfg(windows)]
+    #[test]
+    fn a_running_bak_is_moved_aside_by_the_real_file_operations() {
+        let d = tempdir().unwrap();
+        let bak = d.path().join(BAK_NAME);
+        std::fs::copy(r"C:\Windows\System32\ping.exe", &bak).unwrap();
+        let mut running = std::process::Command::new(&bak)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            std::fs::remove_file(&bak).is_err(),
+            "control: a running exe cannot be deleted, or this test proves nothing"
+        );
+        let aside = free_bak(&bak, 9, &|p| std::fs::remove_file(p), &|a, b| {
+            std::fs::rename(a, b)
+        });
+        let _ = running.kill();
+        let _ = running.wait();
+        let aside = aside.unwrap().unwrap();
+        assert!(aside.is_file() && !bak.exists());
+    }
+
+    #[test]
+    fn an_install_whose_old_bak_cannot_be_deleted_still_installs_and_nothing_is_lost() {
+        let (_t, hooks, cand) = fixture();
+        // the earlier bak exists; the real remove works here, so the move-aside path is the unit
+        // test above. This pins that an existing bak never stops an install.
+        std::fs::write(hooks.join(BAK_NAME), b"EARLIER").unwrap();
+        install(&hooks, &cand, &FakeProbe::good("0.14.21"), false).unwrap();
+        assert_eq!(std::fs::read(hooks.join(EXE_NAME)).unwrap(), b"NEW-EXE");
+        assert_eq!(std::fs::read(hooks.join(BAK_NAME)).unwrap(), b"OLD-EXE");
     }
 
     #[test]
