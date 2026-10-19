@@ -6,6 +6,8 @@
 //! real `SystemFacts`, calls `authorize::decide`, and - only if it comes
 //! back `Ok` with `will_act: true` - performs the kill and the relaunch.
 
+mod cli;
+
 use lane_restart::authorize::{self, Target};
 use lane_restart::facts::SysinfoFacts;
 use lane_restart::lane_state_writer::{self, ParentProcess, RealParentProcess};
@@ -338,31 +340,6 @@ fn quiet_mark(a: &lane_restart::spec::Activity, quiet_over: Option<i64>) -> Stri
         (Some(true), Some(n)) => format!(" QUIET>{n}s"),
         _ => String::new(),
     }
-}
-
-/// `status [--json] [--quiet-over <secs>]` arguments, any order. The threshold is a positive
-/// whole number of seconds; no default is applied (the flag is opt-in).
-fn parse_status_args(args: &[String]) -> Result<(bool, Option<i64>, bool), String> {
-    let (mut json, mut quiet, mut peers) = (false, None, false);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--json" => json = true,
-            "--peers" => peers = true,
-            "--quiet-over" => {
-                let v = it.next().ok_or("--quiet-over needs a number of seconds")?;
-                let n: i64 =
-                    v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
-                        format!("--quiet-over: not a positive whole number: {v:?}")
-                    })?;
-                if quiet.replace(n).is_some() {
-                    return Err("--quiet-over given twice".to_string());
-                }
-            }
-            other => return Err(format!("unexpected argument {other:?}")),
-        }
-    }
-    Ok((json, quiet, peers))
 }
 
 /// `\tduplicate-risk: host pid N, claude pid M`, or nothing for a normal row.
@@ -1250,26 +1227,6 @@ fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
     }
 }
 
-/// `install --from <exe> [--dry-run]` -> `(exe, dry_run)`.
-fn parse_install_args(rest: &[String]) -> Result<(PathBuf, bool), String> {
-    let mut from = None;
-    let mut dry_run = false;
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--from" => {
-                from = Some(PathBuf::from(
-                    iter.next().ok_or("--from needs a path")?.clone(),
-                ))
-            }
-            "--dry-run" => dry_run = true,
-            other => return Err(format!("unexpected argument {other:?}")),
-        }
-    }
-    let from = from.ok_or("--from <exe> is required")?;
-    Ok((from, dry_run))
-}
-
 /// Runs the candidate for real: `--version`, then `status`.
 struct RealProbe;
 
@@ -1387,42 +1344,6 @@ fn run_install_cmd(from: PathBuf, dry_run: bool) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// `ledger [--role R] [--kind K] [--since T] [--acted|--refused] [--last N] [--json]`.
-fn parse_ledger_args(
-    rest: &[String],
-) -> Result<(lane_restart::ledger::Filter, bool, Option<String>, bool), String> {
-    let mut f = lane_restart::ledger::Filter::default();
-    let mut json = false;
-    let mut by_lane = false;
-    let mut since_raw = None;
-    let mut iter = rest.iter();
-    let value = |name: &str, it: &mut std::slice::Iter<String>| {
-        it.next()
-            .cloned()
-            .ok_or_else(|| format!("{name} requires a value"))
-    };
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => f.role = Some(value("--role", &mut iter)?),
-            "--kind" => f.kind = Some(value("--kind", &mut iter)?),
-            "--since" => since_raw = Some(value("--since", &mut iter)?),
-            "--acted" => f.acted = Some(true),
-            "--refused" => f.acted = Some(false),
-            "--last" => {
-                let v = value("--last", &mut iter)?;
-                f.last = Some(
-                    v.parse()
-                        .map_err(|_| format!("--last takes a number: {v:?}"))?,
-                );
-            }
-            "--json" => json = true,
-            "--by-lane" => by_lane = true,
-            other => return Err(format!("unrecognised argument: {other}")),
-        }
-    }
-    Ok((f, json, since_raw, by_lane))
 }
 
 /// `lane-restart ledger` - read-only: prints `restart.log` filtered. Writes nothing.
@@ -1670,7 +1591,7 @@ fn main() -> ExitCode {
             };
         }
         if first == "status" {
-            return match parse_status_args(rest) {
+            return match cli::status(rest) {
                 Ok((json, quiet_over, peers)) => run_status_cmd(json, quiet_over, peers),
                 Err(e) => {
                     eprintln!(
@@ -1723,7 +1644,7 @@ fn main() -> ExitCode {
             };
         }
         if first == "install" {
-            return match parse_install_args(rest) {
+            return match cli::install(rest) {
                 Ok((from, dry_run)) => run_install_cmd(from, dry_run),
                 Err(e) => {
                     eprintln!(
@@ -1734,7 +1655,7 @@ fn main() -> ExitCode {
             };
         }
         if first == "ledger" {
-            return match parse_ledger_args(rest) {
+            return match cli::ledger(rest) {
                 Ok((f, json, since, by_lane)) => run_ledger_cmd(f, json, since, by_lane),
                 Err(e) => {
                     eprintln!("lane-restart ledger: {e}");
@@ -2185,17 +2106,14 @@ mod cli_tests {
 
     #[test]
     fn status_args_take_json_and_an_optional_positive_quiet_over_in_any_order() {
-        assert_eq!(parse_status_args(&strs(&[])), Ok((false, None, false)));
+        assert_eq!(cli::status(&strs(&[])), Ok((false, None, false)));
+        assert_eq!(cli::status(&strs(&["--json"])), Ok((true, None, false)));
         assert_eq!(
-            parse_status_args(&strs(&["--json"])),
-            Ok((true, None, false))
-        );
-        assert_eq!(
-            parse_status_args(&strs(&["--quiet-over", "120", "--json"])),
+            cli::status(&strs(&["--quiet-over", "120", "--json"])),
             Ok((true, Some(120), false))
         );
         assert_eq!(
-            parse_status_args(&strs(&["--peers", "--json"])),
+            cli::status(&strs(&["--peers", "--json"])),
             Ok((true, None, true))
         );
         for bad in [
@@ -2206,7 +2124,7 @@ mod cli_tests {
             &["--quiet-over", "1", "--quiet-over", "2"],
             &["--wat"],
         ] {
-            assert!(parse_status_args(&strs(bad)).is_err(), "{bad:?}");
+            assert!(cli::status(&strs(bad)).is_err(), "{bad:?}");
         }
     }
 
@@ -2421,23 +2339,23 @@ mod cli_tests {
 
     #[test]
     fn install_args_need_from_and_refuse_the_unknown() {
-        assert!(parse_install_args(&[]).is_err());
+        assert!(cli::install(&[]).is_err());
         assert_eq!(
-            parse_install_args(&strs(&["--from", "x.exe", "--dry-run"])),
+            cli::install(&strs(&["--from", "x.exe", "--dry-run"])),
             Ok((PathBuf::from("x.exe"), true))
         );
         assert_eq!(
-            parse_install_args(&strs(&["--from", "x.exe"])),
+            cli::install(&strs(&["--from", "x.exe"])),
             Ok((PathBuf::from("x.exe"), false))
         );
-        assert!(parse_install_args(&strs(&["--from"])).is_err());
-        assert!(parse_install_args(&strs(&["--from", "x.exe", "--yes"])).is_err());
+        assert!(cli::install(&strs(&["--from"])).is_err());
+        assert!(cli::install(&strs(&["--from", "x.exe", "--yes"])).is_err());
         assert!(USAGE.contains("lane-restart install --from"));
     }
 
     #[test]
     fn ledger_args_parse_filters_and_refuse_the_unknown() {
-        let (f, json, since, by_lane) = parse_ledger_args(&strs(&[
+        let (f, json, since, by_lane) = cli::ledger(&strs(&[
             "--role",
             "a",
             "--kind",
@@ -2454,12 +2372,12 @@ mod cli_tests {
         assert_eq!(f.kind.as_deref(), Some("start"));
         assert_eq!((f.acted, f.last, json), (Some(false), Some(5), true));
         assert!(!by_lane);
-        let (_, _, _, by_lane) = parse_ledger_args(&strs(&["--by-lane"])).unwrap();
+        let (_, _, _, by_lane) = cli::ledger(&strs(&["--by-lane"])).unwrap();
         assert!(by_lane);
         assert_eq!(since.as_deref(), Some("2h"));
-        assert!(parse_ledger_args(&strs(&["--last", "x"])).is_err());
-        assert!(parse_ledger_args(&strs(&["--role"])).is_err());
-        assert!(parse_ledger_args(&strs(&["--all"])).is_err());
+        assert!(cli::ledger(&strs(&["--last", "x"])).is_err());
+        assert!(cli::ledger(&strs(&["--role"])).is_err());
+        assert!(cli::ledger(&strs(&["--all"])).is_err());
         assert!(USAGE.contains("lane-restart ledger"));
     }
 
