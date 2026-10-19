@@ -912,19 +912,35 @@ pub fn kill_and_relaunch_persisting(
         carries_dev_channels_flag,
     } = prepare_launch(&from_spec, &stopping.model, None)?;
     let stopped = stop_lane(facts, state.pid, identity, sleep)?;
-    spawn(&from_spec, &argv)?;
-    let outcome = wait_for_liveness(
-        facts,
-        state_reader,
-        &state.cwd,
-        &state.role,
-        Some(&state.session_id),
-        stopped.launched_after_secs,
-        carries_dev_channels_flag,
-        &LivenessTiming::default(),
-        sleep,
-        on_awaiting,
-    )?;
+    let launched = spawn(&from_spec, &argv).and_then(|()| {
+        wait_for_liveness(
+            facts,
+            state_reader,
+            &state.cwd,
+            &state.role,
+            Some(&state.session_id),
+            stopped.launched_after_secs,
+            carries_dev_channels_flag,
+            &LivenessTiming::default(),
+            sleep,
+            on_awaiting,
+        )
+    });
+    let outcome = match launched {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // The lane is down and its replacement is not up. `stopping` with no stop kind reads
+            // as an unclassified stop, which the launcher refuses, so mark the failure itself:
+            // `failed_relaunch` is startable. Best effort; the error returned is the launch's.
+            let failed = spec::build(&spec_inputs(SpecState::FailedRelaunch, false))
+                .map_err(|e| e.to_string())
+                .and_then(|s| specs.write(&s).map_err(|e| e.to_string()));
+            if let Err(why) = failed {
+                eprintln!("lane-restart: could not mark the launch spec failed_relaunch: {why}");
+            }
+            return Err(e);
+        }
+    };
     // The lane is up with these parameters. Best effort: a failure here leaves the `stopping`
     // spec, which is complete and reads as `crashed` if the new session later ends.
     let running = spec::build(&spec_inputs(SpecState::Running, false))

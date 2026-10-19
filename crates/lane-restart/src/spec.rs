@@ -49,6 +49,10 @@ pub enum SpecState {
     /// Imported from a lane state whose process was already gone (`specs import`): the lane
     /// ended without a stop, and this is its last known launch.
     Crashed,
+    /// A restart stopped the lane and the new session never came up (`relaunch FAILED`). The lane
+    /// was killed to be started again, not to stay stopped, so it is a failure like `Crashed`
+    /// rather than a stop: no `stop_kind` is needed and the launcher may start it (the retry).
+    FailedRelaunch,
 }
 
 /// Why a lane was stopped, as far as a launcher may act on it (board 216, CireSnave: "216: yes").
@@ -440,6 +444,8 @@ pub enum Lifecycle {
     Running,
     Suspended,
     Crashed,
+    /// The last restart stopped the lane and its replacement never came up; startable.
+    FailedRelaunch,
     NeverRun,
     Unknown,
 }
@@ -637,6 +643,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         (Some(SpecState::Running | SpecState::Stopping | SpecState::Crashed), _) => {
             out.state = Lifecycle::Crashed
         }
+        (Some(SpecState::FailedRelaunch), _) => out.state = Lifecycle::FailedRelaunch,
         (None, Ok(st)) => {
             out.state = Lifecycle::Crashed;
             out.since = Some(st.updated_at);

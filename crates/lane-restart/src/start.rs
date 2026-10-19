@@ -507,7 +507,7 @@ pub fn plan_start(
 /// and writes `soft` here, `park` writes `hard`, so the two cannot be read apart from this field.
 fn launcher_may_start(spec: &SpecFile) -> Result<(), StartRefusal> {
     match spec.state {
-        SpecState::Running | SpecState::Crashed => Ok(()),
+        SpecState::Running | SpecState::Crashed | SpecState::FailedRelaunch => Ok(()),
         SpecState::Suspended | SpecState::Stopping => match spec.stop_kind {
             Some(spec::StopKind::Soft) => Ok(()),
             Some(spec::StopKind::Hard) => Err(StartRefusal::StopNotSoft("stop-hard")),
@@ -820,6 +820,9 @@ mod tests {
             // a crash is soft by nature: no mark needed, and a stale kind is not read
             (SpecState::Crashed, None, None),
             (SpecState::Crashed, Some("hard"), None),
+            // a restart whose new session never came up: a failure, so the launcher retries it
+            (SpecState::FailedRelaunch, None, None),
+            (SpecState::FailedRelaunch, Some("hard"), None),
             (SpecState::Running, None, None),
         ];
         for (state, kind, want) in cases {
