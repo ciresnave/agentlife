@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! clap-derive argument grammars for the cold subcommands. Each keeps the hand-written parser's
+//! behaviour: the same spellings, a flag's value is taken verbatim even when it starts with `-`
+//! (`allow_hyphen_values`), a repeated flag is last-wins unless the old parser refused it, and
+//! `--help`/`--version` stay main's (clap's are disabled). A failed parse is the caller's exit 1.
+
+use clap::Parser;
+use std::path::PathBuf;
+
+/// One subcommand's tail, parsed as if `lane-restart <name>` had been typed. `takes_value` names
+/// the flags that consume the next token whatever it is: a bare `--` anywhere else would be clap's
+/// end-of-options marker, which the hand-written parsers never had - it is refused as unknown.
+fn parse<T: Parser>(name: &str, takes_value: &[&str], rest: &[String]) -> Result<T, String> {
+    let mut prev_takes_value = false;
+    for a in rest {
+        if a == "--" && !prev_takes_value {
+            return Err("unexpected argument \"--\"".to_string());
+        }
+        prev_takes_value = !prev_takes_value && takes_value.contains(&a.as_str());
+    }
+    T::try_parse_from(std::iter::once(format!("lane-restart {name}")).chain(rest.iter().cloned()))
+        .map_err(|e| e.render().to_string().trim_end().to_string())
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Install {
+    #[arg(long, allow_hyphen_values = true, overrides_with = "from")]
+    from: PathBuf,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+}
+
+/// `install --from <exe> [--dry-run]` -> `(exe, dry_run)`.
+pub fn install(rest: &[String]) -> Result<(PathBuf, bool), String> {
+    let a: Install = parse("install", &["--from"], rest)?;
+    Ok((a.from, a.dry_run))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Status {
+    #[arg(long, overrides_with = "json")]
+    json: bool,
+    #[arg(long, overrides_with = "peers")]
+    peers: bool,
+    /// Positive whole seconds; given twice is an error (the default clap behaviour).
+    #[arg(long, allow_hyphen_values = true, value_parser = positive_seconds)]
+    quiet_over: Option<i64>,
+}
+
+fn positive_seconds(v: &str) -> Result<i64, String> {
+    v.parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| format!("not a positive whole number: {v:?}"))
+}
+
+/// `status [--json] [--quiet-over <secs>] [--peers]` -> `(json, quiet_over, peers)`.
+pub fn status(rest: &[String]) -> Result<(bool, Option<i64>, bool), String> {
+    let a: Status = parse("status", &["--quiet-over"], rest)?;
+    Ok((a.json, a.quiet_over, a.peers))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Ledger {
+    #[arg(long, allow_hyphen_values = true, overrides_with = "role")]
+    role: Option<String>,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "kind")]
+    kind: Option<String>,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "since")]
+    since: Option<String>,
+    #[arg(long, overrides_with_all = ["acted", "refused"])]
+    acted: bool,
+    #[arg(long, overrides_with_all = ["acted", "refused"])]
+    refused: bool,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "last")]
+    last: Option<usize>,
+    #[arg(long, overrides_with = "json")]
+    json: bool,
+    #[arg(long, overrides_with = "by_lane")]
+    by_lane: bool,
+}
+
+/// `ledger [--role R] [--kind K] [--since T] [--acted|--refused] [--last N] [--json] [--by-lane]`
+/// -> `(filter, json, since as typed, by_lane)`.
+pub fn ledger(
+    rest: &[String],
+) -> Result<(lane_restart::ledger::Filter, bool, Option<String>, bool), String> {
+    let a: Ledger = parse("ledger", &["--role", "--kind", "--since", "--last"], rest)?;
+    let acted = match (a.acted, a.refused) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    let f = lane_restart::ledger::Filter {
+        role: a.role,
+        kind: a.kind,
+        acted,
+        last: a.last,
+        ..Default::default()
+    };
+    Ok((f, a.json, a.since, a.by_lane))
+}

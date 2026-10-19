@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.2
+
+- **`lane-restart install`, `ledger` and `status` parse their arguments with clap derive (audit group 5, row 6, first slice):** the three hand-written `match arg.as_str()` loops are `crates/lane-restart/src/cli.rs`. Spellings, last-wins repeats, a flag value taken verbatim even when it starts with `-`, `--quiet-over` refused twice, and exit 1 on every refusal are unchanged: the old and new parsers were compared over all 245,411 argument sequences of up to 4 tokens from a 22-token pool and agreed on accept/reject and on every parsed value. The refusal TEXT for these three is now clap's. `--help`/`--version`, `state`, `host`, `start`, `stop`, `specs`, `assert-idle`, `approvals`, `attach` and the restart flags stay hand-written. No API change.
+
 ## 0.27.1
 
 - **`lane-restart install` no longer stops on an earlier `.bak` that is running (PM report 2026-10-19):** installing 0.27.0 was refused with `cannot move the installed exe to lane-restart.exe.bak: Access is denied`, because the `.bak` left by the previous install was still the image of running hosts, and Windows will not replace or delete a running exe (it can only be renamed). The install now deletes an earlier `.bak`; if that fails it renames it to `lane-restart.exe.bak.<unix seconds>` and says so on stderr; only if that fails too is the install refused, before anything changed, naming the file to move by hand. No API change.
