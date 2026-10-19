@@ -240,7 +240,7 @@ fn reopen_spec(dir: &Path, rec: &AgentRecord) -> Result<bool, String> {
         return Ok(false);
     }
     s.state = SpecState::Crashed;
-    s.written_by = "unpark".to_string();
+    s.written_by = lane_restart::spec::WrittenBy::Unpark;
     s.written_at = chrono::Utc::now();
     spec::write_atomic(dir, &s).map_err(|e| e.to_string())?;
     Ok(true)
@@ -645,7 +645,7 @@ mod tests {
             handoff_mtime: None,
             state,
             written_at: Utc::now(),
-            written_by: "test".into(),
+            written_by: lane_restart::spec::WrittenBy::Other("test".into()),
             stopped_session_id: None,
             stopped_pid_start_secs: None,
             stop_reason: None,
@@ -696,7 +696,7 @@ mod tests {
             let got = spec::read(d.path(), role).unwrap();
             assert_eq!(got.state, after, "from {before:?}");
             if before != after {
-                assert_eq!(got.written_by, "unpark");
+                assert_eq!(got.written_by, lane_restart::spec::WrittenBy::Unpark);
             }
         }
         // no spec at all: reopening still works and writes nothing

@@ -75,6 +75,56 @@ impl StopKind {
     }
 }
 
+/// Who caused a spec write. On disk it is the plain string it always was; a spelling this build does
+/// not know (an older or newer build's) reads as `Other` rather than refusing the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrittenBy {
+    Restart,
+    Launch,
+    Stop,
+    Import,
+    Unpark,
+    Other(String),
+}
+
+impl WrittenBy {
+    pub fn as_str(&self) -> &str {
+        match self {
+            WrittenBy::Restart => "restart",
+            WrittenBy::Launch => "launch",
+            WrittenBy::Stop => "stop",
+            WrittenBy::Import => "import",
+            WrittenBy::Unpark => "unpark",
+            WrittenBy::Other(s) => s,
+        }
+    }
+}
+
+impl From<&str> for WrittenBy {
+    fn from(s: &str) -> Self {
+        match s {
+            "restart" => WrittenBy::Restart,
+            "launch" => WrittenBy::Launch,
+            "stop" => WrittenBy::Stop,
+            "import" => WrittenBy::Import,
+            "unpark" => WrittenBy::Unpark,
+            other => WrittenBy::Other(other.to_string()),
+        }
+    }
+}
+
+impl Serialize for WrittenBy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for WrittenBy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(String::deserialize(d)?.as_str().into())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecFile {
     pub schema: u32,
@@ -91,8 +141,8 @@ pub struct SpecFile {
     pub handoff_mtime: Option<DateTime<Utc>>,
     pub state: SpecState,
     pub written_at: DateTime<Utc>,
-    /// Who caused this write: `restart`, `launch`, ...
-    pub written_by: String,
+    /// Who caused this write.
+    pub written_by: WrittenBy,
     /// The session this spec was derived from when it was stopped. Not named `session_id` or
     /// `pid` on purpose: see the module note on `LaneState`.
     pub stopped_session_id: Option<String>,
@@ -154,7 +204,7 @@ pub struct SpecInputs<'a> {
     pub session_id: Option<&'a str>,
     pub pid_start_secs: Option<u64>,
     pub state: SpecState,
-    pub written_by: &'a str,
+    pub written_by: WrittenBy,
     pub now: DateTime<Utc>,
 }
 
@@ -205,7 +255,7 @@ pub fn build(i: &SpecInputs) -> Result<SpecFile, SpecError> {
         handoff_mtime: handoff.map(|(_, t)| t),
         state: i.state,
         written_at: i.now,
-        written_by: i.written_by.to_string(),
+        written_by: i.written_by.clone(),
         stopped_session_id: i.session_id.map(str::to_string),
         stopped_pid_start_secs: i.pid_start_secs,
         stop_reason: None,
@@ -887,6 +937,23 @@ pub fn status_all(dir: &Path, facts: &dyn SystemFacts) -> StatusReport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn written_by_is_the_plain_string_on_disk_and_an_unknown_one_still_reads() {
+        for (w, text) in [
+            (WrittenBy::Restart, "\"restart\""),
+            (WrittenBy::Launch, "\"launch\""),
+            (WrittenBy::Stop, "\"stop\""),
+            (WrittenBy::Import, "\"import\""),
+            (WrittenBy::Unpark, "\"unpark\""),
+            (WrittenBy::Other("later".into()), "\"later\""),
+        ] {
+            assert_eq!(serde_json::to_string(&w).unwrap(), text);
+            assert_eq!(serde_json::from_str::<WrittenBy>(text).unwrap(), w);
+        }
+        // A spelling a known variant would own never lands in `Other`.
+        assert_eq!(WrittenBy::from("stop"), WrittenBy::Stop);
+    }
+
     use super::*;
     use crate::testing::{log, RecordingFacts};
     use chrono::TimeZone;
@@ -923,7 +990,7 @@ mod tests {
             session_id: Some("sess-1"),
             pid_start_secs: Some(1234),
             state,
-            written_by: "restart",
+            written_by: WrittenBy::Restart,
             now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
         }
     }

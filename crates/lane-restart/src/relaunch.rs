@@ -11,7 +11,7 @@ use crate::launch::{
     launch_argv, prepare_launch, wait_for_liveness, LaunchSpec, LivenessTiming, PreparedLaunch,
     SpawnFn,
 };
-use crate::spec::{self, DirSpecStore, NoSpecStore, SpecState, SpecStore};
+use crate::spec::{self, DirSpecStore, NoSpecStore, SpecState, SpecStore, WrittenBy};
 use crate::state::LaneState;
 use crate::stop::stop_lane;
 
@@ -157,15 +157,46 @@ enum FlagArity {
 /// what `wait_for_relaunch_liveness`'s `AwaitingConfirmation` outcome
 /// exists to detect and report, not something this allowlist should
 /// paper over by dropping the flag.
-const ALLOWED_LAUNCH_ARG_FLAGS: &[(&str, FlagArity)] = &[
-    (
-        "--dangerously-load-development-channels",
-        FlagArity::Variadic,
-    ),
-    ("--add-dir", FlagArity::Variadic),
-    ("--mcp-config", FlagArity::One),
-    ("--settings", FlagArity::One),
-];
+///
+/// A flag is carried over only if it is a `LaunchFlag`: adding one is a new variant, and the compiler
+/// then demands its token and arity, so no allow-listed flag can lack either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchFlag {
+    DevChannels,
+    AddDir,
+    McpConfig,
+    Settings,
+}
+
+impl LaunchFlag {
+    const ALL: [LaunchFlag; 4] = [
+        LaunchFlag::DevChannels,
+        LaunchFlag::AddDir,
+        LaunchFlag::McpConfig,
+        LaunchFlag::Settings,
+    ];
+
+    fn token(self) -> &'static str {
+        match self {
+            LaunchFlag::DevChannels => "--dangerously-load-development-channels",
+            LaunchFlag::AddDir => "--add-dir",
+            LaunchFlag::McpConfig => "--mcp-config",
+            LaunchFlag::Settings => "--settings",
+        }
+    }
+
+    fn arity(self) -> FlagArity {
+        match self {
+            LaunchFlag::DevChannels | LaunchFlag::AddDir => FlagArity::Variadic,
+            LaunchFlag::McpConfig | LaunchFlag::Settings => FlagArity::One,
+        }
+    }
+
+    /// Exact match only: `--add-dir=x` is not this flag.
+    fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.token() == token)
+    }
+}
 
 /// Flags known to drop, with the arity to skip PAST correctly - so a
 /// dropped flag's own value is never misread as a stray positional or
@@ -258,9 +289,9 @@ pub fn extra_launch_args(launch_args: &[String]) -> (Vec<String>, Vec<String>) {
         if token.starts_with("--permission-mode=") || token.starts_with("--name=") {
             continue;
         }
-        if let Some((_, arity)) = ALLOWED_LAUNCH_ARG_FLAGS.iter().find(|(f, _)| f == token) {
+        if let Some(flag) = LaunchFlag::from_token(token) {
             allowed.push(token.clone());
-            consume_flag_values(*arity, &mut iter, &mut allowed);
+            consume_flag_values(flag.arity(), &mut iter, &mut allowed);
             continue;
         }
         if let Some((_, arity)) = DROPPED_LAUNCH_ARG_FLAGS.iter().find(|(f, _)| f == token) {
@@ -286,11 +317,11 @@ pub fn extra_launch_args(launch_args: &[String]) -> (Vec<String>, Vec<String>) {
 /// show a security confirmation dialog on every start. Used only to
 /// decide whether a stuck-at-20s process is plausibly AWAITING a human
 /// confirmation, never to decide whether to carry the flag over (that
-/// decision is `ALLOWED_LAUNCH_ARG_FLAGS`'s alone).
+/// decision is `LaunchFlag`'s alone).
 pub fn has_dev_channels_flag(launch_args: &[String]) -> bool {
     launch_args
         .iter()
-        .any(|a| a == "--dangerously-load-development-channels")
+        .any(|a| a == LaunchFlag::DevChannels.token())
 }
 
 /// ⚠️ PM finding, 2026-09-19 (real-rerun, "must be tagged" error from
@@ -863,7 +894,7 @@ pub fn kill_and_relaunch_persisting(
         session_id: stopped.then_some(state.session_id.as_str()),
         pid_start_secs: stopped.then_some(identity.start_time_secs),
         state: spec_state,
-        written_by: "restart",
+        written_by: WrittenBy::Restart,
         now: chrono::Utc::now(),
     };
     let stopping = spec::build(&spec_inputs(SpecState::Stopping, true))
@@ -1463,6 +1494,25 @@ mod tests {
     }
 
     #[test]
+    fn every_launch_flag_round_trips_and_only_the_exact_token_matches() {
+        for f in LaunchFlag::ALL {
+            assert_eq!(LaunchFlag::from_token(f.token()), Some(f));
+        }
+        for not in [
+            "--add-dir=x",
+            "--ADD-DIR",
+            "--add-dirs",
+            "-add-dir",
+            "",
+            "--model",
+        ] {
+            assert_eq!(LaunchFlag::from_token(not), None, "{not}");
+        }
+        assert_eq!(LaunchFlag::DevChannels.arity(), FlagArity::Variadic);
+        assert_eq!(LaunchFlag::Settings.arity(), FlagArity::One);
+    }
+
+    #[test]
     fn has_dev_channels_flag_detects_it_present() {
         let launch_args = strs(&[
             "claude.exe",
@@ -1658,9 +1708,9 @@ mod tests {
             );
             let arity = known_arities
                 .iter()
-                .chain(ALLOWED_LAUNCH_ARG_FLAGS.iter())
                 .find(|(f, _)| f == token)
                 .map(|(_, a)| *a)
+                .or_else(|| LaunchFlag::from_token(token).map(LaunchFlag::arity))
                 .unwrap_or_else(|| panic!("unrecognised flag in built argv: {token:?}"));
             match arity {
                 FlagArity::None => {}

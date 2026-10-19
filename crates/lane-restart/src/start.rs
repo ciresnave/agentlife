@@ -20,7 +20,9 @@ use crate::duplicate::{self, DuplicateRefusal};
 use crate::facts::SystemFacts;
 use crate::launch::{launch_and_wait_with, prepare_launch, LaunchSpec, LivenessTiming, SpawnFn};
 use crate::relaunch::{valid_identifier, RelaunchError, RelaunchOutcome, StateReader};
-use crate::spec::{self, role_status, Lifecycle, SpecError, SpecFile, SpecState, SpecStore};
+use crate::spec::{
+    self, role_status, Lifecycle, SpecError, SpecFile, SpecState, SpecStore, WrittenBy,
+};
 use crate::state;
 use std::path::Path;
 use std::time::Duration;
@@ -557,7 +559,7 @@ pub fn execute_start(
     let launch_elapsed = started.elapsed();
     let mut running = plan.spec.clone();
     running.state = SpecState::Running;
-    running.written_by = "launch".to_string();
+    running.written_by = WrittenBy::Launch;
     running.written_at = facts.now();
     // A launch is not a stop: the kind described the stop that ended the previous session.
     running.stop_kind = None;
@@ -629,7 +631,7 @@ mod tests {
             session_id: Some("old-session"),
             pid_start_secs: Some(1),
             state: st,
-            written_by: "import",
+            written_by: WrittenBy::Import,
             now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
         })
         .unwrap();
@@ -1440,7 +1442,7 @@ mod tests {
         assert_eq!(r.spec_warning, None);
         let s = spec::read(d.path(), "baracuda").unwrap();
         assert_eq!(s.state, SpecState::Running);
-        assert_eq!(s.written_by, "launch");
+        assert_eq!(s.written_by, WrittenBy::Launch);
         assert_eq!(s.model, "sonnet", "the pinned model is what is recorded");
         assert_eq!(s.permission_mode.as_deref(), Some("auto"));
         assert_eq!(
@@ -1499,7 +1501,7 @@ mod tests {
             session_id: None,
             pid_start_secs: None,
             state: SpecState::Suspended,
-            written_by: "import",
+            written_by: WrittenBy::Import,
             now: Utc::now(),
         })
         .unwrap();

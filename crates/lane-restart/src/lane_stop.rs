@@ -20,7 +20,7 @@
 use crate::authorize::{self, Refusal, Request, Target};
 use crate::facts::{ProcessIdentity, SystemFacts};
 use crate::relaunch::{recorded_launch_model, valid_identifier, RelaunchError};
-use crate::spec::{self, find_handoff, SpecFile, SpecState, SpecStore, StopKind};
+use crate::spec::{self, find_handoff, SpecFile, SpecState, SpecStore, StopKind, WrittenBy};
 use crate::start::{validate_reason, CallerError, PM_ROLE};
 use crate::state::LaneState;
 use crate::stop::stop_lane;
@@ -281,7 +281,7 @@ pub fn build_stop_plan(
         session_id: Some(&state.session_id),
         pid_start_secs: Some(identity.start_time_secs),
         state: SpecState::Stopping,
-        written_by: "stop",
+        written_by: WrittenBy::Stop,
         now,
     })
     .map_err(|e| StopRefusal::Spec(e.to_string()))?;
@@ -440,7 +440,7 @@ mod tests {
         write_handoff(d.path(), 500);
         let plan = plan_for(s, false).expect("a fresh HANDOFF before the claim is allowed");
         assert_eq!(plan.stopping.state, SpecState::Stopping);
-        assert_eq!(plan.stopping.written_by, "stop");
+        assert_eq!(plan.stopping.written_by, WrittenBy::Stop);
         assert_eq!(plan.stopping.stop_reason.as_deref(), Some("end of shift"));
         assert_eq!(plan.stopping.stopped_session_id.as_deref(), Some("sess-1"));
         assert_eq!(plan.stopping.stopped_pid_start_secs, Some(1_000));
