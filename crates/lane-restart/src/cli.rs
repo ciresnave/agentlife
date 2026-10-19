@@ -104,3 +104,127 @@ pub fn ledger(
     };
     Ok((f, a.json, a.since, a.by_lane))
 }
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct AssertIdle {
+    #[arg(long, allow_hyphen_values = true, overrides_with = "role")]
+    role: Option<String>,
+}
+
+/// `assert-idle [--role <name>]` and `approvals [--role <name>]` -> the role.
+pub fn assert_idle(rest: &[String]) -> Result<Option<String>, String> {
+    let a: AssertIdle = parse("assert-idle", &["--role"], rest)?;
+    Ok(a.role)
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct SpecsImport {
+    #[arg(long, allow_hyphen_values = true, overrides_with = "role")]
+    role: Option<String>,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+    #[arg(long, overrides_with = "verbose")]
+    verbose: bool,
+}
+
+/// `specs import [--role R] [--dry-run] [--verbose]` -> `(role, dry_run, verbose)`.
+pub fn specs_import(rest: &[String]) -> Result<(Option<String>, bool, bool), String> {
+    let a: SpecsImport = parse("specs import", &["--role"], rest)?;
+    Ok((a.role, a.dry_run, a.verbose))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct SpecsRetire {
+    #[arg(long = "role", allow_hyphen_values = true, required = true)]
+    roles: Vec<String>,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+}
+
+/// `specs retire --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
+pub fn specs_retire(rest: &[String]) -> Result<(Vec<String>, bool), String> {
+    let a: SpecsRetire = parse("specs retire", &["--role"], rest)?;
+    Ok((a.roles, a.dry_run))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Start {
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required = true,
+        overrides_with = "role"
+    )]
+    role: String,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "reason")]
+    reason: Option<String>,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "model")]
+    model: Option<String>,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+    #[arg(long, overrides_with = "json")]
+    json: bool,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "signal_id")]
+    signal_id: Option<String>,
+}
+
+/// `start --role R [--reason <text>] [--model M] [--signal-id I] [--dry-run] [--json]`. A missing
+/// `--reason` is an empty one: `start::validate_reason` owns that refusal.
+pub fn start(rest: &[String]) -> Result<crate::StartArgs, String> {
+    let takes = ["--role", "--reason", "--model", "--signal-id"];
+    let a: Start = parse("start", &takes, rest)?;
+    Ok(crate::StartArgs {
+        role: a.role,
+        reason: a.reason.unwrap_or_default(),
+        model: a.model,
+        dry_run: a.dry_run,
+        json: a.json,
+        signal_id: a.signal_id,
+    })
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Stop {
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required = true,
+        overrides_with = "role"
+    )]
+    role: String,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "reason")]
+    reason: Option<String>,
+    #[arg(long = "self", overrides_with = "target_self")]
+    target_self: bool,
+    #[arg(long, overrides_with = "soft", conflicts_with = "hard")]
+    soft: bool,
+    #[arg(long, overrides_with = "hard", conflicts_with = "soft")]
+    hard: bool,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+    #[arg(long = "yes", overrides_with = "confirmed")]
+    confirmed: bool,
+}
+
+/// `stop --role R [--reason <text>] [--self] [--soft|--hard] [--dry-run] [--yes]`.
+pub fn stop(rest: &[String]) -> Result<crate::StopArgs, String> {
+    let a: Stop = parse("stop", &["--role", "--reason"], rest)?;
+    let kind = match (a.soft, a.hard) {
+        (true, _) => Some(lane_restart::spec::StopKind::Soft),
+        (_, true) => Some(lane_restart::spec::StopKind::Hard),
+        _ => None,
+    };
+    Ok(crate::StopArgs {
+        role: a.role,
+        reason: a.reason.unwrap_or_default(),
+        target_self: a.target_self,
+        dry_run: a.dry_run,
+        confirmed: a.confirmed,
+        kind,
+    })
+}
