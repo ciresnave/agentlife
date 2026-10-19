@@ -45,7 +45,7 @@ pub fn from_spec(s: &spec::SpecFile) -> SpecLaunch {
     ];
     if let Some(m) = &s.permission_mode {
         argv.push("--permission-mode".to_string());
-        argv.push(m.clone());
+        argv.push(m.as_str().to_string());
     }
     if s.remote_control {
         argv.push("--remote-control".to_string());

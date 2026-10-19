@@ -19,6 +19,7 @@
 use crate::duplicate::{self, DuplicateRefusal};
 use crate::facts::SystemFacts;
 use crate::launch::{launch_and_wait_with, prepare_launch, LaunchSpec, LivenessTiming, SpawnFn};
+use crate::permission_mode::PermissionMode;
 use crate::relaunch::{valid_identifier, RelaunchError, RelaunchOutcome, StateReader};
 use crate::spec::{
     self, role_status, Lifecycle, SpecError, SpecFile, SpecState, SpecStore, WrittenBy,
@@ -31,7 +32,7 @@ use std::time::Duration;
 pub const REASON_MAX_CHARS: usize = 200;
 
 /// The permission mode every started lane gets (the PM's answer to O1, 2026-10-11).
-pub const START_PERMISSION_MODE: &str = "auto";
+pub const START_PERMISSION_MODE: PermissionMode = PermissionMode::Auto;
 
 /// The role that a start may not target (the PM is started by a person; O1).
 pub const PM_ROLE: &str = "pm";
@@ -484,7 +485,7 @@ pub fn plan_start(
             was
         }
     };
-    effective.permission_mode = Some(START_PERMISSION_MODE.to_string());
+    effective.permission_mode = Some(START_PERMISSION_MODE);
     let launch = effective.launch_spec();
     let prepared = prepare_launch(&launch, &effective.model, None).map_err(StartRefusal::Launch)?;
     let previous_session = state::load(dir, req.role).ok().map(|s| s.session_id);
@@ -607,7 +608,7 @@ mod tests {
             role: role.to_string(),
             name: role.to_string(),
             cwd: "C:/Projects/x".to_string(),
-            permission_mode: Some("bypassPermissions".to_string()),
+            permission_mode: Some("bypassPermissions".into()),
             remote_control: false,
             launch_args: Some(
                 [
@@ -1448,7 +1449,7 @@ mod tests {
         assert_eq!(s.state, SpecState::Running);
         assert_eq!(s.written_by, WrittenBy::Launch);
         assert_eq!(s.model, "sonnet", "the pinned model is what is recorded");
-        assert_eq!(s.permission_mode.as_deref(), Some("auto"));
+        assert_eq!(s.permission_mode.as_ref().map(|m| m.as_str()), Some("auto"));
         assert_eq!(
             s.stop_kind, None,
             "a launch is unclassified, not the old stop's kind"

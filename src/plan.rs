@@ -33,6 +33,7 @@ use crate::list::{liveness, Liveness};
 use crate::marks::{pin_kind, PinKind};
 use crate::registry::{AgentRecord, Intent};
 use chrono::{DateTime, Utc};
+use lane_state::permission_mode::PermissionMode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -62,8 +63,6 @@ pub fn model_is_allowed(m: &str) -> bool {
     let m = m.to_ascii_lowercase();
     !m.contains("opus") && (m.contains("sonnet") || m.contains("haiku"))
 }
-
-const KNOWN_MODES: &[&str] = &["default", "acceptEdits", "auto", "bypassPermissions"];
 
 /// Why an agent is not in the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,7 +120,7 @@ pub struct Entry {
     pub cwd: String,
     /// The rebuilt arguments, **without** the program name.
     pub argv: Vec<String>,
-    pub mode: Option<String>,
+    pub mode: Option<PermissionMode>,
     pub pm: bool,
     /// Things a person should look at (an unknown permission mode, a dropped channel).
     pub flags: Vec<String>,
@@ -221,7 +220,7 @@ fn safe_value(v: &str) -> bool {
 
 struct Rebuilt {
     argv: Vec<String>,
-    mode: Option<String>,
+    mode: Option<PermissionMode>,
     flags: Vec<String>,
     dropped: Vec<String>,
 }
@@ -235,12 +234,12 @@ struct Rebuilt {
 /// canonical order, so two records that differ only in flag order give one plan entry.
 fn rebuild(
     recorded: &[String],
-    observed_mode: Option<&str>,
+    observed_mode: Option<&PermissionMode>,
     is_pm: bool,
 ) -> Result<Rebuilt, (Reason, String)> {
     let mut name: Option<String> = None;
     let mut model: Option<String> = None;
-    let mut mode: Option<String> = None;
+    let mut mode: Option<PermissionMode> = None;
     let mut remote = false;
     let mut channel = false;
     let mut flags = Vec::new();
@@ -268,8 +267,8 @@ fn rebuild(
         match flag {
             "--name" | "-n" => name = Some(value_of(flag, inline, &mut it)?),
             "--model" => model = Some(value_of(flag, inline, &mut it)?),
-            "--permission-mode" => mode = Some(value_of(flag, inline, &mut it)?),
-            "--dangerously-skip-permissions" => mode = Some("bypassPermissions".to_string()),
+            "--permission-mode" => mode = Some(value_of(flag, inline, &mut it)?.into()),
+            "--dangerously-skip-permissions" => mode = Some(PermissionMode::BypassPermissions),
             "--remote-control" => remote = true,
             CHANNEL_FLAG => {
                 let v = value_of(flag, inline, &mut it)?;
@@ -283,19 +282,20 @@ fn rebuild(
             _ => dropped.push(arg.clone()),
         }
     }
-    let mode = observed_mode.map(str::to_string).or(mode);
-    if mode.as_deref() == Some("bypassPermissions") && !is_pm {
+    let mode = observed_mode.cloned().or(mode);
+    if mode == Some(PermissionMode::BypassPermissions) && !is_pm {
         return Err((
             Reason::BypassNotPm,
             "bypassPermissions is for the PM only; refused, not downgraded".into(),
         ));
     }
-    if let Some(m) = mode.as_deref() {
-        if !KNOWN_MODES.contains(&m) {
+    if let Some(m) = &mode {
+        if !m.is_known() {
             flags.push(format!("mode-needs-a-person:{m}"));
         }
     }
-    for v in [&name, &model, &mode].into_iter().flatten() {
+    let mode_text = mode.as_ref().map(|m| m.as_str().to_string());
+    for v in [&name, &model, &mode_text].into_iter().flatten() {
         if !safe_value(v) {
             return Err((
                 Reason::UnsafeArgument,
@@ -320,7 +320,7 @@ fn rebuild(
     argv.push(pinned);
     if let Some(m) = &mode {
         argv.push("--permission-mode".to_string());
-        argv.push(m.clone());
+        argv.push(m.as_str().to_string());
     }
     if remote {
         argv.push("--remote-control".to_string());
@@ -487,7 +487,7 @@ pub fn build(i: &Inputs) -> Plan {
             continue;
         }
         let pm = pin_kind(r, cfg) == Some(PinKind::Rule);
-        match rebuild(&args, r.permission_mode.as_deref(), pm) {
+        match rebuild(&args, r.permission_mode.as_ref(), pm) {
             Ok(rebuilt) => candidates.push(Candidate {
                 rec: (*r).clone(),
                 cwd,
@@ -1281,7 +1281,10 @@ mod tests {
         observed.permission_mode = Some("bypassPermissions".into());
         let p = plan_of(&[not_pm, observed, pm_rec(3)], &none_alive(), &cfg());
         assert_eq!(names(&p), ["pm"]);
-        assert_eq!(p.entries[0].mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(
+            p.entries[0].mode.as_ref().map(|m| m.as_str()),
+            Some("bypassPermissions")
+        );
         let refused: Vec<_> = p
             .excluded
             .iter()
@@ -1526,7 +1529,7 @@ mod tests {
         );
         r.permission_mode = Some("auto".into());
         let p = plan_of(&[r], &none_alive(), &cfg());
-        assert_eq!(p.entries[0].mode.as_deref(), Some("auto"));
+        assert_eq!(p.entries[0].mode.as_ref().map(|m| m.as_str()), Some("auto"));
         assert_eq!(
             p.entries[0].argv,
             [

@@ -24,7 +24,7 @@ fn state(role: &str) -> LaneState {
         cwd: "C:/x".to_string(),
         name: None,
         model: Some("claude-sonnet-5".to_string()),
-        permission_mode: Some("prompting".to_string()),
+        permission_mode: Some("prompting".into()),
         remote_control: false,
         busy: false,
         subagents_running: 0,

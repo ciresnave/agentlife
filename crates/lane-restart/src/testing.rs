@@ -140,7 +140,7 @@ pub fn state_at(role: &str, session: &str, event: &str) -> LaneState {
         cwd: "C:/Projects/x".to_string(),
         name: None,
         model: Some("claude-sonnet-5".to_string()),
-        permission_mode: Some("prompting".to_string()),
+        permission_mode: Some("prompting".into()),
         remote_control: false,
         busy: false,
         subagents_running: 0,

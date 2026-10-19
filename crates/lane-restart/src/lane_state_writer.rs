@@ -719,7 +719,7 @@ mod tests {
             hook_event_name: "Test".to_string(),
             session_id: "s-123".to_string(),
             cwd: cwd.to_string(),
-            permission_mode: Some("prompting".to_string()),
+            permission_mode: Some("prompting".into()),
             model: None,
             transcript_path: None,
         }
@@ -842,7 +842,7 @@ mod tests {
             now(),
         )
         .unwrap();
-        prior.permission_mode = Some("bypassPermissions".to_string());
+        prior.permission_mode = Some("bypassPermissions".into());
         let restarted = apply_event(
             Some(prior),
             "SessionStart",
@@ -855,7 +855,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             restarted.permission_mode,
-            Some("bypassPermissions".to_string()),
+            Some("bypassPermissions".into()),
             "a later SessionStart missing the field must not erase what was already known"
         );
     }
@@ -946,7 +946,7 @@ mod tests {
         let cli_flags = ClaudeCliFlags {
             remote_control: false,
             name: None,
-            permission_mode: Some("bypassPermissions".to_string()),
+            permission_mode: Some("bypassPermissions".into()),
             launch_args: None,
         };
         let state = apply_event(
@@ -961,7 +961,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             state.permission_mode,
-            Some("bypassPermissions".to_string()),
+            Some("bypassPermissions".into()),
             "the launch command line is the fallback source, not just a JSON field"
         );
     }
@@ -971,7 +971,7 @@ mod tests {
         let cli_flags = ClaudeCliFlags {
             remote_control: false,
             name: None,
-            permission_mode: Some("bypassPermissions".to_string()),
+            permission_mode: Some("bypassPermissions".into()),
             launch_args: None,
         };
         // `input()` carries permission_mode: Some("prompting").
@@ -985,7 +985,7 @@ mod tests {
             now(),
         )
         .unwrap();
-        assert_eq!(state.permission_mode, Some("prompting".to_string()));
+        assert_eq!(state.permission_mode, Some("prompting".into()));
     }
 
     #[test]
@@ -1118,7 +1118,7 @@ mod tests {
         let cli_flags = ClaudeCliFlags {
             remote_control: true,
             name: None,
-            permission_mode: Some("bypassPermissions".to_string()),
+            permission_mode: Some("bypassPermissions".into()),
             launch_args: Some(vec![
                 "claude.exe".to_string(),
                 "--remote-control".to_string(),
@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(s.cwd, "C:/Projects/OverMind");
         assert_eq!(s.session_id, "s-123");
         assert!(s.remote_control);
-        assert_eq!(s.permission_mode, Some("bypassPermissions".to_string()));
+        assert_eq!(s.permission_mode, Some("bypassPermissions".into()));
         assert_eq!(s.launch_args, cli_flags.launch_args);
         assert!(s.busy, "PreToolUse's own effect still applies");
     }
