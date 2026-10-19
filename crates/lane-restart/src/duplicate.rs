@@ -139,7 +139,7 @@ pub fn find(
 pub fn role_names(dir: &std::path::Path, role: &str) -> Vec<String> {
     let mut names = vec![role.to_string()];
     if let Ok(spec) = crate::spec::read(dir, role) {
-        let n = spec.launch_spec().name;
+        let n = spec.launch_spec().name.to_string();
         if !names.contains(&n) {
             names.push(n);
         }

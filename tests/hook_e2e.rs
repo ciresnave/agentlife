@@ -1026,8 +1026,8 @@ fn write_launch_spec(lane_state: &Path, rig: &Rig, role: &str) {
     let role = role.to_string();
     let spec = lane_restart::spec::SpecFile {
         schema: lane_restart::spec::SCHEMA,
-        role,
-        name: "target".to_string(),
+        role: lane_state::role::Role::new(role).unwrap(),
+        name: lane_state::role::Role::new("target").unwrap(),
         cwd,
         model: "sonnet".to_string(),
         permission_mode: Some("auto".into()),
@@ -1387,8 +1387,8 @@ fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_o
     // With a complete spec for that role, on haiku: the spec is.
     let spec = lane_restart::spec::SpecFile {
         schema: lane_restart::spec::SCHEMA,
-        role: "specd".to_string(),
-        name: "e2e-lane".to_string(),
+        role: lane_state::role::Role::new("specd").unwrap(),
+        name: lane_state::role::Role::new("e2e-lane").unwrap(),
         cwd: rig.cwd(),
         model: "haiku".to_string(),
         permission_mode: Some("auto".into()),

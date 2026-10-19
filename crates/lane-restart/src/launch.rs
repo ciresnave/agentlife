@@ -9,9 +9,9 @@ use crate::facts::SystemFacts;
 use crate::permission_mode::PermissionMode;
 use crate::relaunch::{
     extra_launch_args, has_dev_channels_flag, policy_default_model, resolve_launch_model,
-    spawn_launch, valid_identifier, HostedArgv, OpusPermit, RelaunchError, RelaunchOutcome,
-    StateReader,
+    spawn_launch, HostedArgv, OpusPermit, RelaunchError, RelaunchOutcome, StateReader,
 };
+use crate::role::Role;
 use crate::state::LaneState;
 use std::time::Duration;
 
@@ -19,10 +19,10 @@ use std::time::Duration;
 /// file for a restart (`From<&LaneState>`), or by hand from a roster entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
-    pub role: String,
+    pub role: Role,
     /// The `--name` the session is started with: the lane's recorded name,
     /// else its role.
-    pub name: String,
+    pub name: Role,
     pub cwd: String,
     pub permission_mode: Option<PermissionMode>,
     pub remote_control: bool,
@@ -30,16 +30,28 @@ pub struct LaunchSpec {
     pub launch_args: Option<Vec<String>>,
 }
 
-impl From<&LaneState> for LaunchSpec {
-    fn from(state: &LaneState) -> Self {
-        LaunchSpec {
-            role: state.role.clone(),
-            name: state.name.clone().unwrap_or_else(|| state.role.clone()),
+/// A state file's role or name is whatever a hook wrote, so the conversion is where it is checked:
+/// holding a `LaunchSpec` is proof its role and name are plain identifiers, and a restart whose
+/// state carries anything else is refused here, before anything is written or killed.
+impl TryFrom<&LaneState> for LaunchSpec {
+    type Error = RelaunchError;
+
+    fn try_from(state: &LaneState) -> Result<Self, RelaunchError> {
+        let role = Role::new(state.role.clone())
+            .map_err(|e| RelaunchError::InvalidIdentifier(format!("role {:?}", e.0)))?;
+        let name = match &state.name {
+            Some(n) => Role::new(n.clone())
+                .map_err(|e| RelaunchError::InvalidIdentifier(format!("name {:?}", e.0)))?,
+            None => role.clone(),
+        };
+        Ok(LaunchSpec {
+            role,
+            name,
             cwd: state.cwd.clone(),
             permission_mode: state.permission_mode.clone(),
             remote_control: state.remote_control,
             launch_args: state.launch_args.clone(),
-        }
+        })
     }
 }
 
@@ -64,7 +76,7 @@ pub struct PreparedLaunch {
 pub fn launch_argv(spec: &LaunchSpec, prompt: &str, model: &str) -> Vec<String> {
     let mut argv = vec!["claude".to_string(), prompt.to_string()];
     argv.push("--name".to_string());
-    argv.push(spec.name.clone());
+    argv.push(spec.name.to_string());
     argv.push("--model".to_string());
     argv.push(model.to_string());
     if let Some(permission_mode) = &spec.permission_mode {
@@ -97,24 +109,12 @@ pub fn prepare_launch(
     policy_default: &str,
     permit: Option<&OpusPermit>,
 ) -> Result<PreparedLaunch, RelaunchError> {
-    if !valid_identifier(&spec.role) {
-        return Err(RelaunchError::InvalidIdentifier(format!(
-            "role {:?}",
-            spec.role
-        )));
-    }
-    if !valid_identifier(&spec.name) {
-        return Err(RelaunchError::InvalidIdentifier(format!(
-            "name {:?}",
-            spec.name
-        )));
-    }
     let prompt = format!("read {} HANDOFF and continue", spec.role);
     let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, permit)?;
     let argv = launch_argv(spec, &prompt, model.as_str());
     // Checked as the FINAL command line (cwd + host-wrapped argv, the `lane-restart.exe` path
     // included): `HostedArgv` is the only thing a spawn accepts.
-    let argv = HostedArgv::new(&spec.cwd, &spec.role, argv)?;
+    let argv = HostedArgv::new(&spec.cwd, spec.role.as_str(), argv)?;
     // PM finding, 2026-09-19: judge the argv ABOUT TO BE LAUNCHED (it already
     // went through the allowlist), never the original launch flags.
     let carries_dev_channels_flag = has_dev_channels_flag(&argv);
@@ -250,7 +250,7 @@ pub fn launch_and_wait_with(
         facts,
         state_reader,
         &spec.cwd,
-        &spec.role,
+        spec.role.as_str(),
         previous_session,
         launched_after_secs,
         carries_dev_channels_flag,
@@ -316,7 +316,7 @@ mod tests {
     }
 
     fn spec(role: &str) -> LaunchSpec {
-        LaunchSpec::from(&state(role))
+        LaunchSpec::try_from(&state(role)).unwrap()
     }
 
     #[test]
@@ -324,9 +324,9 @@ mod tests {
         let mut st = state("overmind");
         st.remote_control = true;
         st.launch_args = Some(strs(&["claude", "--remote-control"]));
-        let s = LaunchSpec::from(&st);
-        assert_eq!(s.role, "overmind");
-        assert_eq!(s.name, "overmind");
+        let s = LaunchSpec::try_from(&st).unwrap();
+        assert_eq!(s.role.as_str(), "overmind");
+        assert_eq!(s.name.as_str(), "overmind");
         assert_eq!(s.cwd, "C:/x");
         assert_eq!(
             s.permission_mode.as_ref().map(|m| m.as_str()),
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(s.launch_args, st.launch_args);
         // control: a recorded name wins over the role
         st.name = Some("PM".into());
-        assert_eq!(LaunchSpec::from(&st).name, "PM");
+        assert_eq!(LaunchSpec::try_from(&st).unwrap().name.as_str(), "PM");
     }
 
     /// The restart path and the new spec path build the SAME argv, for every
@@ -357,11 +357,11 @@ mod tests {
         let mut named = state("overmind");
         named.name = Some("Over".into());
         for st in [state("overmind"), plain, remote, named] {
-            let spec = LaunchSpec::from(&st);
+            let spec = LaunchSpec::try_from(&st).unwrap();
             let name = st.name.clone().unwrap_or_else(|| st.role.clone());
             assert_eq!(
                 launch_argv(&spec, "p", "sonnet"),
-                claude_argv(&name, &st, "p", "sonnet"),
+                claude_argv(&name, &st, "p", "sonnet").unwrap(),
                 "{}",
                 st.role
             );
@@ -372,8 +372,8 @@ mod tests {
     #[test]
     fn a_hand_built_spec_launches_without_a_state_file() {
         let spec = LaunchSpec {
-            role: "fuel".into(),
-            name: "fuel".into(),
+            role: Role::new("fuel").unwrap(),
+            name: Role::new("fuel").unwrap(),
             cwd: "C:/Projects/fuel".into(),
             permission_mode: None,
             remote_control: false,
@@ -393,15 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_is_refused_for_an_invalid_role_or_name() {
+    fn a_state_with_an_invalid_role_or_name_makes_no_launch_spec() {
+        // A `LaunchSpec` cannot hold either, so the refusal is the conversion's.
         assert!(matches!(
-            prepare_launch(&spec("a&calc"), "sonnet", None),
+            LaunchSpec::try_from(&state("a&calc")),
             Err(RelaunchError::InvalidIdentifier(_))
         ));
-        let mut s = spec("overmind");
-        s.name = "a|calc".into();
+        let mut st = state("overmind");
+        st.name = Some("a|calc".into());
         assert!(matches!(
-            prepare_launch(&s, "sonnet", None),
+            LaunchSpec::try_from(&st),
             Err(RelaunchError::InvalidIdentifier(_))
         ));
     }
@@ -806,8 +807,8 @@ mod tests {
 
     fn fuel() -> LaunchSpec {
         LaunchSpec {
-            role: "fuel".into(),
-            name: "fuel".into(),
+            role: Role::new("fuel").unwrap(),
+            name: Role::new("fuel").unwrap(),
             cwd: "C:/Projects/fuel".into(),
             permission_mode: None,
             remote_control: false,
@@ -850,11 +851,7 @@ mod tests {
     #[test]
     fn a_start_refuses_a_bad_launch_before_it_spawns_or_even_reads_the_clock() {
         type Mutate = fn(&mut LaunchSpec);
-        let cases: Vec<(&str, Mutate)> = vec![
-            ("role", |s| s.role = "a&calc".into()),
-            ("name", |s| s.name = "a|b".into()),
-            ("cwd", |s| s.cwd = "C:/x;calc".into()),
-        ];
+        let cases: Vec<(&str, Mutate)> = vec![("cwd", |s| s.cwd = "C:/x;calc".into())];
         for (what, mutate) in cases {
             let l = log();
             let facts = RecordingFacts::new(&l);

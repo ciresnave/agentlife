@@ -20,6 +20,7 @@ use crate::facts::SystemFacts;
 use crate::launch::{prepare_launch, LaunchSpec, PreparedLaunch};
 use crate::permission_mode::PermissionMode;
 use crate::relaunch::{extra_launch_args, valid_identifier, RelaunchError};
+use crate::role::Role;
 use crate::state;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -133,8 +134,8 @@ impl<'de> Deserialize<'de> for WrittenBy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecFile {
     pub schema: u32,
-    pub role: String,
-    pub name: String,
+    pub role: Role,
+    pub name: Role,
     pub cwd: String,
     /// The explicit `--model` value a start passes.
     pub model: String,
@@ -236,9 +237,6 @@ pub fn find_handoff(cwd: &str, role: &str) -> Option<(String, DateTime<Utc>)> {
 /// Builds a spec from a launch description. Refuses inline config values. Does NOT check
 /// completeness: `write_atomic` does, so a caller cannot write an incomplete one by skipping it.
 pub fn build(i: &SpecInputs) -> Result<SpecFile, SpecError> {
-    if !valid_identifier(&i.launch.role) {
-        return Err(SpecError::InvalidRole(i.launch.role.clone()));
-    }
     let (extras, _dropped) = extra_launch_args(i.launch.launch_args.as_deref().unwrap_or_default());
     for pair in extras.windows(2) {
         if INLINE_CAPABLE_FLAGS.contains(&pair[0].as_str()) && pair[1].trim_start().starts_with('{')
@@ -246,7 +244,7 @@ pub fn build(i: &SpecInputs) -> Result<SpecFile, SpecError> {
             return Err(SpecError::InlineConfig(pair[0].clone()));
         }
     }
-    let handoff = find_handoff(&i.launch.cwd, &i.launch.role);
+    let handoff = find_handoff(&i.launch.cwd, i.launch.role.as_str());
     Ok(SpecFile {
         schema: SCHEMA,
         role: i.launch.role.clone(),
@@ -363,9 +361,9 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// never half of one.
 pub fn write_atomic(dir: &Path, spec: &SpecFile) -> Result<(), SpecError> {
     spec.check()?;
-    let path = spec_path(dir, &spec.role)?;
+    let path = spec_path(dir, spec.role.as_str())?;
     std::fs::create_dir_all(dir).map_err(|e| SpecError::Write(e.to_string()))?;
-    sweep_temp_files(dir, &spec.role);
+    sweep_temp_files(dir, spec.role.as_str());
     let tmp = dir.join(format!(
         "{}{FILE_SUFFIX}.tmp-{}-{}",
         spec.role,
@@ -379,7 +377,7 @@ pub fn write_atomic(dir: &Path, spec: &SpecFile) -> Result<(), SpecError> {
         f.sync_all().map_err(|e| SpecError::Write(e.to_string()))?;
         drop(f);
         std::fs::rename(&tmp, &path).map_err(|e| SpecError::Write(e.to_string()))?;
-        if read(dir, &spec.role)? != *spec {
+        if read(dir, spec.role.as_str())? != *spec {
             return Err(SpecError::ReadBackMismatch);
         }
         Ok(())
@@ -969,8 +967,8 @@ mod tests {
 
     fn launch(role: &str) -> LaunchSpec {
         LaunchSpec {
-            role: role.to_string(),
-            name: role.to_string(),
+            role: Role::new(role).unwrap(),
+            name: Role::new(role).unwrap(),
             cwd: "C:/Projects/x".to_string(),
             permission_mode: Some("auto".into()),
             remote_control: false,
@@ -1015,6 +1013,20 @@ mod tests {
         let back: SpecFile = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.stop_kind, Some(StopKind::Soft));
         assert_eq!(StopKind::Hard.as_str(), "hard");
+    }
+
+    #[test]
+    fn a_spec_file_with_a_role_or_name_that_is_not_an_identifier_does_not_parse() {
+        let good = serde_json::to_value(built("agentlife", SpecState::Suspended)).unwrap();
+        assert!(serde_json::from_value::<SpecFile>(good.clone()).is_ok());
+        for key in ["role", "name"] {
+            let mut bad = good.clone();
+            bad[key] = "a;calc".into();
+            assert!(
+                serde_json::from_value::<SpecFile>(bad).is_err(),
+                "{key} accepted"
+            );
+        }
     }
 
     fn built(role: &str, state: SpecState) -> SpecFile {

@@ -11,6 +11,7 @@ use crate::launch::{
     launch_argv, prepare_launch, wait_for_liveness, LaunchSpec, LivenessTiming, PreparedLaunch,
     SpawnFn,
 };
+use crate::role::Role;
 use crate::spec::{self, DirSpecStore, NoSpecStore, SpecState, SpecStore, WrittenBy};
 use crate::state::LaneState;
 use crate::stop::stop_lane;
@@ -343,12 +344,18 @@ pub fn has_dev_channels_flag(launch_args: &[String]) -> bool {
 /// `no_positional_ever_directly_follows_a_variadic_flags_values` for the
 /// general property this now guarantees for every allowlisted variadic
 /// flag, not just this one.
-pub fn claude_argv(name: &str, state: &LaneState, prompt: &str, model: &str) -> Vec<String> {
+pub fn claude_argv(
+    name: &str,
+    state: &LaneState,
+    prompt: &str,
+    model: &str,
+) -> Result<Vec<String>, RelaunchError> {
     let spec = LaunchSpec {
-        name: name.to_string(),
-        ..LaunchSpec::from(state)
+        name: Role::new(name)
+            .map_err(|e| RelaunchError::InvalidIdentifier(format!("name {:?}", e.0)))?,
+        ..LaunchSpec::try_from(state)?
     };
-    launch_argv(&spec, prompt, model)
+    Ok(launch_argv(&spec, prompt, model))
 }
 
 /// PM finding, 2026-09-18: `wt.exe`'s own argument parser reads `;` as
@@ -645,13 +652,13 @@ fn launch_commands(
     wt.args(["-w", "new", "-d", argv.cwd()]);
     wt.args(hosted_argv);
     strip_session_identity_env(&mut wt);
-    set_lane_role(&mut wt, &spec.role);
+    set_lane_role(&mut wt, spec.role.as_str());
 
     let mut conhost = std::process::Command::new("conhost.exe");
     conhost.args(hosted_argv);
     conhost.current_dir(&spec.cwd);
     strip_session_identity_env(&mut conhost);
-    set_lane_role(&mut conhost, &spec.role);
+    set_lane_role(&mut conhost, spec.role.as_str());
     (wt, conhost)
 }
 
@@ -675,7 +682,7 @@ pub fn direct_command(
     cmd.args(args);
     cmd.current_dir(&spec.cwd);
     strip_session_identity_env(&mut cmd);
-    set_lane_role(&mut cmd, &spec.role);
+    set_lane_role(&mut cmd, spec.role.as_str());
     cmd.stdin(std::process::Stdio::null());
     match out_file.and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
         Some((out, err)) => {
@@ -732,7 +739,7 @@ pub fn spawn_launch(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), Relaunch
 }
 
 pub fn spawn_relaunch(state: &LaneState, argv: &HostedArgv) -> Result<(), RelaunchError> {
-    spawn_launch(&LaunchSpec::from(state), argv)
+    spawn_launch(&LaunchSpec::try_from(state)?, argv)
 }
 
 /// Reads the target role's OWN current state file - injected so the
@@ -819,7 +826,7 @@ pub fn wait_for_relaunch_liveness(
 /// calls the EXACT SAME `claude_argv` the real launch calls, so the two
 /// can never drift apart again.
 pub fn describe_dry_run(state: &LaneState) -> Result<Vec<String>, RelaunchError> {
-    Ok(prepare(&LaunchSpec::from(state))?.argv.to_vec())
+    Ok(prepare(&LaunchSpec::try_from(state)?)?.argv.to_vec())
 }
 
 /// `prepare_launch` with this machine's policy default model and the Opus
@@ -882,7 +889,7 @@ pub fn kill_and_relaunch_persisting(
     sleep: &mut dyn FnMut(std::time::Duration),
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<RelaunchOutcome, RelaunchError> {
-    let spec = LaunchSpec::from(state);
+    let spec = LaunchSpec::try_from(state)?;
     // every check runs BEFORE anything is killed
     // Checked here, before anything is written or killed; the launch itself comes from the
     // spec below.
@@ -1158,8 +1165,8 @@ mod tests {
 
     fn direct_spec() -> LaunchSpec {
         LaunchSpec {
-            role: "baracuda".to_string(),
-            name: "baracuda".to_string(),
+            role: Role::new("baracuda").unwrap(),
+            name: Role::new("baracuda").unwrap(),
             cwd: "C:/Projects/baracuda".to_string(),
             permission_mode: None,
             remote_control: false,
@@ -1235,12 +1242,12 @@ mod tests {
     #[test]
     fn both_launch_commands_set_the_launched_role_not_the_spawners() {
         let spec = LaunchSpec {
-            role: "overmind".to_string(),
+            role: Role::new("overmind").unwrap(),
             cwd: "C:/Projects/OverMind".to_string(),
-            ..LaunchSpec::from(&state_with_role("overmind"))
+            ..LaunchSpec::try_from(&state_with_role("overmind")).unwrap()
         };
         // An explicit set overrides whatever the spawner's own environment carries.
-        let argv = HostedArgv::new(&spec.cwd, &spec.role, strs(&["claude"])).unwrap();
+        let argv = HostedArgv::new(&spec.cwd, spec.role.as_str(), strs(&["claude"])).unwrap();
         let (wt, conhost) = launch_commands(&spec, &argv);
         for (what, cmd) in [("wt", &wt), ("conhost", &conhost)] {
             let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
@@ -1291,7 +1298,7 @@ mod tests {
         state.launch_args = None;
         let model = resolve_model(&state, "sonnet", None).unwrap();
         assert_eq!(model, "sonnet");
-        let argv = claude_argv("overmind", &state, "p", &model);
+        let argv = claude_argv("overmind", &state, "p", &model).unwrap();
         assert!(!argv.iter().any(|a| a.contains("opus")), "got {argv:?}");
         let i = argv.iter().position(|a| a == "--model").unwrap();
         assert_eq!(argv[i + 1], "sonnet");
@@ -1433,7 +1440,7 @@ mod tests {
         let mut state = state_with_role("overmind");
         state.model = None;
         state.permission_mode = None;
-        let argv = claude_argv("overmind", &state, "the prompt", "sonnet");
+        let argv = claude_argv("overmind", &state, "the prompt", "sonnet").unwrap();
         assert_eq!(
             argv,
             vec![
@@ -1454,7 +1461,7 @@ mod tests {
     fn claude_argv_includes_remote_control_flag_when_set() {
         let mut state = state_with_role("overmind");
         state.remote_control = true;
-        let argv = claude_argv("overmind", &state, "p", "sonnet");
+        let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert!(argv.contains(&"--remote-control".to_string()));
     }
 
@@ -1463,7 +1470,7 @@ mod tests {
         // ⚠️ PM finding, 2026-09-18: --resume reloads the whole prior
         // transcript - exactly the cost a restart exists to cut.
         let state = state_with_role("overmind");
-        let argv = claude_argv("overmind", &state, "p", "sonnet");
+        let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert!(!argv.iter().any(|a| a == "--resume"));
     }
 
@@ -1492,7 +1499,7 @@ mod tests {
             "server:claude-peers",
             "--resume",
         ]));
-        let argv = claude_argv("overmind", &state, "the prompt", "sonnet");
+        let argv = claude_argv("overmind", &state, "the prompt", "sonnet").unwrap();
         assert_eq!(
             argv,
             strs(&[
@@ -1640,7 +1647,7 @@ mod tests {
     fn claude_argv_never_duplicates_name_when_the_original_launch_already_had_one() {
         let mut state = state_with_role("overmind");
         state.launch_args = Some(strs(&["claude.exe", "--name", "old-name"]));
-        let argv = claude_argv("overmind", &state, "p", "sonnet");
+        let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert_eq!(
             argv.iter().filter(|a| *a == "--name").count(),
             1,
@@ -1660,7 +1667,7 @@ mod tests {
         // invent anything.
         let mut state = state_with_role("overmind");
         state.launch_args = None;
-        let argv = claude_argv("overmind", &state, "p", "sonnet");
+        let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert_eq!(
             argv,
             strs(&[
@@ -1710,7 +1717,7 @@ mod tests {
             "C:/a",
             "C:/b",
         ]));
-        let argv = claude_argv("overmind", &state, "the prompt", "sonnet");
+        let argv = claude_argv("overmind", &state, "the prompt", "sonnet").unwrap();
 
         assert_eq!(argv[0], "claude");
         assert_eq!(argv[1], "the prompt", "the prompt must come FIRST");

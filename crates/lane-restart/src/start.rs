@@ -595,6 +595,7 @@ pub fn take_start_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::role::Role;
     use crate::spec::{build, write_atomic, DirSpecStore, SpecInputs};
     use crate::testing::{log, state_at, RecordingFacts, ScriptedReader};
     use chrono::{TimeZone, Utc};
@@ -605,8 +606,8 @@ mod tests {
 
     fn launch(role: &str) -> LaunchSpec {
         LaunchSpec {
-            role: role.to_string(),
-            name: role.to_string(),
+            role: Role::new(role).unwrap(),
+            name: Role::new(role).unwrap(),
             cwd: "C:/Projects/x".to_string(),
             permission_mode: Some("bypassPermissions".into()),
             remote_control: false,

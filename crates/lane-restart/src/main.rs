@@ -841,7 +841,7 @@ fn run_start_cmd(args: StartArgs) -> ExitCode {
     let state_reader = relaunch::RealStateReader {
         state_dir: &state_dir_path,
     };
-    let role_for_notice = plan.launch.role.clone();
+    let role_for_notice = plan.launch.role.to_string();
     let mut on_awaiting = || print_status_json("awaiting_confirmation", &role_for_notice);
     let result = start::execute_start(
         &plan,

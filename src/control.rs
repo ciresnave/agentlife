@@ -634,8 +634,8 @@ mod tests {
     fn spec_in(role: &str, state: lane_restart::spec::SpecState) -> lane_restart::spec::SpecFile {
         lane_restart::spec::SpecFile {
             schema: lane_restart::spec::SCHEMA,
-            role: role.into(),
-            name: role.into(),
+            role: lane_state::role::Role::new(role).unwrap(),
+            name: lane_state::role::Role::new(role).unwrap(),
             cwd: format!("C:/Projects/{role}"),
             model: "sonnet".into(),
             permission_mode: Some("auto".into()),

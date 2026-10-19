@@ -96,7 +96,10 @@ fn import_one(
     } else {
         SpecState::Crashed
     };
-    let launch = LaunchSpec::from(&st);
+    let launch = match LaunchSpec::try_from(&st) {
+        Ok(l) => l,
+        Err(e) => return ImportOutcome::Refused(e.to_string()),
+    };
     let file = match spec::build(&SpecInputs {
         launch: &launch,
         model: &model,
