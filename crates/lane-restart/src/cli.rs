@@ -228,3 +228,53 @@ pub fn stop(rest: &[String]) -> Result<crate::StopArgs, String> {
         kind,
     })
 }
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Attach {
+    #[arg(long, allow_hyphen_values = true, overrides_with = "role")]
+    role: Option<String>,
+    #[arg(long, overrides_with = "watch")]
+    watch: bool,
+}
+
+/// `attach --role <r> --watch` -> `(role, watch)`. Whether the role is an identifier and whether
+/// `--watch` was given are the caller's refusals, each with its own message.
+pub fn attach(rest: &[String]) -> Result<(Option<String>, bool), String> {
+    let a: Attach = parse("attach", &["--role"], rest)?;
+    Ok((a.role, a.watch))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Restart {
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required_unless_present = "target_self",
+        overrides_with = "role"
+    )]
+    role: Option<String>,
+    #[arg(long = "self", overrides_with = "target_self")]
+    target_self: bool,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+    #[arg(long = "yes", overrides_with = "confirmed")]
+    confirmed: bool,
+}
+
+/// The restart flags: `(--role <name> | --self) [--dry-run] [--yes]`.
+///
+/// ⚠️ `--self` DEFAULTS TO FALSE. Omitting it means "restart a different
+/// lane" - the SAFER default is the one that requires `--yes` to act for
+/// real, not the one that acts unconditionally. A caller who wants to
+/// restart their own session must say so explicitly.
+pub fn restart(rest: &[String]) -> Result<crate::Args, String> {
+    let a: Restart = parse("", &["--role"], rest)?;
+    Ok(crate::Args {
+        role: a.role,
+        target_self: a.target_self,
+        dry_run: a.dry_run,
+        confirmed: a.confirmed,
+    })
+}

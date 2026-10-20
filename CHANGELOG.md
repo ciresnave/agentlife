@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.7
+
+- **`lane-restart attach` and the restart flags (`--role`/`--self`/`--dry-run`/`--yes`) parse with clap derive (audit group 5, row 6, slice 3):** same method as 0.27.2/0.27.3. Old and new parsers were compared over all 111,111 argument sequences of up to 5 tokens from a 10-token pool (500 accepted `attach`, 2,721 accepted restart lines, so the comparison saw both outcomes) and agreed on accept/reject and every parsed value; for `attach`, a trailing `--role` with no value was already a refusal, now caught one step earlier with the same exit 1. `--self` still defaults to false. Refusal text is clap's. Still hand-written: `host`, `state`, `--help`/`--version`. No API change.
+
 ## 0.27.6
 
 - **CI builds and tests with `--locked` (CodeRipper SUP-001):** `cargo build` and `cargo test` in `.github/workflows/ci.yml` now pass `--locked`, as `clippy` already did, so a stale `Cargo.lock` fails CI instead of being silently re-resolved. No code change.

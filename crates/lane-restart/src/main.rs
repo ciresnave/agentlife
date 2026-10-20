@@ -73,38 +73,8 @@ impl std::fmt::Display for ArgError {
     }
 }
 
-/// ⚠️ `--self` DEFAULTS TO FALSE. Omitting it means "restart a different
-/// lane" - the SAFER default is the one that requires `--yes` to act for
-/// real, not the one that acts unconditionally. A caller who wants to
-/// restart their own session must say so explicitly.
-fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, ArgError> {
-    let mut role: Option<String> = None;
-    let mut target_self = false;
-    let mut dry_run = false;
-    let mut confirmed = false;
-    let mut iter = argv.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?),
-            "--self" => target_self = true,
-            "--dry-run" => dry_run = true,
-            "--yes" => confirmed = true,
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    if role.is_none() && !target_self {
-        return Err(ArgError::RoleRequired);
-    }
-    Ok(Args {
-        role,
-        target_self,
-        dry_run,
-        confirmed,
-    })
-}
-
 /// `lane-restart state <event>` - the hook command. Handled separately from
-/// `parse_args` because its shape (a positional subcommand, then a single
+/// `cli::restart` because its shape (a positional subcommand, then a single
 /// positional event name) doesn't fit the restart CLI's own flags at all,
 /// and mixing the two would make either grammar harder to read.
 fn run_state_hook(event: &str) -> ExitCode {
@@ -135,7 +105,7 @@ fn run_state_hook(event: &str) -> ExitCode {
 }
 
 /// `lane-restart assert-idle [--role <name>]` - run by a lane itself, right
-/// after writing HANDOFF. Separate from `parse_args` for the same reason
+/// after writing HANDOFF. Separate from `cli::restart` for the same reason
 /// `state` is: a positional subcommand, not the restart CLI's own flags.
 fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
     let my_pid = std::process::id();
@@ -198,19 +168,13 @@ fn run_host_cmd(role: &str, child_argv: &[String]) -> ExitCode {
 /// and not approved (P6c), and a bare `attach` must not look like it will do that. Read-only, so it
 /// is open to any session, like `status`.
 fn run_attach_cmd(rest: &[String]) -> ExitCode {
-    let mut role: Option<String> = None;
-    let mut watch = false;
-    let mut iter = rest.iter();
-    while let Some(a) = iter.next() {
-        match a.as_str() {
-            "--role" => role = iter.next().cloned(),
-            "--watch" => watch = true,
-            other => {
-                eprintln!("lane-restart attach: unexpected argument {other:?}");
-                return ExitCode::FAILURE;
-            }
+    let (role, watch) = match cli::attach(rest) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("lane-restart attach: {e}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
     let Some(role) = role.filter(|r| lane_restart::relaunch::valid_identifier(r)) else {
         eprintln!("lane-restart attach: --role <name> is required and must be a plain identifier");
         return ExitCode::FAILURE;
@@ -251,7 +215,7 @@ fn run_attach_cmd(rest: &[String]) -> ExitCode {
 }
 
 /// Parses `--role <name> -- <child argv...>` for the `host` subcommand - a
-/// positional subcommand with its own `--` separator, not `parse_args`'s
+/// positional subcommand with its own `--` separator, not `cli::restart`'s
 /// restart-CLI flag grammar.
 fn parse_host_args(rest: &[String]) -> Result<(String, Vec<String>), ArgError> {
     let mut role: Option<String> = None;
@@ -1548,7 +1512,7 @@ fn main() -> ExitCode {
             };
         }
     }
-    let args = match parse_args(argv) {
+    let args = match cli::restart(&argv) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("lane-restart: {e}");
@@ -1952,13 +1916,10 @@ mod cli_tests {
     #[test]
     fn a_bare_self_is_accepted_and_the_role_is_resolved_later() {
         // The documented form (`lane-restart --self`, CLAUDE.md and CIRESNAVE-EXPECTATIONS 2.3b).
-        let a = parse_args(strs(&["--self"])).expect("bare --self must parse");
+        let a = cli::restart(&strs(&["--self"])).expect("bare --self must parse");
         assert!(a.target_self);
         // without --self the role is still required
-        assert_eq!(
-            parse_args(strs(&["--yes"])).unwrap_err(),
-            ArgError::RoleRequired
-        );
+        assert!(cli::restart(&strs(&["--yes"])).is_err());
     }
 
     #[test]
@@ -2009,7 +1970,7 @@ mod cli_tests {
     }
 
     /// ⚠️ PM finding, 2026-09-18: `--help` printed "unrecognised argument:
-    /// --help" because `parse_args` treats every unknown token as an error
+    /// --help" because `cli::restart` treats every unknown token as an error
     /// with no earlier check. `main()` now intercepts `--help`/`-h` before
     /// any subcommand dispatch - this asserts the usage text actually
     /// documents the command this fix itself adds, so the two can't drift
