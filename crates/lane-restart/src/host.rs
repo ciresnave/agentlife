@@ -309,6 +309,13 @@ pub struct HostOutcome {
 /// been closed, for the PTY reader thread to see end-of-file and end.
 const READER_END_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long the host waits, at teardown, for the outer-input thread to end
+/// when its input has reached end-of-file. The thread is not woken by
+/// anything the host does, so a run whose child exits first can sample its
+/// flag before it has been scheduled; an input that is really blocked (a
+/// terminal) stays alive past this and is reported, never hidden.
+const INPUT_END_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// True while a helper thread is running. The thread owns the `LiveFlag`
 /// and clears the shared bool when the closure returns (or unwinds), so
 /// the host can read back whether a thread really ended, instead of
@@ -667,6 +674,10 @@ fn run_with_handlers_and_window_watched(
     // now, so waiting here stalls nothing.
     if let Some(t) = unhandled_thread {
         let _ = t.join();
+    }
+    let input_deadline = Instant::now() + INPUT_END_TIMEOUT;
+    while is_alive(&input_alive) && Instant::now() < input_deadline {
+        std::thread::sleep(Duration::from_millis(10));
     }
     let mut abandoned_threads = Vec::new();
     if is_alive(&reader_alive) {
@@ -1577,6 +1588,77 @@ mod tests {
                 outcome.abandoned_threads
             );
         }
+    }
+
+    /// An outer input that reaches end-of-file shortly AFTER the child has
+    /// exited is not a leak: the host waits a bounded time for it. Without
+    /// that wait the teardown samples the thread's flag while it is still
+    /// running and reports `outer-input` (seen on ubuntu CI, run 0).
+    #[test]
+    fn an_outer_input_that_ends_just_after_the_child_is_not_abandoned() {
+        struct LateEof {
+            sent_cpr: bool,
+            child_output_seen: Arc<std::sync::atomic::AtomicBool>,
+        }
+        struct FlagOnWrite(Arc<std::sync::atomic::AtomicBool>);
+        impl Write for FlagOnWrite {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Read for LateEof {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.sent_cpr {
+                    self.sent_cpr = true;
+                    let cpr = b"[1;1R";
+                    buf[..cpr.len()].copy_from_slice(cpr);
+                    return Ok(cpr.len());
+                }
+                // End-of-file comes 500 ms after the child's output reached the
+                // outer side, so it always lands after the child has exited.
+                while !self
+                    .child_output_seen
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(0)
+            }
+        }
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo LEAK_PROBE".to_string(),
+            ],
+            "echo LEAK_PROBE",
+        );
+        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outcome = run_with_handlers(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            LateEof {
+                sent_cpr: false,
+                child_output_seen: Arc::clone(&seen),
+            },
+            FlagOnWrite(seen),
+            |_| {},
+            |_| {},
+        )
+        .expect("run_with_handlers failed");
+        assert!(
+            outcome.abandoned_threads.is_empty(),
+            "helper threads still alive after return: {:?}",
+            outcome.abandoned_threads
+        );
     }
 
     /// An outer input that is still blocked cannot be cancelled through a
