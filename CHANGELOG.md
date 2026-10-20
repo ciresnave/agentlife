@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.5
+
+- **Fix: `lane-restart` host no longer reports `outer-input` as abandoned when its input ends just after the child exits:** teardown sampled the outer-input thread's liveness flag at once, while only the PTY reader got a bounded wait, so a fast child on a loaded runner made `host::tests::no_helper_thread_outlives_a_host_run` fail on ubuntu CI (agentlife#142, run 0; passed on rerun). The host now waits up to `INPUT_END_TIMEOUT` (1 s) for the thread; a really blocked input is still reported. New test `an_outer_input_that_ends_just_after_the_child_is_not_abandoned` (fails without the wait with the CI message). Not breaking.
+
 ## 0.27.4
 
 - **Declared public API (`[reachability] public_api`):** `.coderipper.toml` declares the library's `pub` items that the binaries do not call (6 files), so `reachability` stops reporting them as unused. Configuration only; no code change, not breaking.
