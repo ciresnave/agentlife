@@ -36,10 +36,10 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: cargo build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       - name: cargo test
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --locked --workspace --no-fail-fast
 
   deny:
     name: cargo deny (advisories, licences, bans, sources)
