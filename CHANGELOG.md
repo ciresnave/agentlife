@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.8
+
+- **`lane-restart host` parses with clap derive (audit group 5, row 6, last slice):** `host --role <role> -- <child argv...>`; the old and new parsers were compared over all 299,593 argument sequences of up to 6 tokens from an 8-token pool (5,184 accepted) and agreed on accept/reject and every parsed value, `--` handling included. `host_boot::record` still runs before the parse. `ArgError` is gone: nothing hand-parses an argument list any more. `state <event>` stays a slice pattern in `main` (a single positional, the hook hot path: no loop to replace). Refusal text is clap's. No API change.
+
 ## 0.27.7
 
 - **`lane-restart attach` and the restart flags (`--role`/`--self`/`--dry-run`/`--yes`) parse with clap derive (audit group 5, row 6, slice 3):** same method as 0.27.2/0.27.3. Old and new parsers were compared over all 111,111 argument sequences of up to 5 tokens from a 10-token pool (500 accepted `attach`, 2,721 accepted restart lines, so the comparison saw both outcomes) and agreed on accept/reject and every parsed value; for `attach`, a trailing `--role` with no value was already a refusal, now caught one step earlier with the same exit 1. `--self` still defaults to false. Refusal text is clap's. Still hand-written: `host`, `state`, `--help`/`--version`. No API change.
