@@ -52,31 +52,12 @@ struct Args {
     confirmed: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ArgError {
-    MissingRole,
-    RoleRequired,
-    Unknown(String),
-    MissingChildArgv,
-}
-
-impl std::fmt::Display for ArgError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ArgError::MissingRole => write!(f, "--role requires a value"),
-            ArgError::RoleRequired => write!(f, "--role <name> is required"),
-            ArgError::Unknown(a) => write!(f, "unrecognised argument: {a}"),
-            ArgError::MissingChildArgv => {
-                write!(f, "expected `-- <child argv...>` after --role <name>")
-            }
-        }
-    }
-}
-
 /// `lane-restart state <event>` - the hook command. Handled separately from
 /// `cli::restart` because its shape (a positional subcommand, then a single
 /// positional event name) doesn't fit the restart CLI's own flags at all,
 /// and mixing the two would make either grammar harder to read.
+/// It stays a slice pattern in `main` (`[cmd, event]`): there is no flag loop to replace, and it is
+/// the hook hot path.
 fn run_state_hook(event: &str) -> ExitCode {
     let started = std::time::Instant::now();
     let my_pid = std::process::id();
@@ -212,28 +193,6 @@ fn run_attach_cmd(rest: &[String]) -> ExitCode {
         );
         ExitCode::FAILURE
     }
-}
-
-/// Parses `--role <name> -- <child argv...>` for the `host` subcommand - a
-/// positional subcommand with its own `--` separator, not `cli::restart`'s
-/// restart-CLI flag grammar.
-fn parse_host_args(rest: &[String]) -> Result<(String, Vec<String>), ArgError> {
-    let mut role: Option<String> = None;
-    let mut iter = rest.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--role" => role = Some(iter.next().ok_or(ArgError::MissingRole)?.clone()),
-            "--" => {
-                let child_argv: Vec<String> = iter.cloned().collect();
-                if child_argv.is_empty() {
-                    return Err(ArgError::MissingChildArgv);
-                }
-                return Ok((role.ok_or(ArgError::RoleRequired)?, child_argv));
-            }
-            other => return Err(ArgError::Unknown(other.to_string())),
-        }
-    }
-    Err(ArgError::MissingChildArgv)
 }
 
 /// `lane-restart --version` - RESTART-TOOL-DESIGN.md §12.9: the crate
@@ -1503,7 +1462,7 @@ fn main() -> ExitCode {
         if first == "host" {
             // Before anything can fail or wait: a restart that finds no record knows the host never ran.
             lane_restart::host_boot::record(&state_dir(), &argv[1..]);
-            return match parse_host_args(rest) {
+            return match cli::host(rest) {
                 Ok((role, child_argv)) => run_host_cmd(&role, &child_argv),
                 Err(e) => {
                     eprintln!("lane-restart host: {e}");
@@ -2166,12 +2125,12 @@ mod cli_tests {
         assert!(USAGE.contains("lane-restart specs import"));
     }
 
-    // -- parse_host_args ---------------------------------------------- //
+    // -- cli::host ---------------------------------------------------- //
 
     #[test]
     fn host_args_extracts_role_and_child_argv() {
         assert_eq!(
-            parse_host_args(&strs(&[
+            cli::host(&strs(&[
                 "--role", "overmind", "--", "claude", "--name", "x"
             ])),
             Ok(("overmind".to_string(), strs(&["claude", "--name", "x"])))
@@ -2180,33 +2139,21 @@ mod cli_tests {
 
     #[test]
     fn host_args_requires_a_separator() {
-        assert_eq!(
-            parse_host_args(&strs(&["--role", "overmind"])),
-            Err(ArgError::MissingChildArgv)
-        );
+        assert!(cli::host(&strs(&["--role", "overmind"])).is_err());
     }
 
     #[test]
     fn host_args_requires_a_non_empty_child_argv_after_the_separator() {
-        assert_eq!(
-            parse_host_args(&strs(&["--role", "overmind", "--"])),
-            Err(ArgError::MissingChildArgv)
-        );
+        assert!(cli::host(&strs(&["--role", "overmind", "--"])).is_err());
     }
 
     #[test]
     fn host_args_requires_role() {
-        assert_eq!(
-            parse_host_args(&strs(&["--", "claude"])),
-            Err(ArgError::RoleRequired)
-        );
+        assert!(cli::host(&strs(&["--", "claude"])).is_err());
     }
 
     #[test]
     fn host_args_rejects_an_unknown_flag_before_the_separator() {
-        assert_eq!(
-            parse_host_args(&strs(&["--bogus"])),
-            Err(ArgError::Unknown("--bogus".to_string()))
-        );
+        assert!(cli::host(&strs(&["--bogus"])).is_err());
     }
 }

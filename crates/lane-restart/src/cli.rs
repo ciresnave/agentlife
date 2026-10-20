@@ -278,3 +278,28 @@ pub fn restart(rest: &[String]) -> Result<crate::Args, String> {
         confirmed: a.confirmed,
     })
 }
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct Host {
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required = true,
+        overrides_with = "role"
+    )]
+    role: String,
+    /// Everything after the first `--` that is not a `--role` value, verbatim.
+    #[arg(last = true, required = true, allow_hyphen_values = true)]
+    child: Vec<String>,
+}
+
+/// `host --role <role> -- <child argv...>` -> `(role, child_argv)`. The `--` separator belongs to
+/// this grammar, so `parse`'s refusal of a bare `--` does not apply.
+pub fn host(rest: &[String]) -> Result<(String, Vec<String>), String> {
+    let a = Host::try_parse_from(
+        std::iter::once("lane-restart host".to_string()).chain(rest.iter().cloned()),
+    )
+    .map_err(|e| e.render().to_string().trim_end().to_string())?;
+    Ok((a.role, a.child))
+}
