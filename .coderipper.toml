@@ -1,0 +1,11 @@
+# Declared public API (reachability): each file below holds `pub` items of a `pub` module that this repository's own
+# targets do not call. Kept per file, not as a glob, so a new undeclared file is still reported.
+[reachability]
+public_api = [
+  { file = "src/consent.rs", reason = "published API of the agentlife library crate (crates.io); the binaries use a subset, the rest is for downstream crates" },
+  { file = "src/home.rs", reason = "published API of the agentlife library crate (crates.io); the binaries use a subset, the rest is for downstream crates" },
+  { file = "src/install.rs", reason = "published API of the agentlife library crate (crates.io); the binaries use a subset, the rest is for downstream crates" },
+  { file = "src/journal.rs", reason = "published API of the agentlife library crate (crates.io); the binaries use a subset, the rest is for downstream crates" },
+  { file = "src/launcher_service.rs", reason = "published API of the agentlife library crate (crates.io); the binaries use a subset, the rest is for downstream crates" },
+  { file = "src/peers.rs", reason = "published API of the agentlife library crate (crates.io); the binaries use a subset, the rest is for downstream crates" },
+]
