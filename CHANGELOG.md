@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.10
+
+- **Lock-only security fix:** `rustls-webpki` 0.103.15 -> 0.103.16 and `webpki-root-certs` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0382/0383). `cargo deny check advisories` ok and `cargo audit` exits clean (one allowed warning: `inout` 0.2.3 yanked). No code change.
+
 ## 0.27.8
 
 - **`lane-restart host` parses with clap derive (audit group 5, row 6, last slice):** `host --role <role> -- <child argv...>`; the old and new parsers were compared over all 299,593 argument sequences of up to 6 tokens from an 8-token pool (5,184 accepted) and agreed on accept/reject and every parsed value, `--` handling included. `host_boot::record` still runs before the parse. `ArgError` is gone: nothing hand-parses an argument list any more. `state <event>` stays a slice pattern in `main` (a single positional, the hook hot path: no loop to replace). Refusal text is clap's. No API change.
