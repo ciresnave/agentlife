@@ -47,7 +47,7 @@ default (prints the wrapper and the XML); `-Register` creates the task `synapsed
 log directory locked to the registering user with `icacls`; paths must be absolute ASCII and the port 1-65535.
 Per-user and interactive like the two above. The task runs a wrapper `synapsed-run.cmd` that SETS
 `SYNAPSE_HOME`, `SYNAPSE_ADDR` (loopback only, checked) and `SYNAPSE_LAUNCHER_ROLES` (empty until the launch
-poller is live), appends stderr to `synapsed.log`, and maps `synapsed` exit 2 (refused to start: config, lock,
+poller is live), plus `SYNAPSE_MAILBOX_STORE` only when `-MailboxStore <value>` is passed (unset by default: no line), appends stderr to `synapsed.log`, and maps `synapsed` exit 2 (refused to start: config, lock,
 second instance) to task exit 0 so Task Scheduler's restart-on-failure (3 times, 1 minute apart) never loops on
 it. Any other non-zero exit is restarted.
 **Known limit:** if a lane's auto-start wins the instance lock before the task, the task's `synapsed` exits 2, the task

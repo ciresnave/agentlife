@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.27.11
+
+- **Script, no code change:** `scripts/synapsed-task.ps1` takes `-MailboxStore <value>`, written into the wrapper as `set "SYNAPSE_MAILBOX_STORE=<value>"` so it reaches the scheduled-task daemon (the wrapper set only SYNAPSE_HOME/ADDR/LAUNCHER_ROLES, so a store chosen by the lane never got there). Default unset: the dry-run output is identical to 0.27.8 (compared with the timestamp in the wrapper name masked), no line is written. A value with a cmd metacharacter is refused like `-LauncherRoles`. Not registered; the PM's T-0 run applies it. Not breaking.
+
 ## 0.27.10
 
 - **Lock-only security fix:** `rustls-webpki` 0.103.15 -> 0.103.16 and `webpki-root-certs` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0382/0383). `cargo deny check advisories` ok and `cargo audit` exits clean (one allowed warning: `inout` 0.2.3 yanked). No code change.

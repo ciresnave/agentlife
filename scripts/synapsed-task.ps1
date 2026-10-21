@@ -11,8 +11,8 @@
   (the same shape `agentlife install-task` was measured to create unelevated, docs/TASKS.md).
 
   The contract, and where each line of it lands here:
-    - Fixed environment: SYNAPSE_HOME, SYNAPSE_ADDR, SYNAPSE_LAUNCHER_ROLES are SET in the wrapper, so a lane's
-      environment never reaches the daemon. Every lane launch must pass the same SYNAPSE_HOME and SYNAPSE_ADDR.
+    - Fixed environment: SYNAPSE_HOME, SYNAPSE_ADDR, SYNAPSE_LAUNCHER_ROLES (and SYNAPSE_MAILBOX_STORE, only when
+      -MailboxStore is given) are SET in the wrapper, so a lane's environment never reaches the daemon. Every lane launch must pass the same SYNAPSE_HOME and SYNAPSE_ADDR.
     - Loopback only: -Addr is refused unless it is 127.0.0.1 or [::1] with a port (the daemon exits 2 otherwise).
     - Restart policy: Task Scheduler restarts a failed task at most 3 times, 1 minute apart. `synapsed` exits 2
       for a configuration or lock problem (not an address, not loopback, cannot bind, store error, second
@@ -29,6 +29,7 @@
 .PARAMETER SynapseHome     SYNAPSE_HOME. Default %LOCALAPPDATA%\synapse.
 .PARAMETER Addr     SYNAPSE_ADDR. Default 127.0.0.1:7920.
 .PARAMETER LauncherRoles  SYNAPSE_LAUNCHER_ROLES. Empty until the launch poller service is live; then `agentlife-launcher`.
+.PARAMETER MailboxStore  SYNAPSE_MAILBOX_STORE (e.g. `sqlite`). Default unset: the wrapper then has no such line and the daemon runs as before.
 .PARAMETER LogDir   Where synapsed.log and the wrapper go. Default <Home>\task.
 #>
 [CmdletBinding()]
@@ -37,6 +38,7 @@ param(
   [string]$SynapseHome = (Join-Path $env:LOCALAPPDATA 'synapse'),
   [string]$Addr = '127.0.0.1:7920',
   [string]$LauncherRoles = '',
+  [string]$MailboxStore = '',
   [string]$LogDir,
   [switch]$Register,
   [switch]$Remove
@@ -60,6 +62,7 @@ if ($Addr -notmatch '^(127\.0\.0\.1|\[::1\]):(\d{1,5})$' -or [int]$Matches[2] -l
   throw "Addr '$Addr' is not loopback host:port (1-65535); synapsed exits 2 on anything else"
 }
 if ($LauncherRoles -match '[%"&|<>^\r\n]') { throw 'LauncherRoles holds a character the wrapper cannot carry' }
+if ($MailboxStore -match '[%"&|<>^\r\n]') { throw 'MailboxStore holds a character the wrapper cannot carry' }
 if ($Exe -notmatch '^([A-Za-z]:\\|\\\\)') { throw 'Exe must be a full path (relative and drive-relative paths are refused)' }
 # The task runs from another working directory: make every path absolute now.
 $SynapseHome = [IO.Path]::GetFullPath($SynapseHome)
@@ -73,13 +76,14 @@ if ($Register -and -not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "E
 # A distinct wrapper per registration: a failed or overlapping update never changes what the existing task runs.
 $wrapperPath = Join-Path $LogDir ('synapsed-run-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.cmd')
 $logPath = Join-Path $LogDir 'synapsed.log'
+$mailboxLine = if ($MailboxStore) { "set `"SYNAPSE_MAILBOX_STORE=$MailboxStore`"`n" } else { '' }
 $wrapper = @"
 @echo off
 rem Written by agentlife scripts\synapsed-task.ps1. Edit the script, not this file.
 set "SYNAPSE_HOME=$SynapseHome"
 set "SYNAPSE_ADDR=$Addr"
 set "SYNAPSE_LAUNCHER_ROLES=$LauncherRoles"
-"$Exe" 2>>"$logPath"
+${mailboxLine}"$Exe" 2>>"$logPath"
 set "RC=%ERRORLEVEL%"
 if "%RC%"=="2" (
   echo %DATE% %TIME% synapsed exited 2: refused to start, not restarting ^(see lines above^)>>"$logPath"
