@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.7
+
+- **Docs and an example, no runtime change: the notify-outbox -> Synapse send path was run against a real daemon (cutover gate 3, PM TASK 2026-10-22).** `examples/synapse_outbox_check.rs` queues messages and drives `relay_outbox` against whatever `SYNAPSE_HOME`/`SYNAPSE_ADDR` name (a throwaway home only). Result in `docs/LAUNCHER-SERVICE.md`: the message to a claimed `pm` arrives once as `agentlife-launcher@<account>/<message_id>`, redelivers once after its lease with the same id, a resend of the same id adds nothing, ack works, and a message to a role that never claimed is refused `unknown_recipient` and stays queued. Not covered: the `agentlife launcher` process, an sqlite-store daemon. The 0.27.11 `-MailboxStore` parameter of `scripts/synapsed-task.ps1` already sets `SYNAPSE_MAILBOX_STORE` in the wrapper when given; this daemon (rc.123) calls that variable deprecated and prefers a recorded store (`synapse storage use`).
+
 ## 0.29.6
 
 - **Docs only (roadmap C3):** `docs/TOKEN-INVENTORY.md`, a names-only inventory of every token and credential we hold or script (the vault's 18 entries, the two GitHub identities and their scopes, 22 `CODECOV_TOKEN` repo secrets, crates.io and Docker Hub secrets, secrets that workflows reference but nothing configures), each marked replaceable by a GitHub App, by OIDC (Codecov, crates.io Trusted Publishing, AWS) or not replaceable, with an order of work and five questions for CireSnave (org-level secrets could not be read). No value was read. No code change.
