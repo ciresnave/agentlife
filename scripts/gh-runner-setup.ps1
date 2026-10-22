@@ -13,9 +13,9 @@
        A repo is treated as PUBLIC unless you name it in -Private, and -Apply asks GitHub (gh api) and refuses a repo
        declared private that is public: public means ephemeral only.
     2. Creates the local account (default gh-runner): standard user, never in Administrators, password a random
-       32 characters generated in memory, passed to New-LocalUser and to the service configuration, never written to a
+       32 characters (letters, digits, - _ @ only: cmd.exe mangles % ^ !) generated in memory, passed to New-LocalUser and to the service configuration, never written to a
        file, never printed, never logged. An existing account is kept and its password is ROTATED the same way, so
-       nobody ever knows it. (The password is visible in the process command line of config.cmd for a moment, to
+       nobody ever knows it; every service that already logs on as the account is given the new password in the same run, so none breaks at its next start. (The password is visible in the process command line of config.cmd for a moment, to
        administrators only; the runner stores it in the service control manager.)
     3. Creates -Root (default C:\gh-runner) with an ACL of SYSTEM, Administrators and the account only.
     4. Downloads the pinned official runner release and VERIFIES its SHA256 against the pinned value before
@@ -109,7 +109,20 @@ $ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
 # scope: it touches this runner's jobs only, no machine or registry-hive setting. Not a security boundary (a job runs any command).
 $runnerEnv = @('PSExecutionPolicyPreference=Bypass')
 function Slug([string]$r) { $r -replace '/', '-' }
-function Svc([string]$r) { 'actions.runner.' + (Slug $r) + '.' + $env:COMPUTERNAME + '-' + (Slug $r) }
+# The runner TRUNCATES long service names ('...TUF-LAPTOP-ThinkersJ-9595'), so a name built from the repo cannot be trusted
+# (live run 2026-10-22: read-back threw 'not found' for a service that was running). The service is found by the runner
+# directory its executable lives in. `$services` is for the test (objects with Name and PathName); null reads Win32_Service.
+function Find-RunnerService([string]$dir, $services = $null) {
+  if ($null -eq $services) { $services = Get-CimInstance Win32_Service -Filter "PathName LIKE '%RunnerService.exe%'" }
+  $sep = [string][IO.Path]::DirectorySeparatorChar
+  $prefix = ([IO.Path]::GetFullPath($dir)).TrimEnd($sep[0]) + $sep
+  $hit = @($services | Where-Object {
+    $exe = ($_.PathName -replace '^\s*"([^"]*)".*$', '$1').Trim()
+    $exe.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and $exe -like '*RunnerService.exe'
+  })
+  if ($hit.Count -gt 1) { throw "more than one runner service lives under ${dir}: $(($hit | ForEach-Object Name) -join ', ')" }
+  if ($hit.Count -eq 1) { $hit[0] } else { $null }
+}
 
 # ACL preflight (board 224). A local account that can replace with-secret.exe or lane-restart.exe gets code run as
 # the owner WITH vault access, so none of the protected paths may be writable by any principal the runner account
@@ -209,8 +222,16 @@ if ($aclFindings.Count -gt 0) {
   throw "refusing to create or change the account: $($aclFindings.Count) exposed entr(ies) on the protected paths (board 224). Fix them, then run again."
 }
 
+# Services that log on as the account (any root): a changed password must reach every one of them, or each fails at its next start.
+function Select-AccountServices($services, [string]$account, [string]$computer) {
+  @($services | Where-Object { $_.StartName -ieq ".\$account" -or $_.StartName -ieq "$computer\$account" })
+}
+
 function New-RandomPassword([int]$len = 32) {
-  $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!#%+-=?@^_'
+  # Letters, digits and -_@ ONLY: config.cmd is a .cmd file, so cmd.exe re-reads the argument and mangles % ^ ! (live run
+  # 2026-10-22: 'Invalid windows credentials entered', config.cmd exited 1, a runner registered with no service). The
+  # test pushes generated passwords through a real cmd.exe round trip.
+  $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_@'
   $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
   $limit = 256 - (256 % $chars.Length)   # rejection sampling: no modulo bias
   $b = New-Object byte[] 1
@@ -227,11 +248,13 @@ if ($Remove) {
   foreach ($r in $Repo) {
     $dir = Join-Path $Root (Slug $r)
     if (-not (Test-Path -LiteralPath "$dir\config.cmd")) { Write-Host "[$r] no runner at $dir, skipping"; continue }
+    $before = Find-RunnerService $dir
     $tok = [Net.NetworkCredential]::new('', (Read-Host "Removal token for $r" -AsSecureString)).Password
     & "$dir\config.cmd" remove --token $tok
     if ($LASTEXITCODE -ne 0) { throw "config.cmd remove exited $LASTEXITCODE for $r" }
     $tok = $null
-    if (Get-Service -Name (Svc $r) -ErrorAction SilentlyContinue) { throw "service $(Svc $r) still exists after remove" }
+    if (Find-RunnerService $dir) { throw "a runner service under $dir still exists after remove" }
+    if ($before -and (Get-Service -Name $before.Name -ErrorAction SilentlyContinue)) { throw "service $($before.Name) still exists after remove" }
     Write-Host "[$r] removed (read back: service absent). Directory $dir kept for you to delete."
   }
   return
@@ -249,8 +272,16 @@ $password = New-RandomPassword
 $secure = ConvertTo-SecureString $password -AsPlainText -Force
 $existing = Get-LocalUser -Name $Account -ErrorAction SilentlyContinue
 if ($existing) {
+  # A new password nobody knows would silently break every runner service already configured with the old one (live run
+  # 2026-10-22: the ThinkersFoundation-site service would have failed at its next start). So the same run gives each of
+  # them the new password through the service manager (CIM Change: the password is not on a command line).
+  $dependents = Select-AccountServices (Get-CimInstance Win32_Service) $Account $env:COMPUTERNAME
   Set-LocalUser -Name $Account -Password $secure
-  Write-Host "account $Account exists: password rotated (nobody knows it)"
+  foreach ($d in $dependents) {
+    $res = Invoke-CimMethod -InputObject $d -MethodName Change -Arguments @{ StartName = ".\$Account"; StartPassword = $password }
+    if ($res.ReturnValue -ne 0) { throw "the password of $Account was rotated but service $($d.Name) could not be updated (Win32_Service.Change returned $($res.ReturnValue)): fix that service before it next starts" }
+  }
+  Write-Host "account $Account exists: password rotated (nobody knows it); $($dependents.Count) service(s) logging on as it were given the new one: $(($dependents | ForEach-Object Name) -join ', ')"
 } else {
   New-LocalUser -Name $Account -Password $secure -PasswordNeverExpires -UserMayNotChangePassword `
     -AccountNeverExpires -Description 'GitHub Actions runner (agentlife setup script)' | Out-Null
@@ -293,8 +324,8 @@ foreach ($r in $Repo) {
   $tok = $null
   if ($rc -ne 0) { throw "config.cmd exited $rc for $r" }
   # 6. Read it back.
-  $svc = Get-CimInstance Win32_Service -Filter "Name='$(Svc $r)'"
-  if (-not $svc) { throw "service $(Svc $r) not found after configure" }
+  $svc = Find-RunnerService $dir
+  if (-not $svc) { throw "no runner service found under $dir after configure" }
   if ($svc.StartName -ine ".\$Account") { throw "service runs as '$($svc.StartName)', expected .\$Account" }
   if ((Get-Content -LiteralPath "$dir\.env") -notcontains $runnerEnv[0]) { throw "$dir\.env does not hold $($runnerEnv[0])" }
   Write-Host "[$r] service $($svc.Name) as $($svc.StartName), state $($svc.State); .env: $($runnerEnv -join '; ')"
