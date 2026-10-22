@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.6
+
+- **Docs only (roadmap C3):** `docs/TOKEN-INVENTORY.md`, a names-only inventory of every token and credential we hold or script (the vault's 18 entries, the two GitHub identities and their scopes, 22 `CODECOV_TOKEN` repo secrets, crates.io and Docker Hub secrets, secrets that workflows reference but nothing configures), each marked replaceable by a GitHub App, by OIDC (Codecov, crates.io Trusted Publishing, AWS) or not replaceable, with an order of work and five questions for CireSnave (org-level secrets could not be read). No value was read. No code change.
+
 ## 0.29.4
 
 - **Tests only: the four Synapse approval records are tested as they stand in `ciresnave/ciresnave`, not as built from the inert example.** `crates/lane-restart/tests/fixtures/approvals/` holds byte-for-byte copies of `synapse-dev-channel-pilot`, `claude-peers-synapse-dev-channels-pilot`, `synapse-dev-channel-restarttest` and `claude-peers-dev-channels` (approvals folder at commit 3b5d508, 2026-10-22T14:26Z); `handlers/real_records.rs` checks each against a hand-written expectation: `parse_and_validate` ok, action `1`, exact roles, `is_active` true for each role one second before `expires_at` and false at it, false for an out-of-scope role (true only for `*`), answers exactly its own Channels set and none of the other two (plus `, server:extra` and `,server:extra` variants), and refuses a screen asking for a password or missing either anchor. The two real captures (`REAL_DIALOG_SCREEN`, `TWO_SERVER_SCREEN`) are each answered only by records naming their set. Mutations on the pilot fixture, each applied once and each failing two tests: one character of Channels, one anchor, one role, the expiry date. Not done: a drift check against the repo (a non-gating job), and a real one-server `server:synapse` capture (none exists; that screen is the two-server capture with its Channels value replaced). The copies go stale when CireSnave edits a record; the commit is named so the comparison is possible.
