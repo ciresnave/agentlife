@@ -140,7 +140,10 @@ try {
   Check 'apply prints the loopback START_URL' ([bool]$startUrl) (Get-Content -LiteralPath $applyOut -Raw)
   $base = ([Uri]$startUrl).GetLeftPart([UriPartial]::Authority)
 
-  $page = Invoke-WebRequest -Uri $startUrl -SkipHttpErrorCheck
+  # The first request arrives LATE, after the script's 2 s accept poll has timed out more than once: it must still be
+  # answered (an accept task abandoned at a poll timeout used to swallow it: CI saw "connection forcibly closed").
+  Start-Sleep -Seconds 5
+  $page = Invoke-WebRequest -Uri $startUrl -SkipHttpErrorCheck -TimeoutSec 20
   $html = [System.Net.WebUtility]::HtmlDecode($page.Content)
   Check 'the start page is a form that POSTs the manifest to the organization page with a state' ($page.StatusCode -eq 200 -and $html.Contains("method=`"post`" action=`"$fakeUrl/organizations/ThinkersJournal/settings/apps/new?state=") -and $html -like '*name="manifest"*') $html
   Check 'the manifest has the permissions and a loopback redirect, no webhook, no events' ($html.Contains('"organization_self_hosted_runners":"write"') -and $html.Contains('"metadata":"read"') -and $html.Contains("`"redirect_url`":`"$base/callback`"") -and $html.Contains('"public":false') -and $html.Contains('"default_events":[]') -and -not $html.Contains('hook_attributes')) $html

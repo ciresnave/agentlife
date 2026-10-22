@@ -210,14 +210,18 @@ function Send-Reply($ctx, [int]$status, [string]$text, [string]$type = 'text/pla
 }
 
 $code = $null
+$pending = $null
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 try {
   while (-not $code) {
     $left = ($deadline - [DateTime]::UtcNow).TotalMilliseconds
     if ($left -le 0) { throw "timed out after $TimeoutSeconds s waiting for GitHub's redirect: nothing was created here" }
-    $pending = $listener.GetContextAsync()
+    # ONE outstanding accept at a time, kept across polls: a task abandoned after a 2 s timeout still collects the next
+    # request and drops it (the browser's redirect from GitHub arrives long after 2 s, and would never be seen).
+    if ($null -eq $pending) { $pending = $listener.GetContextAsync() }
     if (-not $pending.Wait([int][Math]::Min($left, 2000))) { continue }
     $ctx = $pending.Result
+    $pending = $null
     $req = $ctx.Request
     # Loopback only, by the Host header too (a DNS-rebinding page must not be able to talk to this).
     if ($req.Headers['Host'] -ne "127.0.0.1:$port" -or $req.HttpMethod -ne 'GET') { Send-Reply $ctx 400 'bad request'; continue }
