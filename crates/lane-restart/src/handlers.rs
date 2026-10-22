@@ -96,6 +96,13 @@ pub struct MatchSpec {
     /// entry) belongs in `lines`.
     #[serde(default)]
     pub isolated_lines: Vec<String>,
+    /// Makes this a FOLDER-TRUST PREFIX approval (`crate::folder_trust`, board 244): answers the
+    /// folder-trust dialog for any folder strictly under this plain absolute path (for example
+    /// `C:\Projects`), after the path has been resolved on disk. Such a record must carry the
+    /// folder-trust anchors and lines, no `fields` or `isolated_lines`, and the action `<Down><Enter>`
+    /// (see [`refusal_reason`]); a host older than this field refuses the whole record as an unknown field.
+    #[serde(default)]
+    pub folder_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,6 +312,11 @@ fn refusal_reason(handler: &RawHandlerSpec) -> Option<String> {
             "pinned line {l:?} is shorter than {MIN_ANCHOR_LEN} characters or spans lines"
         ));
     }
+    if let Some(prefix) = &handler.match_spec.folder_prefix {
+        if let Some(reason) = folder_prefix_refusal(prefix, handler) {
+            return Some(reason);
+        }
+    }
     if !action_is_allowed(&handler.action) {
         return Some(format!(
             "action {:?} is not a keystroke sequence of at most 3 tokens (at most one letter or \
@@ -316,6 +328,7 @@ fn refusal_reason(handler: &RawHandlerSpec) -> Option<String> {
     texts.extend(handler.match_spec.text_anchors.iter().map(String::as_str));
     texts.extend(handler.match_spec.lines.iter().map(String::as_str));
     texts.extend(handler.match_spec.isolated_lines.iter().map(String::as_str));
+    texts.extend(handler.match_spec.folder_prefix.as_deref());
     for (name, value) in &handler.match_spec.fields {
         texts.push(name);
         texts.push(value);
@@ -341,6 +354,45 @@ fn refusal_reason(handler: &RawHandlerSpec) -> Option<String> {
         .any(|a| a.quote.trim().is_empty() || a.approving.trim().is_empty())
     {
         return Some("a provenance approval has an empty quote or `approving`".into());
+    }
+    None
+}
+
+/// The only dialog a folder-prefix record may answer, and the only way it may answer it.
+const TRUST_ANCHOR: &str = "Quick safety check";
+const TRUST_LINES: [&str; 2] = ["Accessing workspace:", "Yes, I trust this folder"];
+const TRUST_ACTION: &str = "<Down><Enter>";
+
+/// Why a `folder_prefix` record must be refused, or `None`. Such a record can answer exactly the
+/// folder-trust dialog (choosing "Yes, I trust this folder": the default is "No, exit", so Down then
+/// Enter) and nothing else, whatever else its JSON says.
+fn folder_prefix_refusal(prefix: &str, handler: &RawHandlerSpec) -> Option<String> {
+    let Some((_, comps)) = crate::folder_trust::split_path(prefix) else {
+        return Some(format!(
+            "folder_prefix {prefix:?} is not a plain absolute drive path (no UNC, `..`, `/`, 8.3 name or trailing `\\`)"
+        ));
+    };
+    if comps.is_empty() {
+        return Some("folder_prefix is a drive root".into());
+    }
+    let m = &handler.match_spec;
+    if !m.text_anchors.iter().any(|a| a.contains(TRUST_ANCHOR))
+        || !TRUST_LINES
+            .iter()
+            .all(|l| m.lines.iter().any(|x| x.trim() == *l))
+    {
+        return Some(format!(
+            "a folder_prefix record must pin the folder-trust dialog: anchor {TRUST_ANCHOR:?} and lines {TRUST_LINES:?}"
+        ));
+    }
+    if !m.fields.is_empty() || !m.isolated_lines.is_empty() {
+        return Some("a folder_prefix record may not also pin fields or isolated_lines".into());
+    }
+    if handler.action != TRUST_ACTION {
+        return Some(format!(
+            "a folder_prefix record's action must be exactly {TRUST_ACTION:?}, not {:?}",
+            handler.action
+        ));
     }
     None
 }
@@ -413,6 +465,36 @@ fn isolated_line_matches(screen_text: &str, pinned: &str) -> bool {
 /// mention a secret (§12.3a) - a dialog that asks for one is never
 /// answered, even by a handler whose anchors it happens to contain.
 pub fn matches(handler: &HandlerSpec, screen_text: &str) -> bool {
+    matches_with(handler, screen_text, &crate::folder_trust::FsResolver)
+}
+
+/// [`matches`] with the filesystem a `folder_prefix` record resolves paths on made explicit.
+pub fn matches_with(
+    handler: &HandlerSpec,
+    screen_text: &str,
+    resolver: &dyn crate::folder_trust::FolderResolver,
+) -> bool {
+    base_matches(handler, screen_text) && trusted_folder_of(handler, screen_text, resolver).is_ok()
+}
+
+/// For a `folder_prefix` record: `Ok(Some(path))` when the dialog's folder is trusted (the resolved
+/// canonical path), `Err(())` when it is not; `Ok(None)` for every other record.
+#[allow(clippy::result_unit_err)]
+pub fn trusted_folder_of(
+    handler: &HandlerSpec,
+    screen_text: &str,
+    resolver: &dyn crate::folder_trust::FolderResolver,
+) -> Result<Option<String>, ()> {
+    let Some(prefix) = &handler.match_spec.folder_prefix else {
+        return Ok(None);
+    };
+    let shown = crate::folder_trust::dialog_folder(screen_text).ok_or(())?;
+    crate::folder_trust::trusted_folder(prefix, &shown, resolver)
+        .map(Some)
+        .ok_or(())
+}
+
+fn base_matches(handler: &HandlerSpec, screen_text: &str) -> bool {
     let anchors_ok = handler
         .match_spec
         .text_anchors
@@ -443,9 +525,36 @@ pub fn find_matching_handler<'a>(
     now: chrono::DateTime<chrono::Utc>,
     screen_text: &str,
 ) -> Option<&'a HandlerSpec> {
+    find_matching_handler_resolved(
+        handlers,
+        role,
+        now,
+        screen_text,
+        &crate::folder_trust::FsResolver,
+    )
+    .map(|(h, _)| h)
+}
+
+/// As [`find_matching_handler`], with the resolver explicit and the resolved folder returned for a
+/// `folder_prefix` record (so the host logs exactly the path that was checked, not a second lookup).
+pub fn find_matching_handler_resolved<'a>(
+    handlers: &'a [HandlerSpec],
+    role: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    screen_text: &str,
+    resolver: &dyn crate::folder_trust::FolderResolver,
+) -> Option<(&'a HandlerSpec, Option<String>)> {
     handlers
         .iter()
-        .find(|h| is_active(h, role, now) && matches(h, screen_text))
+        .filter(|h| is_active(h, role, now))
+        .find_map(|h| {
+            if !base_matches(h, screen_text) {
+                return None;
+            }
+            trusted_folder_of(h, screen_text, resolver)
+                .ok()
+                .map(|folder| (h, folder))
+        })
 }
 
 /// Per-anchor, per-field detail behind a `matches()` verdict - PM finding,
@@ -464,6 +573,9 @@ pub struct MatchReport {
     pub lines: Vec<(String, bool)>,
     /// The secret word on screen that vetoed a match, if any.
     pub secret_word: Option<&'static str>,
+    /// For a `folder_prefix` record: the folder the dialog showed (or `(none)`) and whether it is
+    /// trusted under the prefix on disk.
+    pub folder: Option<(String, bool)>,
     pub matched: bool,
 }
 
@@ -499,7 +611,14 @@ pub fn match_report(
         )
     }));
     let secret_word = secret_word_in(screen_text);
+    let folder = handler.match_spec.folder_prefix.as_ref().map(|_| {
+        let shown =
+            crate::folder_trust::dialog_folder(screen_text).unwrap_or_else(|| "(none)".into());
+        let ok = trusted_folder_of(handler, screen_text, &crate::folder_trust::FsResolver).is_ok();
+        (shown, ok)
+    });
     let matched = active
+        && folder.as_ref().is_none_or(|(_, ok)| *ok)
         && anchors.iter().all(|(_, ok)| *ok)
         && fields.iter().all(|(_, _, ok)| *ok)
         && lines.iter().all(|(_, ok)| *ok)
@@ -511,6 +630,7 @@ pub fn match_report(
         fields,
         lines,
         secret_word,
+        folder,
         matched,
     }
 }
@@ -1272,5 +1392,184 @@ mod tests {
             &h,
             "Do you want to run this command? 1. Yes 2. No"
         ));
+    }
+
+    // -- folder-trust PREFIX approval (board 244) ------------------------------------------------------
+
+    use crate::folder_trust::staged::StagedFs;
+
+    /// The record CireSnave's repo gets (draft in `approval-example/`).
+    const PREFIX_JSON: &str = include_str!("../approval-example/trust-folder-prefix.json");
+
+    fn prefix_handler() -> HandlerSpec {
+        parse_and_validate(PREFIX_JSON).expect("the folder-prefix record must pass validation")
+    }
+
+    /// The real dialog, shaped exactly like `.lane-state/unhandled-prompts/2026-10-22T00-29-28...txt`
+    /// (configurant) and `2026-10-21T23-09-02...txt` (antspawn), with `path` substituted.
+    fn trust_screen(path: &str) -> String {
+        format!(
+            "\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\n\n\n Accessing workspace:\n\
+\n {path}\n\
+\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source\n \
+project, or work from your team). If not, take a moment to review what's in this folder first.\n\
+\n Claude Code'll be able to read, edit, and execute files here.\n\
+\n Security guide\n\
+\n ❯ No, exit\n   Yes, I trust this folder\n\
+\n Enter to confirm · Esc to cancel\n"
+        )
+    }
+
+    fn fs() -> StagedFs {
+        StagedFs::with(&[
+            r"C:\Projects\configurant",
+            r"C:\Projects\antspawn",
+            r"C:\Projects\a\deep\er",
+            r"C:\Projects-evil\x",
+            r"C:\ProjectsX\y",
+        ])
+        .alias(r"C:\Projects\evil", r"D:\secrets")
+        .alias(r"C:\Projects\evil2", r"C:\Windows\System32")
+        .alias(r"C:\Projects\LONGNA~1", r"C:\Projects\longname-real")
+    }
+
+    fn answers(screen: &str) -> Option<String> {
+        let hs = [prefix_handler()];
+        find_matching_handler_resolved(&hs, "any-lane", chrono::Utc::now(), screen, &fs())
+            .map(|(h, folder)| format!("{}:{}", h.id, folder.unwrap_or_default()))
+    }
+
+    #[test]
+    fn the_prefix_record_answers_the_real_new_lane_dialogs_and_reports_the_resolved_folder() {
+        assert_eq!(
+            answers(&trust_screen(r"C:\Projects\configurant")).as_deref(),
+            Some(r"trust-folder-prefix:C:\Projects\configurant")
+        );
+        assert_eq!(
+            answers(&trust_screen(r"C:\Projects\antspawn")).as_deref(),
+            Some(r"trust-folder-prefix:C:\Projects\antspawn")
+        );
+        assert!(answers(&trust_screen(r"C:\Projects\a\deep\er")).is_some());
+        assert_eq!(prefix_handler().action, "<Down><Enter>");
+    }
+
+    #[test]
+    fn every_way_out_of_the_prefix_is_refused() {
+        // Control first: the same harness answers a good folder, so the refusals below are real.
+        assert!(answers(&trust_screen(r"C:\Projects\configurant")).is_some());
+        for bad in [
+            r"C:\Projects\..\Windows", // `..` escape
+            r"C:\Projects\configurant\..\..\Windows",
+            r"C:\Projects\evil",                    // junction to another drive
+            r"C:\Projects\evil2",                   // junction into C:\Windows
+            r"C:\Projects\LONGNA~1",                // 8.3 short name
+            r"\\server\share\Projects\configurant", // UNC
+            r"\\?\C:\Projects\configurant",         // verbatim path
+            r"C:\Projects-evil\x",                  // prefix confusion
+            r"C:\ProjectsX\y",
+            r"C:\Projects",             // the prefix itself
+            r"C:\Projects\ghost",       // not on disk
+            r"D:\Projects\configurant", // another drive
+            r"C:/Projects/configurant", // wrong separators
+        ] {
+            assert_eq!(answers(&trust_screen(bad)), None, "{bad}");
+        }
+        // A path the terminal wrapped onto a second row is never trusted.
+        let wrapped = trust_screen(r"C:\Projects\configurant")
+            .replace(r"C:\Projects\configurant", "C:\\Projects\\configu\n rant");
+        assert_eq!(answers(&wrapped), None);
+    }
+
+    #[test]
+    fn it_answers_the_trust_dialog_and_nothing_else() {
+        let good = trust_screen(r"C:\Projects\configurant");
+        assert!(answers(&good).is_some());
+        // The development-channels dialogs (real captures) are never answered by it.
+        for other in [REAL_DIALOG_SCREEN, TWO_SERVER_SCREEN] {
+            assert_eq!(answers(other), None);
+        }
+        // A dialog that also asks for a secret is never answered, anchors or not.
+        assert_eq!(answers(&format!("{good}\n Enter your password:\n")), None);
+        assert_eq!(
+            answers(&good.replace("Quick safety check", "Quick check")),
+            None
+        );
+        assert_eq!(
+            answers(&good.replace("Yes, I trust this folder", "Yes, trust it")),
+            None
+        );
+        assert_eq!(
+            answers(&good.replace("Accessing workspace:", "Opening workspace:")),
+            None
+        );
+        // Something else that merely names a folder.
+        assert_eq!(
+            answers("Delete C:\\Projects\\configurant? 1. Yes 2. No"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_expired_prefix_record_answers_nothing() {
+        let h = prefix_handler();
+        let expiry = h.expires_at.expect("the record carries an expiry");
+        let hs = [h];
+        let screen = trust_screen(r"C:\Projects\configurant");
+        let before = expiry - chrono::Duration::seconds(1);
+        let after = expiry + chrono::Duration::seconds(1);
+        assert!(find_matching_handler_resolved(&hs, "x", before, &screen, &fs()).is_some());
+        assert!(find_matching_handler_resolved(&hs, "x", after, &screen, &fs()).is_none());
+    }
+
+    #[test]
+    fn a_folder_prefix_record_that_could_answer_anything_else_is_refused_at_load() {
+        let prefix_line = r#""folder_prefix": "C:\\Projects""#;
+        assert_eq!(PREFIX_JSON.matches(prefix_line).count(), 1);
+        let with_prefix =
+            |p: &str| PREFIX_JSON.replace(prefix_line, &format!(r#""folder_prefix": "{p}""#));
+        for bad in [
+            r"\\\\server\\share",
+            r"C:\\Projects\\..\\Windows",
+            r"C:\\Projects\\",
+            r"C:\\",
+            r"C:/Projects",
+            r"Projects",
+            r"C:\\PROGRA~1",
+            r"\\\\?\\C:\\Projects",
+        ] {
+            assert!(parse_and_validate(&with_prefix(bad)).is_err(), "{bad}");
+        }
+        assert!(
+            parse_and_validate(&with_prefix(r"C:\\Projects")).is_ok(),
+            "control"
+        );
+        assert!(parse_and_validate(&with_prefix(r"D:\\Work\\Repos")).is_ok());
+        // Any other action (it could answer a different dialog), or a missing pin on the trust dialog.
+        let mutate = |from: &str, to: &str| {
+            assert_eq!(PREFIX_JSON.matches(from).count(), 1, "{from}");
+            parse_and_validate(&PREFIX_JSON.replace(from, to))
+        };
+        assert!(mutate(r#""action": "<Down><Enter>""#, r#""action": "1\r""#).is_err());
+        assert!(mutate(r#""action": "<Down><Enter>""#, r#""action": "<Enter>""#).is_err());
+        assert!(mutate(r#""Quick safety check""#, r#""Some other dialog""#).is_err());
+        assert!(mutate(r#""Yes, I trust this folder""#, r#""Yes, I do""#).is_err());
+        assert!(mutate(r#""Accessing workspace:""#, r#""Opening workspace:""#).is_err());
+        assert!(mutate(
+            r#""lines": ["#,
+            r#""fields": {"Channels": "server:synapse"}, "lines": ["#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_record_without_folder_prefix_still_pins_one_folder_exactly() {
+        // The per-lane records keep working unchanged: a different folder is not answered.
+        let h = parse_and_validate(TRUST_EXAMPLE).unwrap();
+        assert!(h.match_spec.folder_prefix.is_none());
+        assert!(matches(&h, &trust_screen(r"C:\Projects\agentlife")));
+        assert!(!matches(&h, &trust_screen(r"C:\Projects\agentlife-evil")));
+        assert!(!matches(&h, &trust_screen(r"C:\Projects\configurant")));
     }
 }

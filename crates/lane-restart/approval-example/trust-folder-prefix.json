@@ -1,0 +1,33 @@
+{
+  "id": "trust-folder-prefix",
+  "match": {
+    "text_anchors": [
+      "Quick safety check"
+    ],
+    "lines": [
+      "Accessing workspace:",
+      "Yes, I trust this folder"
+    ],
+    "folder_prefix": "C:\\Projects"
+  },
+  "action": "<Down><Enter>",
+  "scope": {
+    "roles": ["*"]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approvals": [
+      {
+        "said_on": "2026-10-14",
+        "quote": "I always trust our own projects because the only two people working on them are you and I.",
+        "approving": "Answering Claude Code's folder-trust dialog Yes, one record per lane folder (the per-lane trust-folder-<role> records)."
+      },
+      {
+        "said_on": "2026-10-22",
+        "quote": "Yes.  Blanket trust all directories under C:\\Projects so future projects are already approved for that dialog.",
+        "approving": "Replacing the one-record-per-lane trust-folder records, for NEW folders, with this single record: on a session lane-restart relaunched, answer Claude Code's folder-trust dialog Yes (Down then Enter; the default is 'No, exit') for any folder STRICTLY UNDER C:\\Projects, and for nothing else. The dialog must show 'Quick safety check', the line 'Accessing workspace:' and the line 'Yes, I trust this folder', and the folder on one row followed by a blank row; the folder must be a plain C:\\ path (no UNC, no '..', no 8.3 short name), strictly under C:\\Projects component by component (C:\\Projects-evil and C:\\ProjectsX do not qualify, nor does C:\\Projects itself), and must equal its own canonical form on disk (a junction or symlink out of C:\\Projects, or any alias, is refused). The risk was accepted knowingly: anything that can create a folder under C:\\Projects is trusted. Every answer is written to .lane-state/folder-trust-answers.log (lane, resolved folder, time) and announced to the notify role. A dialog that mentions a secret is never answered. Expires 2027-04-22."
+      }
+    ]
+  },
+  "expires_at": "2027-04-22T00:00:00Z"
+}

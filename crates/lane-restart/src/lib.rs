@@ -21,6 +21,7 @@ pub mod approvals;
 pub mod authorize;
 pub mod disk;
 pub mod duplicate;
+pub mod folder_trust;
 pub mod handlers;
 pub mod handoff_lint;
 pub mod host;

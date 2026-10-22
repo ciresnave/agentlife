@@ -201,6 +201,9 @@ pub struct HandlerAnswered {
     /// 2026-09-19: "any injection with the bytes" needs the actual bytes on
     /// the record, not just that an injection happened.
     pub injected_action: String,
+    /// For a `folder_prefix` (folder-trust) approval: the canonical folder it just trusted. Every such
+    /// answer is written to `folder-trust-answers.log` and announced to the notify role.
+    pub resolved_folder: Option<String>,
 }
 
 /// Relays one chunk of the CHILD's real output to `output_writer`
@@ -272,7 +275,33 @@ pub fn check_and_inject(
     input_writer: &mut impl Write,
     on_answered: &mut impl FnMut(HandlerAnswered),
 ) -> std::io::Result<()> {
-    if let Some(handler) = handlers::find_matching_handler(handler_list, role, now, screen_text) {
+    check_and_inject_with(
+        &crate::folder_trust::FsResolver,
+        handler_list,
+        role,
+        now,
+        screen_text,
+        matched_ids,
+        input_writer,
+        on_answered,
+    )
+}
+
+/// [`check_and_inject`] with the filesystem that folder-trust approvals resolve paths on explicit.
+#[allow(clippy::too_many_arguments)]
+pub fn check_and_inject_with(
+    resolver: &dyn crate::folder_trust::FolderResolver,
+    handler_list: &[HandlerSpec],
+    role: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    screen_text: &str,
+    matched_ids: &mut HashSet<String>,
+    input_writer: &mut impl Write,
+    on_answered: &mut impl FnMut(HandlerAnswered),
+) -> std::io::Result<()> {
+    if let Some((handler, resolved_folder)) =
+        handlers::find_matching_handler_resolved(handler_list, role, now, screen_text, resolver)
+    {
         if matched_ids.insert(handler.id.clone()) {
             // Validated at load, so this cannot be None; if it ever is, send nothing.
             let bytes = handlers::action_bytes(&handler.action).ok_or_else(|| {
@@ -290,6 +319,7 @@ pub fn check_and_inject(
                 handler_id: handler.id.clone(),
                 matched_screen_text: screen_text.to_string(),
                 injected_action: handler.action.clone(),
+                resolved_folder,
             });
         }
     }
@@ -776,6 +806,15 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
 
     let (cols, rows) = current_console_size().unwrap_or((80, 25));
     let log_path_for_answered = log_path.clone();
+    let role_for_answered = role.to_string();
+    let notify_for_answered = (
+        config
+            .as_ref()
+            .map_or("pm".to_string(), |c| c.notify_role.clone()),
+        config
+            .as_ref()
+            .map_or(notify::Transport::Broker, |c| c.notify_transport),
+    );
     let log_path_for_attempts = log_path.clone();
     let log_path_for_raw_io = log_path.clone();
     let log_path_for_unhandled = log_path.clone();
@@ -828,6 +867,17 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                     answered.matched_screen_text
                 ),
             );
+            if let Some(folder) = &answered.resolved_folder {
+                record_folder_trust_answer(
+                    &crate::state_dir(),
+                    &role_for_answered,
+                    &answered.handler_id,
+                    folder,
+                    &notify_for_answered.0,
+                    notify_for_answered.1,
+                    &log_path_for_answered,
+                );
+            }
         },
         on_unhandled,
         STARTUP_WINDOW,
@@ -848,6 +898,15 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                         r.handler_id, r.active, r.matched, r.anchors, r.fields, r.lines
                     ),
                 );
+                if let Some((shown, ok)) = &r.folder {
+                    append_host_log(
+                        &log_path_for_attempts,
+                        &format!(
+                            "  handler={} folder={shown:?} trusted_under_prefix={ok}",
+                            r.handler_id
+                        ),
+                    );
+                }
             }
         },
         move |direction, bytes| {
@@ -864,6 +923,73 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
         Some(watch_hub),
         None,
     )
+}
+
+/// One line of `folder-trust-answers.log`: time, lane, handler, resolved folder.
+fn folder_trust_record(now: &str, role: &str, handler_id: &str, folder: &str) -> String {
+    serde_json::json!({"time": now, "lane": role, "handler": handler_id, "folder": folder})
+        .to_string()
+}
+
+/// The one-line notice sent to the notify role (compact [NOTICE] format, MESSAGE-FORMATS.md).
+fn folder_trust_notice(now: &str, role: &str, handler_id: &str, folder: &str) -> String {
+    format!(
+        "[NOTICE] topic=folder-trust-auto-answer affects={role} when={now} action=none path={folder} handler={handler_id}"
+    )
+}
+
+/// Every folder-trust prefix auto-answer is recorded where the PM reads it
+/// (`<state dir>/folder-trust-answers.log`, one JSON object per line) and announced to the notify
+/// role in one line (board 244: the answer is blanket, so each use is visible). Never takes down the
+/// relay: failures are logged to the host log and the announcement is best-effort on its own thread
+/// (the broker call can be slow).
+fn record_folder_trust_answer(
+    state_dir: &std::path::Path,
+    role: &str,
+    handler_id: &str,
+    folder: &str,
+    notify_role: &str,
+    transport: notify::Transport,
+    host_log: &std::path::Path,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let log = state_dir.join("folder-trust-answers.log");
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .and_then(|mut f| writeln!(f, "{}", folder_trust_record(&now, role, handler_id, folder)))
+    {
+        append_host_log(
+            host_log,
+            &format!(
+                "[{now}] FOLDER-TRUST log {} not written: {e}",
+                log.display()
+            ),
+        );
+    }
+    let text = folder_trust_notice(&now, role, handler_id, folder);
+    let (state_dir, notify_role, host_log) = (
+        state_dir.to_path_buf(),
+        notify_role.to_string(),
+        host_log.to_path_buf(),
+    );
+    std::thread::spawn(move || {
+        let sent = match transport {
+            notify::Transport::Broker => {
+                notify::notify_role(notify::broker_addr(), &state_dir, &notify_role, &text)
+                    .map(|_| ())
+            }
+            notify::Transport::Synapse => {
+                notify::enqueue(&state_dir, &notify_role, &text).map(|_| ())
+            }
+        };
+        let line = match sent {
+            Ok(()) => format!("[{now}] FOLDER-TRUST notice sent to {notify_role}"),
+            Err(e) => format!("[{now}] FOLDER-TRUST notice to {notify_role} FAILED: {e}"),
+        };
+        append_host_log(&host_log, &line);
+    });
 }
 
 /// PM finding, 2026-09-19 (real-restart-2): "first ~200 bytes escaped" -
@@ -2166,5 +2292,97 @@ mod tests {
             finished.load(std::sync::atomic::Ordering::SeqCst),
             "run must not return while on_unhandled is still running"
         );
+    }
+
+    // -- folder-trust prefix approvals at the host ------------------------------------------------------
+
+    const PREFIX_JSON: &str = include_str!("../approval-example/trust-folder-prefix.json");
+
+    fn trust_dialog(path: &str) -> String {
+        format!(
+            "\n Accessing workspace:\n\n {path}\n\n Quick safety check: Is this a project you created or one you trust?\n\n \
+             ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n"
+        )
+    }
+
+    #[test]
+    fn a_folder_trust_prefix_answer_sends_down_enter_and_reports_the_resolved_folder() {
+        let fs = crate::folder_trust::staged::StagedFs::with(&[r"C:\Projects\newlane"])
+            .alias(r"C:\Projects\evil", r"D:\x");
+        let handler: HandlerSpec = serde_json::from_str(PREFIX_JSON).unwrap();
+        let run = |path: &str| {
+            let mut input = Vec::new();
+            let mut answered = Vec::new();
+            check_and_inject_with(
+                &fs,
+                std::slice::from_ref(&handler),
+                "newlane",
+                chrono::Utc::now(),
+                &trust_dialog(path),
+                &mut HashSet::new(),
+                &mut input,
+                &mut |a| answered.push((a.handler_id, a.resolved_folder)),
+            )
+            .unwrap();
+            (input, answered)
+        };
+        let (input, answered) = run(r"C:\Projects\newlane");
+        assert_eq!(input, handlers::action_bytes("<Down><Enter>").unwrap());
+        assert_eq!(
+            answered,
+            vec![(
+                "trust-folder-prefix".to_string(),
+                Some(r"C:\Projects\newlane".to_string())
+            )]
+        );
+        // The junction out of the prefix: nothing is sent, nothing is reported.
+        let (input, answered) = run(r"C:\Projects\evil");
+        assert!(
+            input.is_empty() && answered.is_empty(),
+            "{input:?} {answered:?}"
+        );
+    }
+
+    #[test]
+    fn a_folder_trust_answer_is_logged_for_the_pm_and_announced_as_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let host_log = dir.path().join("host.log");
+        record_folder_trust_answer(
+            dir.path(),
+            "newlane",
+            "trust-folder-prefix",
+            r"C:\Projects\newlane",
+            "pm",
+            notify::Transport::Synapse,
+            &host_log,
+        );
+        let log = std::fs::read_to_string(dir.path().join("folder-trust-answers.log")).unwrap();
+        let line: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
+        assert_eq!(line["lane"], "newlane");
+        assert_eq!(line["handler"], "trust-folder-prefix");
+        assert_eq!(line["folder"], r"C:\Projects\newlane");
+        assert!(line["time"].as_str().is_some_and(|t| t.contains('T')));
+        // The notice is queued on its own thread: wait for it.
+        let outbox = notify::outbox_dir(dir.path());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let queued = loop {
+            let files: Vec<_> = std::fs::read_dir(&outbox)
+                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                .unwrap_or_default();
+            if let Some(f) = files.into_iter().next() {
+                break std::fs::read_to_string(f).unwrap();
+            }
+            assert!(Instant::now() < deadline, "the notice was never queued");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            queued.contains("folder-trust-auto-answer") && queued.contains("newlane"),
+            "{queued}"
+        );
+        assert!(
+            queued.contains(r"C:\\Projects\\newlane") || queued.contains(r"C:\Projects\newlane"),
+            "{queued}"
+        );
+        assert!(!queued.contains('\n') || queued.matches("[NOTICE]").count() == 1);
     }
 }
