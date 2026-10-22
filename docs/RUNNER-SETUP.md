@@ -228,6 +228,10 @@ and typed at the script's prompt (`Read-Host -AsSecureString`). It expires in an
 stored. `config.cmd` takes it on its command line, so it is visible to administrators for the length of the call.
 Removal needs a removal token the same way (`-Remove`).
 
+**Two more defects from the same live runs (2026-10-22), fixed in the script:** the generated password may hold only letters, digits and `- _ @` (`config.cmd` is a `.cmd` file: `% ^ !` are mangled by cmd.exe, which showed as `Invalid windows credentials entered` and left a runner registered with no service), and when `gh-runner` already exists its rotated password is applied in the same run to every service that logs on as it (`Win32_Service.Change`), because a password nobody knows would otherwise break each existing runner at its next start. Tested in `scripts/tests/gh-runner-setup-service.tests.ps1` (a real cmd.exe round trip; fake services). Not run: the `Change` call against a real service, and a full `-Apply` after the fixes.
+
+**Service names are not predictable (found 2026-10-22, live `-Apply` for `ThinkersJournal/ThinkersFoundation-site`):** the runner truncates a long service name (the real one ended `...TUF-LAPTOP-ThinkersJ-9595`; the untruncated name is 105 characters), so the script no longer builds the name. `Find-RunnerService` finds the service whose executable (`<runner dir>\bin\RunnerService.exe`) lives under the runner's directory, for the read-back after configure and for the absence check after `-Remove` (the service is looked up before `config.cmd remove`, since afterwards there is nothing to find). Two services under one directory are refused rather than guessed. Tested with fake service objects (`scripts/tests/gh-runner-setup-service.tests.ps1`), including the over-80-character case and a sibling directory that shares the prefix; not re-run against a real install.
+
 ## 5. Service or interactive: MEASURED in spike run 2 (2026-10-17)
 
 The script installs a **Windows service** under `gh-runner`. The question is whether CUDA and Vulkan work from a
