@@ -157,6 +157,14 @@ pub struct DirEntry {
     pub size: u64,
 }
 
+/// A folder as ONE round trip returned it: the default branch's tip, the listing, and every file's
+/// bytes (`None` for a file too large, truncated or binary to have been delivered).
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub commit: String,
+    pub entries: Vec<(DirEntry, Option<Vec<u8>>)>,
+}
+
 /// Read-only access to one GitHub repo. A trait so the loading rules can be
 /// tested without a network; [`GhReader`] is the real one.
 pub trait RepoReader {
@@ -164,6 +172,13 @@ pub trait RepoReader {
     fn default_branch_commit(&self, repo: &str) -> Result<String, String>;
     fn list_dir(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<DirEntry>, String>;
     fn read_file(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<u8>, String>;
+    /// The tip, the listing and every file in ONE call, if this reader can: `None` means it cannot
+    /// (use [`default_branch_commit`](Self::default_branch_commit), [`list_dir`](Self::list_dir) and
+    /// [`read_file`](Self::read_file)). 2026-10-22: one `gh` read per file let five approvals starve a
+    /// 20 s budget; a snapshot makes the cost of a load independent of how many approvals exist.
+    fn snapshot(&self, _repo: &str, _path: &str) -> Option<Result<Snapshot, String>> {
+        None
+    }
     /// Set when the last [`default_branch_commit`](Self::default_branch_commit) answer was NOT read
     /// from GitHub but taken from a remembered, fully loaded commit (see [`CachingReader`]).
     fn stale_note(&self) -> Option<String> {
@@ -224,8 +239,50 @@ impl Loaded {
 /// reviewer sees in the PR is the handler the log names.
 pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
     let mut loaded = Loaded::default();
+    if let Some(snapshot) = reader.snapshot(&source.repo, &source.path) {
+        let snap = match snapshot {
+            Ok(s) => s,
+            Err(e) => {
+                loaded.error = Some(format!(
+                    "could not resolve {}'s default branch: {e}",
+                    source.repo
+                ));
+                return loaded;
+            }
+        };
+        if !is_sha(&snap.commit) {
+            loaded.error = Some(format!(
+                "default branch resolved to {:?}, not a commit SHA",
+                snap.commit
+            ));
+            return loaded;
+        }
+        loaded.source = Some(format!(
+            "{}:{}@{}",
+            source.repo,
+            source.path,
+            &snap.commit[..12]
+        ));
+        loaded.stale = reader.stale_note();
+        let mut bodies: std::collections::HashMap<String, Option<Vec<u8>>> = Default::default();
+        let mut entries = Vec::new();
+        for (entry, body) in snap.entries {
+            bodies.insert(entry.name.clone(), body);
+            entries.push(entry);
+        }
+        load_entries(&entries, &mut loaded, &mut |name| {
+            bodies
+                .remove(name)
+                .flatten()
+                .ok_or_else(|| "its content was not delivered with the folder".to_string())
+        });
+        if loaded.error.is_none() {
+            reader.record_good(&source.repo, &snap.commit);
+        }
+        return loaded;
+    }
     let commit = match reader.default_branch_commit(&source.repo) {
-        Ok(c) if c.len() == 40 && c.chars().all(|ch| ch.is_ascii_hexdigit()) => c,
+        Ok(c) if is_sha(&c) => c,
         Ok(c) => {
             loaded.error = Some(format!(
                 "default branch resolved to {c:?}, not a commit SHA"
@@ -249,6 +306,25 @@ pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
             return loaded;
         }
     };
+    load_entries(&entries, &mut loaded, &mut |name| {
+        reader.read_file(&source.repo, &format!("{}/{name}", source.path), &commit)
+    });
+    if loaded.error.is_none() {
+        reader.record_good(&source.repo, &commit);
+    }
+    loaded
+}
+
+fn is_sha(c: &str) -> bool {
+    c.len() == 40 && c.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+/// Parses and validates every `*.json` entry, reading each body through `fetch`.
+fn load_entries(
+    entries: &[DirEntry],
+    loaded: &mut Loaded,
+    fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+) {
     let json_files: Vec<&DirEntry> = entries
         .iter()
         .filter(|e| e.kind == "file" && e.name.ends_with(".json"))
@@ -258,7 +334,7 @@ pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
             "{} approval files exceeds the limit of {MAX_FILES}",
             json_files.len()
         ));
-        return loaded;
+        return;
     }
     for entry in json_files {
         let name = entry.name.clone();
@@ -269,14 +345,13 @@ pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
             ));
             continue;
         }
-        let bytes =
-            match reader.read_file(&source.repo, &format!("{}/{name}", source.path), &commit) {
-                Ok(b) => b,
-                Err(e) => {
-                    loaded.refused.push((name, format!("could not read: {e}")));
-                    continue;
-                }
-            };
+        let bytes = match fetch(&name) {
+            Ok(b) => b,
+            Err(e) => {
+                loaded.refused.push((name, format!("could not read: {e}")));
+                continue;
+            }
+        };
         let Ok(text) = String::from_utf8(bytes) else {
             loaded.refused.push((name, "not UTF-8".into()));
             continue;
@@ -292,8 +367,6 @@ pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
             Err(reason) => loaded.refused.push((name, reason)),
         }
     }
-    reader.record_good(&source.repo, &commit);
-    loaded
 }
 
 /// Loads the user's config from `home` and then the approvals it names.
@@ -471,13 +544,10 @@ impl<R: RepoReader> CachingReader<R> {
     }
 }
 
-impl<R: RepoReader> RepoReader for CachingReader<R> {
-    fn default_branch_commit(&self, repo: &str) -> Result<String, String> {
-        *self.stale.borrow_mut() = None;
-        let error = match self.inner.default_branch_commit(repo) {
-            Ok(commit) => return Ok(commit),
-            Err(e) => e,
-        };
+impl<R: RepoReader> CachingReader<R> {
+    /// The tip lookup failed with `error`: a transient failure may fall back to the remembered commit
+    /// (marked stale); anything else, or nothing fresh remembered, fails closed with `error` in the message.
+    fn fallback_commit(&self, repo: &str, error: String) -> Result<String, String> {
         if !is_transient(&error) {
             return Err(error);
         }
@@ -499,6 +569,61 @@ impl<R: RepoReader> RepoReader for CachingReader<R> {
             human(age)
         ));
         Ok(good.commit)
+    }
+
+    /// The snapshot call failed: rebuild it from the remembered commit's cached listing and files, if
+    /// the failure is transient and that commit is fresh; otherwise fail closed.
+    fn snapshot_from_memory(
+        &self,
+        repo: &str,
+        path: &str,
+        error: String,
+    ) -> Result<Snapshot, String> {
+        let commit = self.fallback_commit(repo, error)?;
+        let listing: Vec<DirEntry> = self
+            .get(&self.entry("dir", repo, path, &commit))
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or_else(|| "the remembered commit's listing is not cached".to_string())?;
+        let entries = listing
+            .into_iter()
+            .map(|e| {
+                let body =
+                    self.get(&self.entry("file", repo, &format!("{path}/{}", e.name), &commit));
+                (e, body)
+            })
+            .collect();
+        Ok(Snapshot { commit, entries })
+    }
+}
+
+impl<R: RepoReader> RepoReader for CachingReader<R> {
+    fn default_branch_commit(&self, repo: &str) -> Result<String, String> {
+        *self.stale.borrow_mut() = None;
+        match self.inner.default_branch_commit(repo) {
+            Ok(commit) => Ok(commit),
+            Err(error) => self.fallback_commit(repo, error),
+        }
+    }
+
+    fn snapshot(&self, repo: &str, path: &str) -> Option<Result<Snapshot, String>> {
+        *self.stale.borrow_mut() = None;
+        let result = self.inner.snapshot(repo, path)?;
+        Some(match result {
+            Ok(snap) => {
+                let listing: Vec<DirEntry> = snap.entries.iter().map(|(e, _)| e.clone()).collect();
+                if let Ok(bytes) = serde_json::to_vec(&listing) {
+                    self.put(&self.entry("dir", repo, path, &snap.commit), &bytes);
+                }
+                for (entry, body) in &snap.entries {
+                    if let Some(body) = body {
+                        let p = format!("{path}/{}", entry.name);
+                        self.put(&self.entry("file", repo, &p, &snap.commit), body);
+                    }
+                }
+                Ok(snap)
+            }
+            Err(error) => self.snapshot_from_memory(repo, path, error),
+        })
     }
 
     fn stale_note(&self) -> Option<String> {
@@ -569,7 +694,132 @@ struct CommitInfo {
     sha: String,
 }
 
+/// The whole approvals folder in one GraphQL call: `HEAD` is the default branch, so `head.oid` is the
+/// tip and `dir` is the folder at it, with every blob's text. Both are resolved by the one query.
+const SNAPSHOT_QUERY: &str = "query($owner:String!,$name:String!,$expr:String!){repository(owner:$owner,name:$name){head:object(expression:\"HEAD\"){oid} dir:object(expression:$expr){... on Tree{entries{name type object{... on Blob{byteSize isTruncated isBinary text}}}}}}}";
+
+#[derive(Deserialize)]
+struct GqlResponse {
+    data: Option<GqlData>,
+    errors: Option<Vec<GqlError>>,
+}
+#[derive(Deserialize)]
+struct GqlError {
+    message: String,
+}
+#[derive(Deserialize)]
+struct GqlData {
+    repository: Option<GqlRepo>,
+}
+#[derive(Deserialize)]
+struct GqlRepo {
+    head: Option<GqlOid>,
+    dir: Option<GqlTree>,
+}
+#[derive(Deserialize)]
+struct GqlOid {
+    oid: Option<String>,
+}
+#[derive(Deserialize)]
+struct GqlTree {
+    entries: Option<Vec<GqlEntry>>,
+}
+#[derive(Deserialize)]
+struct GqlEntry {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+    object: Option<GqlBlob>,
+}
+#[derive(Deserialize)]
+struct GqlBlob {
+    #[serde(rename = "byteSize")]
+    byte_size: Option<u64>,
+    #[serde(rename = "isTruncated")]
+    is_truncated: Option<bool>,
+    #[serde(rename = "isBinary")]
+    is_binary: Option<bool>,
+    text: Option<String>,
+}
+
+/// Turns the GraphQL answer into a [`Snapshot`]. A file that was not delivered whole (too large,
+/// truncated, binary) has no body, and `load` refuses it by name.
+pub fn parse_snapshot(body: &[u8], path: &str) -> Result<Snapshot, String> {
+    let resp: GqlResponse =
+        serde_json::from_slice(body).map_err(|e| format!("unexpected GraphQL response: {e}"))?;
+    let repo = resp.data.and_then(|d| d.repository);
+    let Some(repo) = repo else {
+        let why = resp
+            .errors
+            .and_then(|e| e.into_iter().next())
+            .map_or_else(|| "repository not found".to_string(), |e| e.message);
+        return Err(why);
+    };
+    let commit = repo
+        .head
+        .and_then(|h| h.oid)
+        .ok_or_else(|| "the repository has no default branch tip".to_string())?;
+    let tree = repo
+        .dir
+        .and_then(|d| d.entries)
+        .ok_or_else(|| format!("{path} is not a folder"))?;
+    let entries = tree
+        .into_iter()
+        .map(|e| {
+            let blob = e.object;
+            let size = blob.as_ref().and_then(|b| b.byte_size).unwrap_or(0);
+            let whole = blob
+                .as_ref()
+                .is_some_and(|b| b.is_truncated != Some(true) && b.is_binary != Some(true));
+            let bytes = blob
+                .and_then(|b| b.text)
+                .filter(|_| whole)
+                .map(String::into_bytes);
+            let kind = if e.kind == "blob" {
+                "file".to_string()
+            } else {
+                e.kind
+            };
+            (
+                DirEntry {
+                    name: e.name,
+                    kind,
+                    size,
+                },
+                bytes,
+            )
+        })
+        .collect();
+    Ok(Snapshot { commit, entries })
+}
+
 impl RepoReader for GhReader {
+    /// One call for everything (see [`SNAPSHOT_QUERY`]).
+    fn snapshot(&self, repo: &str, path: &str) -> Option<Result<Snapshot, String>> {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Some(Err(format!("{repo:?} is not owner/name")));
+        };
+        if !valid_repo(repo) || !valid_repo_path(path) {
+            return Some(Err("unusable repository or folder name".into()));
+        }
+        let body = match self.gh(&[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={SNAPSHOT_QUERY}"),
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("name={name}"),
+            "-f",
+            &format!("expr=HEAD:{path}"),
+        ]) {
+            Ok(b) => b,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(parse_snapshot(&body, path))
+    }
+
     /// One call: `repos/{repo}/commits/HEAD`. A repository's HEAD IS its default branch, so this is
     /// the default branch's tip (checked equal to `repos/{repo}/branches/<default>` for
     /// `ciresnave/ciresnave` on 2026-10-22), and it needs one network round trip, not two.
@@ -1209,5 +1459,278 @@ mod tests {
             assert_eq!(loaded.handlers.len(), 0);
             assert!(loaded.error.is_some());
         }
+    }
+
+    // -- one call for the whole folder (2026-10-22: one gh read per file starved the 20 s budget) ------
+
+    /// A reader that can ONLY answer through `snapshot`: any per-file call panics, so a test passing
+    /// proves the load used one round trip.
+    struct BulkRepo {
+        commit: Result<String, String>,
+        files: Vec<(String, Option<String>, u64)>,
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl BulkRepo {
+        fn with_approvals(n: usize) -> Self {
+            let files = (0..n)
+                .map(|i| {
+                    let id = format!("approval-{i}");
+                    let body = approval(&id);
+                    let size = body.len() as u64;
+                    (format!("{id}.json"), Some(body), size)
+                })
+                .collect();
+            Self {
+                commit: Ok(SHA.to_string()),
+                files,
+                calls: Default::default(),
+            }
+        }
+    }
+
+    impl RepoReader for BulkRepo {
+        fn default_branch_commit(&self, _: &str) -> Result<String, String> {
+            panic!("the per-file path was used")
+        }
+        fn list_dir(&self, _: &str, _: &str, _: &str) -> Result<Vec<DirEntry>, String> {
+            panic!("the per-file path was used")
+        }
+        fn read_file(&self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, String> {
+            panic!("the per-file path was used")
+        }
+        fn snapshot(&self, _: &str, _: &str) -> Option<Result<Snapshot, String>> {
+            self.calls.set(self.calls.get() + 1);
+            Some(self.commit.clone().map(|commit| {
+                Snapshot {
+                    commit,
+                    entries: self
+                        .files
+                        .iter()
+                        .map(|(name, body, size)| {
+                            (
+                                DirEntry {
+                                    name: name.clone(),
+                                    kind: "file".into(),
+                                    size: *size,
+                                },
+                                body.as_ref().map(|b| b.as_bytes().to_vec()),
+                            )
+                        })
+                        .collect(),
+                }
+            }))
+        }
+    }
+
+    /// The old shape: only per-file calls, and (like `GhReader`) a budget that runs out after `allowed` of them.
+    struct PerFileWithBudget {
+        inner: FakeRepo,
+        allowed: u32,
+        used: std::cell::Cell<u32>,
+    }
+
+    impl PerFileWithBudget {
+        fn spend(&self) -> Result<(), String> {
+            self.used.set(self.used.get() + 1);
+            if self.used.get() > self.allowed {
+                Err("the 20s approvals budget is used up".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl RepoReader for PerFileWithBudget {
+        fn default_branch_commit(&self, r: &str) -> Result<String, String> {
+            self.spend()?;
+            self.inner.default_branch_commit(r)
+        }
+        fn list_dir(&self, r: &str, p: &str, c: &str) -> Result<Vec<DirEntry>, String> {
+            self.spend()?;
+            self.inner.list_dir(r, p, c)
+        }
+        fn read_file(&self, r: &str, p: &str, c: &str) -> Result<Vec<u8>, String> {
+            self.spend()?;
+            self.inner.read_file(r, p, c)
+        }
+    }
+
+    #[test]
+    fn forty_approvals_load_in_one_call_where_one_call_per_file_starves_the_budget() {
+        // Control: the per-file shape with a budget of a few calls loads only some of 40.
+        let owned: Vec<(String, String)> = (0..40)
+            .map(|i| {
+                (
+                    format!("approval-{i}.json"),
+                    approval(&format!("approval-{i}")),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_str()))
+            .collect();
+        let old = PerFileWithBudget {
+            inner: FakeRepo::with_files(&borrowed),
+            allowed: 6,
+            used: Default::default(),
+        };
+        let starved = load(&source(), &old);
+        assert!(
+            starved.handlers.len() < 40,
+            "the control must starve: {}",
+            starved.summary()
+        );
+        assert!(!starved.refused.is_empty() || starved.error.is_some());
+
+        // The fix: one snapshot call, all 40, no per-file call (BulkRepo panics on one).
+        let bulk = BulkRepo::with_approvals(40);
+        let loaded = load(&source(), &bulk);
+        assert_eq!(loaded.error, None, "{loaded:?}");
+        assert_eq!((loaded.handlers.len(), loaded.refused.len()), (40, 0));
+        assert_eq!(bulk.calls.get(), 1);
+        assert!(
+            loaded.summary().contains("40 active"),
+            "{}",
+            loaded.summary()
+        );
+    }
+
+    #[test]
+    fn a_snapshot_load_applies_the_same_rules_as_the_per_file_load() {
+        let mut bulk = BulkRepo::with_approvals(2);
+        bulk.files
+            .push(("README.md".into(), Some("not an approval".into()), 15));
+        bulk.files.push((
+            "wrong-name.json".into(),
+            Some(approval("something-else")),
+            100,
+        ));
+        bulk.files
+            .push(("huge.json".into(), None, MAX_FILE_BYTES + 1));
+        bulk.files.push(("not-delivered.json".into(), None, 100));
+        bulk.files
+            .push(("bad.json".into(), Some("{ not json".into()), 10));
+        let loaded = load(&source(), &bulk);
+        assert_eq!(loaded.handlers.len(), 2);
+        let refused: std::collections::HashMap<_, _> = loaded.refused.iter().cloned().collect();
+        assert!(
+            refused["wrong-name.json"].contains("file name must be"),
+            "{refused:?}"
+        );
+        assert!(refused["huge.json"].contains("exceeds"), "{refused:?}");
+        assert!(
+            refused["not-delivered.json"].contains("not delivered"),
+            "{refused:?}"
+        );
+        assert!(refused.contains_key("bad.json") && !refused.contains_key("README.md"));
+        // Too many files, and a tip that is not a SHA, are still refused.
+        assert!(load(&source(), &BulkRepo::with_approvals(MAX_FILES + 1))
+            .error
+            .unwrap()
+            .contains("exceeds the limit"));
+        let mut odd = BulkRepo::with_approvals(1);
+        odd.commit = Ok("main".into());
+        assert!(load(&source(), &odd)
+            .error
+            .unwrap()
+            .contains("not a commit SHA"));
+        let mut down = BulkRepo::with_approvals(1);
+        down.commit = Err("HTTP 404".into());
+        assert!(load(&source(), &down)
+            .error
+            .unwrap()
+            .contains("could not resolve"));
+    }
+
+    #[test]
+    fn a_snapshot_that_timed_out_falls_back_to_the_cache_the_last_good_snapshot_filled() {
+        let d = tempfile::tempdir().unwrap();
+        set_now(T0);
+        let live = cache_over(BulkRepo::with_approvals(40), d.path());
+        assert_eq!(load(&source(), &live).handlers.len(), 40);
+
+        let mut gone = BulkRepo::with_approvals(0);
+        gone.commit = Err("gh timed out after 15s".into());
+        set_now(T0 + 2 * HOUR);
+        let stale = load(&source(), &cache_over(gone, d.path()));
+        assert_eq!(
+            (stale.handlers.len(), stale.error.as_deref()),
+            (40, None),
+            "{stale:?}"
+        );
+        assert!(
+            stale
+                .stale
+                .as_deref()
+                .is_some_and(|n| n.contains("2h00min")),
+            "{:?}",
+            stale.stale
+        );
+
+        for (when, error, why) in [
+            (T0 + 25 * HOUR, "gh timed out after 15s", "older than 24 h"),
+            (T0 + HOUR, "HTTP 403: rate limit", "not transient"),
+        ] {
+            set_now(when);
+            let mut b = BulkRepo::with_approvals(0);
+            b.commit = Err(error.into());
+            let l = load(&source(), &cache_over(b, d.path()));
+            assert_eq!(l.handlers.len(), 0, "{why}: {l:?}");
+            assert!(l.error.is_some(), "{why}");
+        }
+        // Nothing cached for the remembered commit: fail closed.
+        for e in std::fs::read_dir(d.path()).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_some_and(|x| x == "cache") {
+                std::fs::remove_file(p).unwrap();
+            }
+        }
+        set_now(T0 + HOUR);
+        let mut b = BulkRepo::with_approvals(0);
+        b.commit = Err("gh timed out after 15s".into());
+        let l = load(&source(), &cache_over(b, d.path()));
+        assert_eq!(l.handlers.len(), 0);
+        assert!(l.error.unwrap().contains("not cached"));
+    }
+
+    #[test]
+    fn parse_snapshot_reads_the_graphql_answer_and_refuses_the_rest() {
+        let ok = serde_json::json!({"data": {"repository": {
+        "head": {"oid": SHA},
+        "dir": {"entries": [
+            {"name": "a.json", "type": "blob", "object": {"byteSize": 5, "isTruncated": false, "isBinary": false, "text": "hello"}},
+            {"name": "big.json", "type": "blob", "object": {"byteSize": 999999, "isTruncated": true, "isBinary": false, "text": "he"}},
+            {"name": "img.json", "type": "blob", "object": {"byteSize": 3, "isTruncated": false, "isBinary": true, "text": null}},
+            {"name": "sub", "type": "tree", "object": {}}
+        ]}}}});
+        let snap = parse_snapshot(ok.to_string().as_bytes(), "a/b").unwrap();
+        assert_eq!(snap.commit, SHA);
+        let by: std::collections::HashMap<_, _> = snap
+            .entries
+            .iter()
+            .map(|(e, b)| (e.name.as_str(), (e.kind.as_str(), e.size, b.clone())))
+            .collect();
+        assert_eq!(by["a.json"], ("file", 5, Some(b"hello".to_vec())));
+        assert_eq!(by["big.json"].2, None, "a truncated blob has no body");
+        assert_eq!(by["img.json"].2, None, "a binary blob has no body");
+        assert_eq!(by["sub"].0, "tree");
+
+        let not_folder =
+            serde_json::json!({"data": {"repository": {"head": {"oid": SHA}, "dir": null}}});
+        assert!(parse_snapshot(not_folder.to_string().as_bytes(), "a/b")
+            .unwrap_err()
+            .contains("not a folder"));
+        let a_file = serde_json::json!({"data": {"repository": {"head": {"oid": SHA}, "dir": {}}}});
+        assert!(parse_snapshot(a_file.to_string().as_bytes(), "a/b").is_err());
+        let no_repo = serde_json::json!({"data": {"repository": null}, "errors": [{"message": "Could not resolve to a Repository"}]});
+        assert!(parse_snapshot(no_repo.to_string().as_bytes(), "a/b")
+            .unwrap_err()
+            .contains("Could not resolve"));
+        let no_tip =
+            serde_json::json!({"data": {"repository": {"head": null, "dir": {"entries": []}}}});
+        assert!(parse_snapshot(no_tip.to_string().as_bytes(), "a/b").is_err());
+        assert!(parse_snapshot(b"<html>", "a/b").is_err());
     }
 }
