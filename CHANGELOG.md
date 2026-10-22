@@ -4,7 +4,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## 0.29.9
 
-- **Docs only: roadmap C5 design, `ciresnave-bot` as a GitHub App , and a staged rollout starting with a one-repository pilot. Every GitHub behaviour not yet seen is marked UNVERIFIED and is a pilot step. Nothing is built. Version 0.29.9 is provisional.
+- **Docs only: roadmap C5 design, `ciresnave-bot` as a GitHub App (PM TASK 2026-10-22; CireSnave: "Yes on ciresnave-bot as an App.").** `docs/GITHUB-APP.md` gains the design: a token broker (the App key never reaches a lane) minting 1-hour, repository- and permission-scoped installation tokens per lane in three tiers (`lane`, `read`, `workflows`), a `gh` shim and git credential helper, what commits and PRs show (`<slug>[bot]`, `app/<slug>` in `gh`, the App's noreply email), one App first (PM decision) versus per-lane Apps later, a survey of what is keyed to the bot login (0 code references; CODEOWNERS is `* @ciresnave` in 30 of 113 repositories; the PM's admin read of branch protection: 33 repositories protected, 0 name the bot, 3 require reviews, 61 unprotected, 19 private on the free plan), the Docker publishers (synapse: Docker Hub, auth-framework: ECR, auto-discovery: GHCR), and a staged rollout starting with a one-repository pilot. Every GitHub behaviour not yet seen is marked UNVERIFIED and is a pilot step. Nothing is built. Version 0.29.9 is provisional.
 
 ## 0.29.8
 
