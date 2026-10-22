@@ -164,6 +164,13 @@ pub trait RepoReader {
     fn default_branch_commit(&self, repo: &str) -> Result<String, String>;
     fn list_dir(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<DirEntry>, String>;
     fn read_file(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<u8>, String>;
+    /// Set when the last [`default_branch_commit`](Self::default_branch_commit) answer was NOT read
+    /// from GitHub but taken from a remembered, fully loaded commit (see [`CachingReader`]).
+    fn stale_note(&self) -> Option<String> {
+        None
+    }
+    /// Told by [`load`] that `commit` loaded completely (no error), so a reader may remember it.
+    fn record_good(&self, _repo: &str, _commit: &str) {}
 }
 
 /// At most this many approval files are read; more is refused outright.
@@ -183,6 +190,9 @@ pub struct Loaded {
     pub refused: Vec<(String, String)>,
     /// Why NOTHING loaded, when that's the case.
     pub error: Option<String>,
+    /// Set when GitHub could not be reached and the last fully loaded approvals commit was used
+    /// instead: how old that check is and why. `None` means the branch tip was read live.
+    pub stale: Option<String>,
 }
 
 impl Loaded {
@@ -195,9 +205,13 @@ impl Loaded {
         match (&self.source, &self.error) {
             (_, Some(e)) => format!("0 active - {e}"),
             (Some(src), None) => format!(
-                "{} active, {} refused, from {src}",
+                "{} active, {} refused, from {src} [{}]",
                 self.handlers.len(),
-                self.refused.len()
+                self.refused.len(),
+                match &self.stale {
+                    Some(note) => format!("STALE: {note}"),
+                    None => "tip read live".to_string(),
+                }
             ),
             (None, None) => "0 active".to_string(),
         }
@@ -227,6 +241,7 @@ pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
         }
     };
     loaded.source = Some(format!("{}:{}@{}", source.repo, source.path, &commit[..12]));
+    loaded.stale = reader.stale_note();
     let entries = match reader.list_dir(&source.repo, &source.path, &commit) {
         Ok(e) => e,
         Err(e) => {
@@ -277,6 +292,7 @@ pub fn load(source: &ApprovalsSource, reader: &dyn RepoReader) -> Loaded {
             Err(reason) => loaded.refused.push((name, reason)),
         }
     }
+    reader.record_good(&source.repo, &commit);
     loaded
 }
 
@@ -314,7 +330,11 @@ pub struct GhReader {
 }
 
 /// The default budget of a whole approvals load.
-pub const LOAD_BUDGET: Duration = Duration::from_secs(8);
+///
+/// 20 s (was 8 s): a slow link made the two sequential tip calls time out (2026-10-21/22), and the
+/// appear verdict that the 8 s protected is 120 s now. The tip is ONE call, and a failed one falls
+/// back to the last fully loaded commit (see [`CachingReader`]), so this only bounds the worst case.
+pub const LOAD_BUDGET: Duration = Duration::from_secs(20);
 
 impl Default for GhReader {
     fn default() -> Self {
@@ -339,19 +359,92 @@ impl GhReader {
     }
 }
 
+/// How old a remembered approvals commit may be when it stands in for an unreachable GitHub.
+/// CireSnave-approved by the PM 2026-10-22: an approval removed from the repo stays honoured for at
+/// most this long, and only while GitHub cannot be reached from this machine.
+pub const MAX_STALE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Does this `gh` failure say the network (or GitHub) is down, as opposed to GitHub answering "no"?
+/// Only these may fall back to a remembered commit; anything unrecognised (a 404, 401, 403, a rate
+/// limit, a changed message) keeps the load failing closed.
+pub fn is_transient(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "timed out",
+        "i/o timeout",
+        "error connecting",
+        "dial tcp",
+        "no such host",
+        "could not resolve host",
+        "network is unreachable",
+        "connection reset",
+        "tls handshake",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+    ]
+    .iter()
+    .any(|t| e.contains(t))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The remembered commit: written only when a load of it completed with no error.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct GoodPointer {
+    repo: String,
+    commit: String,
+    verified_at: u64,
+}
+
 /// A [`RepoReader`] that remembers directory listings and files by COMMIT SHA, which names
 /// immutable content: a hit needs no network, and a changed approvals folder is a new SHA, so it
-/// misses. Only the branch-tip lookup always goes out. Entries are named by a hash of
-/// `repo|path|commit`, never by the path itself. A cache that cannot be read or written is a miss.
-/// Nothing read from the cache skips validation: the caller parses and checks it as if fetched.
+/// misses. The branch-tip lookup always goes out first; if it fails with a TRANSIENT error and a
+/// commit whose load completed within [`MAX_STALE`] is remembered, that commit stands in (its
+/// listing and files come from this cache, and `load` still validates every byte). Entries are
+/// named by a hash of `repo|path|commit`, never by the path itself. A cache that cannot be read or
+/// written is a miss.
 pub struct CachingReader<R> {
     inner: R,
     dir: PathBuf,
+    now: fn() -> u64,
+    /// Set while the last tip answer was the remembered one; read by `stale_note`.
+    stale: std::cell::RefCell<Option<String>>,
 }
 
 impl<R: RepoReader> CachingReader<R> {
     pub fn new(inner: R, dir: PathBuf) -> Self {
-        Self { inner, dir }
+        Self::with_clock(inner, dir, unix_now)
+    }
+
+    /// [`new`](Self::new) with an injected clock (seconds since the Unix epoch), for tests.
+    pub fn with_clock(inner: R, dir: PathBuf, now: fn() -> u64) -> Self {
+        Self {
+            inner,
+            dir,
+            now,
+            stale: std::cell::RefCell::new(None),
+        }
+    }
+
+    fn pointer_path(&self, repo: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(format!("last-good|{repo}").as_bytes());
+        let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        self.dir.join(format!("{hex}.good"))
+    }
+
+    /// The remembered commit for `repo`, if it is well-formed and names this repo.
+    fn pointer(&self, repo: &str) -> Option<GoodPointer> {
+        let p: GoodPointer =
+            serde_json::from_slice(&std::fs::read(self.pointer_path(repo)).ok()?).ok()?;
+        let hex40 = p.commit.len() == 40 && p.commit.chars().all(|c| c.is_ascii_hexdigit());
+        (p.repo == repo && hex40).then_some(p)
     }
 
     fn entry(&self, kind: &str, repo: &str, path: &str, commit: &str) -> Option<PathBuf> {
@@ -380,7 +473,51 @@ impl<R: RepoReader> CachingReader<R> {
 
 impl<R: RepoReader> RepoReader for CachingReader<R> {
     fn default_branch_commit(&self, repo: &str) -> Result<String, String> {
-        self.inner.default_branch_commit(repo)
+        *self.stale.borrow_mut() = None;
+        let error = match self.inner.default_branch_commit(repo) {
+            Ok(commit) => return Ok(commit),
+            Err(e) => e,
+        };
+        if !is_transient(&error) {
+            return Err(error);
+        }
+        let Some(good) = self.pointer(repo) else {
+            return Err(format!(
+                "{error}; no remembered approvals commit to fall back on"
+            ));
+        };
+        let age = Duration::from_secs((self.now)().saturating_sub(good.verified_at));
+        if age > MAX_STALE {
+            return Err(format!(
+                "{error}; the remembered approvals commit is {} old (limit {})",
+                human(age),
+                human(MAX_STALE)
+            ));
+        }
+        *self.stale.borrow_mut() = Some(format!(
+            "GitHub unreachable ({error}); using the approvals commit last fully loaded {} ago",
+            human(age)
+        ));
+        Ok(good.commit)
+    }
+
+    fn stale_note(&self) -> Option<String> {
+        self.stale.borrow().clone()
+    }
+
+    fn record_good(&self, repo: &str, commit: &str) {
+        // A stand-in commit must not refresh its own "verified" time.
+        if self.stale.borrow().is_some() {
+            return;
+        }
+        let pointer = GoodPointer {
+            repo: repo.to_owned(),
+            commit: commit.to_owned(),
+            verified_at: (self.now)(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&pointer) {
+            self.put(&Some(self.pointer_path(repo)), &bytes);
+        }
     }
 
     fn list_dir(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<DirEntry>, String> {
@@ -409,6 +546,15 @@ impl<R: RepoReader> RepoReader for CachingReader<R> {
     }
 }
 
+fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=119 => format!("{s}s"),
+        120..=7199 => format!("{}min", s / 60),
+        _ => format!("{}h{:02}min", s / 3600, (s % 3600) / 60),
+    }
+}
+
 /// The reader a host (and `lane-restart approvals`) uses: `gh` under [`LOAD_BUDGET`], cached by
 /// commit under `<home>/.overmind/lane-restart-approvals-cache`.
 pub fn default_reader(home: &Path) -> CachingReader<GhReader> {
@@ -419,36 +565,19 @@ pub fn default_reader(home: &Path) -> CachingReader<GhReader> {
 }
 
 #[derive(Deserialize)]
-struct RepoInfo {
-    default_branch: String,
-}
-
-#[derive(Deserialize)]
-struct BranchInfo {
-    commit: CommitRef,
-}
-
-#[derive(Deserialize)]
-struct CommitRef {
+struct CommitInfo {
     sha: String,
 }
 
 impl RepoReader for GhReader {
+    /// One call: `repos/{repo}/commits/HEAD`. A repository's HEAD IS its default branch, so this is
+    /// the default branch's tip (checked equal to `repos/{repo}/branches/<default>` for
+    /// `ciresnave/ciresnave` on 2026-10-22), and it needs one network round trip, not two.
     fn default_branch_commit(&self, repo: &str) -> Result<String, String> {
-        let info: RepoInfo = serde_json::from_slice(&self.gh(&["api", &format!("repos/{repo}")])?)
-            .map_err(|e| format!("unexpected repo response: {e}"))?;
-        if !valid_repo_path(&info.default_branch) {
-            return Err(format!(
-                "unusable default branch name {:?}",
-                info.default_branch
-            ));
-        }
-        let branch: BranchInfo = serde_json::from_slice(&self.gh(&[
-            "api",
-            &format!("repos/{repo}/branches/{}", info.default_branch),
-        ])?)
-        .map_err(|e| format!("unexpected branch response: {e}"))?;
-        Ok(branch.commit.sha)
+        let commit: CommitInfo =
+            serde_json::from_slice(&self.gh(&["api", &format!("repos/{repo}/commits/HEAD")])?)
+                .map_err(|e| format!("unexpected commit response: {e}"))?;
+        Ok(commit.sha)
     }
 
     fn list_dir(&self, repo: &str, path: &str, commit: &str) -> Result<Vec<DirEntry>, String> {
@@ -844,5 +973,241 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("could not run"));
+    }
+
+    // -- last-known-good approvals (2026-10-22: a slow link made the tip lookup time out and a
+    //    lane's dev-channels dialog went unanswered although its approval existed) -------------
+
+    thread_local! {
+        static NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn clock() -> u64 {
+        NOW.with(|n| n.get())
+    }
+
+    fn set_now(t: u64) {
+        NOW.with(|n| n.set(t));
+    }
+
+    const HOUR: u64 = 3600;
+    const T0: u64 = 1_000_000;
+
+    /// A GitHub that cannot be reached: the tip lookup fails with `error`, and any listing or file
+    /// request that gets through to the network fails too, so a handler that loads must have come
+    /// from the cache.
+    fn down(error: &str) -> FakeRepo {
+        let mut r = FakeRepo::with_files(&[]);
+        r.commit = Err(error.to_string());
+        r.dirs.clear();
+        r
+    }
+
+    fn cache_over<R: RepoReader>(inner: R, dir: &Path) -> CachingReader<R> {
+        CachingReader::with_clock(inner, dir.to_path_buf(), clock)
+    }
+
+    /// A cache directory in which one approval has been fully loaded at `T0`.
+    fn primed() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        set_now(T0);
+        let live = cache_over(
+            FakeRepo::with_files(&[("one.json", &approval("one"))]),
+            d.path(),
+        );
+        let first = load(&source(), &live);
+        assert_eq!((first.handlers.len(), first.error.as_deref()), (1, None));
+        assert_eq!(first.stale, None);
+        assert!(
+            first.summary().contains("tip read live"),
+            "{}",
+            first.summary()
+        );
+        d
+    }
+
+    #[test]
+    fn a_timed_out_tip_lookup_uses_the_last_fully_loaded_commit_and_says_so() {
+        let d = primed();
+        set_now(T0 + 3 * HOUR);
+        let loaded = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(loaded.error, None, "{loaded:?}");
+        assert_eq!(
+            loaded.handlers.len(),
+            1,
+            "the approval must load from the cache"
+        );
+        let note = loaded
+            .stale
+            .as_deref()
+            .expect("a stand-in commit is marked stale");
+        assert!(
+            note.contains("3h00min") && note.contains("timed out"),
+            "{note}"
+        );
+        assert!(loaded.summary().contains("STALE"), "{}", loaded.summary());
+    }
+
+    #[test]
+    fn a_remembered_commit_older_than_24_hours_is_not_used() {
+        let d = primed();
+        set_now(T0 + 24 * HOUR + 60);
+        let loaded = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(loaded.handlers.len(), 0);
+        let e = loaded.error.expect("must fail closed");
+        assert!(e.contains("old (limit 24h00min)"), "{e}");
+        set_now(T0 + 24 * HOUR);
+        let at_limit = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(
+            at_limit.handlers.len(),
+            1,
+            "exactly 24 h is still inside the window"
+        );
+    }
+
+    #[test]
+    fn a_stand_in_commit_does_not_refresh_its_own_verified_time() {
+        let d = primed();
+        set_now(T0 + 20 * HOUR);
+        let first = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(first.handlers.len(), 1);
+        // 25 h after the real verification, 5 h after the stand-in: must be refused.
+        set_now(T0 + 25 * HOUR);
+        let later = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(later.handlers.len(), 0, "{later:?}");
+    }
+
+    #[test]
+    fn only_transient_failures_fall_back_everything_else_fails_closed() {
+        let d = primed();
+        set_now(T0 + HOUR);
+        for refusal in [
+            "HTTP 404: Not Found (https://api.github.com/repos/x/y/commits/HEAD)",
+            "HTTP 401: Bad credentials",
+            "HTTP 403: API rate limit exceeded",
+            "gh: something we have never seen",
+            "",
+        ] {
+            let loaded = load(&source(), &cache_over(down(refusal), d.path()));
+            assert_eq!(
+                loaded.handlers.len(),
+                0,
+                "{refusal:?} must not use the remembered commit"
+            );
+            assert_eq!(loaded.stale, None);
+            assert!(loaded.error.is_some(), "{refusal:?}");
+        }
+    }
+
+    #[test]
+    fn is_transient_names_the_network_failures_and_nothing_else() {
+        for yes in [
+            "gh timed out after 7s",
+            "error connecting to api.github.com",
+            "Get \"https://api.github.com/\": dial tcp: lookup api.github.com: no such host",
+            "read tcp 1.2.3.4:5->6.7.8.9:443: connection reset by peer",
+            "net/http: TLS handshake timeout",
+            "HTTP 502: Bad Gateway",
+            "HTTP 503: Service Unavailable",
+        ] {
+            assert!(is_transient(yes), "{yes}");
+        }
+        for no in [
+            "HTTP 404: Not Found",
+            "HTTP 401: Bad credentials",
+            "HTTP 403: Forbidden",
+            "HTTP 422: Unprocessable",
+            "could not run gh: program not found",
+            "",
+        ] {
+            assert!(!is_transient(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn nothing_remembered_means_nothing_loads() {
+        let d = tempfile::tempdir().unwrap();
+        set_now(T0);
+        let loaded = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(loaded.handlers.len(), 0);
+        assert!(loaded
+            .error
+            .unwrap()
+            .contains("no remembered approvals commit"));
+    }
+
+    #[test]
+    fn a_commit_is_remembered_only_after_it_loaded_completely() {
+        // The tip resolves but the listing then fails: that commit must not become "last good".
+        let d = tempfile::tempdir().unwrap();
+        set_now(T0);
+        let mut broken = FakeRepo::with_files(&[("one.json", &approval("one"))]);
+        broken.dirs.clear();
+        let first = load(&source(), &cache_over(broken, d.path()));
+        assert!(first.error.is_some());
+        set_now(T0 + HOUR);
+        let later = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(later.handlers.len(), 0);
+        assert!(later
+            .error
+            .unwrap()
+            .contains("no remembered approvals commit"));
+    }
+
+    #[test]
+    fn a_remembered_commit_whose_files_are_not_cached_fails_closed() {
+        let d = primed();
+        for entry in std::fs::read_dir(d.path()).unwrap() {
+            let p = entry.unwrap().path();
+            if p.extension().is_some_and(|e| e == "cache") {
+                std::fs::remove_file(p).unwrap();
+            }
+        }
+        set_now(T0 + HOUR);
+        let loaded = load(
+            &source(),
+            &cache_over(down("gh timed out after 7s"), d.path()),
+        );
+        assert_eq!(loaded.handlers.len(), 0, "{loaded:?}");
+        assert!(loaded.error.is_some());
+    }
+
+    #[test]
+    fn a_pointer_for_another_repo_or_with_a_bad_commit_is_ignored() {
+        let d = primed();
+        let reader = cache_over(down("gh timed out after 7s"), d.path());
+        let path = reader.pointer_path(&source().repo);
+        for body in [
+            format!(r#"{{"repo":"other/repo","commit":"{SHA}","verified_at":{T0}}}"#),
+            format!(r#"{{"repo":"someone/someone","commit":"not-a-sha","verified_at":{T0}}}"#),
+            "{ not json".to_string(),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            set_now(T0 + HOUR);
+            let loaded = load(&source(), &reader);
+            assert_eq!(loaded.handlers.len(), 0);
+            assert!(loaded.error.is_some());
+        }
     }
 }

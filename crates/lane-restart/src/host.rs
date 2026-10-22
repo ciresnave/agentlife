@@ -750,6 +750,17 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             started_at.to_rfc3339()
         ),
     );
+    if loaded.handlers.is_empty() {
+        // Startup self-check: a lane relaunched with no active approval waits for a person at its
+        // first dialog (2026-10-22: two lanes did, because GitHub was slow). Say so at boot.
+        eprintln!(
+            "lane-restart host: WARNING: no approvals are active; a startup dialog will wait for a person"
+        );
+        append_host_log(
+            &log_path,
+            "APPROVALS-WARNING no handler is active: every startup dialog goes unanswered",
+        );
+    }
     for (h, hash) in &loaded.handlers {
         append_host_log(&log_path, &format!("  active {} {hash}", h.id));
     }
