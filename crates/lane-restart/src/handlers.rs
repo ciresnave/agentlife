@@ -1163,4 +1163,114 @@ mod tests {
         assert_ne!(a, c);
         assert_eq!(a.len(), 64, "sha256 hex digest is 64 chars");
     }
+
+    // -- the dev-channels dialog for every channel set a lane can launch with ---------------------
+    // 2026-10-22: every lane is about to move from server:claude-peers to server:synapse; an approval
+    // record whose Channels value does not equal the dialog's leaves that lane waiting for CireSnave.
+
+    /// Real capture, verbatim from `.lane-state/unhandled-prompts/2026-10-09T17-48-16...txt`
+    /// (a lane launched with both servers; trailing blank rows trimmed).
+    const TWO_SERVER_SCREEN: &str = "\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+  WARNING: Loading development channels\n\
+\n\
+  --dangerously-load-development-channels is for local channel development only. Do not use this option to run\n\
+  channels you have downloaded off the internet.\n\
+\n\
+  Please use --channels to run a list of approved channels.\n\
+\n\
+  Channels: server:claude-peers, server:synapse\n\
+\n\
+  ❯ 1. I am using this for local development\n\
+    2. Exit\n\
+\n\
+  Enter to confirm · Esc to cancel\n";
+
+    /// The example record with a different `Channels` value (the shape CireSnave's repo uses for
+    /// `synapse-dev-channel-pilot.json` and `claude-peers-synapse-dev-channels-pilot.json`).
+    fn record_for_channels(channels: &str) -> HandlerSpec {
+        let old = "\"Channels\": \"server:claude-peers\"";
+        assert_eq!(EXAMPLE_JSON.matches(old).count(), 1);
+        let json = EXAMPLE_JSON.replace(old, &format!("\"Channels\": \"{channels}\""));
+        parse_and_validate(&json).expect("the record shape must pass validation")
+    }
+
+    #[test]
+    fn a_record_matches_exactly_the_channel_set_it_names() {
+        // (record's Channels, screen's Channels, must match)
+        let cases = [
+            ("server:claude-peers", "server:claude-peers", true),
+            ("server:synapse", "server:synapse", true),
+            (
+                "server:claude-peers, server:synapse",
+                "server:claude-peers, server:synapse",
+                true,
+            ),
+            ("server:synapse", "server:claude-peers", false),
+            (
+                "server:claude-peers",
+                "server:claude-peers, server:synapse",
+                false,
+            ),
+            (
+                "server:synapse",
+                "server:claude-peers, server:synapse",
+                false,
+            ),
+            (
+                "server:claude-peers, server:synapse",
+                "server:synapse",
+                false,
+            ),
+            ("server:synapse", "server:synapse,server:extra", false),
+        ];
+        for (record, screen, expect) in cases {
+            // The screens are built from the real captures by replacing only the Channels value.
+            let text = TWO_SERVER_SCREEN.replace("server:claude-peers, server:synapse", screen);
+            assert_eq!(
+                matches(&record_for_channels(record), &text),
+                expect,
+                "record {record:?} vs screen {screen:?}"
+            );
+        }
+        // And the two real captures themselves.
+        assert!(matches(
+            &record_for_channels("server:claude-peers"),
+            REAL_DIALOG_SCREEN
+        ));
+        assert!(matches(
+            &record_for_channels("server:claude-peers, server:synapse"),
+            TWO_SERVER_SCREEN
+        ));
+    }
+
+    #[test]
+    fn an_unrecognised_or_secret_asking_dialog_is_never_answered() {
+        let h = record_for_channels("server:synapse");
+        let screen =
+            TWO_SERVER_SCREEN.replace("server:claude-peers, server:synapse", "server:synapse");
+        assert!(
+            matches(&h, &screen),
+            "control: the same record does answer the real dialog"
+        );
+        // Changed wording: an anchor is gone.
+        assert!(!matches(
+            &h,
+            &screen.replace(
+                "WARNING: Loading development channels",
+                "NOTICE: Loading channels"
+            )
+        ));
+        assert!(!matches(
+            &h,
+            &screen.replace("I am using this for local development", "Continue")
+        ));
+        // A dialog that also asks for a secret is refused even though every anchor is present.
+        assert!(!matches(&h, &format!("{screen}\n  Enter your password:\n")));
+        // Something that is not this dialog at all.
+        assert!(!matches(
+            &h,
+            "Do you want to run this command? 1. Yes 2. No"
+        ));
+    }
 }
