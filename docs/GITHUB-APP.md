@@ -149,7 +149,7 @@ lane (gh / git) --request(lane, repos, tier)--> broker --JWT (RS256, <=10 min)--
 | Per-account limit on Apps owned | none | **UNVERIFIED**: check GitHub's cap before choosing |
 | Push-restriction or bypass lists, if any exist (section 5: unread) | one entry | one entry per lane |
 
-**Recommendation:** start with **one App** and the broker's per-lane log, and move to per-lane Apps only if the PM's need to see
+**Decided (PM, 2026-10-22): one App first**; per-lane attribution is a later option. Recommendation behind it: start with **one App** and the broker's per-lane log, and move to per-lane Apps only if the PM's need to see
 which lane merged what cannot be met from the broker log. The broker's interface does not change between the two (the table maps
 a lane to an App id instead of to the one), and the staged move (section 8) works for either.
 
@@ -160,7 +160,7 @@ a lane to an App id instead of to the one), and the staged move (section 8) work
 | Repo files (`git grep -i ciresnave-bot` at `origin/main` of every checkout that has a `.git`) | Documentation, changelog prose and one test fixture string (FAM `taken_as: 'ciresnave-bot'`). **No** workflow, script, CODEOWNERS or code path compares against the login. (Control: the same grep does find the doc and test lines.) | Nothing to rewrite in code. The FAM string is a label in a test of a project being decommissioned. |
 | CODEOWNERS | 30 of the 113 non-archived repositories under `ciresnave` and `ThinkersJournal` have `.github/CODEOWNERS`, every one `* @ciresnave` (read through the contents API as the bot; the other 83 have none: 68 public, 15 private). | An App cannot be a code owner and need not be. If a rule ever requires a code-owner *review*, App PRs need CireSnave's review exactly as bot PRs do. |
 | Rulesets | `0` on every repository where the endpoint answered; the private ones answer an error (rulesets there need a plan this account may not have). | No ruleset bypass list names the bot on a readable repository. |
-| Branch protection | The bot is not an admin and can read only `required_status_checks` (`enforcement_level: non_admins`, the two CI legs). `required_pull_request_reviews`, push restrictions and bypass allowances **cannot be read by this lane** (the admin endpoint answers 404 on 90 of the 94 public repositories asked). | **UNREAD, PM to read** with the admin token: for each protected branch, any `restrictions` (push allowances) or `bypass_pull_request_allowances` that lists `ciresnave-bot`, and whether any rule requires an approving review. An App is a *non-admin* like the bot, so required checks apply to it identically. |
+| Branch protection | The bot is not an admin and can read only `required_status_checks` (`enforcement_level: non_admins`, the two CI legs). `required_pull_request_reviews`, push restrictions and bypass allowances **cannot be read by this lane** (the admin endpoint answers 404 on 90 of the 94 public repositories asked). | **Answered by the PM** (admin read of all 113 repositories, 2026-10-22, file `.archive/protection-bot-refs-2026-10-22.txt`; control: `auth-framework` read OK): 33 repositories protect `main` and **0 mention `ciresnave-bot`** anywhere (no push restrictions, no bypass lists, no required-review allowances). Only `ciresnave/ciresnave` (with `enforce_admins`), `commy-sdk-rust` and `dirty-ranges` require reviews. 61 repositories have no protection (404); 19 answer 403 "Upgrade to GitHub Pro or make this repository public" (private repositories on the free plan, board 108: unprotectable, not a read error). So nothing needs adding for an App except that App PRs to those three need a review, as the bot's do. An App is a *non-admin* like the bot, so required checks apply to it identically. |
 | Repository access | `ciresnave-bot` is a collaborator (`write` on `agentlife`, READ on `ciresnave/ciresnave`, 404 on some private repositories). | The App must be **installed on each repository** a lane touches and gets exactly the access given there. Private repositories the bot cannot see today (the `auth-framework-ghsa-*` security forks) are an installation question, **UNVERIFIED**. |
 | App owner versus installable owners | The runner App is private and owned by the organization; repositories under the personal account `ciresnave` can be reached only if the App can be installed there. | **UNVERIFIED**, the first pilot question: make the App installable by "any account" (harmless without its key) or use two Apps (one per owner). Moving the OSS repositories to `ThinkersJournal` (C4) removes the problem. |
 | Third-party checks (Sourcery, Codacy, Codecov) | Nothing in our repositories says how they treat bot-authored PRs. | **UNVERIFIED**, pilot step: open one App-authored PR and read which analyzers ran. |
@@ -185,9 +185,7 @@ covered; the `wt-*` and `*-ghsa-*` hits are worktrees or forks of `auth-framewor
 | `auto-discovery` | `cd.yml` with `REGISTRY: ghcr.io`, `docker/login-action` and `build-push-action` | **GHCR already** |
 | `PersistAnt` | `docker buildx imagetools inspect mysql:8.4` (reads a digest; publishes nothing) | none |
 
-Publishing to GHCR from CI uses the workflow's `GITHUB_TOKEN` (`packages: write`); the broker is not involved. I found no written
-GHCR rule in `CIRESNAVE-EXPECTATIONS.md`, `PORTFOLIO-ROADMAP.md` or `PORTFOLIO-STRATEGY.md` (0 hits for "ghcr"; those files do
-contain other registry mentions, so the search works): if there is one, the PM should quote it.
+Publishing to GHCR from CI uses the workflow's `GITHUB_TOKEN` (`packages: write`); the broker is not involved. The GHCR rule is CireSnave's board-249 ruling (PM, 2026-10-22, in the PM archive; its wording is not reproduced here because this lane has not read it). My own search of `CIRESNAVE-EXPECTATIONS.md`, `PORTFOLIO-ROADMAP.md` and `PORTFOLIO-STRATEGY.md` found 0 hits for "ghcr" (those files contain other registry mentions, so the search works): the ruling is not in them.
 
 ## 8. Staged rollout (one lane at a time)
 
@@ -206,5 +204,5 @@ contain other registry mentions, so the search works): if there is one, the PM s
 
 ## 9. Not decided here
 
-One App versus one per lane (section 4), the App owner (section 5), the admin App, and whether the broker is this repository's
-binary or AntSpawn's. Each needs a CireSnave or PM answer before step 2.
+The App owner and installability (section 5, a pilot question; one App is decided), the admin App, and whether the broker is this repository's
+binary or AntSpawn's. Each needs a CireSnave or PM answer before step 2 (the owner question can wait for the pilot).
