@@ -1,0 +1,31 @@
+{
+  "id": "claude-peers-synapse-dev-channels-pilot",
+  "match": {
+    "text_anchors": [
+      "WARNING: Loading development channels",
+      "I am using this for local development"
+    ],
+    "fields": {
+      "Channels": "server:claude-peers, server:synapse"
+    }
+  },
+  "action": "1\r",
+  "scope": {
+    "roles": [
+      "synapse",
+      "agentlife",
+      "overmind"
+    ]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approvals": [
+      {
+        "said_on": "2026-10-15",
+        "quote": "If you and the Synapse lane agree we're ready to cut over to Synapse, do it!",
+        "approving": "A 24h PILOT, not the cutover, on the lanes synapse, agentlife and overmind only: if the screen contains verbatim \"WARNING: Loading development channels\" and \"I am using this for local development\", and Channels is exactly \"server:claude-peers, server:synapse\" (comma and one space, as the real dialog showed on 2026-10-09), press 1 then Enter (no trailing newline); expires 2026-10-31. Anything else means no answer. PM reading of the quote: on 2026-10-15/16 the PM and the Synapse lane agreed the cutover is NOT ready and a 24h side-by-side pilot comes first (synapse docs/CUTOVER_READINESS_2026-10-15.md), so the quote's condition (agreeing we are ready to cut over) is not met; this record covers the pilot only, the quote is the PM's relay and was not independently verified by the OverMind lane, and it takes effect only if CireSnave merges it."
+      }
+    ]
+  },
+  "expires_at": "2026-10-31T00:00:00Z"
+}

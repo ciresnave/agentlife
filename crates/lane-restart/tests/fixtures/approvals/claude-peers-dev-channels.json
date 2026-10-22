@@ -1,0 +1,32 @@
+{
+  "id": "claude-peers-dev-channels",
+  "match": {
+    "text_anchors": [
+      "WARNING: Loading development channels",
+      "I am using this for local development"
+    ],
+    "fields": {
+      "Channels": "server:claude-peers"
+    }
+  },
+  "action": "1\r",
+  "scope": {
+    "roles": ["*"]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approvals": [
+      {
+        "said_on": "2026-09-19",
+        "quote": "I like that.  Proceed.",
+        "approving": "This handler's exact spec as the PM presented it: on a lane lane-restart just relaunched, if the screen contains verbatim \"WARNING: Loading development channels\" and \"I am using this for local development\", and Channels is exactly server:claude-peers, press 1 then Enter (no trailing newline); expires 2027-03-19. Anything else means no answer."
+      },
+      {
+        "said_on": "2026-09-27",
+        "quote": "Yes on all fronts.  Proceed.",
+        "approving": "Moving approvals out of OverMind into a user-chosen repo (his: ciresnave/ciresnave, folder .overmind/), with only the user able to approve, secrets never approvals, and this dev-channels approval seeded for ALL lanes (roles [\"*\"])."
+      }
+    ]
+  },
+  "expires_at": "2027-03-19T00:00:00Z"
+}

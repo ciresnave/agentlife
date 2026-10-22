@@ -1,0 +1,27 @@
+{
+  "id": "synapse-dev-channel-restarttest",
+  "match": {
+    "text_anchors": [
+      "WARNING: Loading development channels",
+      "I am using this for local development"
+    ],
+    "fields": {
+      "Channels": "server:synapse"
+    }
+  },
+  "action": "1\r",
+  "scope": {
+    "roles": ["restarttest"]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approvals": [
+      {
+        "said_on": "2026-10-09",
+        "quote": "On decision 160: Yes to all three.",
+        "approving": "Phase 1 of docs/RESTARTTEST_SOAK_PROCEDURE.md: on the disposable lane restarttest only, if the screen contains verbatim \"WARNING: Loading development channels\" and \"I am using this for local development\", and Channels is exactly server:synapse, press 1 then Enter; expires 2026-11-09."
+      }
+    ]
+  },
+  "expires_at": "2026-11-09T00:00:00Z"
+}
