@@ -1208,7 +1208,7 @@ mod tests {
     /// The real dialog, verbatim from `.lane-state/unhandled-prompts/
     /// 2026-09-27T14-58-37.644790300+00-00.txt` - the Unpopped restart that
     /// reached CireSnave's screen unasked (trailing blank rows trimmed).
-    const REAL_DIALOG_SCREEN: &str = "\
+    pub(super) const REAL_DIALOG_SCREEN: &str = "\
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
   WARNING: Loading development channels\n\
 \n\
@@ -1290,7 +1290,7 @@ mod tests {
 
     /// Real capture, verbatim from `.lane-state/unhandled-prompts/2026-10-09T17-48-16...txt`
     /// (a lane launched with both servers; trailing blank rows trimmed).
-    const TWO_SERVER_SCREEN: &str = "\
+    pub(super) const TWO_SERVER_SCREEN: &str = "\
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
   WARNING: Loading development channels\n\
 \n\
@@ -1573,3 +1573,6 @@ project, or work from your team). If not, take a moment to review what's in this
         assert!(!matches(&h, &trust_screen(r"C:\Projects\configurant")));
     }
 }
+
+#[cfg(test)]
+mod real_records;
