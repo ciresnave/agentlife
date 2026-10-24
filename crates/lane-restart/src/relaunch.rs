@@ -44,6 +44,8 @@ pub enum RelaunchError {
     UnsafeArgument(String),
     Kill(KillError),
     Spawn(String),
+    /// A `launch: wsl` lane that cannot be launched as described (docs/LANE-RESTART-WSL.md).
+    Wsl(String),
     /// PM finding, 2026-09-18 (fifth real-restart retest, revised
     /// spec): the process died, or never came up at all, within
     /// `TOTAL_TIMEOUT` - not the "awaiting a human's confirmation at a
@@ -104,6 +106,7 @@ impl std::fmt::Display for RelaunchError {
             }
             RelaunchError::Kill(e) => write!(f, "kill refused: {e}"),
             RelaunchError::Spawn(e) => write!(f, "could not launch the relaunch command: {e}"),
+            RelaunchError::Wsl(e) => write!(f, "cannot launch the WSL lane: {e}"),
             RelaunchError::SessionNeverProcessedPrompt => {
                 write!(f, "relaunch FAILED: session never processed its prompt")
             }
@@ -367,6 +370,7 @@ pub fn claude_argv(
     model: &str,
 ) -> Result<Vec<String>, RelaunchError> {
     let spec = LaunchSpec {
+        wsl: None,
         name: Role::new(name)
             .map_err(|e| RelaunchError::InvalidIdentifier(format!("name {:?}", e.0)))?,
         ..LaunchSpec::try_from(state)?
@@ -395,6 +399,9 @@ pub struct HostedArgv {
     cwd: String,
     claude: Vec<String>,
     hosted: Vec<String>,
+    /// The `wsl.exe ...` command the host runs in place of `claude` (a WSL lane); `None` for a
+    /// Windows lane.
+    wsl: Option<Vec<String>>,
 }
 
 impl HostedArgv {
@@ -409,10 +416,41 @@ impl HostedArgv {
             cwd: cwd.to_string(),
             claude: claude_argv,
             hosted,
+            wsl: None,
         })
     }
 
-    /// The working directory the checked command line starts in.
+    /// A WSL lane (docs/LANE-RESTART-WSL.md section 3): the host is still `lane-restart host`,
+    /// on Windows, and its child is `wsl_argv` (the `wsl.exe` command); `claude_argv` is what the
+    /// lane runs inside the distro, kept to display and to judge flags. `host_cwd` is a WINDOWS
+    /// directory for the terminal to start in: the lane's own `cwd` is a POSIX path that
+    /// `wt.exe` and `conhost.exe` cannot enter. Every element is checked for `;`, as for any lane.
+    pub fn new_wsl(
+        host_cwd: &str,
+        role: &str,
+        claude_argv: Vec<String>,
+        wsl_argv: Vec<String>,
+    ) -> Result<Self, RelaunchError> {
+        let hosted = host_wrapped_argv(role, &wsl_argv);
+        if let Some(bad) = first_unsafe_argument(
+            std::iter::once(host_cwd).chain(hosted.iter().map(String::as_str)),
+        ) {
+            return Err(RelaunchError::UnsafeArgument(bad.to_string()));
+        }
+        Ok(Self {
+            cwd: host_cwd.to_string(),
+            claude: claude_argv,
+            hosted,
+            wsl: Some(wsl_argv),
+        })
+    }
+
+    /// The `wsl.exe` command of a WSL lane; `None` for a Windows lane.
+    pub fn wsl_command(&self) -> Option<&[String]> {
+        self.wsl.as_deref()
+    }
+
+    /// The (Windows) working directory the checked command line starts in.
     pub fn cwd(&self) -> &str {
         &self.cwd
     }
@@ -672,7 +710,7 @@ fn launch_commands(
 
     let mut conhost = std::process::Command::new("conhost.exe");
     conhost.args(hosted_argv);
-    conhost.current_dir(&spec.cwd);
+    conhost.current_dir(argv.cwd());
     strip_session_identity_env(&mut conhost);
     set_lane_role(&mut conhost, spec.role.as_str());
     (wt, conhost)
@@ -735,6 +773,9 @@ fn spawn_direct_argv(
 }
 
 pub fn spawn_launch(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), RelaunchError> {
+    // A WSL lane needs `wsl.exe`: there is none off Windows (docs/LANE-RESTART-WSL.md section 7).
+    crate::wsl::host_supports_wsl(spec.wsl.is_some(), cfg!(windows))
+        .map_err(|e| RelaunchError::Wsl(e.to_string()))?;
     // Off Windows there is no `wt.exe`/`conhost.exe`: the lane host runs directly.
     if !cfg!(windows) {
         return spawn_direct(spec, argv);
@@ -1265,6 +1306,7 @@ mod tests {
 
     fn direct_spec() -> LaunchSpec {
         LaunchSpec {
+            wsl: None,
             role: Role::new("baracuda").unwrap(),
             name: Role::new("baracuda").unwrap(),
             cwd: "C:/Projects/baracuda".to_string(),
@@ -1386,6 +1428,7 @@ mod tests {
     #[test]
     fn both_launch_commands_set_the_launched_role_not_the_spawners() {
         let spec = LaunchSpec {
+            wsl: None,
             role: Role::new("overmind").unwrap(),
             cwd: "C:/Projects/OverMind".to_string(),
             ..LaunchSpec::try_from(&state_with_role("overmind")).unwrap()
@@ -2304,6 +2347,72 @@ mod tests {
         assert_eq!(
             awaiting_calls, 1,
             "must still have notified once, at the 20s mark, even though it later resolved"
+        );
+    }
+
+    // -- launch mode `wsl` (docs/LANE-RESTART-WSL.md) ------------------- //
+
+    #[test]
+    fn a_wsl_lanes_terminal_starts_in_a_windows_folder_in_both_commands() {
+        let spec = LaunchSpec {
+            wsl: Some(crate::wsl::WslTarget {
+                distro: "lane-spike".to_string(),
+                user: "lane-commysdk".to_string(),
+                wrapper: "/usr/local/bin/lane-sandbox".to_string(),
+                state_dir: None,
+            }),
+            role: Role::new("overmind").unwrap(),
+            cwd: "/home/lane-commysdk/work/overmind".to_string(),
+            ..LaunchSpec::try_from(&state_with_role("overmind")).unwrap()
+        };
+        let argv = HostedArgv::new_wsl(
+            "C:/Projects",
+            "overmind",
+            strs(&["claude"]),
+            strs(&["wsl.exe", "--exec", "/w", "--", "claude"]),
+        )
+        .unwrap();
+        let (wt, conhost) = launch_commands(&spec, &argv);
+        let wt_args: Vec<_> = wt.get_args().collect();
+        let d = wt_args.iter().position(|a| *a == "-d").expect("wt -d");
+        assert_eq!(wt_args[d + 1], "C:/Projects");
+        assert_eq!(
+            conhost.get_current_dir(),
+            Some(std::path::Path::new("C:/Projects"))
+        );
+        // control: the lane's own cwd appears nowhere on either command line except as the --cd
+        // the wsl command itself carries (none here), so neither terminal is told to enter it
+        assert!(wt_args
+            .iter()
+            .all(|a| *a != std::ffi::OsStr::new(&spec.cwd)));
+        assert_ne!(
+            conhost.get_current_dir(),
+            Some(std::path::Path::new(&spec.cwd))
+        );
+    }
+
+    #[test]
+    fn a_wsl_hosted_argv_refuses_a_semicolon_anywhere() {
+        assert!(matches!(
+            HostedArgv::new_wsl("C:/Pro;jects", "r", strs(&["claude"]), strs(&["wsl.exe"])),
+            Err(RelaunchError::UnsafeArgument(_))
+        ));
+        assert!(matches!(
+            HostedArgv::new_wsl(
+                "C:/Projects",
+                "r",
+                strs(&["claude"]),
+                strs(&["wsl.exe", "a;b"])
+            ),
+            Err(RelaunchError::UnsafeArgument(_))
+        ));
+        let ok =
+            HostedArgv::new_wsl("C:/Projects", "r", strs(&["claude"]), strs(&["wsl.exe"])).unwrap();
+        assert_eq!(ok.wsl_command(), Some(&strs(&["wsl.exe"])[..]));
+        assert_eq!(
+            &*ok,
+            &strs(&["claude"])[..],
+            "derefs to the lane's claude argv"
         );
     }
 }

@@ -13,6 +13,7 @@ use crate::relaunch::{
 };
 use crate::role::Role;
 use crate::state::LaneState;
+use crate::wsl::{self, WslTarget};
 use std::time::Duration;
 
 /// What a launch needs to know about the lane it starts. Built from a state
@@ -28,6 +29,9 @@ pub struct LaunchSpec {
     pub remote_control: bool,
     /// The flags of the ORIGINAL launch; only the allowlisted ones carry over.
     pub launch_args: Option<Vec<String>>,
+    /// `Some` for a lane that runs in a WSL2 distro (docs/LANE-RESTART-WSL.md): `cwd` is then a
+    /// POSIX path inside the distro and the launch is `wsl.exe ...`. `None` is a Windows lane.
+    pub wsl: Option<WslTarget>,
 }
 
 /// A state file's role or name is whatever a hook wrote, so the conversion is where it is checked:
@@ -45,6 +49,7 @@ impl TryFrom<&LaneState> for LaunchSpec {
             None => role.clone(),
         };
         Ok(LaunchSpec {
+            wsl: None,
             role,
             name,
             cwd: state.cwd.clone(),
@@ -114,7 +119,14 @@ pub fn prepare_launch(
     let argv = launch_argv(spec, &prompt, model.as_str());
     // Checked as the FINAL command line (cwd + host-wrapped argv, the `lane-restart.exe` path
     // included): `HostedArgv` is the only thing a spawn accepts.
-    let argv = HostedArgv::new(&spec.cwd, spec.role.as_str(), argv)?;
+    let argv = match &spec.wsl {
+        None => HostedArgv::new(&spec.cwd, spec.role.as_str(), argv)?,
+        Some(target) => {
+            let command = wsl::build_command(target, &spec.cwd, &argv)
+                .map_err(|e| RelaunchError::Wsl(e.to_string()))?;
+            HostedArgv::new_wsl(&wsl::host_start_dir(), spec.role.as_str(), argv, command)?
+        }
+    };
     // PM finding, 2026-09-19: judge the argv ABOUT TO BE LAUNCHED (it already
     // went through the allowlist), never the original launch flags.
     let carries_dev_channels_flag = has_dev_channels_flag(&argv);
@@ -384,6 +396,7 @@ mod tests {
     #[test]
     fn a_hand_built_spec_launches_without_a_state_file() {
         let spec = LaunchSpec {
+            wsl: None,
             role: Role::new("fuel").unwrap(),
             name: Role::new("fuel").unwrap(),
             cwd: "C:/Projects/fuel".into(),
@@ -905,6 +918,7 @@ mod tests {
 
     fn fuel() -> LaunchSpec {
         LaunchSpec {
+            wsl: None,
             role: Role::new("fuel").unwrap(),
             name: Role::new("fuel").unwrap(),
             cwd: "C:/Projects/fuel".into(),
@@ -1028,5 +1042,94 @@ mod tests {
             Err(RelaunchError::SessionNeverProcessedPrompt)
         ));
         assert_eq!(slept, 2, "the 2 s progress timeout of `short()`");
+    }
+
+    // ---- launch mode `wsl` (docs/LANE-RESTART-WSL.md section 3) ----
+
+    fn wsl_spec(role: &str) -> LaunchSpec {
+        let mut s = spec(role);
+        s.cwd = "/home/lane-commysdk/work/commy-sdk-rust".to_string();
+        s.launch_args = Some(strs(&[
+            "claude",
+            "--mcp-config",
+            "/home/lane-commysdk/synapse-home/lane.mcp.json",
+            "--dangerously-load-development-channels",
+            "server:synapse",
+        ]));
+        s.wsl = Some(WslTarget {
+            distro: "lane-spike".to_string(),
+            user: "lane-commysdk".to_string(),
+            wrapper: "/usr/local/bin/lane-sandbox".to_string(),
+            state_dir: None,
+        });
+        s
+    }
+
+    #[test]
+    fn a_wsl_launch_is_hosted_on_windows_with_wsl_exe_as_the_hosts_child() {
+        let p = prepare_launch(&wsl_spec("commy-sdk-rust"), "sonnet", None).unwrap();
+        let hosted = p.argv.hosted();
+        assert_eq!(hosted[1], "host");
+        let sep = hosted
+            .iter()
+            .position(|a| a == "--")
+            .expect("a -- before the child");
+        let wsl_cmd = p
+            .argv
+            .wsl_command()
+            .expect("a wsl launch has the wsl.exe command");
+        assert_eq!(
+            &hosted[sep + 1..],
+            wsl_cmd,
+            "the host runs exactly the wsl.exe command"
+        );
+        assert_eq!(wsl_cmd[0], "wsl.exe");
+        assert!(
+            wsl_cmd
+                .windows(2)
+                .any(|w| w[0] == "--cd" && w[1] == "/home/lane-commysdk/work/commy-sdk-rust"),
+            "{wsl_cmd:?}"
+        );
+        // what runs inside the distro is the same claude argv a Windows lane gets: prompt first
+        assert_eq!(p.argv[0], "claude");
+        assert_eq!(p.argv[1], "read commy-sdk-rust HANDOFF and continue");
+        assert_eq!(wsl_cmd[wsl_cmd.len() - p.argv.len()..], p.argv[..]);
+        assert!(p.carries_dev_channels_flag, "the dialog flag is still seen");
+        // the terminal starts in a Windows folder, never the POSIX cwd
+        assert_eq!(p.argv.cwd(), crate::wsl::host_start_dir());
+        assert_ne!(p.argv.cwd(), "/home/lane-commysdk/work/commy-sdk-rust");
+    }
+
+    #[test]
+    fn a_windows_launch_has_no_wsl_command() {
+        let p = prepare_launch(&spec("overmind"), "sonnet", None).unwrap();
+        assert!(p.argv.wsl_command().is_none());
+        assert_eq!(p.argv.cwd(), "C:/x");
+    }
+
+    #[test]
+    fn a_wsl_launch_is_refused_for_a_bad_target_a_windows_cwd_a_semicolon_or_opus() {
+        let mut s = wsl_spec("commy-sdk-rust");
+        s.wsl.as_mut().unwrap().user = "root".to_string();
+        assert!(matches!(
+            prepare_launch(&s, "sonnet", None),
+            Err(RelaunchError::Wsl(_))
+        ));
+        let mut s = wsl_spec("commy-sdk-rust");
+        s.cwd = "C:/Projects/commy-sdk-rust".to_string();
+        assert!(matches!(
+            prepare_launch(&s, "sonnet", None),
+            Err(RelaunchError::Wsl(_))
+        ));
+        let mut s = wsl_spec("commy-sdk-rust");
+        s.permission_mode = Some("a;b".into());
+        assert!(matches!(
+            prepare_launch(&s, "sonnet", None),
+            Err(RelaunchError::Wsl(_)) | Err(RelaunchError::UnsafeArgument(_))
+        ));
+        assert!(matches!(
+            prepare_launch(&wsl_spec("commy-sdk-rust"), "claude-opus-5", None),
+            Err(RelaunchError::ModelRefused(_))
+        ));
     }
 }

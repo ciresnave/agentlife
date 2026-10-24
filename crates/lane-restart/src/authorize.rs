@@ -571,6 +571,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_state(dir.path(), "commy-sdk-rust", |_| {});
         let launch = crate::launch::LaunchSpec {
+            wsl: None,
             role: crate::role::Role::new("commy-sdk-rust").unwrap(),
             name: crate::role::Role::new("commy-sdk-rust").unwrap(),
             cwd: "/home/lane-commysdk/work/commy-sdk-rust".to_string(),
