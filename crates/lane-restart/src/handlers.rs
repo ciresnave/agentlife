@@ -148,6 +148,8 @@ const SECRET_WORDS: &[&str] = &[
     "passwords",
     "passphrase",
     "passcode",
+    "passkey",
+    "passkeys",
     "pin",
     "secret",
     "secrets",
@@ -1093,6 +1095,25 @@ mod tests {
         );
     }
 
+    /// OverMind#96 (b): a passkey prompt is a secret prompt. Whole words only, like the rest.
+    #[test]
+    fn a_passkey_prompt_is_a_secret_prompt() {
+        assert_eq!(secret_word_in("Create a passkey"), Some("passkey"));
+        assert_eq!(secret_word_in("Use your Passkey:"), Some("passkey"));
+        assert_eq!(secret_word_in("Manage passkeys"), Some("passkeys"));
+        // controls: the list still matches whole words, and says nothing about its neighbours
+        assert_eq!(secret_word_in("the passkeying tool"), None);
+        assert_eq!(secret_word_in("Enter PIN:"), Some("pin"));
+    }
+
+    #[test]
+    fn refuses_a_pinned_line_that_names_a_passkey() {
+        let json = format!(
+            r#"{{"id":"t","match":{{"text_anchors":["Do you trust the files"],"lines":["Use your passkey here"]}},"action":"<Down><Enter>","scope":{{"roles":["*"]}},"provenance":{PROVENANCE}}}"#
+        );
+        assert!(parse_and_validate(&json).is_err());
+    }
+
     #[test]
     fn refuses_an_empty_or_too_short_anchor_list() {
         let none = r#"{"id":"t","match":{"text_anchors":[],"fields":{}},"action":"1\r","scope":{"roles":["*"]},"provenance":PROV}"#
@@ -1492,6 +1513,7 @@ project, or work from your team). If not, take a moment to review what's in this
         }
         // A dialog that also asks for a secret is never answered, anchors or not.
         assert_eq!(answers(&format!("{good}\n Enter your password:\n")), None);
+        assert_eq!(answers(&format!("{good}\n Use your passkey:\n")), None);
         assert_eq!(
             answers(&good.replace("Quick safety check", "Quick check")),
             None
