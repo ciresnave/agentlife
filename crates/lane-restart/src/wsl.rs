@@ -194,9 +194,98 @@ pub fn build_command(
     Ok(argv)
 }
 
+/// The distro names `wsl.exe -l -q` printed. Windows prints UTF-16LE (with a BOM, or none), and a
+/// `WSL_UTF8=1` environment prints UTF-8; both are read, and bytes that are neither are an error,
+/// never an empty list (an empty list would say "no such distro" about a list nobody read).
+pub fn parse_distro_list(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let text = if bytes.starts_with(&[0xFF, 0xFE])
+        || (bytes.len() >= 2
+            && bytes.len().is_multiple_of(2)
+            && bytes.iter().skip(1).step_by(2).all(|b| *b == 0))
+    {
+        if !bytes.len().is_multiple_of(2) {
+            return Err("the distro list is UTF-16 with an odd number of bytes".to_string());
+        }
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16(&units)
+            .map_err(|e| format!("the distro list is not valid UTF-16: {e}"))?
+    } else {
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| format!("the distro list is neither UTF-16 nor UTF-8: {e}"))?
+    };
+    Ok(text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(|l| l.trim().trim_matches('\u{0}').to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Whether `distro` is among `listed`, exactly.
+pub fn distro_installed(listed: &[String], distro: &str) -> bool {
+    listed.iter().any(|d| d == distro)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn utf16le(text: &str, bom: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if bom {
+            out.extend([0xFF, 0xFE]);
+        }
+        for u in text.encode_utf16() {
+            out.extend(u.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn the_distro_list_is_read_from_utf16_with_or_without_a_bom_and_from_utf8() {
+        let text = "Ubuntu-24.04\r\nlane-spike\r\ndocker-desktop\r\n";
+        let want = ["Ubuntu-24.04", "lane-spike", "docker-desktop"];
+        for bytes in [
+            utf16le(text, true),
+            utf16le(text, false),
+            text.as_bytes().to_vec(),
+            utf16le("Ubuntu-24.04\nlane-spike\ndocker-desktop", false),
+        ] {
+            assert_eq!(parse_distro_list(&bytes).unwrap(), want, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn a_distro_is_installed_only_by_its_exact_name() {
+        let listed = parse_distro_list(&utf16le("lane-spike\r\nUbuntu\r\n", true)).unwrap();
+        assert!(distro_installed(&listed, "lane-spike"));
+        assert!(
+            !distro_installed(&listed, "lane-spik"),
+            "a prefix is not it"
+        );
+        assert!(!distro_installed(&listed, "Lane-Spike"));
+        assert!(!distro_installed(&listed, ""));
+        assert!(!distro_installed(&[], "lane-spike"));
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_distro_list_are_an_error_not_an_empty_list() {
+        assert!(
+            parse_distro_list(&[0xFF, 0xFE, 0x41]).is_err(),
+            "odd UTF-16"
+        );
+        assert!(
+            parse_distro_list(&[0xFF, 0xFF, 0xFE, 0xFD]).is_err(),
+            "neither encoding"
+        );
+        // an installed-but-empty output is an empty list, which is a real answer
+        assert_eq!(parse_distro_list(b"").unwrap(), Vec::<String>::new());
+    }
 
     fn target() -> WslTarget {
         WslTarget {

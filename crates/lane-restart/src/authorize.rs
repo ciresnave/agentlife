@@ -78,6 +78,9 @@ pub enum Refusal {
         caller: Option<u32>,
         recorded: u32,
     },
+    /// `--self` for a lane whose spec says `launch: wsl` (docs/LANE-RESTART-WSL.md section 5): its
+    /// claude is a Linux process in another kernel, which this tool cannot be the caller of.
+    SelfNotAvailableForWsl(String),
     Busy(String),
     SubagentsRunning(String, u32),
     NoBackgroundShellsClaimMissing(String),
@@ -115,6 +118,12 @@ impl std::fmt::Display for Refusal {
             } => write!(
                 f,
                 "{role}: --self, but the caller's own claude process could not be found to compare with pid {recorded}"
+            ),
+            Refusal::SelfNotAvailableForWsl(r) => write!(
+                f,
+                "{r}: --self is not available for a WSL lane (its claude runs in another kernel and \
+                 cannot be this tool's caller); it asks the PM by Synapse, and the PM restarts it \
+                 with `lane-restart --role {r}`"
             ),
             Refusal::Busy(r) => write!(f, "{r}: busy"),
             Refusal::SubagentsRunning(r, n) => write!(f, "{r}: {n} subagent(s) still running"),
@@ -245,6 +254,9 @@ fn idle_and_shell_free(state: &LaneState, facts: &dyn SystemFacts) -> Result<(),
 /// decides.
 pub fn decide(req: &Request, facts: &dyn SystemFacts, state_dir: &Path) -> Result<Plan, Refusal> {
     let role = req.target.role();
+    if !req.target.is_other() && crate::spec::is_wsl_lane(state_dir, role) {
+        return Err(Refusal::SelfNotAvailableForWsl(role.to_string()));
+    }
     let state = state::load(state_dir, role).map_err(|e| match e {
         state::LoadError::NotFound(_) => Refusal::NoStateFile(role.to_string()),
         state::LoadError::Unreadable(m) | state::LoadError::Malformed(m) => {
@@ -550,6 +562,89 @@ mod tests {
             decide(&req, &healthy_facts(), dir.path()),
             Err(Refusal::NotTheCaller { .. })
         ));
+    }
+
+    #[test]
+    fn self_restart_is_refused_for_a_wsl_lane_and_only_for_it() {
+        use crate::spec::{build, write_atomic, SpecInputs, SpecState, WrittenBy};
+        use crate::wsl::WslTarget;
+        let dir = tempdir().unwrap();
+        write_state(dir.path(), "commy-sdk-rust", |_| {});
+        let launch = crate::launch::LaunchSpec {
+            role: crate::role::Role::new("commy-sdk-rust").unwrap(),
+            name: crate::role::Role::new("commy-sdk-rust").unwrap(),
+            cwd: "/home/lane-commysdk/work/commy-sdk-rust".to_string(),
+            permission_mode: None,
+            remote_control: false,
+            launch_args: None,
+        };
+        let spec = build(&SpecInputs {
+            launch: &launch,
+            model: "sonnet",
+            session_id: None,
+            pid_start_secs: None,
+            state: SpecState::Running,
+            written_by: WrittenBy::Launch,
+            now: Utc::now(),
+        })
+        .unwrap();
+        let myself = |role: &str| Request {
+            target: Target::Myself {
+                role: role.into(),
+                caller_pid: Some(1234),
+            },
+            confirmed: false,
+            dry_run: false,
+        };
+        // a Windows spec for the role: the usual path (here: the wrong caller), not this refusal
+        write_atomic(dir.path(), &{
+            let mut w = spec.clone();
+            w.cwd = "C:/Projects/commy-sdk-rust".to_string();
+            w
+        })
+        .unwrap();
+        assert!(!matches!(
+            decide(&myself("commy-sdk-rust"), &healthy_facts(), dir.path()),
+            Err(Refusal::SelfNotAvailableForWsl(_))
+        ));
+        // the same role as a WSL lane: refused, by name
+        let wsl = spec.with_wsl(WslTarget {
+            distro: "lane-spike".into(),
+            user: "lane-commysdk".into(),
+            wrapper: "/usr/local/bin/lane-sandbox".into(),
+            state_dir: None,
+        });
+        write_atomic(dir.path(), &wsl).unwrap();
+        assert_eq!(
+            decide(&myself("commy-sdk-rust"), &healthy_facts(), dir.path()).unwrap_err(),
+            Refusal::SelfNotAvailableForWsl("commy-sdk-rust".into())
+        );
+        // control: restarting it from outside (the PM) is not this refusal
+        let other = Request {
+            target: Target::Other {
+                role: "commy-sdk-rust".into(),
+            },
+            confirmed: false,
+            dry_run: false,
+        };
+        assert!(!matches!(
+            decide(&other, &healthy_facts(), dir.path()),
+            Err(Refusal::SelfNotAvailableForWsl(_))
+        ));
+        // a role with no spec at all is untouched
+        write_state(dir.path(), "overmind", |_| {});
+        assert!(!matches!(
+            decide(&myself("overmind"), &healthy_facts(), dir.path()),
+            Err(Refusal::SelfNotAvailableForWsl(_))
+        ));
+    }
+
+    #[test]
+    fn the_wsl_self_refusal_names_the_way_out() {
+        let m = Refusal::SelfNotAvailableForWsl("commy-sdk-rust".into()).to_string();
+        assert!(m.contains("commy-sdk-rust"), "{m}");
+        assert!(m.contains("--self is not available for a WSL lane"), "{m}");
+        assert!(m.contains("lane-restart --role commy-sdk-rust"), "{m}");
     }
 
     #[test]
