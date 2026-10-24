@@ -54,8 +54,13 @@ once they have. The App is private (installable only on this account), has no we
   one there, store it protected the same way) is not built; `-Apply -Replace` would create a second App, not a new key.
 - "The host keystore under the watcher account" is taken to mean this DPAPI directory. If the PM means the `with-secret` vault
   instead, that store is not implemented here (it needs the vault's own approval prompt).
-- The manifest's permission key `organization_self_hosted_runners` is the REST documentation's name; the **write** level is
-  confirmed only when GitHub's creation page shows it, which is why click 1 is a person reading the list.
+- **Proven on GitHub's real create page (2026-10-23).** The manifest's permission key `organization_self_hosted_runners` at level
+  **write** was accepted: the PM read the installation `174476958` of `antspawn-runner` (App id `5441608`) on ThinkersJournal and
+  it carries exactly `organization_self_hosted_runners=write` and `metadata=read`; `-Verify` printed `verify ok`. Click 1 is still
+  a person reading the list.
+- **Actions: Read-only is not requested by the manifest.** A live read of queued runs on `antspawn-proof` returned HTTP 403
+  `Resource not accessible by integration`; adding repository **Actions: Read-only** is a browser step on the App's settings
+  page plus an Accept on the installation (the manifest does not request it).
 
 ## Hand-off to C2 (the AntSpawn adapter)
 

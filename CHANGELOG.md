@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.13
+
+- **Docs only: `docs/GITHUB-APP.md` closes the "Unproven" note (PM TASK 2026-10-23).** The permission key `organization_self_hosted_runners` at **write** was accepted by GitHub's real create page: installation 174476958 of `antspawn-runner` (id 5441608) carries exactly `organization_self_hosted_runners=write` + `metadata=read` (PM's read, `-Verify` ok). Also records that repository Actions: Read-only is not in the manifest (403 on `antspawn-proof` until added in the browser). Version 0.29.13 is provisional.
+
 ## 0.29.12
 
 - **Dependency: `ctutils` 0.4.3 to 0.4.5 (RUSTSEC-2026-0385, "Non-constant-time mask generation and `u128` comparisons", PM TASK 2026-10-23).** `cargo deny` failed on `main` (seen on #164, 2026-10-24); `cargo update -p ctutils` only, and `cargo deny check advisories` reads `advisories ok` afterwards. Version 0.29.12 is provisional.
