@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.16
+
+- **Docs only: `docs/ROADMAP.md` row for OverMind#96 (b), `SECRET_WORDS` lacks `passkey` (PM TASK 2026-10-23, roadmap-or-close).** Read at `origin/main` 616b8d2: OverMind#96 (a) is fixed in agentlife's `host.rs` since the import (e742f01: the unhandled-dialog capture runs on its own thread) and OverMind#117 by 52fa622 (#113: the 800 ms literals remain, but the window starts at the child's first output, with a regression test), agentlife#14 already has Next row 2. This lane does not close the OverMind issues; the PM does, after this merges. Version 0.29.16 is provisional (#167 merged as 0.29.15).
+
 ## 0.29.15
 
 - **Docs only: `docs/LANE-RESTART-WSL.md`, the spec for a `lane-restart` launch mode `wsl` (PM TASK 2026-10-23, WSL2 pilot, decision 179 B).** Spec fields (`launch: wsl`, `wsl.distro`, `wsl.user`, `wsl.wrapper`, optional `wsl.state_dir`; a WSL spec is `schema: 2` so an older build refuses it instead of launching a POSIX `cwd` as a Windows process), the exact argv (`wsl.exe -d D -u U --cd CWD --exec WRAPPER -- claude PROMPT ... dev-channels flag last`), the Windows host kept as host, state read through the distro's UNC path, a `WslFacts` implementation of the `SystemFacts` seam, `--self` refused for a WSL lane (the lane asks the PM by Synapse), the refusals, a red-first test plan and five pilot measurements. Nothing is built, and every WSL behaviour not yet seen is marked UNVERIFIED: `lane-spike` was Stopped when this was written, and starting it is the PM's pilot. Version 0.29.15 is provisional (#166 merged as 0.29.14).
