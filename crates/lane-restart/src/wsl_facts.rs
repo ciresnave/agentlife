@@ -93,6 +93,13 @@ fn program_name(arg0: &str) -> &str {
     arg0.rsplit('/').next().unwrap_or(arg0)
 }
 
+/// The last component of a Windows or POSIX path, split on both separators on every OS:
+/// `Path::file_name` does not treat `\` as a separator when this runs on Linux (CI's Ubuntu leg).
+fn image_name(path: &std::path::Path) -> String {
+    let full = path.to_string_lossy();
+    full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string()
+}
+
 /// Seconds of slack when comparing a start time rebuilt from `etimes` (whole seconds, read a
 /// moment after the clock) with one read from the process table.
 const START_SLACK_SECS: u64 = 2;
@@ -213,9 +220,8 @@ impl<I: SystemFacts, R: DistroRunner> WslFacts<I, R> {
         let id = self.inner.process_identity(pid)?;
         let is_wsl = id
             .exe
-            .as_ref()
-            .and_then(|e| e.file_name())
-            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("wsl.exe"));
+            .as_deref()
+            .is_some_and(|e| image_name(e).eq_ignore_ascii_case("wsl.exe"));
         is_wsl.then_some(id)
     }
 }
@@ -618,6 +624,19 @@ mod tests {
         assert!(has_shell_descendant(&deep, 1), "a shell two levels down");
         let cycle = parse_ps("1 2 9 claude a\n2 1 9 node x\n").unwrap();
         assert!(!has_shell_descendant(&cycle, 1), "a ppid cycle ends");
+    }
+
+    #[test]
+    fn the_image_name_is_the_last_component_of_either_kind_of_path_on_every_os() {
+        for (path, want) in [
+            (r"C:\Windows\System32\wsl.exe", "wsl.exe"),
+            ("C:/Windows/System32/WSL.EXE", "WSL.EXE"),
+            ("/usr/bin/wsl.exe", "wsl.exe"),
+            ("wsl.exe", "wsl.exe"),
+            (r"C:\Windows\System32\wsl.exe.bak", "wsl.exe.bak"),
+        ] {
+            assert_eq!(image_name(std::path::Path::new(path)), want, "{path}");
+        }
     }
 
     // ---- the facts ----
