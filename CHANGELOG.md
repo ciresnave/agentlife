@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.12
+
+- **Dependency: `ctutils` 0.4.3 to 0.4.5 (RUSTSEC-2026-0385, "Non-constant-time mask generation and `u128` comparisons", PM TASK 2026-10-23).** `cargo deny` failed on `main` (seen on #164, 2026-10-24); `cargo update -p ctutils` only, and `cargo deny check advisories` reads `advisories ok` afterwards. Version 0.29.12 is provisional.
+
 ## 0.29.10
 
 - **Fix: `github-app-setup.ps1 -Apply` could lose GitHub's redirect (CI flake on #162, 2026-10-22, and a real bug in the script).** The wait loop called `HttpListener.GetContextAsync()` every poll and abandoned the task when the 2 s wait timed out; an abandoned task still collects the NEXT request and drops it, so any request that arrives after more than one poll (a human clicking for minutes, then GitHub's redirect to `/callback`) can be swallowed and never answered, and the script then waits out its timeout. CI saw it as "existing connection was forcibly closed" on the test's first request after 129 s. The script now keeps ONE outstanding accept across polls and starts a new one only after it completed. The test's first request is now sent 5 s late (more than two poll timeouts) with a 20 s client timeout, so the race is exercised every run instead of by chance: seen red against the old script (the request times out), green against the fix. The failing job ran on a GitHub-hosted runner, not on this machine, so the Visual Studio update here was not involved. Not done: nothing else in the script was re-measured.

@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "agentlife"
-version = "0.29.10"
+version = "0.29.12"
 dependencies = [
  "chrono",
  "lane-restart",
@@ -923,9 +923,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.29.10"
+version = "0.29.12"
 dependencies = [
  "chrono",
  "clap",
@@ -2157,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.29.10"
+version = "0.29.12"
 dependencies = [
  "chrono",
  "rustix",
@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "launcher"
-version = "0.29.10"
+version = "0.29.12"
 dependencies = [
  "lane-state",
  "serde",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "pin-plan"
-version = "0.29.10"
+version = "0.29.12"
 
 [[package]]
 name = "pin-project"
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "runner-lint"
-version = "0.29.10"
+version = "0.29.12"
 dependencies = [
  "saphyr",
 ]
