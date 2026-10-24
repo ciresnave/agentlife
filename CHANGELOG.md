@@ -2,9 +2,9 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.29.18
+## 0.29.17
 
-- **Docs only: `docs/LANE-RESTART-WSL.md` records P2 and P4 as measured (PM go, 2026-10-24) and corrects the process-match rule.** Run on `lane-spike` with a stand-in (`lane-sandbox -- sleep 600`, no claude, no host, no settings touched). P2: `wsl.exe --exec` keeps a spaced prompt, `a;b`, an embedded quote, `--name` and a literal `$HOME` as single arguments, `--cd` takes the POSIX path, the wrapper's `-- cmd` convention works. P4: the `ps -u` probe sees the whole lane tree from outside the sandbox and killing the Windows-side `wsl.exe` ended all of it (`bwrap --die-with-parent`). **Correction:** the probe also lists two `bwrap` processes whose command line ends with the lane's own argv, so the rule "args carry `--name <role>`" would have matched them; the rule is now `argv[0]` basename `claude` plus `--name <role>` plus a start time not before the host's `wsl.exe`. Not measured: a real `claude`; P1, P3, P5 are held by the PM. Version 0.29.18 is provisional (#169 holds 0.29.17).
+- **Docs only: `docs/LANE-RESTART-WSL.md` records P2 and P4 as measured (PM go, 2026-10-24) and corrects the process-match rule.** Run on `lane-spike` with a stand-in (`lane-sandbox -- sleep 600`, no claude, no host, no settings touched). P2: `wsl.exe --exec` keeps a spaced prompt, `a;b`, an embedded quote, `--name` and a literal `$HOME` as single arguments, `--cd` takes the POSIX path, the wrapper's `-- cmd` convention works. P4: the `ps -u` probe sees the whole lane tree from outside the sandbox and killing the Windows-side `wsl.exe` ended all of it (`bwrap --die-with-parent`). **Correction:** the probe also lists two `bwrap` processes whose command line ends with the lane's own argv, so the rule "args carry `--name <role>`" would have matched them; the rule is now `argv[0]` basename `claude` plus `--name <role>` plus a start time not before the host's `wsl.exe`. Not measured: a real `claude`; P1, P3, P5 are held by the PM. Version 0.29.17 is provisional (#168 merged as 0.29.16).
 
 ## 0.29.16
 
