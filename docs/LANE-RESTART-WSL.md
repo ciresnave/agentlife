@@ -100,10 +100,15 @@ fact means for a WSL lane:
 
 **The one command lane-restart runs inside a distro:** `wsl.exe -d <distro> -u <user> --exec /bin/ps -u <user> -o pid=,lstart=,args=`
 (fixed argv, no wrapper, no user input in it), read as data. It lists the lane user's processes (the sandbox's pid namespace is
-outside the lane, so `bwrap` and `claude` show). A claude is "the lane's" when its args carry `--name <role>` and its start time is
-not before the host's `wsl.exe` start time (the same "after the launch" rule `find_claude_process_in` uses). **UNVERIFIED** (P4): that
-`ps -u` from outside the sandbox sees the claude child, and that killing `wsl.exe` ends it (`bwrap --die-with-parent` is the PM's wrapper's
-decision; if it does not, the stop above fails closed with the survivor named).
+outside the lane, so `bwrap` and `claude` show). **Measured 2026-10-24 (P4, stand-in `lane-sandbox -- sleep 600`, no claude):** the
+list holds the `systemd --user` and shell of the lane user, **two `bwrap` processes whose command line ENDS WITH the lane's own argv**
+(`bwrap --die-with-parent ... /usr/bin/sleep 600`), and the inner command itself. So a match on "args carry `--name <role>`" would
+also match both `bwrap` lines. **The rule is therefore: a process is the lane's claude when its `argv[0]` basename is `claude`, its
+args carry `--name <role>`, and its start time is not before the host's `wsl.exe` start time** (the same "after the launch" rule
+`find_claude_process_in` uses); a `bwrap` line is never the lane. `lstart` has one-second resolution (as the Windows start times do).
+**Measured too:** `TerminateProcess` on the Windows-side `wsl.exe` ended the whole tree (0 survivors 4 s later, control: 3 processes
+listed while it ran), because the PM's wrapper passes `bwrap --die-with-parent`. That is the wrapper's property, not lane-restart's:
+if a wrapper does not set it, the stop above fails closed with the survivor named. Not measured: the same with a real `claude`.
 
 **Identity of the caller for `--self`.** `Target::Myself` compares the caller's `claude` pid with the state file's. A WSL lane's claude is
 a Linux process: the Windows `lane-restart` cannot be its caller (no interop), so **`--self` does not exist for a WSL lane** and is
@@ -158,9 +163,9 @@ The real-process half (P1 to P5 below) is the pilot's measurement, not a CI test
 | id | measure | decides |
 |---|---|---|
 | P1 | `lane-restart host -- wsl.exe -d lane-spike -u lane-commysdk --exec /usr/local/bin/lane-sandbox -- claude ...` shows the dev-channels dialog and a handler matches it | host stays on Windows (3) |
-| P2 | `--exec` keeps a prompt with spaces as ONE argument; `--cd` accepts the POSIX cwd | the argv of 3 |
+| P2 | **MEASURED 2026-10-24, pass.** `--exec` keeps each element ONE argument: a spaced prompt, `a;b`, `q"uote`, `--name`, a literal `$HOME` (not expanded); `--cd /home/lane-commysdk/work/commy-sdk-rust` takes the POSIX path; the wrapper's `-- cmd` convention works. Driven by Python `subprocess` (the MSVCRT quoting Rust's `Command` uses), not by a Rust build | the argv of 3 |
 | P3 | `Get-ChildItem \\wsl.localhost\lane-spike\home\lane-commysdk\.local\state\lane-state` works with `automount=false`; whether it starts a stopped distro | state reads (4), O3 |
-| P4 | `wsl.exe -d lane-spike -u lane-commysdk --exec /bin/ps -u lane-commysdk -o pid=,lstart=,args=` lists `claude --name <role>`; killing the host's `wsl.exe` ends the sandboxed claude | identity and stop (5) |
+| P4 | **MEASURED 2026-10-24 with a stand-in, pass with one fix (section 5: `bwrap` lines also carry the lane's argv).** `wsl.exe ... --exec /bin/ps -u lane-commysdk -o pid=,lstart=,args=` sees the whole tree from outside the sandbox; killing the Windows-side `wsl.exe` ended all of it. A real `claude` is still to be seen | identity and stop (5) |
 | P5 | the Linux `lane-restart state` hook writes `wsl.state_dir/<role>.json` under the wrapper (`$HOME` is the lane user's own) | state (4) |
 
 ## 11. Open questions for the PM
