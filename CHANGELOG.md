@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.15
+
+- **Docs only: `docs/LANE-RESTART-WSL.md`, the spec for a `lane-restart` launch mode `wsl` (PM TASK 2026-10-23, WSL2 pilot, decision 179 B).** Spec fields (`launch: wsl`, `wsl.distro`, `wsl.user`, `wsl.wrapper`, optional `wsl.state_dir`; a WSL spec is `schema: 2` so an older build refuses it instead of launching a POSIX `cwd` as a Windows process), the exact argv (`wsl.exe -d D -u U --cd CWD --exec WRAPPER -- claude PROMPT ... dev-channels flag last`), the Windows host kept as host, state read through the distro's UNC path, a `WslFacts` implementation of the `SystemFacts` seam, `--self` refused for a WSL lane (the lane asks the PM by Synapse), the refusals, a red-first test plan and five pilot measurements. Nothing is built, and every WSL behaviour not yet seen is marked UNVERIFIED: `lane-spike` was Stopped when this was written, and starting it is the PM's pilot. Version 0.29.15 is provisional (#166 merged as 0.29.14).
+
 ## 0.29.14
 
 - **Dependency: `persistant` 0.4.4 to 0.9.28 (PM TASK 2026-10-23; CireSnave: all dependencies on their most recent versions).** The requirement is `0.9.28`; the lock resolves it to 0.9.42. It builds without source changes. Version 0.29.14 is provisional.
