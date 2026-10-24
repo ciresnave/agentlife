@@ -98,14 +98,14 @@ fact means for a WSL lane:
 | live shell below it | descendants in the Windows table | the state file's own `no_background_shells` claim **plus** the probe's process list; if the probe fails the answer is `Err(ShellCheckError)`, which blocks a stop (closed direction), never "no shells" |
 | kill | `kill_verified(pid, identity)` | the same verified kill of the `wsl.exe` tree, **then** the probe must confirm no claude of that lane remains; a survivor is `KillError`, reported, not retried blindly |
 
-**The one command lane-restart runs inside a distro:** `wsl.exe -d <distro> -u <user> --exec /bin/ps -u <user> -o pid=,lstart=,args=`
+**The one command lane-restart runs inside a distro:** `wsl.exe -d <distro> -u <user> --exec /bin/ps -u <user> -o pid=,ppid=,etimes=,args=`
 (fixed argv, no wrapper, no user input in it), read as data. It lists the lane user's processes (the sandbox's pid namespace is
 outside the lane, so `bwrap` and `claude` show). **Measured 2026-10-24 (P4, stand-in `lane-sandbox -- sleep 600`, no claude):** the
 list holds the `systemd --user` and shell of the lane user, **two `bwrap` processes whose command line ENDS WITH the lane's own argv**
 (`bwrap --die-with-parent ... /usr/bin/sleep 600`), and the inner command itself. So a match on "args carry `--name <role>`" would
 also match both `bwrap` lines. **The rule is therefore: a process is the lane's claude when its `argv[0]` basename is `claude`, its
 args carry `--name <role>`, and its start time is not before the host's `wsl.exe` start time** (the same "after the launch" rule
-`find_claude_process_in` uses); a `bwrap` line is never the lane. `lstart` has one-second resolution (as the Windows start times do).
+`find_claude_process_in` uses); a `bwrap` line is never the lane. The code (`wsl_facts.rs`) reads `pid`, `ppid`, `etimes` (seconds since start) and `args` rather than the `lstart` measured in P4, because `lstart` is the distro's local time and Windows does not know its zone; a start is rebuilt as the Windows clock at the probe minus `etimes`, with two seconds of slack. **UNVERIFIED (P4b, needs the distro, held):** that this `ps` has `etimes`; if it does not, `ps` fails and every answer is a refusal, never a guess. `ppid` is what lets the shell check walk the lane's children.
 **Measured too:** `TerminateProcess` on the Windows-side `wsl.exe` ended the whole tree (0 survivors 4 s later, control: 3 processes
 listed while it ran), because the PM's wrapper passes `bwrap --die-with-parent`. That is the wrapper's property, not lane-restart's:
 if a wrapper does not set it, the stop above fails closed with the survivor named. Not measured: the same with a real `claude`.
