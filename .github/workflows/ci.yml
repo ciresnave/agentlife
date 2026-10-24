@@ -50,3 +50,10 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses bans sources
+
+  # Advisory (PM TASK 2026-10-24): NOT a required check and no rule is silenced here. The called workflow fixes the rule profile and the
+  # CodeRipper version; this repository passes nothing (it is public, so the default GitHub-hosted runner is right).
+  portfolio:
+    permissions:
+      contents: read
+    uses: ciresnave/coderipper/.github/workflows/portfolio.yml@c665210ad0972cf3ddb7bc81bdd7800c3248a938 # coderipper commit c665210 (its portfolio.yml pins CodeRipper 0.8.19)
