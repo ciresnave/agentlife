@@ -393,6 +393,13 @@ fn spec_path(dir: &Path, role: &str) -> Result<PathBuf, SpecError> {
     Ok(dir.join(format!("{role}{FILE_SUFFIX}")))
 }
 
+/// Whether `role`'s spec says `launch: wsl`. Any read problem (no spec, unreadable, malformed, a
+/// schema this build does not know) is `false`: this is only a reason to refuse something extra,
+/// never a reason to allow it.
+pub fn is_wsl_lane(dir: &Path, role: &str) -> bool {
+    read(dir, role).is_ok_and(|s| s.launch.as_deref() == Some(wsl::LAUNCH_WSL))
+}
+
 pub fn read(dir: &Path, role: &str) -> Result<SpecFile, SpecError> {
     let path = spec_path(dir, role)?;
     let text = match std::fs::read_to_string(&path) {

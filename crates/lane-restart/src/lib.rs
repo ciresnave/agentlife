@@ -47,6 +47,7 @@ pub mod tab_close;
 mod testing;
 pub mod watch;
 pub mod wsl;
+pub mod wsl_facts;
 
 /// The state directory (`C:/Projects/.lane-state` on Windows; under `XDG_STATE_HOME` elsewhere, see
 /// `lane_state::platform`) - RESTART-TOOL-DESIGN.md section 7. Not
