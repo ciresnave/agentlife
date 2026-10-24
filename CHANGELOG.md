@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.14
+
+- **Dependency: `persistant` 0.4.4 to 0.9.28 (PM TASK 2026-10-23; CireSnave: all dependencies on their most recent versions).** The requirement is `0.9.28`; the lock resolves it to 0.9.42. It builds without source changes. Version 0.29.14 is provisional.
+
 ## 0.29.13
 
 - **Docs only: `docs/GITHUB-APP.md` closes the "Unproven" note (PM TASK 2026-10-23).** The permission key `organization_self_hosted_runners` at **write** was accepted by GitHub's real create page: installation 174476958 of `antspawn-runner` (id 5441608) carries exactly `organization_self_hosted_runners=write` + `metadata=read` (PM's read, `-Verify` ok). Also records that repository Actions: Read-only is not in the manifest (403 on `antspawn-proof` until added in the browser). Version 0.29.13 is provisional.
