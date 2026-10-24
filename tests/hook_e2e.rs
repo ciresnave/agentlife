@@ -1043,6 +1043,8 @@ fn write_launch_spec(lane_state: &Path, rig: &Rig, role: &str) {
         stop_reason: None,
         stop_kind: None,
         tool_version: "test".to_string(),
+        launch: None,
+        wsl: None,
     };
     lane_restart::spec::write_atomic(lane_state, &spec).expect("a complete spec for the stand-in");
 }
@@ -1407,6 +1409,8 @@ fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_o
         stop_reason: None,
         stop_kind: None,
         tool_version: "test".to_string(),
+        launch: None,
+        wsl: None,
     };
     // Suspended (stopped on purpose) + wanted: restore leaves it alone, whatever the registry says.
     lane_restart::spec::write_atomic(&lane_state, &spec).unwrap();

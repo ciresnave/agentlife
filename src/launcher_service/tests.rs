@@ -123,6 +123,8 @@ fn spec_in(dir: &Path, role: &str, state: spec::SpecState) {
         stop_reason: None,
         stop_kind: None,
         tool_version: "test".into(),
+        launch: None,
+        wsl: None,
     };
     spec::write_atomic(dir, &s).unwrap();
 }
