@@ -22,6 +22,7 @@ use crate::permission_mode::PermissionMode;
 use crate::relaunch::{extra_launch_args, valid_identifier, RelaunchError};
 use crate::role::Role;
 use crate::state;
+use crate::wsl::{self, WslTarget};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -159,6 +160,14 @@ pub struct SpecFile {
     #[serde(default)]
     pub stop_kind: Option<StopKind>,
     pub tool_version: String,
+    /// `Some("wsl")` for a lane that runs inside a WSL2 distro (docs/LANE-RESTART-WSL.md), which
+    /// is also what makes the spec schema 2. Absent, and not written, for a Windows lane, so a
+    /// Windows spec is byte-for-byte what it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
+    /// The distro, user and wrapper of a `launch: wsl` spec; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl: Option<WslTarget>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -173,6 +182,8 @@ pub enum SpecError {
     Unreadable(String),
     Malformed(String),
     UnsupportedSchema(u32),
+    /// A `launch` value this build does not know. Never read as a Windows lane.
+    UnsupportedLaunch(String),
     Write(String),
     /// What was read back is not what was written.
     ReadBackMismatch,
@@ -193,7 +204,13 @@ impl std::fmt::Display for SpecError {
             SpecError::Malformed(e) => write!(f, "the launch spec is not valid: {e}"),
             SpecError::UnsupportedSchema(n) => write!(
                 f,
-                "the launch spec has schema {n}; this build reads schema {SCHEMA}"
+                "the launch spec has schema {n}; this build reads schemas {SCHEMA} and {}",
+                wsl::SCHEMA_WSL
+            ),
+            SpecError::UnsupportedLaunch(l) => write!(
+                f,
+                "the launch spec has launch mode {l:?}; this build knows only {:?}",
+                wsl::LAUNCH_WSL
             ),
             SpecError::Write(e) => write!(f, "could not write the launch spec: {e}"),
             SpecError::ReadBackMismatch => {
@@ -264,10 +281,58 @@ pub fn build(i: &SpecInputs) -> Result<SpecFile, SpecError> {
         stop_reason: None,
         stop_kind: None,
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        launch: None,
+        wsl: None,
     })
 }
 
 impl SpecFile {
+    /// This spec as a WSL lane (docs/LANE-RESTART-WSL.md section 2): schema 2, `launch: wsl`, the
+    /// target. Not checked here; `check` and `write_atomic` do.
+    pub fn with_wsl(mut self, target: WslTarget) -> SpecFile {
+        self.schema = wsl::SCHEMA_WSL;
+        self.launch = Some(wsl::LAUNCH_WSL.to_string());
+        self.wsl = Some(target);
+        self
+    }
+
+    /// The `wsl.exe` command a WSL spec launches (section 3): the checked claude argv wrapped for
+    /// the distro. A Windows spec has none.
+    pub fn wsl_argv(&self) -> Result<Vec<String>, SpecError> {
+        let target = match (self.launch.as_deref(), &self.wsl) {
+            (Some(wsl::LAUNCH_WSL), Some(t)) => t,
+            _ => return Err(SpecError::Incomplete("not a wsl spec".to_string())),
+        };
+        let prepared = self.check()?;
+        wsl::build_command(target, &self.cwd, &prepared.argv)
+            .map_err(|e| SpecError::Incomplete(e.to_string()))
+    }
+
+    /// The schema and the launch fields agree (section 2): a Windows spec is schema 1 with no
+    /// `launch` and no `wsl`; a WSL spec is schema 2, `launch: wsl`, a valid target and a POSIX
+    /// `cwd`. Checked at write and at read, so a hand-edited file is not trusted.
+    fn check_launch_fields(&self) -> Result<(), SpecError> {
+        let incomplete = |why: &str| Err(SpecError::Incomplete(why.to_string()));
+        match (self.schema, self.launch.as_deref(), self.wsl.as_ref()) {
+            (SCHEMA, None, None) => Ok(()),
+            (SCHEMA, _, _) => {
+                incomplete("the launch fields need schema 2; a schema 1 spec is a Windows lane")
+            }
+            (wsl::SCHEMA_WSL, Some(wsl::LAUNCH_WSL), Some(target)) => target
+                .validate()
+                .and_then(|()| wsl::validate_cwd(&self.cwd))
+                .map_err(|e| SpecError::Incomplete(e.to_string())),
+            (wsl::SCHEMA_WSL, Some(wsl::LAUNCH_WSL), None) => {
+                incomplete("launch is wsl but there is no wsl target")
+            }
+            (wsl::SCHEMA_WSL, Some(other), _) => {
+                Err(SpecError::UnsupportedLaunch(other.to_string()))
+            }
+            (wsl::SCHEMA_WSL, None, _) => incomplete("schema 2 without a launch mode"),
+            (n, _, _) => Err(SpecError::UnsupportedSchema(n)),
+        }
+    }
+
     /// The `LaunchSpec` a start would use. Its original-argv slot carries the explicit model and
     /// the allowlisted extras, so `resolve_launch_model` reads the model from the spec itself.
     pub fn launch_spec(&self) -> LaunchSpec {
@@ -300,9 +365,7 @@ impl SpecFile {
     /// Complete means: `prepare_launch` accepts it (plain role and name, a non-Opus explicit
     /// model, no `;` in any element). Opus is never allowed here.
     pub fn check(&self) -> Result<PreparedLaunch, SpecError> {
-        if self.schema != SCHEMA {
-            return Err(SpecError::UnsupportedSchema(self.schema));
-        }
+        self.check_launch_fields()?;
         if self.model.trim().is_empty() {
             return Err(SpecError::Incomplete("no model".to_string()));
         }
@@ -342,7 +405,7 @@ pub fn read(dir: &Path, role: &str) -> Result<SpecFile, SpecError> {
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| SpecError::Malformed(e.to_string()))?;
     match value.get("schema").and_then(|s| s.as_u64()) {
-        Some(n) if n == u64::from(SCHEMA) => {}
+        Some(n) if n == u64::from(SCHEMA) || n == u64::from(wsl::SCHEMA_WSL) => {}
         Some(n) => {
             return Err(SpecError::UnsupportedSchema(
                 n.min(u64::from(u32::MAX)) as u32
@@ -350,7 +413,10 @@ pub fn read(dir: &Path, role: &str) -> Result<SpecFile, SpecError> {
         }
         None => return Err(SpecError::Malformed("no schema field".to_string())),
     }
-    serde_json::from_value(value).map_err(|e| SpecError::Malformed(e.to_string()))
+    let spec: SpecFile =
+        serde_json::from_value(value).map_err(|e| SpecError::Malformed(e.to_string()))?;
+    spec.check_launch_fields()?;
+    Ok(spec)
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1156,12 +1222,12 @@ mod tests {
         let d = tempdir().unwrap();
         std::fs::write(
             d.path().join("agentlife.launch.json"),
-            r#"{"schema": 2, "role": "agentlife"}"#,
+            r#"{"schema": 3, "role": "agentlife"}"#,
         )
         .unwrap();
         assert_eq!(
             read(d.path(), "agentlife").unwrap_err(),
-            SpecError::UnsupportedSchema(2)
+            SpecError::UnsupportedSchema(3)
         );
     }
 
@@ -1656,5 +1722,236 @@ mod tests {
         assert!(r.peers_unmatched.is_none());
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains(r#""peers":"unknown""#), "{json}");
+    }
+
+    // ---- launch mode `wsl` (docs/LANE-RESTART-WSL.md) ----
+
+    fn pilot_target() -> WslTarget {
+        WslTarget {
+            distro: "lane-spike".to_string(),
+            user: "lane-commysdk".to_string(),
+            wrapper: "/usr/local/bin/lane-sandbox".to_string(),
+            state_dir: None,
+        }
+    }
+
+    fn wsl_spec(role: &str) -> SpecFile {
+        let mut l = launch(role);
+        l.cwd = "/home/lane-commysdk/work/commy-sdk-rust".to_string();
+        l.launch_args = Some(
+            [
+                "claude",
+                "--mcp-config",
+                "/home/lane-commysdk/synapse-home/lane.mcp.json",
+                "--dangerously-load-development-channels",
+                "server:synapse",
+            ]
+            .map(String::from)
+            .to_vec(),
+        );
+        build(&inputs(&l, "sonnet", SpecState::Running))
+            .unwrap()
+            .with_wsl(pilot_target())
+    }
+
+    #[test]
+    fn a_windows_spec_has_exactly_todays_keys_and_schema_1() {
+        let v = serde_json::to_value(built("agentlife", SpecState::Running)).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cwd",
+                "handoff_mtime",
+                "handoff_path",
+                "launch_args",
+                "model",
+                "name",
+                "permission_mode",
+                "remote_control",
+                "role",
+                "schema",
+                "state",
+                "stop_kind",
+                "stop_reason",
+                "stopped_pid_start_secs",
+                "stopped_session_id",
+                "tool_version",
+                "written_at",
+                "written_by",
+            ]
+        );
+        assert_eq!(v["schema"], 1);
+    }
+
+    #[test]
+    fn a_wsl_spec_is_schema_2_and_round_trips_through_the_atomic_write() {
+        let d = tempdir().unwrap();
+        let s = wsl_spec("commy-sdk-rust");
+        write_atomic(d.path(), &s).unwrap();
+        assert_eq!(read(d.path(), "commy-sdk-rust").unwrap(), s);
+        let on_disk: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(d.path().join("commy-sdk-rust.launch.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on_disk["schema"], 2);
+        assert_eq!(on_disk["launch"], "wsl");
+        assert_eq!(on_disk["wsl"]["distro"], "lane-spike");
+        assert_eq!(on_disk["wsl"]["user"], "lane-commysdk");
+        assert_eq!(on_disk["wsl"]["wrapper"], "/usr/local/bin/lane-sandbox");
+        assert!(on_disk["wsl"].get("state_dir").is_none());
+    }
+
+    #[test]
+    fn a_build_that_reads_only_schema_1_would_refuse_a_wsl_spec() {
+        // The mechanism the design relies on: a Windows lane-restart of today compares the schema
+        // with 1 and answers `UnsupportedSchema`, so a WSL spec, written as 2, is never launched
+        // by it as a Windows process with a POSIX cwd.
+        let v = serde_json::to_value(wsl_spec("commy-sdk-rust")).unwrap();
+        assert_ne!(v["schema"].as_u64().unwrap(), 1);
+        assert_eq!(SCHEMA, 1, "Windows specs keep schema 1");
+    }
+
+    #[test]
+    fn launch_fields_and_schema_must_agree_or_the_spec_is_refused() {
+        let ok = wsl_spec("commy-sdk-rust");
+        assert!(ok.check().is_ok(), "{:?}", ok.check());
+        // schema 1 carrying the wsl fields
+        let mut s = ok.clone();
+        s.schema = 1;
+        assert!(
+            matches!(s.check(), Err(SpecError::Incomplete(_))),
+            "{:?}",
+            s.check()
+        );
+        // schema 2 without a launch mode
+        let mut s = ok.clone();
+        s.launch = None;
+        assert!(
+            matches!(s.check(), Err(SpecError::Incomplete(_))),
+            "{:?}",
+            s.check()
+        );
+        // schema 2, launch wsl, no target
+        let mut s = ok.clone();
+        s.wsl = None;
+        assert!(
+            matches!(s.check(), Err(SpecError::Incomplete(_))),
+            "{:?}",
+            s.check()
+        );
+        // a launch mode this build does not know is never read as Windows
+        let mut s = ok.clone();
+        s.launch = Some("lxc".to_string());
+        assert_eq!(
+            s.check().unwrap_err(),
+            SpecError::UnsupportedLaunch("lxc".to_string())
+        );
+        // a schema this build does not know
+        let mut s = ok.clone();
+        s.schema = 3;
+        assert_eq!(s.check().unwrap_err(), SpecError::UnsupportedSchema(3));
+        // a Windows spec with a stray wsl object
+        let mut s = built("agentlife", SpecState::Running);
+        s.wsl = Some(pilot_target());
+        assert!(
+            matches!(s.check(), Err(SpecError::Incomplete(_))),
+            "{:?}",
+            s.check()
+        );
+    }
+
+    #[test]
+    fn a_wsl_spec_with_a_bad_field_or_a_windows_cwd_is_refused_at_write() {
+        let d = tempdir().unwrap();
+        let mut s = wsl_spec("commy-sdk-rust");
+        s.wsl.as_mut().unwrap().user = "root".to_string();
+        assert!(matches!(
+            write_atomic(d.path(), &s),
+            Err(SpecError::Incomplete(_))
+        ));
+        let mut s = wsl_spec("commy-sdk-rust");
+        s.cwd = "C:/Projects/commy-sdk-rust".to_string();
+        assert!(matches!(
+            write_atomic(d.path(), &s),
+            Err(SpecError::Incomplete(_))
+        ));
+        assert_eq!(
+            std::fs::read_dir(d.path()).unwrap().count(),
+            0,
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_wsl_spec_is_refused_at_read_too() {
+        let d = tempdir().unwrap();
+        write_atomic(d.path(), &wsl_spec("commy-sdk-rust")).unwrap();
+        let path = d.path().join("commy-sdk-rust.launch.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["wsl"]["wrapper"] = "/usr/bin/curl;evil".into();
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        assert!(read(d.path(), "commy-sdk-rust").is_err());
+        v["wsl"]["wrapper"] = "/usr/local/bin/lane-sandbox".into();
+        v["launch"] = "lxc".into();
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        assert_eq!(
+            read(d.path(), "commy-sdk-rust").unwrap_err(),
+            SpecError::UnsupportedLaunch("lxc".to_string())
+        );
+    }
+
+    #[test]
+    fn the_wsl_argv_is_the_pilot_command_with_prompt_first_and_the_variadic_flag_last() {
+        let argv = wsl_spec("commy-sdk-rust").wsl_argv().unwrap();
+        assert_eq!(
+            argv[..10],
+            [
+                "wsl.exe",
+                "-d",
+                "lane-spike",
+                "-u",
+                "lane-commysdk",
+                "--cd",
+                "/home/lane-commysdk/work/commy-sdk-rust",
+                "--exec",
+                "/usr/local/bin/lane-sandbox",
+                "--",
+            ]
+        );
+        assert_eq!(argv[10], "claude");
+        assert_eq!(argv[11], "read commy-sdk-rust HANDOFF and continue");
+        let tail = &argv[12..];
+        let pos = |x: &str| tail.iter().position(|a| a == x).unwrap();
+        assert_eq!(tail[pos("--model") + 1], "sonnet");
+        assert_eq!(tail[pos("--name") + 1], "commy-sdk-rust");
+        assert_eq!(
+            tail[pos("--mcp-config") + 1],
+            "/home/lane-commysdk/synapse-home/lane.mcp.json"
+        );
+        assert_eq!(
+            argv[argv.len() - 2],
+            "--dangerously-load-development-channels"
+        );
+        assert_eq!(argv[argv.len() - 1], "server:synapse");
+    }
+
+    #[test]
+    fn an_opus_wsl_spec_is_refused_like_any_other() {
+        let d = tempdir().unwrap();
+        let mut s = wsl_spec("commy-sdk-rust");
+        s.model = "claude-opus-5-5".to_string();
+        assert!(matches!(
+            write_atomic(d.path(), &s),
+            Err(SpecError::Incomplete(_))
+        ));
+        assert!(s.wsl_argv().is_err());
+    }
+
+    #[test]
+    fn a_windows_spec_has_no_wsl_argv() {
+        assert!(built("agentlife", SpecState::Running).wsl_argv().is_err());
     }
 }

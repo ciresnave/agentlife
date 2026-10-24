@@ -651,6 +651,8 @@ mod tests {
             stop_reason: None,
             stop_kind: None,
             tool_version: "test".into(),
+            launch: None,
+            wsl: None,
         }
     }
 
