@@ -194,6 +194,47 @@ pub fn build_command(
     Ok(argv)
 }
 
+/// The Windows directory the terminal of a WSL lane starts in: the lane's own `cwd` is a POSIX
+/// path that `wt.exe` cannot enter, and the host (`lane-restart host`) needs a real folder.
+pub fn host_start_dir() -> String {
+    lane_state::platform::portfolio_root()
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// A WSL lane needs `wsl.exe`, so it can be launched only from Windows.
+pub fn host_supports_wsl(is_wsl_lane: bool, host_is_windows: bool) -> Result<(), WslError> {
+    if is_wsl_lane && !host_is_windows {
+        return Err(refuse(
+            "launch",
+            "a wsl lane can be launched only from Windows (there is no wsl.exe here)",
+        ));
+    }
+    Ok(())
+}
+
+/// How Windows names a path inside a distro: `\\wsl.localhost\<distro>` and the POSIX path with
+/// its slashes turned round. Read-only use only (the state file, the transcript).
+pub fn unc_path(distro: &str, posix_path: &str) -> String {
+    format!(
+        "\\\\wsl.localhost\\{distro}{}",
+        posix_path.replace('/', "\\")
+    )
+}
+
+impl WslTarget {
+    /// The lane user's state directory as Windows reads it (section 4).
+    pub fn unc_state_dir(&self) -> String {
+        unc_path(&self.distro, &self.state_dir_or_default())
+    }
+
+    /// The lane user's `.claude` directory as Windows reads it, for the transcript. **UNVERIFIED
+    /// (P3):** that the home is `/home/<user>`.
+    pub fn unc_claude_dir(&self) -> String {
+        unc_path(&self.distro, &format!("/home/{}/.claude", self.user))
+    }
+}
+
 /// The distro names `wsl.exe -l -q` printed. Windows prints UTF-16LE (with a BOM, or none), and a
 /// `WSL_UTF8=1` environment prints UTF-8; both are read, and bytes that are neither are an error,
 /// never an empty list (an empty list would say "no such distro" about a list nobody read).
@@ -507,5 +548,45 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<WslTarget>(json).unwrap(), target());
+    }
+
+    #[test]
+    fn a_wsl_lane_is_launched_only_from_windows() {
+        assert!(host_supports_wsl(true, true).is_ok());
+        assert_eq!(host_supports_wsl(true, false).unwrap_err().field, "launch");
+        // control: a Windows lane is not affected by the host it is launched from
+        assert!(host_supports_wsl(false, false).is_ok());
+        assert!(host_supports_wsl(false, true).is_ok());
+    }
+
+    #[test]
+    fn windows_reads_a_distros_files_through_the_wsl_localhost_share() {
+        assert_eq!(
+            unc_path("lane-spike", "/home/lane-commysdk/.claude"),
+            r"\\wsl.localhost\lane-spike\home\lane-commysdk\.claude"
+        );
+        let t = target();
+        assert_eq!(
+            t.unc_state_dir(),
+            r"\\wsl.localhost\lane-spike\home\lane-commysdk\.local\state\lane-state"
+        );
+        assert_eq!(
+            t.unc_claude_dir(),
+            r"\\wsl.localhost\lane-spike\home\lane-commysdk\.claude"
+        );
+        let mut custom = target();
+        custom.state_dir = Some("/srv/lane state".to_string());
+        assert_eq!(
+            custom.unc_state_dir(),
+            r"\\wsl.localhost\lane-spike\srv\lane state"
+        );
+    }
+
+    #[test]
+    fn the_hosts_start_folder_is_a_windows_style_path_without_backslashes() {
+        let d = host_start_dir();
+        assert!(!d.is_empty());
+        assert!(!d.contains('\\'), "{d}");
+        assert!(!d.contains(';'), "{d}");
     }
 }

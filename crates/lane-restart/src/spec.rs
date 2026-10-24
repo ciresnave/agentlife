@@ -303,9 +303,13 @@ impl SpecFile {
             (Some(wsl::LAUNCH_WSL), Some(t)) => t,
             _ => return Err(SpecError::Incomplete("not a wsl spec".to_string())),
         };
+        let _ = target;
         let prepared = self.check()?;
-        wsl::build_command(target, &self.cwd, &prepared.argv)
-            .map_err(|e| SpecError::Incomplete(e.to_string()))
+        prepared
+            .argv
+            .wsl_command()
+            .map(<[String]>::to_vec)
+            .ok_or_else(|| SpecError::Incomplete("the launch is not a wsl launch".to_string()))
     }
 
     /// The schema and the launch fields agree (section 2): a Windows spec is schema 1 with no
@@ -343,6 +347,7 @@ impl SpecFile {
         ];
         argv.extend(self.launch_args.iter().cloned());
         LaunchSpec {
+            wsl: self.wsl.clone(),
             role: self.role.clone(),
             name: self.name.clone(),
             cwd: self.cwd.clone(),
@@ -1040,6 +1045,7 @@ mod tests {
 
     fn launch(role: &str) -> LaunchSpec {
         LaunchSpec {
+            wsl: None,
             role: Role::new(role).unwrap(),
             name: Role::new(role).unwrap(),
             cwd: "C:/Projects/x".to_string(),
@@ -1960,5 +1966,25 @@ mod tests {
     #[test]
     fn a_windows_spec_has_no_wsl_argv() {
         assert!(built("agentlife", SpecState::Running).wsl_argv().is_err());
+    }
+
+    #[test]
+    fn the_launch_spec_of_a_wsl_spec_carries_the_target_and_a_windows_spec_carries_none() {
+        let w = wsl_spec("commy-sdk-rust");
+        assert_eq!(w.launch_spec().wsl, Some(pilot_target()));
+        assert_eq!(
+            w.launch_spec().cwd,
+            "/home/lane-commysdk/work/commy-sdk-rust"
+        );
+        assert_eq!(
+            built("agentlife", SpecState::Running).launch_spec().wsl,
+            None
+        );
+        // and the command the spec reports is the one the host would run
+        let prepared = w.check().unwrap();
+        assert_eq!(
+            prepared.argv.wsl_command().map(<[String]>::to_vec),
+            Some(w.wsl_argv().unwrap())
+        );
     }
 }

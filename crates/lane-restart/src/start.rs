@@ -606,6 +606,7 @@ mod tests {
 
     fn launch(role: &str) -> LaunchSpec {
         LaunchSpec {
+            wsl: None,
             role: Role::new(role).unwrap(),
             name: Role::new(role).unwrap(),
             cwd: "C:/Projects/x".to_string(),
