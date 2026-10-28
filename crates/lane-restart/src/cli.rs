@@ -152,6 +152,23 @@ pub fn specs_retire(rest: &[String]) -> Result<(Vec<String>, bool), String> {
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct SpecsSynapseOnly {
+    #[arg(long = "role", allow_hyphen_values = true, required = true)]
+    roles: Vec<String>,
+    #[arg(long, overrides_with = "strict")]
+    strict: bool,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+}
+
+/// `specs synapse-only --role R [--role R]... [--strict] [--dry-run]` -> `(roles, strict, dry_run)`.
+pub fn specs_synapse_only(rest: &[String]) -> Result<(Vec<String>, bool, bool), String> {
+    let a: SpecsSynapseOnly = parse("specs synapse-only", &["--role"], rest)?;
+    Ok((a.roles, a.strict, a.dry_run))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct Start {
     #[arg(
         long,

@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.27
+
+- **`lane-restart specs synapse-only --role R... [--strict] [--dry-run]` (PM only; PM TASK 2026-10-28; docs/SYNAPSE-ONLY-CUTOVER.md step 1a, PM ruling 2).** Rewrites a lane's `launch_args` so its next launch loads `server:synapse` and not `server:claude-peers` (other server names kept; the dev-channels flag keeps its place); `--strict` adds `--strict-mcp-config`. Refuses and leaves untouched a spec with no `--mcp-config`, a config that is missing or has no `mcpServers.synapse`, or no dev-channels flag. One backup `<role>.launch.json.pre-synapse`, written once and never replaced. Ledgered as `synapse-only`. Not run against a real lane. Mutation: not dropping `server:claude-peers` turned 3 of 5 tests red.
+
 ## 0.29.26
 
 - **Docs: `docs/SYNAPSE-ONLY-CUTOVER.md`, the agentlife side of the Synapse-only plan for every lane (PM TASK 2026-10-28; CireSnave: "No claude-peers.").** Measured over the 31 launch specs (4 synapse-only, 8 both, 19 peers-only), the user-scope `claude-peers` server and the 5 roles the pilot daemon knows; names the per-lane needs, the broker-touching code, an order with rollback, and three questions for the PM. No code change.
