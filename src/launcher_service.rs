@@ -62,6 +62,12 @@ pub fn parse_signals(reply: &Value) -> (Vec<Signal>, usize) {
     (ok, skipped)
 }
 
+/// `launch_senders_set` from `GET /v1/stats` (synapsed rc.178 and later). `None` when the field is
+/// absent or not a boolean, which includes a daemon too old to have an allowlist: not a yes.
+pub fn parse_senders_set(reply: &Value) -> Option<bool> {
+    reply.get("launch_senders_set").and_then(Value::as_bool)
+}
+
 /// Role names `/v1/list` shows `online` (`{"roles": [{"global_id": "<role>@<account>", ...}]}`).
 pub fn parse_online(reply: &Value) -> BTreeSet<String> {
     reply
@@ -211,6 +217,15 @@ impl Source for SynapseSource {
             .call(LAUNCHER_ROLE, "/v1/list", None)
             .map(|v| parse_online(&v))
             .map_err(map_error)
+    }
+
+    fn senders_set(&self) -> Result<bool, SourceError> {
+        let stats = self
+            .daemon
+            .call(LAUNCHER_ROLE, "/v1/stats", None)
+            .map_err(map_error)?;
+        parse_senders_set(&stats)
+            .ok_or_else(|| SourceError::Unavailable("stats has no launch_senders_set".into()))
     }
 
     fn drain_notes(&self) -> Vec<String> {

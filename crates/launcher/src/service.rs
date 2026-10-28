@@ -37,6 +37,13 @@ pub trait Source {
     fn clear(&self, role: &str) -> Result<(), SourceError>;
     /// Roles `/v1/list` shows online.
     fn online(&self) -> Result<BTreeSet<String>, SourceError>;
+    /// `GET /v1/stats` `launch_senders_set`: the daemon has a sender allowlist for launch signals.
+    /// Default: unknown, which the cycle treats as no allowlist (fail closed).
+    fn senders_set(&self) -> Result<bool, SourceError> {
+        Err(SourceError::Unavailable(
+            "this source cannot read the sender allowlist".to_string(),
+        ))
+    }
     /// Anything the source noticed since the last call that the log should carry (an entry it
     /// could not read and skipped). Default: nothing.
     fn drain_notes(&self) -> Vec<String> {
@@ -83,6 +90,22 @@ pub fn cycle(
     wait_secs: u64,
 ) -> Report {
     let mut rep = Report::default();
+
+    // Read before any decision, every cycle: an allowlist emptied since the last one must stop
+    // launches at once. An unreadable answer is "not confirmed", never "confirmed".
+    match src.senders_set() {
+        Ok(set) => engine.set_allowlist_confirmed(set),
+        Err(SourceError::Unauthorized(w)) => {
+            engine.set_allowlist_confirmed(false);
+            rep.session_lost = true;
+            rep.notes.push(format!("stats: unauthorized: {w}"));
+            return rep;
+        }
+        Err(e) => {
+            engine.set_allowlist_confirmed(false);
+            rep.notes.push(format!("stats: {e:?}"));
+        }
+    }
 
     let waiting = src.waiting(wait_secs);
     rep.notes.extend(src.drain_notes());
@@ -224,8 +247,13 @@ mod tests {
         online: RefCell<BTreeSet<String>>,
         waiting_err: RefCell<Option<SourceError>>,
         post_err: RefCell<Option<SourceError>>,
+        /// What `senders_set` answers: `None` is an unreadable answer.
+        senders: RefCell<Option<bool>>,
     }
     impl Source for Src {
+        fn senders_set(&self) -> Result<bool, SourceError> {
+            (*self.senders.borrow()).ok_or_else(|| SourceError::Unavailable("stats".into()))
+        }
         fn waiting(&self, _: u64) -> Result<Vec<Signal>, SourceError> {
             match self.waiting_err.borrow().clone() {
                 Some(e) => Err(e),
@@ -279,7 +307,10 @@ mod tests {
             dir: Dir {
                 granted: RefCell::new(false),
             },
-            src: Src::default(),
+            src: Src {
+                senders: RefCell::new(Some(true)),
+                ..Src::default()
+            },
             bell: Bell(RefCell::new(Vec::new())),
         }
     }
@@ -429,5 +460,65 @@ mod tests {
         let c = cycle(&mut e, &r.src, &bell, 100 + 243, 120, 0);
         assert!(c.alarms.is_empty(), "raised once, after it was delivered");
         assert_eq!(*bell.rang.borrow(), 2);
+    }
+
+    #[test]
+    fn a_granted_signal_waits_for_the_daemon_to_confirm_a_sender_allowlist_and_a_failed_read_is_not_a_yes(
+    ) {
+        for (answer, launches, note) in [
+            (Some(true), true, false),
+            (Some(false), false, false),
+            (None, false, true),
+        ] {
+            let r = rig();
+            *r.dir.granted.borrow_mut() = true;
+            *r.src.senders.borrow_mut() = answer;
+            r.src
+                .signals
+                .borrow_mut()
+                .push(signal("fuel", "s1", 1, "e"));
+            let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+            let rep = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+            assert_eq!(*r.mech.0.borrow() == 1, launches, "{answer:?}");
+            let posted = r.src.posted.borrow();
+            assert_eq!(posted.len(), 1, "{answer:?}");
+            assert_eq!(
+                posted[0].reason,
+                if launches {
+                    "started"
+                } else {
+                    "no-sender-allowlist"
+                },
+                "{answer:?}"
+            );
+            assert_eq!(
+                rep.notes.iter().any(|n| n.starts_with("stats:")),
+                note,
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_that_cannot_read_the_allowlist_never_confirms_it() {
+        struct Blind;
+        impl Source for Blind {
+            fn waiting(&self, _: u64) -> Result<Vec<Signal>, SourceError> {
+                Ok(vec![])
+            }
+            fn post(&self, _: &LaunchResult) -> Result<(), SourceError> {
+                Ok(())
+            }
+            fn clear(&self, _: &str) -> Result<(), SourceError> {
+                Ok(())
+            }
+            fn online(&self) -> Result<BTreeSet<String>, SourceError> {
+                Ok(BTreeSet::new())
+            }
+        }
+        assert!(matches!(
+            Blind.senders_set(),
+            Err(SourceError::Unavailable(_))
+        ));
     }
 }
