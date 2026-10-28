@@ -46,6 +46,35 @@ a recipient must have claimed once (`LAUNCHER-SERVICE.md`, scratch-daemon check)
 | duplicate-launch check (`duplicate.rs`) | process table and state files, not the broker | no change |
 | approval records | `claude-peers-dev-channels.json` (expires 2027-03-19), pilot records expire 2026-10-31, any-lane has no expiry | once every spec is synapse-only the first three are dead letters; retire them, do not extend |
 
+## Key placement: can a lane read only its own key?
+
+**Measured** (names and sizes only, no contents): the pilot home keeps one directory per role,
+`roles/<role>/{signing.key.pem, sealing.key.pem, cert.pem}`, plus `account/account.key.pem`. Its ACL is
+`SYSTEM`, `Administrators` and `TUF-LAPTOP\cires`, all inherited. Synapse's `keystore.rs` refuses a key that is
+"accessible to more than its owner" (`PermissionsTooOpen`), and the owner is the Windows user.
+
+**What per-lane ACLs can and cannot do.** Every lane runs as that one user, so any ACL that lets lane A read
+`roles/a/` also lets lane B read it: Windows ACLs separate principals, not processes of one principal, and
+denying the user would lock the lane out of its own key. So on this machine, as the lanes run today:
+
+- **Cannot:** stop one lane reading another's signing key. After the bulk claim, any lane could sign as any role.
+  The daemon verifies keys (readiness doc, G9), but it cannot tell whose hands hold a valid key.
+- **Can, by arrangement, with the same-user limit unchanged:** give each lane only its own `--role` in its MCP
+  config; keep the keys out of every lane's cwd and out of git; keep the owner-only check the keystore
+  already makes; and rely on the daemon's `security-events.jsonl` for what it records (what it records for a
+  forged claim is **not verified**). Detection at best, not prevention.
+- **Can prevent, with a different principal per lane:** (a) a **WSL distro user per lane**, which is what
+  `lane-sandbox` and the `lane-spike` pilot do (`lane-commysdk` cannot read another Linux user's `~/synapse-home`);
+  (b) a **Windows local account per lane** (a launcher change: `CreateProcessWithLogonW` or a scheduled task per
+  user, plus the lane's tools installed per user); (c) **Windows Sandbox / AppContainer** per lane, which the
+  AntSpawn matrix records as `windows-sandbox` yes. Each is a separate project with its own cost.
+
+**So: real per-lane key isolation needs the WSL isolation (or one of (b), (c)); on plain Windows it cannot be
+had.** I recommend: Windows lanes cut over with the arrangement above, the limit written into the cutover record as
+stated; lanes whose keys matter most (`pm`, `overmind`, anything holding the `StateAdmin`/`RoleAdmin` grants in
+`keystore.rs`) go first into the WSL isolation. Whether that residual risk is acceptable is the PM's to put to CireSnave
+in one sentence: on Windows the keys are not per-lane.
+
 ## Order (each step reversible; one lane first, as every rollout here)
 
 0. **Prerequisites, others'**: G7 (who starts `synapsed` at login), a role and key per lane, `launch_senders` for
@@ -57,8 +86,9 @@ a recipient must have claimed once (`LAUNCHER-SERVICE.md`, scratch-daemon check)
    is not (the second half is already in `real_records.rs`).
 2. **Pilot lane**: `lane-commysdk` already has a role on the daemon and is the WSL pilot lane; or `agentlife`
    (already synapse-only, so the lowest-risk first full "no peers" run). The PM picks.
-3. **Waves by lane count, not importance**: the 4 synapse-only lanes need only step 4 (strip user scope); the 8
-   both-lanes need their `--mcp-config` verified; the 19 peers-only need steps 1 to 3. Each wave ends when the
+3. **Waves by lane count, not importance**: the 4 synapse-only lanes need only step 4 (strip user scope); the 7
+   "both" lanes with no config and the 19 peers-only need steps 1 to 3 (26 lanes, as the daemon's role list says);
+   `pm` has its config already. Each wave ends when the
    lane has *restarted* under the new spec and sent and received one message, read back from `synapse inbox`.
 4. **Last**: strip `claude-peers` from user scope; flip `notify_transport`; retire the three old records.
 5. **Rollback** per lane: restore the previous `launch_args` (the spec rewriter keeps one backup) and re-add the
@@ -69,8 +99,11 @@ a recipient must have claimed once (`LAUNCHER-SERVICE.md`, scratch-daemon check)
 Whether the PM's `[NOTICE]` broadcast (G8) is needed after cutover; the broker's shutdown; anything that writes
 another lane's HANDOFF or runs `start`/`stop` (PM only).
 
-## Questions for the PM
+## Rulings (PM, 2026-10-28)
 
-1. Pilot lane: `agentlife` or `lane-commysdk`?
-2. Do you want step 1(a), the spec rewriter, from me? It is the one new write path; the rest is read-only.
-3. The 7 "both" specs with no `--mcp-config`: do you know where their Synapse server is configured?
+1. Pilot is `agentlife`: strip `claude-peers` from its session with `--strict-mcp-config` and its own
+   `--mcp-config` first; user scope is touched only at step 4.
+2. Step 1(a), the spec rewriter, is mine to build: dry-run first, one backup, refuses a lane with no MCP config.
+3. The 7 "both" lanes are assumed to have **no** Synapse server (their `server:synapse` channel name is inert and
+   they are not on the daemon's role list). Plan them as peers-only lanes; verify by the MCP tools a restarted
+   lane actually lists. The PM has asked the Synapse lane for the bulk role/key claim (26 lanes) and for G7.
