@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.25
+
+- **`agentlife launcher`: rule 7 reads the implied grant of board 216; the wake path stays off (PM TASK 2026-10-28; docs/M5-WAKE-DESIGN.md slice 1, PM ruling A).** `RegistryDirectory::granted` is true only when `lazy_enabled` is on AND the lane's spec passes `lane_restart::start::launcher_may_start` (now `pub`; the same predicate `lane-restart start` applies: soft stop or crash) AND the lane rule says launchable. With `lazy_enabled` off (the default) nothing is granted and a soft stop is closed-on-purpose, as before. With it on, a soft stop is launchable even where the registry says `Closed{exited}` (`agentlife stop --soft`). The mechanism is still `NoMechanism`; no lane is started. Mutation: dropping the predicate call turned two tests red. Added `docs/M5-WAKE-DESIGN.md` (slices 2-5; 3 and 4 gate switching it on).
+
 ## 0.29.24
 
 - **`lane-restart`: the any-lane Synapse record joins the real-record tests (PM TASK 2026-10-28; ciresnave/ciresnave#14).** `synapse-dev-channel-any-lane.json` (Channels exactly `server:synapse`, roles `*`, no expiry) is vendored byte for byte (git blob `62e95bb`, equal to upstream commit `2fc6e00`) and checked by the same five tests as the other four records, plus one that it has no expiry, answers a lane the pilot never named and has the pilot's action and screens. Tests only; the expiry column of the shared table is now optional. Mutation: roles `*` -> `synapse` turned three tests red; restored.
