@@ -732,6 +732,7 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         registry: &app.registry,
         lane_state_dir: &state_dir,
         table: &table,
+        wake_enabled: app.cfg.lazy_enabled,
     };
     let mech = svc::NoMechanism;
     let mut engine = match Engine::open(&store, &mech, &dir, init_store) {
