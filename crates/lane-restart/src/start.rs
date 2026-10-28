@@ -506,7 +506,7 @@ pub fn plan_start(
 /// not land) must be recorded `soft`; `hard` and unclassified are refused. The spec is the
 /// authority, not the agent registry: `agentlife stop --soft` leaves its intent `Closed{exited}`
 /// and writes `soft` here, `park` writes `hard`, so the two cannot be read apart from this field.
-fn launcher_may_start(spec: &SpecFile) -> Result<(), StartRefusal> {
+pub fn launcher_may_start(spec: &SpecFile) -> Result<(), StartRefusal> {
     match spec.state {
         SpecState::Running | SpecState::Crashed | SpecState::FailedRelaunch => Ok(()),
         SpecState::Suspended | SpecState::Stopping => match spec.stop_kind {
