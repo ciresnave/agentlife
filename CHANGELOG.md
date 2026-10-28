@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.26
+
+- **Docs: `docs/SYNAPSE-ONLY-CUTOVER.md`, the agentlife side of the Synapse-only plan for every lane (PM TASK 2026-10-28; CireSnave: "No claude-peers.").** Measured over the 31 launch specs (4 synapse-only, 8 both, 19 peers-only), the user-scope `claude-peers` server and the 5 roles the pilot daemon knows; names the per-lane needs, the broker-touching code, an order with rollback, and three questions for the PM. No code change.
+
 ## 0.29.25
 
 - **`agentlife launcher`: rule 7 reads the implied grant of board 216; the wake path stays off (PM TASK 2026-10-28; docs/M5-WAKE-DESIGN.md slice 1, PM ruling A).** `RegistryDirectory::granted` is true only when `lazy_enabled` is on AND the lane's spec passes `lane_restart::start::launcher_may_start` (now `pub`; the same predicate `lane-restart start` applies: soft stop or crash) AND the lane rule says launchable. With `lazy_enabled` off (the default) nothing is granted and a soft stop is closed-on-purpose, as before. With it on, a soft stop is launchable even where the registry says `Closed{exited}` (`agentlife stop --soft`). The mechanism is still `NoMechanism`; no lane is started. Mutation: dropping the predicate call turned two tests red. Added `docs/M5-WAKE-DESIGN.md` (slices 2-5; 3 and 4 gate switching it on).
