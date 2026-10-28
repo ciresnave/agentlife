@@ -1019,6 +1019,66 @@ fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
     }
 }
 
+/// `lane-restart specs synapse-only --role R... [--strict] [--dry-run]` - PM only. Rewrites a spec's
+/// `launch_args` to the Synapse-only form (docs/SYNAPSE-ONLY-CUTOVER.md); one backup, never overwritten.
+fn run_specs_synapse_only_cmd(roles: Vec<String>, strict: bool, dry_run: bool) -> ExitCode {
+    use lane_restart::spec_synapse::{render, rewrite_roles, RewriteOutcome};
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    if caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may rewrite specs; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may rewrite specs, and the caller could not be verified: {e}"
+            ),
+        };
+        eprintln!("lane-restart specs synapse-only: refused - {why}");
+        log_ledger(
+            &requested_by,
+            &roles.join(","),
+            "synapse-only",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    let rows = rewrite_roles(&state_dir(), &roles, strict, dry_run, chrono::Utc::now());
+    let mut refused = false;
+    for r in &rows {
+        let (outcome, acted) = match &r.outcome {
+            RewriteOutcome::Rewrote(a) => (format!("rewrote launch_args to {}", a.join(" ")), true),
+            RewriteOutcome::Refused(why) => {
+                refused = true;
+                (format!("refused: {why}"), false)
+            }
+            RewriteOutcome::WouldRewrite(_) | RewriteOutcome::Unchanged => continue,
+        };
+        log_ledger(
+            &requested_by,
+            &r.role,
+            "synapse-only",
+            caller_role.as_deref(),
+            None,
+            None,
+            &outcome,
+            acted,
+        );
+    }
+    print!("{}", render(&rows, dry_run));
+    if refused {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// Runs the candidate for real: `--version`, then `status`.
 struct RealProbe;
 
@@ -1313,6 +1373,15 @@ USAGE:
         (resume it with `start`) and a role with a live process are refused
         with the reason. First and last lines say whether anything moved.
 
+    lane-restart specs synapse-only --role <name> [--role <name>]... [--strict] [--dry-run]
+        PM only (docs/SYNAPSE-ONLY-CUTOVER.md). Rewrite a role's launch_args so its
+        NEXT launch loads server:synapse and not server:claude-peers; --strict also
+        adds --strict-mcp-config so the user-scope claude-peers server stays out of
+        that session. Refused, untouched: no --mcp-config in the spec, that file
+        missing or without a synapse server, or no dev-channels flag. The old spec
+        is copied once to <role>.launch.json.pre-synapse and never overwritten (roll
+        back by copying it over the spec). A running session is not touched.
+
     lane-restart install --from <exe> [--dry-run]
         PM only. Replace C:/Projects/.claude-hooks/lane-restart.exe with a
         freshly built one. The candidate must run `--version` (first line
@@ -1415,9 +1484,18 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 },
+                Some((sub, tail)) if sub == "synapse-only" => match cli::specs_synapse_only(tail) {
+                    Ok((roles, strict, dry_run)) => {
+                        run_specs_synapse_only_cmd(roles, strict, dry_run)
+                    }
+                    Err(e) => {
+                        eprintln!("lane-restart specs synapse-only: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
                 _ => {
                     eprintln!(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]` or `specs retire --role <name>... [--dry-run]`"
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]` or `specs synapse-only --role <name>... [--strict] [--dry-run]`"
                     );
                     ExitCode::FAILURE
                 }

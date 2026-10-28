@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.27
+
+- **`lane-restart specs synapse-only --role R... [--strict] [--dry-run]` (PM only; PM TASK 2026-10-28; docs/SYNAPSE-ONLY-CUTOVER.md step 1a, PM ruling 2).** Rewrites a lane's `launch_args` so its next launch loads `server:synapse` and not `server:claude-peers` (other server names kept; the dev-channels flag keeps its place); `--strict` adds `--strict-mcp-config`. Refuses and leaves untouched a spec with no `--mcp-config`, a config that is missing or has no `mcpServers.synapse`, or no dev-channels flag. One backup `<role>.launch.json.pre-synapse`, written once and never replaced. Ledgered as `synapse-only`. Not run against a real lane. Mutation: not dropping `server:claude-peers` turned 3 of 5 tests red.
+
 ## 0.29.24
 
 - **`lane-restart`: the any-lane Synapse record joins the real-record tests (PM TASK 2026-10-28; ciresnave/ciresnave#14).** `synapse-dev-channel-any-lane.json` (Channels exactly `server:synapse`, roles `*`, no expiry) is vendored byte for byte (git blob `62e95bb`, equal to upstream commit `2fc6e00`) and checked by the same five tests as the other four records, plus one that it has no expiry, answers a lane the pilot never named and has the pilot's action and screens. Tests only; the expiry column of the shared table is now optional. Mutation: roles `*` -> `synapse` turned three tests red; restored.
