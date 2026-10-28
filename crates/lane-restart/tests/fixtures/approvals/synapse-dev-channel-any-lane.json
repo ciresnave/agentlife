@@ -1,0 +1,29 @@
+{
+  "id": "synapse-dev-channel-any-lane",
+  "match": {
+    "text_anchors": [
+      "WARNING: Loading development channels",
+      "I am using this for local development"
+    ],
+    "fields": {
+      "Channels": "server:synapse"
+    }
+  },
+  "action": "1\r",
+  "scope": {
+    "roles": [
+      "*"
+    ]
+  },
+  "provenance": {
+    "approved_by": "CireSnave",
+    "approvals": [
+      {
+        "said_on": "2026-10-28",
+        "quote": "I want every lane to be able to run with Synapse alone.  That is the desired state.  No claude-peers.  No need for Claude Code's built in messaging.  Synapse. ... Go ahead and put in a permanent okay for all lanes for Synapse only.  Any lane should be able to run with Synapse and Synapse only.",
+        "approving": "Every role, with no expiry: if the screen contains verbatim \"WARNING: Loading development channels\" and \"I am using this for local development\", and Channels is exactly \"server:synapse\", answer exactly as the existing single-channel pilot record does (same action field). No other dialog is covered and no secret is requested. Anything else means no answer. Said first-hand to the PM session 2026-10-28 (board 286, questions 1 and 2). It takes effect only if CireSnave merges it."
+      }
+    ]
+  },
+  "expires_at": null
+}
