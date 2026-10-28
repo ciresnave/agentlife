@@ -14,7 +14,6 @@
 use crate::identity::{ProcessTable, SysinfoTable};
 use crate::list::{liveness, Liveness};
 use crate::registry::{Intent, Registry};
-use crate::spec_launch;
 use lane_restart::start::{launcher_record_name, LauncherRecord, LAUNCHER_ROLE};
 use launcher::service::{Notify, Source, SourceError};
 use launcher::{Directory, Lane, LaunchResult, MechResult, Mechanism, Outcome, Signal};
@@ -228,6 +227,22 @@ pub struct RegistryDirectory<'a> {
     pub registry: &'a Registry,
     pub lane_state_dir: &'a Path,
     pub table: &'a dyn ProcessTable,
+    /// The config's `lazy_enabled` (ships off). Off, a soft stop is a stop like any other here and
+    /// rule 7 grants nothing, exactly as before the implied grant (board 216) was read.
+    pub wake_enabled: bool,
+}
+
+/// What a lane's launch spec says to the launcher, by the predicate `lane-restart start` applies
+/// itself (`launcher_may_start`), so the two cannot disagree.
+enum SpecVerdict {
+    /// No spec file at all: the registry decides (`lane-restart start` refuses a role with no spec).
+    Absent,
+    /// A spec that exists but may not be used: it records a hard or unclassified stop, or is
+    /// corrupt, incomplete, another role's, or of a newer schema. Fails closed.
+    Blocked,
+    /// A spec the launcher may start from. `soft_stop` is true when it records a soft stop
+    /// (`suspended`/`stopping` with `stop_kind` soft), false for a crash or a lane marked running.
+    Startable { soft_stop: bool },
 }
 
 impl RegistryDirectory<'_> {
@@ -235,10 +250,22 @@ impl RegistryDirectory<'_> {
     /// incomplete, another role's, a newer schema). Only a spec that is genuinely absent leaves
     /// the decision to the registry (`lane-restart start` itself refuses a role with no spec).
     /// An unusable spec fails closed because it may be hiding a deliberate stop.
-    fn spec_blocks(&self, role: &str) -> bool {
+    fn spec_verdict(&self, role: &str) -> SpecVerdict {
+        use lane_restart::spec::{SpecError, SpecState};
         match lane_restart::spec::read(self.lane_state_dir, role) {
-            Err(lane_restart::spec::SpecError::NotFound(_)) => false,
-            _ => spec_launch::load(self.lane_state_dir, role).is_none_or(|s| s.suspended),
+            Err(SpecError::NotFound(_)) => SpecVerdict::Absent,
+            Err(_) => SpecVerdict::Blocked,
+            Ok(s) => {
+                if s.role.as_str() != role
+                    || s.check().is_err()
+                    || lane_restart::start::launcher_may_start(&s).is_err()
+                {
+                    return SpecVerdict::Blocked;
+                }
+                SpecVerdict::Startable {
+                    soft_stop: matches!(s.state, SpecState::Suspended | SpecState::Stopping),
+                }
+            }
         }
     }
 
@@ -267,16 +294,27 @@ impl Directory for RegistryDirectory<'_> {
             return Lane::Unknown;
         };
         let closed = matches!(current.intent, Intent::Closed { .. });
-        if closed || self.spec_blocks(role) {
-            Lane::ClosedOnPurpose
-        } else {
-            Lane::Launchable
+        match self.spec_verdict(role) {
+            SpecVerdict::Blocked => Lane::ClosedOnPurpose,
+            // `agentlife stop --soft` leaves registry intent `Closed{exited}` and writes `soft`
+            // in the spec, which is the authority (`start.rs`); only with the wake path on.
+            SpecVerdict::Startable { soft_stop: true } if self.wake_enabled => Lane::Launchable,
+            SpecVerdict::Startable { soft_stop: true } => Lane::ClosedOnPurpose,
+            _ if closed => Lane::ClosedOnPurpose,
+            _ => Lane::Launchable,
         }
     }
 
-    /// No standing grant exists until M5 (board 216).
-    fn granted(&self, _role: &str) -> bool {
-        false
+    /// Rule 7. The grant is the implied one of board 216 (CireSnave: "216: yes"): a lane whose spec
+    /// the launcher may start from (a soft stop, a crash) is granted; a hard or unclassified stop,
+    /// an unusable spec and no spec are not. Nothing is granted while `lazy_enabled` is off. There
+    /// is no M5 store behind this (docs/M5-WAKE-DESIGN.md).
+    fn granted(&self, role: &str) -> bool {
+        self.wake_enabled
+            && matches!(self.spec_verdict(role), SpecVerdict::Startable { .. })
+            // The grant never exceeds the lane rule: a closed registry intent that no soft stop
+            // overrides is not granted even though a spec says `running`.
+            && self.lane(role) == Lane::Launchable
     }
 
     fn running(&self, role: &str) -> bool {

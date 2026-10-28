@@ -104,6 +104,10 @@ fn record(role: &str, intent: Intent) -> AgentRecord {
 }
 
 fn spec_in(dir: &Path, role: &str, state: spec::SpecState) {
+    spec_in_kind(dir, role, state, None);
+}
+
+fn spec_in_kind(dir: &Path, role: &str, state: spec::SpecState, kind: Option<spec::StopKind>) {
     let s = spec::SpecFile {
         schema: spec::SCHEMA,
         role: lane_state::role::Role::new(role).unwrap(),
@@ -121,7 +125,7 @@ fn spec_in(dir: &Path, role: &str, state: spec::SpecState) {
         stopped_session_id: None,
         stopped_pid_start_secs: None,
         stop_reason: None,
-        stop_kind: None,
+        stop_kind: kind,
         tool_version: "test".into(),
         launch: None,
         wsl: None,
@@ -156,6 +160,7 @@ fn the_launcher_rule_reads_registry_intent_and_spec_state_together() {
         registry: &reg,
         lane_state_dir: state.path(),
         table: &table,
+        wake_enabled: false,
     };
     assert_eq!(dir.lane("wanted"), Lane::Launchable);
     assert_eq!(
@@ -185,6 +190,7 @@ fn an_unreadable_registry_launches_nothing() {
         registry: &reg,
         lane_state_dir: state.path(),
         table: &table,
+        wake_enabled: false,
     };
     assert_ne!(dir.lane("wanted"), Lane::Launchable);
 }
@@ -272,6 +278,7 @@ fn dir_over<'a>(reg: &'a Registry, state: &'a Path, table: &'a Nothing) -> Regis
         registry: reg,
         lane_state_dir: state,
         table,
+        wake_enabled: false,
     }
 }
 
@@ -400,4 +407,150 @@ fn the_notify_transport_is_the_broker_unless_the_config_says_synapse() {
 fn a_bare_role_is_addressed_as_role_at_account() {
     assert_eq!(qualify("pm", "scratch"), "pm@scratch");
     assert_eq!(qualify("pm@other", "scratch"), "pm@other");
+}
+
+// ---- the implied grant (board 216, docs/M5-WAKE-DESIGN.md slice 1) ----
+
+use spec::{SpecState, StopKind};
+
+/// Seven lanes, one per way a lane can have ended, all with a `wanted` registry record except
+/// `exited-soft`, whose registry intent is what `agentlife stop --soft` leaves: `Closed{exited}`.
+fn grant_fixture(reg: &Registry, state: &Path) {
+    let exited = Intent::Closed {
+        how: ClosedHow::Exited,
+        by: "test".into(),
+        at: Utc::now(),
+    };
+    for (role, intent, st, kind) in [
+        (
+            "soft",
+            Intent::Wanted,
+            SpecState::Suspended,
+            Some(StopKind::Soft),
+        ),
+        (
+            "soft-stopping",
+            Intent::Wanted,
+            SpecState::Stopping,
+            Some(StopKind::Soft),
+        ),
+        (
+            "hard",
+            Intent::Wanted,
+            SpecState::Suspended,
+            Some(StopKind::Hard),
+        ),
+        ("unclassified", Intent::Wanted, SpecState::Suspended, None),
+        ("crashed", Intent::Wanted, SpecState::Crashed, None),
+        (
+            "exited-soft",
+            exited.clone(),
+            SpecState::Suspended,
+            Some(StopKind::Soft),
+        ),
+        // a parked lane whose suspend write failed leaves an earlier `running` spec behind
+        ("parked-running", exited, SpecState::Running, None),
+    ] {
+        reg.create(&record(role, intent)).unwrap();
+        spec_in_kind(state, role, st, kind);
+    }
+    reg.create(&record("no-spec", Intent::Wanted)).unwrap();
+    reg.create(&record("corrupt", Intent::Wanted)).unwrap();
+    std::fs::write(state.join("corrupt.launch.json"), "{ not json").unwrap();
+}
+
+#[test]
+fn with_the_wake_path_off_nothing_is_granted_and_a_soft_stop_stays_closed() {
+    let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let reg = Registry::new(reg_dir.path());
+    grant_fixture(&reg, state.path());
+    let table = Nothing;
+    let dir = dir_over(&reg, state.path(), &table);
+    for role in [
+        "soft",
+        "soft-stopping",
+        "crashed",
+        "exited-soft",
+        "hard",
+        "no-spec",
+    ] {
+        assert!(
+            !dir.granted(role),
+            "{role}: nothing is granted while lazy is off"
+        );
+    }
+    for role in [
+        "soft",
+        "soft-stopping",
+        "hard",
+        "unclassified",
+        "exited-soft",
+    ] {
+        assert_eq!(
+            dir.lane(role),
+            Lane::ClosedOnPurpose,
+            "{role}: as before 216"
+        );
+    }
+    assert_eq!(dir.lane("crashed"), Lane::Launchable);
+}
+
+#[test]
+fn with_the_wake_path_on_a_soft_stop_and_a_crash_are_granted_and_nothing_else_is() {
+    let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let reg = Registry::new(reg_dir.path());
+    grant_fixture(&reg, state.path());
+    let table = Nothing;
+    let mut dir = dir_over(&reg, state.path(), &table);
+    dir.wake_enabled = true;
+    // (role, granted, lane)
+    for (role, granted, lane) in [
+        ("soft", true, Lane::Launchable),
+        ("soft-stopping", true, Lane::Launchable),
+        ("crashed", true, Lane::Launchable),
+        // `agentlife stop --soft`: registry says exited, the spec (the authority) says soft
+        ("exited-soft", true, Lane::Launchable),
+        ("hard", false, Lane::ClosedOnPurpose),
+        ("unclassified", false, Lane::ClosedOnPurpose),
+        // a closed registry intent is not overridden by a spec that merely says `running`
+        ("parked-running", false, Lane::ClosedOnPurpose),
+        ("corrupt", false, Lane::ClosedOnPurpose),
+        ("no-spec", false, Lane::Launchable),
+        ("ghost", false, Lane::Unknown),
+    ] {
+        assert_eq!(dir.granted(role), granted, "granted({role})");
+        assert_eq!(dir.lane(role), lane, "lane({role})");
+    }
+}
+
+#[test]
+fn rule_seven_and_lane_restart_start_read_one_predicate() {
+    // The directory must agree with `launcher_may_start` for every (state, kind) pair.
+    let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let reg = Registry::new(reg_dir.path());
+    let table = Nothing;
+    let mut dir = dir_over(&reg, state.path(), &table);
+    dir.wake_enabled = true;
+    let mut n = 0;
+    for st in [
+        SpecState::Running,
+        SpecState::Crashed,
+        SpecState::Suspended,
+        SpecState::Stopping,
+        SpecState::FailedRelaunch,
+    ] {
+        for kind in [None, Some(StopKind::Soft), Some(StopKind::Hard)] {
+            let role = format!("r{n}");
+            n += 1;
+            reg.create(&record(&role, Intent::Wanted)).unwrap();
+            spec_in_kind(state.path(), &role, st, kind);
+            let s = spec::read(state.path(), &role).unwrap();
+            assert_eq!(
+                dir.granted(&role),
+                lane_restart::start::launcher_may_start(&s).is_ok(),
+                "{st:?} {kind:?}"
+            );
+        }
+    }
+    assert_eq!(n, 15, "control: every pair was visited");
 }
