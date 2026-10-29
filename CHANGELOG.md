@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.31
+
+- **CLI basics (CodeRipper OPS-011 `cli-basics`; PM TASK 2026-10-29, amended by the PM's HOLD).** `pin-plan` and `runner-lint` gain `--version`/`-V` (`pin-plan` already exited 2 on a bad flag; `runner-lint` exits 2 on an unreadable file). **Exception requested, not made:** `agentlife` and `lane-restart` keep exit 1 for a usage error, because 2 is already a documented, branched-on result in each (`lane-restart`: relaunched but awaiting a human at the dialog, `lane-restart --help`; `agentlife park`/`stop` without `--yes`: the plan was printed, `docs/GRACEFUL-STOP.md`). A `cli_basics` test per binary pins `--version` and the bad-flag code (1 for those two, 2 for the others). Mutation: `runner-lint -V` removed turned its test red. Version 0.29.31 is provisional.
+
 ## 0.29.30
 
 - **`agentlife launcher`: a spec alone makes a registry-less lane known (docs/M5-WAKE-DESIGN.md slice 1b; PM ruling, given slices 3 and 4 in force before the mechanism is switched on).** `RegistryDirectory::lane` for a role with no registry record now answers `Launchable` when `lazy_enabled` is on AND its spec passes `launcher_may_start`; a blocked, corrupt or absent spec, or `lazy_enabled` off (the default), still answers `Unknown`; an unreadable registry is unchanged. Rule 7 follows (`granted` reads `lane`). The mechanism is still `NoMechanism`: no lane is started. Slice 4 (integrity of the soft `stop_kind` marker) is not built, so the wake path must stay off. Mutation: dropping the `wake_enabled` guard turned the new test red. Linux clippy not run locally (aws-lc cannot cross-compile here); Windows clippy and fmt clean. Version 0.29.30 is provisional.

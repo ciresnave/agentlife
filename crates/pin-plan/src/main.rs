@@ -73,6 +73,10 @@ fn parse_args() -> Result<Args, String> {
                 print!("{USAGE}");
                 std::process::exit(0);
             }
+            "-V" | "--version" => {
+                println!("pin-plan {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
