@@ -1,8 +1,8 @@
-//! OPS-011 cli-basics: `--version` prints the crate version and exits 0; a bad flag exits 2.
+//! OPS-011 cli-basics: `--version` prints the crate version and exits 0; a bad flag exits 1 (2 is taken in this binary).
 use std::process::Command;
 
 #[test]
-fn version_prints_and_a_bad_flag_exits_two() {
+fn version_prints_and_a_bad_flag_exits_one() {
     let exe = env!("CARGO_BIN_EXE_lane-restart");
     let v = Command::new(exe).arg("--version").output().unwrap();
     assert_eq!(v.status.code(), Some(0));
@@ -11,5 +11,6 @@ fn version_prints_and_a_bad_flag_exits_two() {
     let short = Command::new(exe).arg("-V").output().unwrap();
     assert_eq!(short.stdout, v.stdout);
     let bad = Command::new(exe).arg("--no-such-flag").output().unwrap();
-    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    // Not 2: 2 means "relaunched, awaiting a human at the dialog" (`lane-restart --help`); scripts branch on it.
+    assert_eq!(bad.status.code(), Some(1), "{bad:?}");
 }

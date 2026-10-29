@@ -153,12 +153,12 @@ fn run_attach_cmd(rest: &[String]) -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!("lane-restart attach: {e}");
-            return usage_error();
+            return ExitCode::FAILURE;
         }
     };
     let Some(role) = role.filter(|r| lane_restart::relaunch::valid_identifier(r)) else {
         eprintln!("lane-restart attach: --role <name> is required and must be a plain identifier");
-        return usage_error();
+        return ExitCode::FAILURE;
     };
     if !watch {
         eprintln!(concat!(
@@ -1414,11 +1414,6 @@ USAGE:
         Print this message.
 ";
 
-/// Exit status for a command line that did not parse (OPS-011 cli-basics: usage errors exit 2, so a script can tell them from a run that failed, which exits 1).
-fn usage_error() -> ExitCode {
-    ExitCode::from(2)
-}
-
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.iter().any(|a| a == "--help" || a == "-h") {
@@ -1440,7 +1435,7 @@ fn main() -> ExitCode {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1451,7 +1446,7 @@ fn main() -> ExitCode {
                     eprintln!(
                         "lane-restart status: {e}; expected `status [--json] [--quiet-over <secs>] [--peers]`"
                     );
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1460,7 +1455,7 @@ fn main() -> ExitCode {
                 Ok(a) => run_start_cmd(a),
                 Err(e) => {
                     eprintln!("lane-restart start: {e}");
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1469,7 +1464,7 @@ fn main() -> ExitCode {
                 Ok(a) => run_stop_cmd(a),
                 Err(e) => {
                     eprintln!("lane-restart stop: {e}");
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1479,14 +1474,14 @@ fn main() -> ExitCode {
                     Ok((role, dry_run, verbose)) => run_specs_import_cmd(role, dry_run, verbose),
                     Err(e) => {
                         eprintln!("lane-restart specs import: {e}");
-                        usage_error()
+                        ExitCode::FAILURE
                     }
                 },
                 Some((sub, tail)) if sub == "retire" => match cli::specs_retire(tail) {
                     Ok((roles, dry_run)) => run_specs_retire_cmd(roles, dry_run),
                     Err(e) => {
                         eprintln!("lane-restart specs retire: {e}");
-                        usage_error()
+                        ExitCode::FAILURE
                     }
                 },
                 Some((sub, tail)) if sub == "synapse-only" => match cli::specs_synapse_only(tail) {
@@ -1495,14 +1490,14 @@ fn main() -> ExitCode {
                     }
                     Err(e) => {
                         eprintln!("lane-restart specs synapse-only: {e}");
-                        usage_error()
+                        ExitCode::FAILURE
                     }
                 },
                 _ => {
                     eprintln!(
                         "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]` or `specs synapse-only --role <name>... [--strict] [--dry-run]`"
                     );
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1513,7 +1508,7 @@ fn main() -> ExitCode {
                     eprintln!(
                         "lane-restart install: {e}; expected `install --from <exe> [--dry-run]`"
                     );
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1522,7 +1517,7 @@ fn main() -> ExitCode {
                 Ok((f, json, since, by_lane)) => run_ledger_cmd(f, json, since, by_lane),
                 Err(e) => {
                     eprintln!("lane-restart ledger: {e}");
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1535,7 +1530,7 @@ fn main() -> ExitCode {
                 Ok(role) => run_approvals_cmd(role),
                 Err(e) => {
                     eprintln!("lane-restart approvals: {e}");
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1549,7 +1544,7 @@ fn main() -> ExitCode {
                 Ok((role, child_argv)) => run_host_cmd(&role, &child_argv),
                 Err(e) => {
                     eprintln!("lane-restart host: {e}");
-                    usage_error()
+                    ExitCode::FAILURE
                 }
             };
         }
@@ -1558,7 +1553,7 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!("lane-restart: {e}");
-            return usage_error();
+            return ExitCode::FAILURE;
         }
     };
     // A bare `--self` (the documented form): the role is the caller's own, found the way

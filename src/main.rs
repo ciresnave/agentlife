@@ -98,8 +98,7 @@ fn main() -> ExitCode {
         Ok(Command::Worktrees { json, root, repos }) => run_worktrees(json, root, repos),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
-            // OPS-011 cli-basics: a command line that did not parse exits 2; a run that failed exits 1.
-            ExitCode::from(2)
+            ExitCode::FAILURE
         }
     }
 }

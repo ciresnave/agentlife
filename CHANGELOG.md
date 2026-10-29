@@ -4,7 +4,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## 0.29.31
 
-- **CLI basics (CodeRipper OPS-011 `cli-basics`; PM TASK 2026-10-29).** A command line that does not parse now exits 2 (was 1) in `agentlife` and in `lane-restart` (every subcommand's parse error, the `specs` fallback and `attach`'s two usage refusals); a run that fails still exits 1. `pin-plan` and `runner-lint` gain `--version`/`-V`. Caution for callers: `lane-restart` already used 2 for a restart that is only awaiting confirmation, so 2 there now means either; the message on stderr tells them apart, and no script in this repo reads the 1. Measured on the built binaries: `--version` 0 and `--bogus-flag` 2 for all four; `lane-restart start --bogus`, `attach`, `specs`, `status --x`, `ledger --x` 2. New `cli_basics` test per binary. Mutation: `agentlife` back to `FAILURE` turned its test red. Version 0.29.31 is provisional. Breaking only for a script that matched exit 1 on a usage error.
+- **CLI basics (CodeRipper OPS-011 `cli-basics`; PM TASK 2026-10-29, amended by the PM's HOLD).** `pin-plan` and `runner-lint` gain `--version`/`-V` (`pin-plan` already exited 2 on a bad flag; `runner-lint` exits 2 on an unreadable file). **Exception requested, not made:** `agentlife` and `lane-restart` keep exit 1 for a usage error, because 2 is already a documented, branched-on result in each (`lane-restart`: relaunched but awaiting a human at the dialog, `lane-restart --help`; `agentlife park`/`stop` without `--yes`: the plan was printed, `docs/GRACEFUL-STOP.md`). A `cli_basics` test per binary pins `--version` and the bad-flag code (1 for those two, 2 for the others). Mutation: `runner-lint -V` removed turned its test red. Version 0.29.31 is provisional.
 
 ## 0.29.30
 
