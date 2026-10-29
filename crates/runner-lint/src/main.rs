@@ -37,6 +37,10 @@ fn main() -> ExitCode {
         println!("usage: runner-lint [--private] [FILE...]   (no FILE: git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')\n  --private  lint as a PRIVATE repo (a pull-request runner job needs the same-repo `if` but no environment).\n             Proven, not trusted: needs GITHUB_REPOSITORY=owner/name and `gh` (GH_TOKEN), and exits 2 unless\n             `gh api repos/$GITHUB_REPOSITORY --jq .private` says true.");
         return ExitCode::SUCCESS;
     }
+    if files.iter().any(|a| a == "-V" || a == "--version") {
+        println!("runner-lint {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let mut mode = runner_lint::Mode::Public;
     if let Some(i) = files.iter().position(|a| a == "--private") {
         files.remove(i);
