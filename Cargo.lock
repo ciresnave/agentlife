@@ -2143,6 +2143,8 @@ version = "0.29.30"
 dependencies = [
  "chrono",
  "clap",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
  "lane-state",
  "portable-pty",
  "rustix",
