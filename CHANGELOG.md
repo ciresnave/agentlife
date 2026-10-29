@@ -6,6 +6,14 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 - **`agentlife launcher`: rule 7b, no launch on an unconfirmed sender allowlist (PM TASK 2026-10-28; docs/M5-WAKE-DESIGN.md slice 3, condition (a); board 216 "signed allowlisted Synapse senders only").** Every cycle the service reads `GET /v1/stats` `launch_senders_set` (synapsed rc.178, `SYNAPSE_LAUNCH_SENDERS`) and tells the engine; a signal that has a grant but no confirmed allowlist is answered `refused: no-sender-allowlist` (transient) and the mechanism is not called. A failed or unreadable read, a daemon too old to report the field, or a `false` all mean not confirmed. Without a grant the reason stays `no-grant`. Not run against a live rc.178 daemon (the pilot daemon is older). Mutation: removing the rule turned 2 tests red.
 
+## 0.29.27
+
+- **`lane-restart specs synapse-only --role R... [--strict] [--dry-run]` (PM only; PM TASK 2026-10-28; docs/SYNAPSE-ONLY-CUTOVER.md step 1a, PM ruling 2).** Rewrites a lane's `launch_args` so its next launch loads `server:synapse` and not `server:claude-peers` (other server names kept; the dev-channels flag keeps its place); `--strict` adds `--strict-mcp-config`. Refuses and leaves untouched a spec with no `--mcp-config`, a config that is missing or has no `mcpServers.synapse`, or no dev-channels flag. One backup `<role>.launch.json.pre-synapse`, written once and never replaced. Ledgered as `synapse-only`. Not run against a real lane. Mutation: not dropping `server:claude-peers` turned 3 of 5 tests red.
+
+## 0.29.26
+
+- **Docs: `docs/SYNAPSE-ONLY-CUTOVER.md`, the agentlife side of the Synapse-only plan for every lane (PM TASK 2026-10-28; CireSnave: "No claude-peers.").** Measured over the 31 launch specs (4 synapse-only, 8 both, 19 peers-only), the user-scope `claude-peers` server and the 5 roles the pilot daemon knows; names the per-lane needs, the broker-touching code, an order with rollback, and three questions for the PM. No code change.
+
 ## 0.29.25
 
 - **`agentlife launcher`: rule 7 reads the implied grant of board 216; the wake path stays off (PM TASK 2026-10-28; docs/M5-WAKE-DESIGN.md slice 1, PM ruling A).** `RegistryDirectory::granted` is true only when `lazy_enabled` is on AND the lane's spec passes `lane_restart::start::launcher_may_start` (now `pub`; the same predicate `lane-restart start` applies: soft stop or crash) AND the lane rule says launchable. With `lazy_enabled` off (the default) nothing is granted and a soft stop is closed-on-purpose, as before. With it on, a soft stop is launchable even where the registry says `Closed{exited}` (`agentlife stop --soft`). The mechanism is still `NoMechanism`; no lane is started. Mutation: dropping the predicate call turned two tests red. Added `docs/M5-WAKE-DESIGN.md` (slices 2-5; 3 and 4 gate switching it on).
