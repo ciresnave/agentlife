@@ -306,7 +306,13 @@ impl Directory for RegistryDirectory<'_> {
         // parked old agent and a wanted newer one can share a role, and the old row must not
         // override the lane that is wanted now. The newest by `first_seen` is the current one.
         let Some(current) = recs.iter().max_by_key(|r| r.first_seen) else {
-            return Lane::Unknown;
+            // A registry-less lane is known by its spec alone, and only with the wake path on: a
+            // spec the launcher may start from makes it launchable. A blocked or absent spec, or
+            // the wake path off, leaves it unknown, as before.
+            return match self.spec_verdict(role) {
+                SpecVerdict::Startable { .. } if self.wake_enabled => Lane::Launchable,
+                _ => Lane::Unknown,
+            };
         };
         let closed = matches!(current.intent, Intent::Closed { .. });
         match self.spec_verdict(role) {
