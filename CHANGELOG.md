@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.29
+
+- **Script, no code change: `scripts/synapsed-task.ps1 -LaunchSenders <value>` (PM TASK 2026-10-29).** Writes `set "SYNAPSE_LAUNCH_SENDERS=<value>"` into the wrapper so the scheduled-task daemon (rc.178) has a launch-sender allowlist, which launcher rule 7b reads from `/v1/stats`. Default unset: no line, wrapper identical to before (dry run compared with the existing task's settings). A value with a cmd metacharacter (`%"&|<>^` or a newline) is refused like `-MailboxStore`. Dry run measured with and without the switch and with `&` and `%`. Not registered; the running daemon is untouched. Not breaking. Version 0.29.29 is provisional.
+
 ## 0.29.28
 
 - **`agentlife launcher`: rule 7b, no launch on an unconfirmed sender allowlist (PM TASK 2026-10-28; docs/M5-WAKE-DESIGN.md slice 3, condition (a); board 216 "signed allowlisted Synapse senders only").** Every cycle the service reads `GET /v1/stats` `launch_senders_set` (synapsed rc.178, `SYNAPSE_LAUNCH_SENDERS`) and tells the engine; a signal that has a grant but no confirmed allowlist is answered `refused: no-sender-allowlist` (transient) and the mechanism is not called. A failed or unreadable read, a daemon too old to report the field, or a `false` all mean not confirmed. Without a grant the reason stays `no-grant`. Not run against a live rc.178 daemon (the pilot daemon is older). Mutation: removing the rule turned 2 tests red.
