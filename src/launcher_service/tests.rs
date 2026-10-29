@@ -554,3 +554,22 @@ fn rule_seven_and_lane_restart_start_read_one_predicate() {
     }
     assert_eq!(n, 15, "control: every pair was visited");
 }
+
+#[test]
+fn the_sender_allowlist_flag_is_read_from_stats_and_anything_else_is_not_a_yes() {
+    // The shape synapsed rc.178 sends (`crates/synapsed/src/lib.rs`, `stats`).
+    let set = json!({"scope": "process", "since": "t", "launch_senders_set": true, "roles": []});
+    let unset = json!({"scope": "process", "since": "t", "launch_senders_set": false, "roles": []});
+    assert_eq!(parse_senders_set(&set), Some(true));
+    assert_eq!(parse_senders_set(&unset), Some(false));
+    // An older daemon has no such field; a string is not a boolean.
+    assert_eq!(
+        parse_senders_set(&json!({"scope": "process", "roles": []})),
+        None
+    );
+    assert_eq!(
+        parse_senders_set(&json!({"launch_senders_set": "true"})),
+        None
+    );
+    assert_eq!(parse_senders_set(&json!(null)), None);
+}

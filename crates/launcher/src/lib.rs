@@ -289,6 +289,9 @@ pub struct Engine<'a> {
     io: &'a dyn StoreIo,
     mech: &'a dyn Mechanism,
     dir: &'a dyn Directory,
+    /// The daemon reports a sender allowlist (`launch_senders_set`). Set by the cycle from a fresh
+    /// read each time; false until then, so a launch is never decided on an unconfirmed allowlist.
+    allowlist_confirmed: bool,
 }
 
 impl<'a> Engine<'a> {
@@ -314,7 +317,13 @@ impl<'a> Engine<'a> {
             io,
             mech,
             dir,
+            allowlist_confirmed: false,
         })
+    }
+
+    /// Whether the daemon has a sender allowlist (board 216: signed allowlisted senders only).
+    pub fn set_allowlist_confirmed(&mut self, confirmed: bool) {
+        self.allowlist_confirmed = confirmed;
     }
 
     pub fn data(&self) -> &StoreData {
@@ -425,6 +434,11 @@ impl<'a> Engine<'a> {
         // Rule 7.
         if !self.dir.granted(&sig.role) {
             return self.refuse(row, "no-grant", Status::Transient, sig);
+        }
+        // Rule 7b: a grant is not enough while the daemon cannot say who may raise a signal. With
+        // no allowlist, any local sender's mail would be a reason to start a lane.
+        if !self.allowlist_confirmed {
+            return self.refuse(row, "no-sender-allowlist", Status::Transient, sig);
         }
         // Rule 8: intent saved first, then the one mechanism call, then the result saved.
         row.status = Status::Intent;

@@ -110,7 +110,9 @@ fn sig(role: &str, id: u64, attempt: u32) -> Signal {
 }
 
 fn open<'a>(io: &'a Mem, m: &'a Mech, d: &'a Dir) -> Engine<'a> {
-    Engine::open(io, m, d, true).unwrap()
+    let mut e = Engine::open(io, m, d, true).unwrap();
+    e.set_allowlist_confirmed(true);
+    e
 }
 
 fn started() -> Mech {
@@ -328,6 +330,7 @@ fn a_restart_does_not_relaunch_inside_the_window() {
         e.handle(&sig("fuel", 5, 1), 1000);
     }
     let mut e2 = Engine::open(&io, &m, &d, false).unwrap();
+    e2.set_allowlist_confirmed(true);
     let r = e2.handle(&sig("fuel", 5, 1), 1100);
     assert_eq!(got(&r), res(Outcome::Started, "started"));
     assert_eq!(m.n(), 1);
@@ -663,4 +666,38 @@ fn recheck_reports_a_save_failure_so_the_caller_does_not_clear() {
     assert!(e.recheck(later).is_err(), "the Clearing mark did not save");
     io.fail_save.set(false);
     assert_eq!(e.recheck(later + 1).unwrap(), vec!["fuel".to_string()]);
+}
+
+// ---- rule 7b: a grant is not enough without a confirmed sender allowlist ----
+
+#[test]
+fn a_grant_without_a_confirmed_sender_allowlist_is_refused_and_the_mechanism_is_not_called() {
+    let (io, m, d) = (Mem::new(), started(), Dir::new());
+    let mut e = Engine::open(&io, &m, &d, true).unwrap();
+    // The default is "not confirmed": a fresh engine has never been told.
+    let r = e.handle(&sig("fuel", 1, 1), 1000);
+    assert_eq!(got(&r), res(Outcome::Refused, "no-sender-allowlist"));
+    assert_eq!(m.n(), 0);
+    // Confirmed: the same lane launches (control: the refusal above was this rule and no other).
+    e.set_allowlist_confirmed(true);
+    let r = e.handle(&sig("fuel", 2, 1), 1100);
+    assert_eq!(got(&r), res(Outcome::Started, "started"));
+    assert_eq!(m.n(), 1);
+    // And withdrawn again: refused again.
+    e.set_allowlist_confirmed(false);
+    let r = e.handle(&sig("fuel", 3, 1), 1200);
+    assert_eq!(got(&r), res(Outcome::Refused, "no-sender-allowlist"));
+    assert_eq!(m.n(), 1);
+}
+
+#[test]
+fn with_no_grant_the_reason_is_still_no_grant_whatever_the_allowlist_says() {
+    let (io, m, d) = (Mem::new(), started(), Dir::new());
+    d.grant.set(false);
+    let mut e = Engine::open(&io, &m, &d, true).unwrap();
+    for (id, confirmed) in [(10, false), (11, true)] {
+        e.set_allowlist_confirmed(confirmed);
+        let r = e.handle(&sig("fuel", id, 1), 1000);
+        assert_eq!(got(&r), res(Outcome::Refused, "no-grant"), "{confirmed}");
+    }
 }

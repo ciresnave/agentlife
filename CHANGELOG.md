@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.28
+
+- **`agentlife launcher`: rule 7b, no launch on an unconfirmed sender allowlist (PM TASK 2026-10-28; docs/M5-WAKE-DESIGN.md slice 3, condition (a); board 216 "signed allowlisted Synapse senders only").** Every cycle the service reads `GET /v1/stats` `launch_senders_set` (synapsed rc.178, `SYNAPSE_LAUNCH_SENDERS`) and tells the engine; a signal that has a grant but no confirmed allowlist is answered `refused: no-sender-allowlist` (transient) and the mechanism is not called. A failed or unreadable read, a daemon too old to report the field, or a `false` all mean not confirmed. Without a grant the reason stays `no-grant`. Not run against a live rc.178 daemon (the pilot daemon is older). Mutation: removing the rule turned 2 tests red.
+
 ## 0.29.27
 
 - **`lane-restart specs synapse-only --role R... [--strict] [--dry-run]` (PM only; PM TASK 2026-10-28; docs/SYNAPSE-ONLY-CUTOVER.md step 1a, PM ruling 2).** Rewrites a lane's `launch_args` so its next launch loads `server:synapse` and not `server:claude-peers` (other server names kept; the dev-channels flag keeps its place); `--strict` adds `--strict-mcp-config`. Refuses and leaves untouched a spec with no `--mcp-config`, a config that is missing or has no `mcpServers.synapse`, or no dev-channels flag. One backup `<role>.launch.json.pre-synapse`, written once and never replaced. Ledgered as `synapse-only`. Not run against a real lane. Mutation: not dropping `server:claude-peers` turned 3 of 5 tests red.
