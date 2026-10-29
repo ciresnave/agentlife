@@ -126,6 +126,7 @@ fn spec_in_kind(dir: &Path, role: &str, state: spec::SpecState, kind: Option<spe
         stopped_pid_start_secs: None,
         stop_reason: None,
         stop_kind: kind,
+        stop_mac: None,
         tool_version: "test".into(),
         launch: None,
         wsl: None,
@@ -558,6 +559,41 @@ fn a_spec_alone_makes_a_registry_less_lane_known_only_with_the_wake_path_on() {
             "on: granted({role})"
         );
     }
+}
+
+#[test]
+fn a_hand_made_soft_stop_is_not_granted_and_a_signed_one_is() {
+    let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let reg = Registry::new(reg_dir.path());
+    let table = Nothing;
+    let mut dir = dir_over(&reg, state.path(), &table);
+    dir.wake_enabled = true;
+    // a real soft stop (signed by `write_atomic`) and a hard stop edited to read `soft`
+    for role in ["signed", "forged"] {
+        reg.create(&record(role, Intent::Wanted)).unwrap();
+    }
+    spec_in_kind(
+        state.path(),
+        "signed",
+        SpecState::Suspended,
+        Some(StopKind::Soft),
+    );
+    spec_in_kind(
+        state.path(),
+        "forged",
+        SpecState::Suspended,
+        Some(StopKind::Hard),
+    );
+    let p = state.path().join("forged.launch.json");
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains("\"hard\""), "control: the anchor is present");
+    std::fs::write(&p, text.replace("\"hard\"", "\"soft\"")).unwrap();
+    assert!(
+        dir.granted("signed"),
+        "control: a genuine soft stop is granted"
+    );
+    assert!(!dir.granted("forged"), "an edited-to-soft stop is not");
+    assert_eq!(dir.lane("forged"), Lane::ClosedOnPurpose);
 }
 
 #[test]

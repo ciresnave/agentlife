@@ -33,6 +33,7 @@ pub mod launch;
 pub mod launcher_gate;
 pub mod ledger;
 pub mod log;
+pub mod marker;
 pub mod notify;
 pub mod peers_join;
 pub mod relaunch;

@@ -159,6 +159,10 @@ pub struct SpecFile {
     /// launch, or by `specs import` (a crash): unclassified, which a launcher refuses.
     #[serde(default)]
     pub stop_kind: Option<StopKind>,
+    /// HMAC over the rest of the spec, written with every soft stop (`marker`). A soft stop without
+    /// a MAC that verifies reads back as unclassified. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_mac: Option<String>,
     pub tool_version: String,
     /// `Some("wsl")` for a lane that runs inside a WSL2 distro (docs/LANE-RESTART-WSL.md), which
     /// is also what makes the spec schema 2. Absent, and not written, for a Windows lane, so a
@@ -280,6 +284,7 @@ pub fn build(i: &SpecInputs) -> Result<SpecFile, SpecError> {
         stopped_pid_start_secs: i.pid_start_secs,
         stop_reason: None,
         stop_kind: None,
+        stop_mac: None,
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
         launch: None,
         wsl: None,
@@ -406,6 +411,11 @@ pub fn is_wsl_lane(dir: &Path, role: &str) -> bool {
 }
 
 pub fn read(dir: &Path, role: &str) -> Result<SpecFile, SpecError> {
+    read_raw(dir, role).map(|spec| verified(dir, spec))
+}
+
+/// `read` without the marker check: the file as written.
+fn read_raw(dir: &Path, role: &str) -> Result<SpecFile, SpecError> {
     let path = spec_path(dir, role)?;
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -431,6 +441,15 @@ pub fn read(dir: &Path, role: &str) -> Result<SpecFile, SpecError> {
     Ok(spec)
 }
 
+/// A soft stop is a grant to start the lane, so it counts only if its MAC verifies; one that does
+/// not (edited, never signed, no key) is *unclassified*, which every launcher refuses.
+fn verified(dir: &Path, mut spec: SpecFile) -> SpecFile {
+    if spec.stop_kind == Some(StopKind::Soft) && !crate::marker::verify(dir, &spec) {
+        spec.stop_kind = None;
+    }
+    spec
+}
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Writes `spec` durably: complete (`check`), to a temp file in the same directory, `sync_all`,
@@ -439,6 +458,14 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// never half of one.
 pub fn write_atomic(dir: &Path, spec: &SpecFile) -> Result<(), SpecError> {
     spec.check()?;
+    // A soft stop is signed here, the one place every spec is written (`marker`); no key means it
+    // is written unsigned and reads back unclassified.
+    let mut signed = spec.clone();
+    signed.stop_mac = None;
+    if signed.stop_kind == Some(StopKind::Soft) {
+        signed.stop_mac = crate::marker::sign(dir, &signed);
+    }
+    let spec = &signed;
     let path = spec_path(dir, spec.role.as_str())?;
     std::fs::create_dir_all(dir).map_err(|e| SpecError::Write(e.to_string()))?;
     sweep_temp_files(dir, spec.role.as_str());
@@ -455,7 +482,7 @@ pub fn write_atomic(dir: &Path, spec: &SpecFile) -> Result<(), SpecError> {
         f.sync_all().map_err(|e| SpecError::Write(e.to_string()))?;
         drop(f);
         std::fs::rename(&tmp, &path).map_err(|e| SpecError::Write(e.to_string()))?;
-        if read(dir, spec.role.as_str())? != *spec {
+        if read_raw(dir, spec.role.as_str())? != *spec {
             return Err(SpecError::ReadBackMismatch);
         }
         Ok(())
@@ -1110,6 +1137,63 @@ mod tests {
 
     fn built(role: &str, state: SpecState) -> SpecFile {
         build(&inputs(&launch(role), "sonnet", state)).unwrap()
+    }
+
+    fn soft_stop(dir: &Path, role: &str, kind: Option<StopKind>) -> PathBuf {
+        let mut s = built(role, SpecState::Suspended);
+        s.stop_kind = kind;
+        write_atomic(dir, &s).unwrap();
+        spec_path(dir, role).unwrap()
+    }
+
+    #[test]
+    fn a_written_soft_stop_is_signed_and_reads_back_soft() {
+        let d = tempdir().unwrap();
+        let path = soft_stop(d.path(), "alpha", Some(StopKind::Soft));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(on_disk["stop_mac"].is_string(), "{on_disk}");
+        assert_eq!(
+            read(d.path(), "alpha").unwrap().stop_kind,
+            Some(StopKind::Soft)
+        );
+        // a hard stop and an unclassified one carry no MAC
+        for (role, kind) in [("beta", Some(StopKind::Hard)), ("gamma", None)] {
+            let p = soft_stop(d.path(), role, kind);
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+            assert!(v.get("stop_mac").is_none(), "{role}: {v}");
+        }
+    }
+
+    #[test]
+    fn an_edited_or_unsigned_soft_stop_reads_back_unclassified() {
+        let d = tempdir().unwrap();
+        // 1. hard -> soft by hand: no MAC
+        let path = soft_stop(d.path(), "hard", Some(StopKind::Hard));
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("\"hard\"", "\"soft\"")).unwrap();
+        let forged = read(d.path(), "hard").unwrap();
+        assert_eq!(forged.stop_kind, None, "forged soft must not read as soft");
+        // 2. a genuine soft stop whose cwd is then edited
+        let path = soft_stop(d.path(), "alpha", Some(StopKind::Soft));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("C:/Projects/x"),
+            "control: the anchor is present: {text}"
+        );
+        std::fs::write(&path, text.replace("C:/Projects/x", "C:/Projects/evil")).unwrap();
+        assert_eq!(read(d.path(), "alpha").unwrap().stop_kind, None);
+        // 3. a genuine soft stop copied to another directory (another key)
+        let other = tempdir().unwrap();
+        let src = soft_stop(d.path(), "delta", Some(StopKind::Soft));
+        std::fs::copy(&src, spec_path(other.path(), "delta").unwrap()).unwrap();
+        assert_eq!(read(other.path(), "delta").unwrap().stop_kind, None);
+        // control: the same file in its own directory is still soft
+        assert_eq!(
+            read(d.path(), "delta").unwrap().stop_kind,
+            Some(StopKind::Soft)
+        );
     }
 
     #[test]

@@ -135,6 +135,7 @@ mod tests {
             stopped_pid_start_secs: None,
             stop_reason: None,
             stop_kind: None,
+            stop_mac: None,
             tool_version: "test".into(),
             launch: None,
             wsl: None,

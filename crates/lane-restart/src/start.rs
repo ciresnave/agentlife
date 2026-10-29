@@ -797,6 +797,16 @@ mod tests {
     }
 
     fn set_kind(dir: &Path, role: &str, kind: Option<&str>) {
+        if kind == Some("soft") {
+            // Through `write_atomic`, as a real stop writes it: a soft stop is signed there, and a
+            // hand-edited `soft` would (rightly) read back unclassified.
+            let mut s = spec::read(dir, role).unwrap();
+            s.stop_kind = Some(spec::StopKind::Soft);
+            spec::write_atomic(dir, &s).unwrap();
+            return;
+        }
+        // Hard and unclassified carry no MAC, so a file edit is how they are made here (and the
+        // only way to give an Opus spec a kind: `write_atomic` refuses one).
         let p = dir.join(format!("{role}.launch.json"));
         let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         match kind {
