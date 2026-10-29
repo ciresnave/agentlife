@@ -524,6 +524,43 @@ fn with_the_wake_path_on_a_soft_stop_and_a_crash_are_granted_and_nothing_else_is
 }
 
 #[test]
+fn a_spec_alone_makes_a_registry_less_lane_known_only_with_the_wake_path_on() {
+    let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let reg = Registry::new(reg_dir.path());
+    // no registry record for any of these
+    for (role, st, kind) in [
+        ("soft", SpecState::Suspended, Some(StopKind::Soft)),
+        ("crashed", SpecState::Crashed, None),
+        ("hard", SpecState::Suspended, Some(StopKind::Hard)),
+        ("unclassified", SpecState::Suspended, None),
+    ] {
+        spec_in_kind(state.path(), role, st, kind);
+    }
+    std::fs::write(state.path().join("corrupt.launch.json"), "{ not json").unwrap();
+    let table = Nothing;
+    let off = dir_over(&reg, state.path(), &table);
+    let mut on = dir_over(&reg, state.path(), &table);
+    on.wake_enabled = true;
+    for (role, with_wake) in [
+        ("soft", Lane::Launchable),
+        ("crashed", Lane::Launchable),
+        ("hard", Lane::Unknown),
+        ("unclassified", Lane::Unknown),
+        ("corrupt", Lane::Unknown),
+        ("ghost", Lane::Unknown),
+    ] {
+        assert_eq!(off.lane(role), Lane::Unknown, "off: {role}");
+        assert!(!off.granted(role), "off: granted({role})");
+        assert_eq!(on.lane(role), with_wake, "on: {role}");
+        assert_eq!(
+            on.granted(role),
+            with_wake == Lane::Launchable,
+            "on: granted({role})"
+        );
+    }
+}
+
+#[test]
 fn rule_seven_and_lane_restart_start_read_one_predicate() {
     // The directory must agree with `launcher_may_start` for every (state, kind) pair.
     let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
