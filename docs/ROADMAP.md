@@ -39,9 +39,9 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 5. ~~**`SECRET_WORDS` lacks `passkey`**~~ **built, 0.29.22** (`passkey` and `passkeys` added; three tests: the word, a pinned line, a trust dialog that also asks for one). Original row: (OverMind#96 (b), read at `origin/main` 616b8d2: `crates/lane-restart/src/handlers.rs:146`, 24 entries, no `passkey`/`passkeys`). A dialog asking for a passkey is not recognised as asking for a secret by that list; defence in depth only, the 1-keystroke action cap is the real backstop. Fix: add the words with a whole-word test beside `secret_words_match_whole_words_only`; the list stays a fixed English list. OverMind#96 (a) (notify on the relay thread) is done in `host.rs` (`capture(text)` runs on its own thread). OverMind#117 is fixed by 52fa622 (#113, on `origin/main`): the `from_millis(800)` literals remain (`host.rs:2031/2082/2233`), but the window now starts at the child's first output (`window_gate_on`), and `on_unhandled_captures_a_child_whose_first_output_is_late` pins it. Not re-measured under load.
 
 6. **`lane-restart lane-new <role> <repo>`** (PM TASK 2026-10-30; design `docs/LANE-NEW.md`, 0.29.40): PM-only, dry run by
-   default; repo (the owner-token step is printed, not run), seed, MCP config, launch spec, soak list, Synapse
-   provisioning, start; every step read back. Design merged first; slice 1 (local files) waits on the PM's answers to
-   the six open questions in the note.
+   default; repo (bot token), seed with CI, MCP config, launch spec, soak list, Synapse provisioning, start; every step
+   read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41). Slice 1
+   (local files, no network) is unblocked; question 7 (CI seed in a repo with no `Cargo.toml`) blocks slice 2 only.
 
 ## Portfolio items from the PM (2026-10-14), taken in order
 
