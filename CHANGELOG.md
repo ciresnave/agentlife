@@ -4,7 +4,11 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## 0.29.38
 
-- **Docs only (PM TASK 2026-10-30): `docs/SYNAPSE-MCP-RECONNECT-MEASURE.md` and `docs/spike/synapse_reconnect_probe.py`, a scratch-daemon measurement of the Synapse adapter across a `synapsed` kill.** The adapter stays up and delivers 0.3 to 0.9 s after a daemon is reachable, but in 3 of 4 kills it started a replacement daemon itself within about 2 s, so no gap longer than that was measured. Adapter level only (no Claude session); two runs are marked invalid in the doc. The live `synapsed` was not touched.
+- **Docs only (PM TASK 2026-10-30): `docs/SYNAPSE-MCP-RECONNECT-MEASURE.md` and `docs/spike/synapse_reconnect_probe.py`, a scratch-daemon measurement of the Synapse adapter across a `synapsed` kill.** The adapter stays up and delivers 0.3 to 0.9 s after a daemon is reachable, but in 3 of 4 kills it started a replacement daemon itself within about 2 s, so no gap longer than that was measured. Adapter only (no Claude session); two runs are marked invalid in the doc. The live `synapsed` was not touched.
+
+## 0.29.37
+
+- **Docs only (PM TASK 2026-10-30, Fuel ROADMAP hardware-free step): `docs/LINUX-GPU-RUN-DESIGN.md`, the Linux counterpart of Fuel's `gpu-run` lock and `cuda-build` slots for the Windows/Linux dual-boot desktop.** `flock(2)` on tmpfs files (not a semaphore, not `pwsh` on Linux), tmpfiles-provisioned lock files because of `fs.protected_regular`, the lock fd inherited by the child, a persistent crash record keyed on `boot_id`, and N and K to be re-measured on Linux. Nothing was run on Linux; the doc lists what to verify on hardware.
 
 ## 0.29.36
 
