@@ -41,8 +41,8 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 6. **`lane-restart lane-new <role> <repo>`** (PM TASK 2026-10-30; design `docs/LANE-NEW.md`, 0.29.40): PM-only, dry run by
    default; repo (bot token), seed with CI, MCP config, launch spec, soak list, Synapse provisioning, start; every step
    read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41), question
-   7 answered (stub crate in the seed, 0.29.43). Slice 1 (local files, no network) is built, 0.29.42 (#194); slices 2 (repo,
-   seed with CI and stub crate) and 3 (provisioning, start, `--apply`) have no open question.
+   7 answered (stub crate in the seed, 0.29.43). Slice 1 (local files) is built, 0.29.42 (#194); slice 2 (repo, clone, seed with CI and the stub crate, `gh`/`git` behind a
+   trait) is built, 0.29.45; slice 3 (provisioning, start, `--apply`) has no open question and is next.
 7. **Flake: `hook_e2e::a_hand_started_agent_started_again_after_its_process_died_is_one_agent`** (Windows CI only seen).
    Red: run 41128992581 attempt 1, job 124314760979 (windows-latest, PR #194, head 6062451): `tests\hook_e2e.rs:508`,
    `assertion left == right failed, left: 1, right: 2`, i.e. `recs[0].sessions.len()` was 1 after the second

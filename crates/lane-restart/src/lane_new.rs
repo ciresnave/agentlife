@@ -17,6 +17,7 @@
 //! nothing, so rerunning converges. Nothing is overwritten: an existing artifact that differs from what
 //! this would write is a failure, found by step 0 before any step writes.
 
+use crate::lane_new_remote::{self as remote, Vcs};
 use crate::spec::{self, SpecFile, SpecState, WrittenBy};
 use crate::start;
 use chrono::{DateTime, Utc};
@@ -316,8 +317,7 @@ fn fail(rows: &mut Vec<StepRow>, n: u8, name: &'static str, detail: String) {
     });
 }
 
-/// Runs steps 0, 3, 4 and 5 (writing only if `apply`), then lists the later steps. Step 0 reads every
-/// existing artifact first, so a conflict is found before anything is written.
+/// Slice 1: steps 0, 3, 4 and 5 with no `gh`/`git`; steps 1 and 2 are listed as later.
 pub fn run_local(
     roots: &Roots,
     role: &str,
@@ -326,6 +326,22 @@ pub fn run_local(
     apply: bool,
     now: DateTime<Utc>,
 ) -> Report {
+    run_with(roots, None, role, repo, model, apply, now)
+}
+
+/// Runs steps 0, 1, 2, 3, 4 and 5 (writing and creating only if `apply`; a dry run only reads), then lists
+/// the later steps. Step 0 reads every existing artifact first, so a conflict is found before anything is
+/// written. With `vcs` `None`, steps 1 and 2 are listed as later (slice 1).
+pub fn run_with(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    role: &str,
+    repo: &str,
+    model: &str,
+    apply: bool,
+    now: DateTime<Utc>,
+) -> Report {
+    let nwo = format!("{ORG}/{repo}");
     let mut rows = Vec::new();
     let mut paths = vec![
         roots.state_dir.clone(),
@@ -431,6 +447,20 @@ pub fn run_local(
             None
         }
     };
+    let seed = if vcs.is_some() {
+        match remote::render(ORG, role, repo) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                problems.push(e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(v) = vcs {
+        problems.extend(remote::local_problems(v, &roots.repo_dir(repo), &nwo));
+    }
     if !problems.is_empty() {
         fail(&mut rows, 0, "validate", problems.join("; "));
         return rep(rows, paths);
@@ -439,8 +469,44 @@ pub fn run_local(
         n: 0,
         name: "validate",
         status: Status::Ok,
-        detail: format!("{role} / {ORG}/{repo} / {model}; nothing in the way"),
+        detail: format!("{role} / {nwo} / {model}; nothing in the way"),
     });
+
+    // --- steps 1 and 2: the repo, then the clone and seed (slice 2) ----------------------------
+    if let (Some(v), Some(seed)) = (vcs, seed.as_ref()) {
+        let status = |o: remote::Outcome| match o {
+            remote::Outcome::Ok => Status::Ok,
+            remote::Outcome::Already => Status::Already,
+            remote::Outcome::Would => Status::Would,
+        };
+        let repo_made = match remote::step_repo(v, &nwo, apply) {
+            Ok((o, detail)) => {
+                rows.push(StepRow {
+                    n: 1,
+                    name: "create repo",
+                    status: status(o),
+                    detail,
+                });
+                o != remote::Outcome::Would
+            }
+            Err(e) => {
+                fail(&mut rows, 1, "create repo", e);
+                return rep(rows, paths);
+            }
+        };
+        match remote::step_seed(v, &nwo, &roots.repo_dir(repo), seed, apply, repo_made) {
+            Ok((o, detail)) => rows.push(StepRow {
+                n: 2,
+                name: "clone + seed + CI",
+                status: status(o),
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 2, "clone + seed + CI", e);
+                return rep(rows, paths);
+            }
+        }
+    }
 
     // --- step 3: MCP config --------------------------------------------------------------------
     let p = roots.mcp_path(role);
@@ -586,19 +652,21 @@ pub fn run_local(
         status: Status::Later,
         detail,
     };
-    rows.push(later(
-        1,
-        "create repo",
-        format!("gh repo create {ORG}/{repo} --public (bot token)"),
-    ));
-    rows.push(later(
-        2,
-        "clone + seed + CI",
-        format!(
-            "clone to {}, seed, push main",
-            roots.repo_dir(repo).display()
-        ),
-    ));
+    if vcs.is_none() {
+        rows.push(later(
+            1,
+            "create repo",
+            format!("gh repo create {ORG}/{repo} --public (bot token)"),
+        ));
+        rows.push(later(
+            2,
+            "clone + seed + CI",
+            format!(
+                "clone to {}, seed, push main",
+                roots.repo_dir(repo).display()
+            ),
+        ));
+    }
     rows.push(later(
         6,
         "synapse identity",
@@ -615,7 +683,14 @@ pub fn run_local(
     rows.push(later(
         8,
         "protect main (PM)",
-        format!("tools/protect-main.sh {ORG}/{repo} <contexts...> after the first CI run"),
+        format!(
+            "after the first CI run on main: tools/protect-main.sh {nwo} {}",
+            remote::REQUIRED_CONTEXTS
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
     ));
     rows.sort_by_key(|r| r.n);
     rep(rows, paths)

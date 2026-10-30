@@ -1120,8 +1120,17 @@ fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> E
             return ExitCode::FAILURE;
         }
     };
-    let report =
-        lane_restart::lane_new::run_local(&roots, &role, &repo, &model, false, chrono::Utc::now());
+    // Slice 2: the dry run also reads GitHub (repo visibility, main's head and files) and the clone
+    // directory; it creates, clones and writes nothing.
+    let report = lane_restart::lane_new::run_with(
+        &roots,
+        Some(&lane_restart::lane_new_remote::GhGit),
+        &role,
+        &repo,
+        &model,
+        false,
+        chrono::Utc::now(),
+    );
     print!("{}", report.render(false));
     if report.failed() {
         ExitCode::FAILURE
@@ -1425,8 +1434,8 @@ USAGE:
         with the reason. First and last lines say whether anything moved.
 
     lane-restart lane-new <role> <repo> [--model sonnet|haiku]
-        PM only (docs/LANE-NEW.md, slice 1). Dry run: validates the names and what
-        exists, and prints the plan for the lane's MCP config, launch spec (suspended,
+        PM only (docs/LANE-NEW.md, slices 1 and 2). Dry run: validates the names and what
+        exists (reading GitHub: repo, main, files), and prints the plan for the repo, seed, MCP config, launch spec (suspended,
         no stop_kind) and soak-list entry, with every absolute path, plus the repo,
         seed, provisioning and start steps still to come. Writes nothing; --apply is
         refused until those steps exist.
