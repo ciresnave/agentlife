@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.41
+
+- **Docs only (PM RULING 2026-10-30): the PM's answers to six of `docs/LANE-NEW.md`'s seven questions folded in.** The bot token creates the repo (no pause step, no `--continue`); a new lane's spec has `stop_kind` absent, not `hard`; CI seed in capant's shape and the protection command printed; onemkl is the licence reference; the cwd incident recorded as the test. One question left (7: CI seed in a repo with no `Cargo.toml`). No code. Version 0.29.41 is provisional.
+
 ## 0.29.40
 
 - **Docs only (PM TASK 2026-10-30): `docs/LANE-NEW.md`, design of `lane-restart lane-new <role> <repo>`, plus ROADMAP row 6.** Eight read-back steps, the PM's three paid failure modes as rules and tests, six open questions. No code. Version 0.29.40 is provisional.
