@@ -356,6 +356,87 @@ impl Mechanism for NoMechanism {
     }
 }
 
+/// Maps one `lane-restart start --json` line to the mechanism's result. Anything it does not
+/// recognise is a failure, never a start; a line that is not JSON is `unparsable-output`.
+pub fn map_start_json(line: &str) -> MechResult {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return MechResult::Failed("unparsable-output".into());
+    };
+    let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
+    match (field("outcome"), field("reason")) {
+        ("started", "awaiting-dialog") => MechResult::AwaitingDialog,
+        ("started", _) => MechResult::Started,
+        ("already-running", _) => MechResult::AlreadyRunning,
+        ("failed", "held-for-memory") => MechResult::HeldForMemory,
+        ("failed", "lock-held") => MechResult::LockHeld,
+        ("refused", "invalid-role") => MechResult::InvalidArgument,
+        (_, reason) if !reason.is_empty() => MechResult::Failed(reason.to_string()),
+        _ => MechResult::Failed("unparsable-output".into()),
+    }
+}
+
+/// The real mechanism: `lane-restart start --role R --model M --signal-id S --json`, run as a
+/// direct child of this service (the caller identity `launcher_gate` accepts). It is only handed
+/// to the engine when `lazy_enabled` is on.
+pub struct LaneRestartMechanism {
+    pub exe: PathBuf,
+    pub timeout: std::time::Duration,
+}
+
+impl LaneRestartMechanism {
+    /// `lane-restart` next to the running executable.
+    pub fn sibling(timeout: std::time::Duration) -> std::io::Result<Self> {
+        let me = std::env::current_exe()?;
+        let name = format!("lane-restart{}", std::env::consts::EXE_SUFFIX);
+        Ok(Self {
+            exe: me.with_file_name(name),
+            timeout,
+        })
+    }
+}
+
+impl Mechanism for LaneRestartMechanism {
+    fn start(&self, role: &str, model: &str, signal_id: &str) -> MechResult {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = match Command::new(&self.exe)
+            .args(["start", "--role", role, "--reason", "wake on mail"])
+            .args(["--model", model, "--signal-id", signal_id, "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return MechResult::Failed("spawn-failed".into()),
+        };
+        let mut out = child.stdout.take().expect("stdout is piped");
+        let reader = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = out.read_to_string(&mut s);
+            s
+        });
+        let deadline = std::time::Instant::now() + self.timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return MechResult::Timeout;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => return MechResult::Failed("spawn-failed".into()),
+            }
+        }
+        let text = reader.join().unwrap_or_default();
+        match text.lines().rev().find(|l| l.trim_start().starts_with('{')) {
+            Some(line) => map_start_json(line),
+            None => MechResult::Failed("unparsable-output".into()),
+        }
+    }
+}
+
 /// The account of the Synapse home (`<home>/account`), read without starting a daemon.
 pub fn account_of(home: &Path) -> Result<String, String> {
     synapse::keystore::Keystore::open(home)

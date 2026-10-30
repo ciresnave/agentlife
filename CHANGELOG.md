@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.34
+
+- **`agentlife-launcher`: the real wake mechanism, off by default (docs/M5-WAKE-DESIGN.md slice 2).** New `LaneRestartMechanism` runs `lane-restart start --role R --model M --signal-id S --json` as a direct child of the service (the caller identity `launcher_gate` accepts), kills it after `LAUNCH_WAIT_SECS - 10` s (`Timeout`), and maps the last JSON line with `map_start_json` to the engine's eight results (`started`, `awaiting-dialog`, `already-running`, `held-for-memory`, `lock-held`, `invalid-argument`, other code to `Failed(code)`, unparsable to `Failed("unparsable-output")`). `main` hands the engine this mechanism only when `lazy_enabled` is true; otherwise `NoMechanism` as before, and rule 7 still refuses without a grant. Tests: the mapping for each result, and a missing executable is `spawn-failed`, never a start. Not run: a real start through the service (the PM's, with the sender allowlist and the PM's word still gating it on). Version 0.29.34 is provisional.
+
 ## 0.29.33
 
 - **`SECURITY.md` added: "Supported versions" (PM TASK, CireSnave 2026-10-29).** The text is exactly `C:\Projects\.lane-state\support-text.md`: the latest line gets security fixes, an older line only when the backport is small, no support period promised. No code change.
