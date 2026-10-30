@@ -564,11 +564,14 @@ mod tests {
 
     const NWO: &str = "ThinkersJournal/rockfish";
 
+    /// The files of a remote's `main` by path, and the commit they are at.
+    type Tree = BTreeMap<String, Vec<u8>>;
+
     /// An in-memory forge plus a pretend git whose state lives in `<dir>/.fakegit`.
     #[derive(Default)]
     struct Fake {
         repos: RefCell<HashMap<String, bool>>,
-        remote: RefCell<HashMap<String, (String, BTreeMap<String, Vec<u8>>)>>,
+        remote: RefCell<HashMap<String, (String, Tree)>>,
         calls: RefCell<Vec<String>>,
         dirs: RefCell<Vec<PathBuf>>,
         lie_push: bool,
