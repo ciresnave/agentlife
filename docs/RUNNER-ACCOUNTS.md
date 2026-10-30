@@ -16,6 +16,7 @@ Nothing in this note was run on the machine except read-only queries and the scr
 | `C:\gh-runner\ciresnave-PersistAnt` ACL | the same entries, **inherited** (`(I)(OI)(CI)(M)` for both accounts), plus the runner's own `GITHUB_ActionsRunner_*` group |
 | cpufish | public, `main`; its only workflow `ci.yml` has **no self-hosted job** yet (read from `main`) |
 | AOCL | `C:\Program Files\AMD\AOCL-Windows` exists; `BUILTIN\Users` has read-and-execute on it (inherited), so a standard account can read it |
+| oneAPI / oneMKL | **installed** at `C:\Program Files (x86)\Intel\oneAPI` (`2026.1`, `latest`; `mkl\latest\include\mkl.h` present; `icpx.exe` in `compiler\latest\bin`); `BUILTIN\Users` has read-and-execute (inherited). `MKLROOT` unset. (An earlier version of this table said it was absent: it looked under `Program Files` only.) |
 
 ## What is wrong with reusing the account
 
@@ -93,10 +94,30 @@ pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJourn
   -Account gh-runner-cpufish -Root C:\gh-runner-cpufish -Labels aocl
 ```
 
-It printed: account `TUF-LAPTOP\gh-runner-cpufish` (standard user), root `C:\gh-runner-cpufish` with ACL SYSTEM,
-Administrators, that account; runner v2.338.0 with its pinned SHA256; `ACL preflight: clean`; extract to
-`C:\gh-runner-cpufish\ThinkersJournal-cpufish`; `config.cmd ... --labels aocl --ephemeral --runasservice
---windowslogonaccount .\gh-runner-cpufish`; read-back of `StartName` and state. No group membership.
+**Re-run 2026-10-30 at `origin/main` ce69169 (exit 0; before and after, `Get-LocalUser gh-runner-cpufish` found nothing and
+`Test-Path C:\gh-runner-cpufish` was False; the ACL preflight read `clean`).** Its output, unedited:
+
+```
+DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.
+
+Owners        : ciresnave, ThinkersJournal   private (persistent allowed): none: every -Repo is treated as public, so ephemeral
+Runner mode   : ephemeral (one job per registration) [default: a -Repo is not declared in -Private]
+Account       : TUF-LAPTOP\gh-runner-cpufish (standard user; random 32-char password held in memory only)
+Root          : C:\gh-runner-cpufish  (ACL: SYSTEM, Administrators, gh-runner-cpufish)
+Runner        : v2.338.0  SHA256 f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f
+  https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-win-x64-2.338.0.zip
+ACL preflight: clean (-Apply would proceed past it)
+
+[ThinkersJournal/cpufish]
+  extract  -> C:\gh-runner-cpufish\ThinkersJournal-cpufish (only after the hash matches)
+  token    -> prompted (Read-Host -AsSecureString): PM fetches it now; not stored
+  C:\gh-runner-cpufish\ThinkersJournal-cpufish\config.cmd --unattended --url https://github.com/ThinkersJournal/cpufish --token <token> --name TUF-LAPTOP-ThinkersJournal-cpufish `
+      --labels aocl --work _work --replace --ephemeral --runasservice --windowslogonaccount .\gh-runner-cpufish --windowslogonpassword <generated>
+  .env     -> C:\gh-runner-cpufish\ThinkersJournal-cpufish\.env: PSExecutionPolicyPreference=Bypass (before config.cmd, so the service starts with it)
+  read back: service ... StartName = .\gh-runner-cpufish, State = Running; .env holds the policy line
+```
+
+No group membership is granted. Board 339: CireSnave chose this option (A: own account, own root, label `aocl`, ephemeral).
 
 **The elevated paste** (CireSnave's shell; the PM fetches the token with the `ciresnave` token for that one command, in
 the same terminal, within the hour):
@@ -116,7 +137,29 @@ GH_TOKEN="$(gh auth token --user ciresnave)" gh api repos/ThinkersJournal/cpufis
 Before step 2: cpufish's workflow must have the AOCL job (`runs-on: [self-hosted, Windows, X64, aocl]`, no
 `pull_request` trigger without the same-repo condition and environment gate, no secrets, passing `runner-lint`); today
 its `ci.yml` has none, so the runner would sit idle. The job must find AOCL itself (`AOCL_ROOT` is unset on the machine;
-the libraries are under `C:\Program Files\AMD\AOCL-Windows`, which `Users` can read). oneMKL is **not installed** (no
-oneAPI/MKL directory under `Program Files`; `MKLROOT` unset): a oneMKL job cannot run on this laptop.
-Undo: `-Remove -Apply` for the repo (another removal token), then `Remove-LocalUser gh-runner-cpufish` and delete
-`C:\gh-runner-cpufish`.
+the libraries are under `C:\Program Files\AMD\AOCL-Windows`, which `Users` can read). **oneAPI/oneMKL IS installed**, at
+`C:\Program Files (x86)\Intel\oneAPI` (version `2026.1`, with `latest`; `mkl\latest\include\mkl.h` exists; the compiler
+dir holds `icpx.exe`), and `BUILTIN\Users` has read-and-execute on it (inherited), so the standard account can read it.
+An earlier version of this note said it was not installed: it looked under `C:\Program Files` only, and oneAPI lives
+under `Program Files (x86)`. `MKLROOT` and `ONEAPI_ROOT` are unset in the machine environment (read 2026-10-30), so a
+oneMKL job must find the install itself (for example `"C:\Program Files (x86)\Intel\oneAPI\setvars.bat"`, or `MKLROOT`
+set to `...\oneAPI\mkl\latest`). Whether a service in session 0 can use it is not measured here.
+
+**Undo block** (no group was granted, so there is nothing else to revert). The runner is ephemeral: after its one job it
+unregisters itself, so step 1 is only needed if it never ran a job or is still registered.
+
+```
+# 1. PM, any shell: a removal token (one hour; copy it, it is not stored). Skip if the runner is already gone:
+GH_TOKEN="$(gh auth token --user ciresnave)" gh api repos/ThinkersJournal/cpufish/actions/runners --jq '.runners[]|{name,status}'
+GH_TOKEN="$(gh auth token --user ciresnave)" gh api -X POST repos/ThinkersJournal/cpufish/actions/runners/remove-token --jq .token
+
+# 2. CireSnave, ELEVATED PowerShell (paste the removal token at the prompt):
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/cpufish `
+  -Account gh-runner-cpufish -Root C:\gh-runner-cpufish -Remove -Apply
+Remove-LocalUser -Name gh-runner-cpufish
+Remove-Item -LiteralPath C:\gh-runner-cpufish -Recurse -Force
+
+# 3. Read back (absent, with the control that the same query finds the live gh-runner account):
+Get-LocalUser gh-runner-cpufish -ErrorAction SilentlyContinue; Test-Path C:\gh-runner-cpufish
+Get-LocalUser gh-runner
+```
