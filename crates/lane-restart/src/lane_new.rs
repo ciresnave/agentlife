@@ -17,6 +17,7 @@
 //! nothing, so rerunning converges. Nothing is overwritten: an existing artifact that differs from what
 //! this would write is a failure, found by step 0 before any step writes.
 
+use crate::lane_new_host::{host_log_since, Host};
 use crate::lane_new_remote::{self as remote, Vcs};
 use crate::spec::{self, SpecFile, SpecState, WrittenBy};
 use crate::start;
@@ -317,6 +318,115 @@ fn fail(rows: &mut Vec<StepRow>, n: u8, name: &'static str, detail: String) {
     });
 }
 
+/// Step 6: the Synapse identity. `already` if the lane home holds the certificate and the announce file;
+/// else (with `apply`) runs the provisioning script for this role alone and reads back both its counts
+/// and the files.
+fn step_identity(
+    host: &dyn Host,
+    roots: &Roots,
+    role: &str,
+    apply: bool,
+) -> Result<(Status, String), String> {
+    let home = roots.lane_home(role);
+    let cert = home.join("roles").join(role).join("cert.pem");
+    let announce = home.join("synapsed.json");
+    let files = || (cert.is_file(), announce.is_file());
+    if files() == (true, true) {
+        return Ok((Status::Already, home.display().to_string()));
+    }
+    if !apply {
+        return Ok((
+            Status::Would,
+            format!(
+                "synapse-provision-weekly.ps1 -Apply for {role} alone; home {}",
+                home.display()
+            ),
+        ));
+    }
+    let roles_file = roots.state_dir.join(format!(".lane-new-{role}.roles.tmp"));
+    write_text_atomic(&roles_file, &format!("{role}\n"))?;
+    let counts = host.provision(&roles_file);
+    let _ = std::fs::remove_file(&roles_file);
+    let c = counts?;
+    if c.refused != 0 || c.other != 0 || c.total() != 1 || c.created + c.ok + c.renewed != 1 {
+        return Err(format!(
+            "the provisioning script reported ok={} created={} renewed={} refused={} other={}; expected exactly one role, none refused",
+            c.ok, c.created, c.renewed, c.refused, c.other
+        ));
+    }
+    match files() {
+        (true, true) => Ok((
+            Status::Ok,
+            format!(
+                "created={} ok={}; certificate and announce file in {}",
+                c.created,
+                c.ok,
+                home.display()
+            ),
+        )),
+        (has_cert, has_announce) => Err(format!(
+            "the script reported success but {} lacks {}",
+            home.display(),
+            match (has_cert, has_announce) {
+                (false, false) => "the certificate and synapsed.json",
+                (false, true) => "the certificate",
+                _ => "synapsed.json",
+            }
+        )),
+    }
+}
+
+/// Step 7: start the lane. The spec is `suspended` until this; the read-back is the lane's own state file
+/// naming a live `claude`, the spec now `running`, and a non-empty host log written since this step began.
+fn step_start(
+    host: &dyn Host,
+    roots: &Roots,
+    role: &str,
+    model: &str,
+    apply: bool,
+) -> Result<(Status, String), String> {
+    let cmd = format!("lane-restart start --role {role} --model {model} --reason lane-new");
+    if !apply {
+        return Ok((Status::Would, cmd));
+    }
+    let since = std::time::SystemTime::now();
+    let code = host.start(role, model)?;
+    let state = crate::state::load(&roots.state_dir, role)
+        .map_err(|e| format!("start returned {code} but the lane wrote no state: {e}"))?;
+    if !host.claude_alive(state.pid) {
+        return Err(format!(
+            "start returned {code} but pid {} in {role}.json is not a live claude",
+            state.pid
+        ));
+    }
+    let have = spec::read(&roots.state_dir, role).map_err(|e| e.to_string())?;
+    if have.state != SpecState::Running {
+        return Err(format!(
+            "start returned {code} but the spec is {:?}, not running",
+            have.state
+        ));
+    }
+    let log = host_log_since(&roots.state_dir, role, since).ok_or_else(|| {
+        format!(
+            "start returned {code} but there is no non-empty host-{role}-<pid>.log in {} written since the start",
+            roots.state_dir.display()
+        )
+    })?;
+    let dialog = if code == 2 {
+        "; AWAITING the dev-channels dialog: someone must confirm it"
+    } else {
+        ""
+    };
+    Ok((
+        Status::Ok,
+        format!(
+            "pid {} live, spec running, host log {}{dialog}",
+            state.pid,
+            log.display()
+        ),
+    ))
+}
+
 /// Slice 1: steps 0, 3, 4 and 5 with no `gh`/`git`; steps 1 and 2 are listed as later.
 pub fn run_local(
     roots: &Roots,
@@ -335,6 +445,22 @@ pub fn run_local(
 pub fn run_with(
     roots: &Roots,
     vcs: Option<&dyn Vcs>,
+    role: &str,
+    repo: &str,
+    model: &str,
+    apply: bool,
+    now: DateTime<Utc>,
+) -> Report {
+    run_full(roots, vcs, None, role, repo, model, apply, now)
+}
+
+/// Slice 3: as [`run_with`], plus the disk floor in step 0 and steps 6 (Synapse identity) and 7 (start)
+/// through `host`. With `host` `None` those two steps are listed as later.
+#[allow(clippy::too_many_arguments)]
+pub fn run_full(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
     role: &str,
     repo: &str,
     model: &str,
@@ -460,6 +586,11 @@ pub fn run_with(
     };
     if let Some(v) = vcs {
         problems.extend(remote::local_problems(v, &roots.repo_dir(repo), &nwo));
+    }
+    if let Some(h) = host {
+        if let Err(why) = h.disk_floor(&roots.state_dir) {
+            problems.push(format!("disk floor: {why}"));
+        }
     }
     if !problems.is_empty() {
         fail(&mut rows, 0, "validate", problems.join("; "));
@@ -667,19 +798,47 @@ pub fn run_with(
             ),
         ));
     }
-    rows.push(later(
-        6,
-        "synapse identity",
-        format!(
-            "synapse-provision-weekly.ps1 for {role}; home {}",
-            roots.lane_home(role).display()
-        ),
-    ));
-    rows.push(later(
-        7,
-        "start",
-        format!("lane-restart start --role {role} --model {model} --reason lane-new"),
-    ));
+    if let Some(h) = host {
+        // One at a time: step 7 never runs after a failed step 6.
+        match step_identity(h, roots, role, apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 6,
+                name: "synapse identity",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 6, "synapse identity", e);
+                return rep(rows, paths);
+            }
+        }
+        match step_start(h, roots, role, model, apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 7,
+                name: "start",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 7, "start", e);
+                return rep(rows, paths);
+            }
+        }
+    } else {
+        rows.push(later(
+            6,
+            "synapse identity",
+            format!(
+                "synapse-provision-weekly.ps1 for {role}; home {}",
+                roots.lane_home(role).display()
+            ),
+        ));
+        rows.push(later(
+            7,
+            "start",
+            format!("lane-restart start --role {role} --model {model} --reason lane-new"),
+        ));
+    }
     rows.push(later(
         8,
         "protect main (PM)",

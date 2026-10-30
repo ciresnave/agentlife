@@ -1079,9 +1079,9 @@ fn run_specs_synapse_only_cmd(roles: Vec<String>, strict: bool, dry_run: bool) -
     }
 }
 
-/// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). Slice 1:
-/// plans every step and can run the local-file ones in tests; `--apply` is refused until the repo, seed,
-/// provisioning and start steps exist, so a half-made lane cannot be left behind by the binary.
+/// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). A dry run
+/// by default; `--apply` creates the repo, seeds it, writes the lane files, provisions the Synapse
+/// identity and starts the lane, stopping at the first step whose read-back fails.
 fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> ExitCode {
     let facts = SysinfoFacts::new(claude_config_dir());
     let caller = verified_caller(&facts);
@@ -1109,10 +1109,6 @@ fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> E
         );
         return ExitCode::FAILURE;
     }
-    if apply {
-        eprintln!("lane-restart lane-new: --apply is not available yet: this build plans and checks only (docs/LANE-NEW.md slice 1); the repo, seed, provisioning and start steps are slices 2 and 3");
-        return ExitCode::FAILURE;
-    }
     let roots = match lane_restart::lane_new::Roots::standard(state_dir()) {
         Ok(r) => r,
         Err(e) => {
@@ -1120,18 +1116,47 @@ fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> E
             return ExitCode::FAILURE;
         }
     };
-    // Slice 2: the dry run also reads GitHub (repo visibility, main's head and files) and the clone
-    // directory; it creates, clones and writes nothing.
-    let report = lane_restart::lane_new::run_with(
+    // The dry run also reads GitHub (repo visibility, main's head and files), the clone directory and
+    // the disk; it creates, clones, provisions and starts nothing. `--apply` does all of it, step by
+    // step, each read back (docs/LANE-NEW.md).
+    let host = lane_restart::lane_new_host::RealHost::new(
+        &roots.projects,
+        &roots.lane_homes,
+        &roots.pilot_home,
+        claude_config_dir(),
+    );
+    let report = lane_restart::lane_new::run_full(
         &roots,
         Some(&lane_restart::lane_new_remote::GhGit),
+        Some(&host),
         &role,
         &repo,
         &model,
-        false,
+        apply,
         chrono::Utc::now(),
     );
-    print!("{}", report.render(false));
+    print!("{}", report.render(apply));
+    if apply {
+        let steps: Vec<String> = report
+            .rows
+            .iter()
+            .map(|r| format!("{}:{:?}", r.n, r.status))
+            .collect();
+        log_ledger(
+            &requested_by,
+            &role,
+            "lane-new",
+            caller_role.as_deref(),
+            Some(&model),
+            Some(&format!("repo {repo}")),
+            &format!(
+                "{}: {}",
+                if report.failed() { "failed" } else { "created" },
+                steps.join(" ")
+            ),
+            true,
+        );
+    }
     if report.failed() {
         ExitCode::FAILURE
     } else {
