@@ -76,6 +76,28 @@ file has no MAC today, so the implied grant is weaker than that. That is the cos
    constraint. Recommend (a). Needs the Synapse lane, and the PM to say whether relaxing "no sender" (b) is
    CireSnave's. Launcher side once (a) lands: nothing to enforce, but a test that a signal for a role is only
    acted on when the daemon is configured so; until then the mechanism stays off.
+   **Closed, by (a) (read at synapse `origin/main` 42bb441, rc.191; agentlife 0.29.35).**
+   - *Who may raise a signal:* only a sender whose key-proven session role is listed. An entry is `role` (this
+     daemon's account) or `role@account`, compared exactly as `role@account` (`LaunchSenders::allows`); a sender
+     cannot borrow a listed role's name. `/v1/waiting` counts only the allowed senders' pending mail, so
+     `count`, `oldest_enqueued_at` and `signal_id` come from allowed mail alone; its shape still carries no sender.
+   - *Fail closed:* an empty list allows nobody, never "anyone". Launcher roles set and the list empty raises no
+     signal. A poisoned lock reads as empty. A bad `launch.senders` entry refuses `synapsed` at start; a bad edit
+     to the file while running keeps the last good list.
+   - *Two sources, one list:* `SYNAPSE_LAUNCH_SENDERS` (comma separated) and `launch.senders` in
+     `<home>/synapsed.toml` feed the same setting; the daemon re-reads both every 5 s. Which wins when both are
+     set is the config loader's order, **not verified here**; set one. `scripts/synapsed-task.ps1
+     -LaunchSenders` writes the environment form only.
+   - *The launcher's half (rule 7b):* it cannot see senders, so each cycle it reads `GET /v1/stats`
+     `launch_senders_set` and answers a granted signal `refused: no-sender-allowlist` (transient) unless that is
+     `true`. A failed read, a daemon that predates the field, or `false` all mean not confirmed.
+   - *Negative controls, where they live:* a sender not on the list never signals
+     (`mail_from_a_sender_not_listed_does_not_signal`) and an empty list with launcher roles set signals nothing
+     (`an_empty_sender_list_signals_nothing_even_with_launcher_roles`), both in synapse
+     `crates/synapsed/tests/launch.rs`; no confirmed allowlist means the mechanism is not called
+     (`a_grant_without_a_confirmed_sender_allowlist_is_refused_and_the_mechanism_is_not_called`, launcher
+     `tests.rs`). **Not run:** the two halves against one live daemon.
+   - *Limit:* an allowlisted sender can still wake its target; the bound is the one in `LAUNCH-ON-MESSAGE-THREAT.md`.
 4. **Integrity of the soft marker (PM ruling 2026-10-28).** Today `stop_kind` is a plain field in
    `<role>.launch.json`; any process that can write `.lane-state` can set `soft` and, with a stopped spec, make
    `rule 7` true. A MAC over the spec's identity fields (role, cwd, model, `stop_kind`, `state`, written-at)
