@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.43
+
+- **Docs only (PM RULINGS 2026-10-30): `docs/LANE-NEW.md` question 7 answered (the seed includes a stub crate, `publish = false`, version 0.0.0, no `hashFiles` guards) and the MCP key-order wording corrected; ROADMAP row 7 records the `hook_e2e` flake with the red and green job ids and an untested hypothesis.** No code. Version 0.29.43 is provisional.
+
 ## 0.29.41
 
 - **Docs only (PM RULING 2026-10-30): the PM's answers to six of `docs/LANE-NEW.md`'s seven questions folded in.** The bot token creates the repo (no pause step, no `--continue`); a new lane's spec has `stop_kind` absent, not `hard`; CI seed in capant's shape and the protection command printed; onemkl is the licence reference; the cwd incident recorded as the test. One question left (7: CI seed in a repo with no `Cargo.toml`). No code. Version 0.29.41 is provisional.

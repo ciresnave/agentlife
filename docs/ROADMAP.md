@@ -40,8 +40,19 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 
 6. **`lane-restart lane-new <role> <repo>`** (PM TASK 2026-10-30; design `docs/LANE-NEW.md`, 0.29.40): PM-only, dry run by
    default; repo (bot token), seed with CI, MCP config, launch spec, soak list, Synapse provisioning, start; every step
-   read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41). Slice 1
-   (local files, no network) is unblocked; question 7 (CI seed in a repo with no `Cargo.toml`) blocks slice 2 only.
+   read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41), question
+   7 answered (stub crate in the seed, 0.29.43). Slice 1 (local files, no network) is PR #194 (0.29.42); slices 2 (repo,
+   seed with CI and stub crate) and 3 (provisioning, start, `--apply`) have no open question.
+7. **Flake: `hook_e2e::a_hand_started_agent_started_again_after_its_process_died_is_one_agent`** (Windows CI only seen).
+   Red: run 41128992581 attempt 1, job 124314760979 (windows-latest, PR #194, head 6062451): `tests\hook_e2e.rs:508`,
+   `assertion left == right failed, left: 1, right: 2`, i.e. `recs[0].sessions.len()` was 1 after the second
+   `SessionStart`. Green: the same run, attempt 2, job 124321376277, same SHA, no code change in between. The other three
+   checks, and ubuntu, passed in both attempts. **Hypothesis, not tested:** the second hook run saw the first run's
+   process as still alive (its exit not yet visible in the process table on a loaded shared runner), so it treated the
+   start as the same live session instead of a new one after a death: a race between process death and the restart's
+   liveness read in the registry. Next step: read the liveness check the registry uses for "same name and launch
+   directory" and whether the test waits for the first child to be gone; make the test wait on the death (as
+   0.29.33 did for a timing bound), not retry it. An earlier flake in the same file: 0.29.33.
 
 ## Portfolio items from the PM (2026-10-14), taken in order
 
