@@ -1079,6 +1079,57 @@ fn run_specs_synapse_only_cmd(roles: Vec<String>, strict: bool, dry_run: bool) -
     }
 }
 
+/// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). Slice 1:
+/// plans every step and can run the local-file ones in tests; `--apply` is refused until the repo, seed,
+/// provisioning and start steps exist, so a half-made lane cannot be left behind by the binary.
+fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> ExitCode {
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    if caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may create a lane; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may create a lane, and the caller could not be verified: {e}"
+            ),
+        };
+        eprintln!("lane-restart lane-new: refused - {why}");
+        log_ledger(
+            &requested_by,
+            &role,
+            "lane-new",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    if apply {
+        eprintln!("lane-restart lane-new: --apply is not available yet: this build plans and checks only (docs/LANE-NEW.md slice 1); the repo, seed, provisioning and start steps are slices 2 and 3");
+        return ExitCode::FAILURE;
+    }
+    let roots = match lane_restart::lane_new::Roots::standard(state_dir()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("lane-restart lane-new: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report =
+        lane_restart::lane_new::run_local(&roots, &role, &repo, &model, false, chrono::Utc::now());
+    print!("{}", report.render(false));
+    if report.failed() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// Runs the candidate for real: `--version`, then `status`.
 struct RealProbe;
 
@@ -1373,6 +1424,13 @@ USAGE:
         (resume it with `start`) and a role with a live process are refused
         with the reason. First and last lines say whether anything moved.
 
+    lane-restart lane-new <role> <repo> [--model sonnet|haiku]
+        PM only (docs/LANE-NEW.md, slice 1). Dry run: validates the names and what
+        exists, and prints the plan for the lane's MCP config, launch spec (suspended,
+        no stop_kind) and soak-list entry, with every absolute path, plus the repo,
+        seed, provisioning and start steps still to come. Writes nothing; --apply is
+        refused until those steps exist.
+
     lane-restart specs synapse-only --role <name> [--role <name>]... [--strict] [--dry-run]
         PM only (docs/SYNAPSE-ONLY-CUTOVER.md). Rewrite a role's launch_args so its
         NEXT launch loads server:synapse and not server:claude-peers; --strict also
@@ -1496,6 +1554,17 @@ fn main() -> ExitCode {
                 _ => {
                     eprintln!(
                         "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]` or `specs synapse-only --role <name>... [--strict] [--dry-run]`"
+                    );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "lane-new" {
+            return match cli::lane_new(rest) {
+                Ok((role, repo, model, apply)) => run_lane_new_cmd(role, repo, model, apply),
+                Err(e) => {
+                    eprintln!(
+                        "lane-restart lane-new: {e}; expected `lane-new <role> <repo> [--model sonnet|haiku] [--apply]`"
                     );
                     ExitCode::FAILURE
                 }

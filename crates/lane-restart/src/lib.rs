@@ -27,6 +27,7 @@ pub mod handoff_lint;
 pub mod host;
 pub mod host_boot;
 pub mod install;
+pub mod lane_new;
 pub mod lane_state_writer;
 pub mod lane_stop;
 pub mod launch;
