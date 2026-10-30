@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.44
+
+- **Docs only (PM RULINGS 2026-10-30, lifting the 8b hold): `docs/RUNNER-SETUP.md` section 8b, the PersistAnt runner.** Read-only facts: public repo, service `.\gh-runner`, `gh-runner` is in Hyper-V Administrators because `machine-durability.yml`'s `power-loss` job needs it, three workflows tabulated against section 2a/5.1h; whether the runner is ephemeral was **not read**. Plus ROADMAP row 8 (a runner account per runner) and its design, `docs/RUNNER-ACCOUNTS.md`: the measured shared-root ACL (`gh-runner` and `gh-runner-private` have Modify on all of `C:\gh-runner`, inherited into every runner directory), add-only accounts, groups listed not defaulted, five tests first, and the cpufish dry run (separate account and root; nothing created) with the one-paste command list; and `docs/RUNNER-REREGISTRATION.md` + ROADMAP row 9 (re-registering ephemeral runners is AntSpawn's GitHub adapter, read at `ecb6f76`: built but no job run end to end; the PM's three rulings recorded: an org JIT group for named ThinkersJournal repos is allowed, the `account` launcher with a row-8 account, and no cpufish self-hosted job before AntSpawn's end-to-end proof). No code. Version 0.29.44 is provisional.
+
 ## 0.29.43
 
 - **Docs only (PM RULINGS 2026-10-30): `docs/LANE-NEW.md` question 7 answered (the seed includes a stub crate, `publish = false`, version 0.0.0, no `hashFiles` guards) and the MCP key-order wording corrected; ROADMAP row 7 records the `hook_e2e` flake with the red and green job ids and an untested hypothesis.** No code. Version 0.29.43 is provisional.

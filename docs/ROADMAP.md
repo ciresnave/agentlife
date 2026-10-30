@@ -53,6 +53,20 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
    liveness read in the registry. Next step: read the liveness check the registry uses for "same name and launch
    directory" and whether the test waits for the first child to be gone; make the test wait on the death (as
    0.29.33 did for a timing bound), not retry it. An earlier flake in the same file: 0.29.33.
+8. **A runner account per runner, not the shared `gh-runner`** (PM RULING 2026-10-30, `gh-runner-setup.ps1`; design
+   `docs/RUNNER-ACCOUNTS.md`, tests first). Why: adding a runner to an existing account rotates that account's password
+   and applies it to every service on it through `Win32_Service.Change`, which has never run on a real service (3 live);
+   and measured 2026-10-30 `C:\gh-runner` grants `gh-runner` and `gh-runner-private` Modify on the whole tree, inherited
+   into every runner directory, so each account can rewrite the other runners' binaries. No group membership by default
+   (`gh-runner` is in Hyper-V Administrators only for PersistAnt's `machine-durability.yml`, section 8b). The CireSnave-at-
+   the-keyboard step for cpufish is the PM's board item; this row is the script change.
+9. **Re-registration of ephemeral (public-repo) runners without a human** (PM RULING 2026-10-30; note
+   `docs/RUNNER-REREGISTRATION.md`, no code). It is AntSpawn's GitHub adapter (JIT config from the live `antspawn-runner`
+   App, board 241), read at antspawn `ecb6f76`: the App, the mint and the watcher exist, **no job has run end to end**
+   (their ROADMAP row 10). PM rulings 2026-10-30 (in the note): an org JIT group for named
+   `ThinkersJournal` repos is allowed, the `account` launcher with a row-8 account, and **cpufish writes no self-hosted job
+   until AntSpawn's end-to-end proof exists** (date asked of the antspawn lane). agentlife's part, after the proof: the
+   watcher account/task, the launcher account (row 8) and a workflow-lint rule for the routing label.
 
 ## Portfolio items from the PM (2026-10-14), taken in order
 
