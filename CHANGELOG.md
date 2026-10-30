@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.37
+
+- **Docs only (PM TASK 2026-10-30, Fuel ROADMAP hardware-free step): `docs/LINUX-GPU-RUN-DESIGN.md`, the Linux counterpart of Fuel's `gpu-run` lock and `cuda-build` slots for the Windows/Linux dual-boot desktop.** `flock(2)` on tmpfs files (not a semaphore, not `pwsh` on Linux), tmpfiles-provisioned lock files because of `fs.protected_regular`, the lock fd inherited by the child, a persistent crash record keyed on `boot_id`, and N and K to be re-measured on Linux. Nothing was run on Linux; the doc lists what to verify on hardware.
+
 ## 0.29.36
 
 - **Docs only (PM TASK 2026-10-30): slice 3 sender allowlist closed in `docs/M5-WAKE-DESIGN.md`.** Records who may raise a launch signal, fail-closed behaviour, how `SYNAPSE_LAUNCH_SENDERS` and `launch.senders` relate, and where the negative controls live (synapse rc.178 and agentlife rule 7b). Env-versus-file precedence is stated as unverified; the two halves have not run against one live daemon. No code change. Not breaking. Version 0.29.36 is provisional.
