@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.40
+
+- **Docs only (PM TASK 2026-10-30): `docs/LANE-NEW.md`, design of `lane-restart lane-new <role> <repo>`, plus ROADMAP row 6.** Eight read-back steps, the PM's three paid failure modes as rules and tests, six open questions. No code. Version 0.29.40 is provisional.
+
 ## 0.29.39
 
 - **Docs only (PM ruling 2026-10-30): `docs/LINUX-GPU-RUN-SLICE1.md`, slice 1 of the Linux `gpu-run` (#189): `gpu-run.sh` spec, test plan, and the script and its 22-check test inline.** Run once on WSL2 Ubuntu 24.04: 22/22; mutation (child gets the lock fd closed) turned T6 red. Not run: real `/run/lock` tmpfs, `fs.protected_regular`, second user, container, GPU. Version 0.29.39 is provisional.
