@@ -401,6 +401,35 @@ CireSnave's account, which is the opposite of policy rule 6 (and why its `docker
 None of these needs the GPU, so none gets `gpu`. Each repo's CI should also run `runner-lint --private` (section 6), with
 `GH_TOKEN` and `GITHUB_REPOSITORY` set.
 
+## 8b. A public repo that already has a runner: `ciresnave/PersistAnt` (read 2026-10-30)
+
+PersistAnt is **public** (`gh api repos/ciresnave/PersistAnt`, default branch `main`, head `743bda7`). Read from this
+machine, read-only (service list, `Win32_Service`, `net localgroup`, the runner's `.runner` file; its `.env` was not read):
+
+| Fact | Value |
+|---|---|
+| Service | `actions.runner.ciresnave-PersistAnt.TUF-LAPTOP-ciresnave-PersistAnt`, Running, Automatic |
+| Runs as | `.\gh-runner` (the same account as every public-repo runner here; `gh-runner-private` runs the two private-repo services) |
+| Directory | `C:\gh-runner\ciresnave-PersistAnt` (`RunnerService.exe` under `bin\`), agent `TUF-LAPTOP-ciresnave-PersistAnt`, pool Default |
+| Ephemeral? | **not read**: `.runner` has no such field. `gh api repos/ciresnave/PersistAnt/actions/runners` would say, and needs the PM's token. Section 2a requires ephemeral for a public repo |
+| `gh-runner` groups | **`Hyper-V Administrators`** (members: `cires`, `gh-runner`). Not in `Administrators` |
+
+Its three workflows, read from `main`:
+
+| Workflow | Job | `runs-on` | Triggers | Runner needs | Meets 2a / 5.1h? |
+|---|---|---|---|---|---|
+| `ci.yml` | `build-test` (matrix), `msrv`, `msrv-sqlx`, `relational` | `${{ matrix.os }}` / `ubuntu-latest` | push, pull_request | none: hosted | yes: nothing here touches the runner |
+| `machine-durability.yml` | `guest-binary` | `ubuntu-24.04` | push to `main` (paths), schedule `17 3 * * *`, `workflow_dispatch` | none: hosted | yes |
+| | `power-loss` (Hyper-V guest) | `[self-hosted, Windows, X64]`, 45 min | same; **no `pull_request`** | account in **Hyper-V Administrators**; the guest image from `scripts/machine-durability/build-image.ps1` in `C:\ProgramData\persistant-machine-durability` (read) | triggers yes; no secrets; `permissions: contents: read`. Not shown: an environment gate (none needed with no PR trigger), ephemeral (above) |
+| `synapse-power-cut.yml` | `guest-binary` | `ubuntu-24.04` | `workflow_dispatch` only | none: hosted | yes |
+| | `power-loss` | `[self-hosted, Windows, X64]`, 45 min | `workflow_dispatch` only | same Hyper-V membership | yes |
+
+**What this means for the account design.** `Hyper-V Administrators` is a near-administrator group (it carries
+"complete and unrestricted access to all features of Hyper-V"), and `gh-runner` is in it today because this one
+workflow needs it; the other public-repo runner services also run as `gh-runner`. A runner account created for another
+repo must **not** inherit that membership: grant it only to the account whose named workflow needs it, and list the
+grant in the plan (PM ruling 2026-10-30). Tracked as ROADMAP row 8 (a runner account per runner, design and tests first).
+
 ## 9. Known limits
 
 - The machine is a laptop: a runner is offline when it sleeps or is off, and a queued job waits (no hosted fallback

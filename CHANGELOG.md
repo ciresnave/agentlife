@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.44
+
+- **Docs only (PM RULING 2026-10-30, lifting the 8b hold): `docs/RUNNER-SETUP.md` section 8b, the PersistAnt runner.** Read-only facts: public repo, service `.\gh-runner`, `gh-runner` is in Hyper-V Administrators because `machine-durability.yml`'s `power-loss` job needs it, three workflows tabulated against section 2a/5.1h; whether the runner is ephemeral was **not read**. Plus ROADMAP row 8 (a runner account per runner; design `docs/RUNNER-ACCOUNTS.md` follows). No code. Version 0.29.44 is provisional.
+
 ## 0.29.41
 
 - **Docs only (PM RULING 2026-10-30): the PM's answers to six of `docs/LANE-NEW.md`'s seven questions folded in.** The bot token creates the repo (no pause step, no `--continue`); a new lane's spec has `stop_kind` absent, not `hard`; CI seed in capant's shape and the protection command printed; onemkl is the licence reference; the cwd incident recorded as the test. One question left (7: CI seed in a repo with no `Cargo.toml`). No code. Version 0.29.41 is provisional.

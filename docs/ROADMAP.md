@@ -42,6 +42,13 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
    default; repo (bot token), seed with CI, MCP config, launch spec, soak list, Synapse provisioning, start; every step
    read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41). Slice 1
    (local files, no network) is unblocked; question 7 (CI seed in a repo with no `Cargo.toml`) blocks slice 2 only.
+8. **A runner account per runner, not the shared `gh-runner`** (PM RULING 2026-10-30, `gh-runner-setup.ps1`; design
+   `docs/RUNNER-ACCOUNTS.md`, tests first). Why: adding a runner to an existing account rotates that account's password
+   and applies it to every service on it through `Win32_Service.Change`, which has never run on a real service (3 live);
+   and measured 2026-10-30 `C:\gh-runner` grants `gh-runner` and `gh-runner-private` Modify on the whole tree, inherited
+   into every runner directory, so each account can rewrite the other runners' binaries. No group membership by default
+   (`gh-runner` is in Hyper-V Administrators only for PersistAnt's `machine-durability.yml`, section 8b). The CireSnave-at-
+   the-keyboard step for cpufish is the PM's board item; this row is the script change.
 
 ## Portfolio items from the PM (2026-10-14), taken in order
 
