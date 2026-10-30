@@ -206,6 +206,64 @@ fn the_notifier_only_mechanism_never_reports_a_start() {
     );
 }
 
+#[test]
+fn start_json_maps_to_the_eight_results() {
+    let j = |o: &str, r: &str| format!(r#"{{"role":"a","outcome":"{o}","reason":"{r}"}}"#);
+    assert_eq!(
+        map_start_json(&j("started", "started")),
+        MechResult::Started
+    );
+    assert_eq!(
+        map_start_json(&j("started", "awaiting-dialog")),
+        MechResult::AwaitingDialog
+    );
+    assert_eq!(
+        map_start_json(&j("already-running", "start-lock-held")),
+        MechResult::AlreadyRunning
+    );
+    assert_eq!(
+        map_start_json(&j("failed", "held-for-memory")),
+        MechResult::HeldForMemory
+    );
+    assert_eq!(
+        map_start_json(&j("failed", "lock-held")),
+        MechResult::LockHeld
+    );
+    assert_eq!(
+        map_start_json(&j("refused", "invalid-role")),
+        MechResult::InvalidArgument
+    );
+    assert_eq!(
+        map_start_json(&j("refused", "model-not-pinned")),
+        MechResult::Failed("model-not-pinned".into())
+    );
+    assert_eq!(
+        map_start_json("not json"),
+        MechResult::Failed("unparsable-output".into())
+    );
+    assert_eq!(
+        map_start_json(r#"{"outcome":"started"}"#),
+        MechResult::Started,
+        "a started line is a start whatever the reason"
+    );
+    assert_eq!(
+        map_start_json("{}"),
+        MechResult::Failed("unparsable-output".into())
+    );
+}
+
+#[test]
+fn a_missing_executable_is_a_failure_not_a_start() {
+    let m = LaneRestartMechanism {
+        exe: PathBuf::from("definitely-not-a-real-lane-restart"),
+        timeout: std::time::Duration::from_secs(1),
+    };
+    assert_eq!(
+        m.start("alpha", launcher::MODEL, "alpha:x"),
+        MechResult::Failed("spawn-failed".into())
+    );
+}
+
 // ---- identity ----
 
 #[test]

@@ -734,8 +734,20 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         table: &table,
         wake_enabled: app.cfg.lazy_enabled,
     };
-    let mech = svc::NoMechanism;
-    let mut engine = match Engine::open(&store, &mech, &dir, init_store) {
+    let real_mech;
+    let mech: &dyn launcher::Mechanism = if app.cfg.lazy_enabled {
+        let wait = std::time::Duration::from_secs((svc::LAUNCH_WAIT_SECS - 10).max(1) as u64);
+        match svc::LaneRestartMechanism::sibling(wait) {
+            Ok(m) => {
+                real_mech = m;
+                &real_mech
+            }
+            Err(e) => return fail(format!("cannot locate lane-restart: {e}")),
+        }
+    } else {
+        &svc::NoMechanism
+    };
+    let mut engine = match Engine::open(&store, mech, &dir, init_store) {
         Ok(e) => e,
         Err(e) => {
             return fail(format!(
