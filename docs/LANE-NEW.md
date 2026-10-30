@@ -25,7 +25,8 @@ Each becomes a rule of the tool and a test:
 1. **Backslash escaping in the spec.** Hand-written JSON with `C:\Projects\...` paths. *Rule:* the tool never writes
    JSON text. It builds a `SpecFile` and goes through `spec::write_atomic` (serde escapes; the HMAC/atomic-write path
    is the one every other writer uses); the MCP config is a `serde_json::Value`. *Test:* round-trip every path field
-   through `spec::read` and compare to the input string; golden-compare the MCP config's key set and order to rockfish's.
+   through `spec::read` and compare to the input string; golden-compare the MCP config's key *set* to rockfish's (serde writes the keys sorted:
+   `args, command, env`; the hand-written files have another order and the same content).
 2. **Wrong cwd for the log path.** *Rule:* no path in the tool is relative. Every path is derived from three roots
    fixed at startup (state dir, projects root, lane-home root), never from the process cwd. The report prints each
    resolved absolute path. **The incident (PM answer, same day):** `(bash tools/gate-sched.sh ... > .lane-state/x.log &)`
@@ -98,7 +99,13 @@ Evans, "correct until the entities exist"), hash-checked in step 2 against the o
 bans, sources)`, `portfolio`; CODEOWNERS `* @ciresnave`). capant's `capant-check` job is capant-specific and is **not**
 copied. The names are printed so the PM can pass them to `protect-main.sh`. **Slice 2 reads capant's file again at that
 time and diffs the template against it**; a seeded workflow that drifts from the fleet's is the failure, and a hidden
-`cargo` step in a lane with no `Cargo.toml` yet would fail its first run (open question 7).
+`cargo` step in a lane with no `Cargo.toml` yet would fail its first run. **The seed therefore includes a stub crate
+(PM ruling 2026-10-30, question 7):** `Cargo.toml` with `publish = false` and `version = "0.0.0"`, and an empty
+`src/lib.rs`, with the crate named for the repo; the CI jobs are copied unguarded. Measured by the PM that day:
+bonefish, rockfish and cpufish used a stub and their required checks ran for real; openclownfish used `hashFiles`
+guards and its fmt/clippy/test/doc/deny "check nothing until a Cargo.toml exists", so protection required vacuous
+checks until the guards were removed. The stub's first real PR bumps the version as usual. *Test (slice 2):* the
+rendered seed contains no `hashFiles` and parses as a Cargo manifest with those two fields.
 
 ## Where it lives
 
@@ -126,10 +133,6 @@ first real run is the PM's, on a throwaway role, dry run first.
 Answered, and folded into the text above: the cwd incident (failure mode 2); seed the CI workflow and print the
 protection command; onemkl as the licence reference; `ThinkersJournal` is the org login (`ThinkersJournal/rockfish`
 exists); the bot's default token creates and pushes without a grant; a never-started lane is `suspended` with no
-`stop_kind`.
+`stop_kind`; and question 7 (a stub crate in the seed, not guards: see "CI seed").
 
-Open:
-
-7. A seeded `ci.yml` copied from capant runs `cargo fmt`, `clippy`, `test`, `doc` and `cargo deny` against a repo with no
-   `Cargo.toml` yet, so its first run fails. Does the PM want the seed to include a minimal `Cargo.toml` + `src/lib.rs`
-   (crate name reserved, as the README says), or jobs guarded on `hashFiles('Cargo.toml') != ''`?
+Open: none.

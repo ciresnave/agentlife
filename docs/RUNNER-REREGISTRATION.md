@@ -68,9 +68,13 @@ the PM, (b) once decided, the host-side pieces that are agentlife's: the watcher
 and (c) the workflow lint rule for the routing label. The end-to-end proof (AntSpawn row 10) is the antspawn lane's; until it
 passes, nobody should plan around it.
 
-## Questions for the PM
+## Rulings (PM, 2026-10-30), answering the three questions this note asked
 
-1. Does "no org runner group" cover an ephemeral JIT group restricted to named repos, or must cpufish use a repo-level JIT
-   (adds `administration: write` to the App)?
-2. `account` or `windows-sandbox` for the AOCL job; if the sandbox, who measures AOCL dispatch inside it?
-3. Do you want the antspawn lane asked for the date of its end-to-end proof (row 10) before cpufish's job is written?
+1. **Org group:** the PM's "no org runner group now" meant a *shared persistent runner pool*. AntSpawn's ephemeral JIT via
+   the board-241 App over an org group limited to named repos (list checked equal before every mint) is a different
+   mechanism, already decided, and allowed for `ThinkersJournal/*` repos. Repo-level JIT for `ciresnave/*` needs the App to
+   gain `administration: write`: **not now**; it goes to CireSnave if a `ciresnave` repo needs it (none does today).
+2. **Launcher:** `account`, with a row-8 per-runner account (AOCL is on the host; `windows-sandbox` CPU dispatch is
+   unmeasured).
+3. **Proof first:** the antspawn lane is asked for the date of its row-10 end-to-end proof (asked 2026-10-30 over Synapse);
+   **cpufish writes no self-hosted job until that proof exists.**

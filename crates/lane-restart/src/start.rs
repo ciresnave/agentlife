@@ -912,6 +912,39 @@ mod tests {
         ));
     }
 
+    /// docs/LANE-NEW.md failure mode 3: the spec `lane-new` writes (suspended, no `stop_kind`) is one
+    /// the PM's `start` plans, and one the launcher service refuses.
+    #[test]
+    fn a_lane_new_spec_is_startable_by_the_pm_and_not_by_the_launcher() {
+        let (d, facts) = world();
+        let b = d.path().join("b");
+        let roots = crate::lane_new::Roots::new(
+            d.path().to_path_buf(),
+            b.join("proj"),
+            b.join("homes"),
+            b.join("pilot"),
+            b.join("chan"),
+        )
+        .unwrap();
+        let s = crate::lane_new::build_spec(&roots, "rockfish", "rockfish", "sonnet", Utc::now())
+            .unwrap();
+        spec::write_atomic(d.path(), &s).unwrap();
+        let plan = plan_start(d.path(), &req("rockfish"), Ok("pm".to_string()), &facts);
+        assert!(plan.is_ok(), "{:?}", plan.err());
+        let mut r = req("rockfish");
+        r.signal_id = Some("rockfish:1");
+        let e = plan_start(
+            d.path(),
+            &r,
+            Ok("launcher:agentlife-launcher".to_string()),
+            &facts,
+        );
+        assert!(
+            matches!(e, Err(StartRefusal::StopNotSoft("stop-unclassified"))),
+            "{e:?}"
+        );
+    }
+
     // ---- caller ----------------------------------------------------------------------------
 
     #[test]

@@ -169,6 +169,28 @@ pub fn specs_synapse_only(rest: &[String]) -> Result<(Vec<String>, bool, bool), 
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct LaneNew {
+    role: String,
+    repo: String,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "model")]
+    model: Option<String>,
+    #[arg(long, overrides_with = "apply")]
+    apply: bool,
+}
+
+/// `lane-new <role> <repo> [--model M] [--apply]` -> `(role, repo, model, apply)`; the model defaults to `sonnet`.
+pub fn lane_new(rest: &[String]) -> Result<(String, String, String, bool), String> {
+    let a: LaneNew = parse("lane-new", &["--model"], rest)?;
+    Ok((
+        a.role,
+        a.repo,
+        a.model.unwrap_or_else(|| "sonnet".to_string()),
+        a.apply,
+    ))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct Start {
     #[arg(
         long,

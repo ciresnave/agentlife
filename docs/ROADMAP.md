@@ -40,8 +40,19 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 
 6. **`lane-restart lane-new <role> <repo>`** (PM TASK 2026-10-30; design `docs/LANE-NEW.md`, 0.29.40): PM-only, dry run by
    default; repo (bot token), seed with CI, MCP config, launch spec, soak list, Synapse provisioning, start; every step
-   read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41). Slice 1
-   (local files, no network) is unblocked; question 7 (CI seed in a repo with no `Cargo.toml`) blocks slice 2 only.
+   read back; the protection command is printed, not run. Design merged (0.29.40), PM answers folded in (0.29.41), question
+   7 answered (stub crate in the seed, 0.29.43). Slice 1 (local files, no network) is built, 0.29.42 (#194); slices 2 (repo,
+   seed with CI and stub crate) and 3 (provisioning, start, `--apply`) have no open question.
+7. **Flake: `hook_e2e::a_hand_started_agent_started_again_after_its_process_died_is_one_agent`** (Windows CI only seen).
+   Red: run 41128992581 attempt 1, job 124314760979 (windows-latest, PR #194, head 6062451): `tests\hook_e2e.rs:508`,
+   `assertion left == right failed, left: 1, right: 2`, i.e. `recs[0].sessions.len()` was 1 after the second
+   `SessionStart`. Green: the same run, attempt 2, job 124321376277, same SHA, no code change in between. The other three
+   checks, and ubuntu, passed in both attempts. **Hypothesis, not tested:** the second hook run saw the first run's
+   process as still alive (its exit not yet visible in the process table on a loaded shared runner), so it treated the
+   start as the same live session instead of a new one after a death: a race between process death and the restart's
+   liveness read in the registry. Next step: read the liveness check the registry uses for "same name and launch
+   directory" and whether the test waits for the first child to be gone; make the test wait on the death (as
+   0.29.33 did for a timing bound), not retry it. An earlier flake in the same file: 0.29.33.
 8. **A runner account per runner, not the shared `gh-runner`** (PM RULING 2026-10-30, `gh-runner-setup.ps1`; design
    `docs/RUNNER-ACCOUNTS.md`, tests first). Why: adding a runner to an existing account rotates that account's password
    and applies it to every service on it through `Win32_Service.Change`, which has never run on a real service (3 live);
@@ -52,9 +63,10 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
 9. **Re-registration of ephemeral (public-repo) runners without a human** (PM RULING 2026-10-30; note
    `docs/RUNNER-REREGISTRATION.md`, no code). It is AntSpawn's GitHub adapter (JIT config from the live `antspawn-runner`
    App, board 241), read at antspawn `ecb6f76`: the App, the mint and the watcher exist, **no job has run end to end**
-   (their ROADMAP row 10). agentlife's part waits on the PM's three questions in the note (does "no org runner group"
-   cover a JIT group; `account` or `windows-sandbox` for AOCL; wait for AntSpawn's proof?), then the watcher account/task,
-   the launcher account (row 8) and a workflow-lint rule for the routing label.
+   (their ROADMAP row 10). PM rulings 2026-10-30 (in the note): an org JIT group for named
+   `ThinkersJournal` repos is allowed, the `account` launcher with a row-8 account, and **cpufish writes no self-hosted job
+   until AntSpawn's end-to-end proof exists** (date asked of the antspawn lane). agentlife's part, after the proof: the
+   watcher account/task, the launcher account (row 8) and a workflow-lint rule for the routing label.
 
 ## Portfolio items from the PM (2026-10-14), taken in order
 
