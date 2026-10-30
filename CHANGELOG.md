@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.39
+
+- **Docs only (PM ruling 2026-10-30): `docs/LINUX-GPU-RUN-SLICE1.md`, slice 1 of the Linux `gpu-run` (#189): `gpu-run.sh` spec, test plan, and the script and its 22-check test inline.** Run once on WSL2 Ubuntu 24.04: 22/22; mutation (child gets the lock fd closed) turned T6 red. Not run: real `/run/lock` tmpfs, `fs.protected_regular`, second user, container, GPU. Version 0.29.39 is provisional.
+
 ## 0.29.38
 
 - **Docs only (PM TASK 2026-10-30): `docs/SYNAPSE-MCP-RECONNECT-MEASURE.md` and `docs/spike/synapse_reconnect_probe.py`, a scratch-daemon measurement of the Synapse adapter across a `synapsed` kill.** The adapter stays up and delivers 0.3 to 0.9 s after a daemon is reachable, but in 3 of 4 kills it started a replacement daemon itself within about 2 s, so no gap longer than that was measured. Adapter only (no Claude session); two runs are marked invalid in the doc. The live `synapsed` was not touched.
