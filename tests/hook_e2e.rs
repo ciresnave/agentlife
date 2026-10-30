@@ -347,9 +347,14 @@ fn session_end_stamps_the_reason_inside_its_budget_and_deletes_nothing() {
     //    --version` from 45 ms to 1.6 s, and the first run of a freshly built or copied exe is
     //    0.7 to 1.7 s (scanning, with 15 live lanes loading the machine). Asserting 1.5 s on it
     //    would test the OS, so it only guards against a catastrophe (a hung hook).
+    //
+    // The bound on (1) is the documented budget itself, not a margin inside it. It was 1000 ms and
+    // flaked on a shared Windows runner (1158 ms observed on an unchanged hook, passing on rerun
+    // of the same head): a fixed wall-clock number tighter than the contract fails when the
+    // runner is loaded, not when the hook regresses. Over 1500 ms the hook really would be cut off.
     let own_ms = hook_total_ms(&rig.log(), "SessionEnd").expect("SessionEnd logs its own timing");
     assert!(
-        own_ms < 1000,
+        own_ms < 1500,
         "the SessionEnd hook's own work took {own_ms} ms (budget 1500 ms):\n{}",
         rig.log()
     );
