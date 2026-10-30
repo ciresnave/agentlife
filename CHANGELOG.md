@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.43
+
+- **Docs only (PM RULINGS 2026-10-30): `docs/LANE-NEW.md` question 7 answered (the seed includes a stub crate, `publish = false`, version 0.0.0, no `hashFiles` guards) and the MCP key-order wording corrected; ROADMAP row 7 records the `hook_e2e` flake with the red and green job ids and an untested hypothesis.** No code. Version 0.29.43 is provisional.
+
 ## 0.29.42
 
 - **`lane-restart lane-new <role> <repo> [--model M]`, slice 1 (docs/LANE-NEW.md; PM TASK 2026-10-30).** New `lane_new` module. PM only (the `specs import` caller check). Validates names, model (never Opus) and what exists, then plans the lane's MCP config (a `serde_json::Value`), launch spec (a `SpecFile` through `spec::write_atomic`: `suspended`, no `stop_kind`) and `roles-soak.txt` entry (line endings kept, weekly-script name rule), with every path absolute (`Roots::new` refuses a relative one). Each step is check, act, read back, `already` when its end state holds, and an existing artifact that differs is refused before any step writes. The binary only plans: **`--apply` is refused** until the repo/seed (slice 2) and provisioning/start (slice 3) steps exist; the apply path is exercised by the tests. Not done: the disk-floor check (comes with start), steps 1, 2, 6, 7. Tests (9): dry run writes nothing with the apply run as control, rerun converges, step 0 refuses before writing, backslash/quote round trip, relative root, MCP shape, soak CRLF/duplicates/unsafe line, and in `start.rs` that the real `plan_start` accepts the spec for the PM and the launcher refuses it (`stop-unclassified`). Mutation: spec written `running` turned 2 red, no absolute-path check turned 1 red. MCP config keys are serde's sorted order (`args, command, env`), not the hand-written order of existing lanes; same content. Version 0.29.42 is provisional.
