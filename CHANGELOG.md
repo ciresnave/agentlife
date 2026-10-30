@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.38
+
+- **Docs only (PM TASK 2026-10-30): `docs/SYNAPSE-MCP-RECONNECT-MEASURE.md` and `docs/spike/synapse_reconnect_probe.py`, a scratch-daemon measurement of the Synapse adapter across a `synapsed` kill.** The adapter stays up and delivers 0.3 to 0.9 s after a daemon is reachable, but in 3 of 4 kills it started a replacement daemon itself within about 2 s, so no gap longer than that was measured. Adapter level only (no Claude session); two runs are marked invalid in the doc. The live `synapsed` was not touched.
+
 ## 0.29.36
 
 - **Docs only (PM TASK 2026-10-30): slice 3 sender allowlist closed in `docs/M5-WAKE-DESIGN.md`.** Records who may raise a launch signal, fail-closed behaviour, how `SYNAPSE_LAUNCH_SENDERS` and `launch.senders` relate, and where the negative controls live (synapse rc.178 and agentlife rule 7b). Env-versus-file precedence is stated as unverified; the two halves have not run against one live daemon. No code change. Not breaking. Version 0.29.36 is provisional.
