@@ -49,6 +49,12 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
    into every runner directory, so each account can rewrite the other runners' binaries. No group membership by default
    (`gh-runner` is in Hyper-V Administrators only for PersistAnt's `machine-durability.yml`, section 8b). The CireSnave-at-
    the-keyboard step for cpufish is the PM's board item; this row is the script change.
+9. **Re-registration of ephemeral (public-repo) runners without a human** (PM RULING 2026-10-30; note
+   `docs/RUNNER-REREGISTRATION.md`, no code). It is AntSpawn's GitHub adapter (JIT config from the live `antspawn-runner`
+   App, board 241), read at antspawn `ecb6f76`: the App, the mint and the watcher exist, **no job has run end to end**
+   (their ROADMAP row 10). agentlife's part waits on the PM's three questions in the note (does "no org runner group"
+   cover a JIT group; `account` or `windows-sandbox` for AOCL; wait for AntSpawn's proof?), then the watcher account/task,
+   the launcher account (row 8) and a workflow-lint rule for the routing label.
 
 ## Portfolio items from the PM (2026-10-14), taken in order
 
