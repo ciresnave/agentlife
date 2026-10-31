@@ -888,8 +888,8 @@ fn real_windows_terminal_opens_one_tab_per_agent_in_a_named_window() {
 struct Scripted(agentlife::consent::Outcome);
 
 impl agentlife::consent::Prompt for Scripted {
-    fn ask(&self, _: &agentlife::consent::Asking) -> agentlife::consent::Outcome {
-        self.0
+    fn ask(&self, _: &agentlife::consent::Asking) -> agentlife::consent::Answer {
+        agentlife::consent::Answer::without_proof(self.0)
     }
 }
 

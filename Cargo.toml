@@ -44,7 +44,7 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 persistant = "0.14.3"
-user-request = "0.11.1"
+user-request = "0.16.0"
 launcher = { version = "0.29.62", path = "crates/launcher" }
 synapsed-client = "=6.0.0-rc.123"
 synapse = { version = "=6.0.0-rc.123", default-features = false, features = ["native-base"] }

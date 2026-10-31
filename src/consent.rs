@@ -124,6 +124,100 @@ pub enum Outcome {
     Unavailable,
 }
 
+/// The approval `user-request`'s own channel issued for one request. **Nothing in this crate can make
+/// one**: `user_request::Approval` is `#[non_exhaustive]` (an approval can only come from a channel; their
+/// audit 2026-10-18), so the only way to hold a `Proof` is to be handed one by [`Answer::from_channel`]
+/// from what the channel returned. The real backend refuses to record an approval without it.
+///
+/// ```compile_fail
+/// // an approval cannot be written down by hand, here or anywhere outside `user-request`
+/// use user_request::{Approval, KindId, Requester};
+/// let who = Requester { role: "r".into(), session_id: "s".into(), claude_pid: 1,
+///     claude_start_secs: 1, managed: true };
+/// let _forged = Approval { kind: KindId::RestorePlan, subject: "plan x".into(), requester: who,
+///     approved_at: chrono::Utc::now(), expires_at: None };
+/// ```
+///
+/// A proof is **spent by value**: it is neither `Clone` nor `Copy`, and [`Consent::resolve`] takes the
+/// [`Answer`] that holds it, so one approval from the channel cannot be kept and replayed on a second
+/// restore (PM, 2026-10-31).
+///
+/// ```compile_fail
+/// fn needs_clone<T: Clone>() {}
+/// needs_clone::<agentlife::consent::Proof>();
+/// ```
+///
+/// Control for the block above (same path, a trait it does have):
+///
+/// ```
+/// fn is_debug<T: std::fmt::Debug>() {}
+/// is_debug::<agentlife::consent::Proof>();
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct Proof(user_request::Approval);
+
+impl Proof {
+    /// What the channel approved.
+    pub fn approval(&self) -> &user_request::Approval {
+        &self.0
+    }
+}
+
+/// What a [`Prompt`] hands back: how the person's answer came out and, for an approval from the real
+/// channel, the channel's own [`Proof`] of it.
+///
+/// ```compile_fail
+/// // the proof field is private: an `Answer` that claims a channel approved cannot be built by hand
+/// use agentlife::consent::{Answer, Outcome};
+/// let _ = Answer { outcome: Outcome::Approved, proof: None };
+/// ```
+///
+/// Control for the block above (same imports; the only difference is the way in):
+///
+/// ```
+/// use agentlife::consent::{Answer, Outcome};
+/// let a = Answer::without_proof(Outcome::Approved);
+/// assert!(a.proof().is_none());
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub outcome: Outcome,
+    proof: Option<Proof>,
+}
+
+impl Answer {
+    /// An answer no channel gave: a denial, a time-out, "could not ask", or a test double's. The real
+    /// backend treats an `Approved` without a proof as no approval at all.
+    pub fn without_proof(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            proof: None,
+        }
+    }
+
+    /// The channel's answer, in this crate's terms, carrying its approval when it gave one. `Refused`
+    /// (over the maximum, malformed, or ended while the person decided) was not an answer: it is
+    /// `Unavailable`, which leaves the request pending. `Outcome` is non-exhaustive, so anything new is
+    /// "not answered", never an approval.
+    pub fn from_channel(o: &user_request::Outcome) -> Self {
+        use user_request::Outcome as Ur;
+        match o {
+            Ur::Approved(a) => Self {
+                outcome: Outcome::Approved,
+                proof: Some(Proof(a.clone())),
+            },
+            Ur::Denied => Self::without_proof(Outcome::Cancelled),
+            Ur::TimedOut => Self::without_proof(Outcome::TimedOut),
+            Ur::Unavailable(_) | Ur::Refused(_) => Self::without_proof(Outcome::Unavailable),
+            _ => Self::without_proof(Outcome::Unavailable),
+        }
+    }
+
+    pub fn proof(&self) -> Option<&Proof> {
+        self.proof.as_ref()
+    }
+}
+
 /// What `resolve` did to the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolved {
@@ -186,7 +280,7 @@ impl std::fmt::Display for AnswerError {
 pub trait Consent {
     fn submit(&mut self, req: &Request, grant: &Grant, bound_hash: &str) -> Result<String, String>;
     fn begin_answer(&mut self, id: &str, bound_hash: &str) -> Result<Asking, AnswerError>;
-    fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String>;
+    fn resolve(&mut self, asking: &Asking, answer: Answer) -> Result<Resolved, String>;
     /// When the unspent one-use approval for `(kind, subject, requester)` was given. `Err` says why
     /// there is none (never approved, or already spent). Read it **before** [`Consent::spend_one_use`]:
     /// the store never expires an approval, so freshness is the requester's to judge
@@ -213,7 +307,7 @@ pub trait Consent {
 
 /// One way to ask the person (Windows Hello first). The real one is `user-request`'s `Channel`.
 pub trait Prompt {
-    fn ask(&self, asking: &Asking) -> Outcome;
+    fn ask(&self, asking: &Asking) -> Answer;
 }
 
 /// Shows the prompt and resolves it: the sequence `begin_answer`, show, `resolve`.
@@ -224,9 +318,9 @@ pub fn answer(
     bound_hash_now: &str,
 ) -> Result<Resolved, AnswerError> {
     let asking = consent.begin_answer(id, bound_hash_now)?;
-    let outcome = prompt.ask(&asking);
+    let given = prompt.ask(&asking);
     consent
-        .resolve(&asking, outcome)
+        .resolve(&asking, given)
         .map_err(AnswerError::Unavailable)
 }
 
@@ -244,7 +338,7 @@ impl Consent for NoBackend {
     fn begin_answer(&mut self, _: &str, _: &str) -> Result<Asking, AnswerError> {
         Err(AnswerError::Unavailable(NO_BACKEND.into()))
     }
-    fn resolve(&mut self, _: &Asking, _: Outcome) -> Result<Resolved, String> {
+    fn resolve(&mut self, _: &Asking, _: Answer) -> Result<Resolved, String> {
         Err(NO_BACKEND.into())
     }
     fn approved_at(&mut self, _: Kind, _: &str, _: &Requester) -> Result<DateTime<Utc>, String> {
@@ -487,7 +581,8 @@ pub mod fake {
             })
         }
 
-        fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String> {
+        fn resolve(&mut self, asking: &Asking, given: Answer) -> Result<Resolved, String> {
+            let outcome = given.outcome;
             let now = self.clock.now();
             let live = self
                 .records
