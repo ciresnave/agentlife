@@ -40,14 +40,14 @@ lane-state.workspace = true
 lane-restart.workspace = true
 chrono = { version = "0.4.45", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
-persistant = "0.9.28"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
+persistant = "0.14.3"
 user-request = "0.16.0"
 launcher = { version = "0.29.61", path = "crates/launcher" }
-synapsed-client = "=6.0.0-rc.101"
-synapse = { version = "=6.0.0-rc.101", default-features = false, features = ["native-base"] }
+synapsed-client = "=6.0.0-rc.123"
+synapse = { version = "=6.0.0-rc.123", default-features = false, features = ["native-base"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

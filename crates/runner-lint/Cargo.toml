@@ -8,4 +8,4 @@ publish = false
 description = "Lint for GitHub workflows: a job that can run on a self-hosted runner must not be reachable from a pull request without the same-repo condition and an environment gate (agentlife docs/RUNNER-SETUP.md)."
 
 [dependencies]
-saphyr = "0.2.2"
+saphyr = "0.3.3"

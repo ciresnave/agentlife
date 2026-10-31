@@ -116,7 +116,7 @@ impl Terminator for SysinfoTerminator {
     fn kill_verified(&self, expected: &ProcessIdentity) -> Result<(), KillError> {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
         let pid = Pid::from_u32(expected.pid);
-        let mut sys = System::new();
+        let mut sys = System::new().map_err(|e| KillError::Failed(e.to_string()))?;
         sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
@@ -141,7 +141,9 @@ impl Terminator for SysinfoTerminator {
                 expected.pid,
                 &|| {
                     use lane_state::platform::signal::Presence;
-                    let mut s = System::new();
+                    let Ok(mut s) = System::new() else {
+                        return Presence::Other;
+                    };
                     s.refresh_processes_specifics(
                         ProcessesToUpdate::Some(&[pid]),
                         true,

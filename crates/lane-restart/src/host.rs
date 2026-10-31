@@ -254,9 +254,9 @@ pub fn drain_tail(
 /// handler matching (`handlers::find_matching_handler`) is checked against.
 pub fn screen_text(parser: &vt100::Parser) -> String {
     let screen = parser.screen();
-    let (rows, _cols) = screen.size();
-    (0..rows)
-        .map(|row| screen.contents_between(row, 0, row, screen.size().1))
+    let (rows, cols) = screen.size();
+    (0..rows.get())
+        .map(|row| screen.contents_between(row, 0, row, cols.get()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -614,7 +614,11 @@ fn run_with_handlers_and_window_watched(
     let mut on_answered = on_answered;
     let mut on_unhandled = Some(on_unhandled);
     let mut unhandled_thread: Option<std::thread::JoinHandle<()>> = None;
-    let mut parser = vt100::Parser::new(rows, cols, 0);
+    let mut parser = vt100::Parser::new(
+        std::num::NonZeroU16::new(rows).unwrap_or(std::num::NonZeroU16::MIN),
+        std::num::NonZeroU16::new(cols).unwrap_or(std::num::NonZeroU16::MIN),
+        0,
+    );
     let mut matched_ids: HashSet<String> = HashSet::new();
     let mut last_logged_screen: Option<String> = None;
     // The window runs from spawn unless a test gated it (see `window_gate`).
@@ -1175,7 +1179,11 @@ mod tests {
         tx.send(b"FINAL".to_vec()).unwrap();
         drop(tx);
         let mut out = Vec::new();
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            0,
+        );
         let n = drain_tail(
             &rx,
             &mut out,
@@ -1217,7 +1225,11 @@ mod tests {
     fn relay_chunk_forwards_plain_text_byte_for_byte() {
         let chunk = b"hello, world\r\n";
         let mut out = Vec::new();
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            0,
+        );
         relay_chunk(chunk, &mut out, &mut parser).unwrap();
         assert_eq!(out, chunk);
     }
@@ -1227,7 +1239,11 @@ mod tests {
         // \x1b[?1000h / \x1b[?1000l - mouse tracking on/off.
         let chunk = b"\x1b[?1000hclick here\x1b[?1000l";
         let mut out = Vec::new();
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            0,
+        );
         relay_chunk(chunk, &mut out, &mut parser).unwrap();
         assert_eq!(out, chunk);
     }
@@ -1237,7 +1253,11 @@ mod tests {
         // \x1b[?1049h / \x1b[?1049l - alternate screen buffer on/off.
         let chunk = b"\x1b[?1049hfull screen app\x1b[?1049l";
         let mut out = Vec::new();
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            0,
+        );
         relay_chunk(chunk, &mut out, &mut parser).unwrap();
         assert_eq!(out, chunk);
     }
@@ -1253,7 +1273,11 @@ mod tests {
         chunk.extend_from_slice(&[0u8, 1, 2, 255, 254]); // arbitrary binary bytes
         chunk.extend_from_slice(b"\x1b[?1049l"); // alt screen off
         let mut out = Vec::new();
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            0,
+        );
         relay_chunk(&chunk, &mut out, &mut parser).unwrap();
         assert_eq!(out, chunk, "every byte must survive the relay unchanged");
     }
@@ -1266,7 +1290,11 @@ mod tests {
         // real was on the other end.
         let chunk = b"\x1b[6n";
         let mut out = Vec::new();
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = vt100::Parser::new(
+            std::num::NonZeroU16::new(24).unwrap(),
+            std::num::NonZeroU16::new(80).unwrap(),
+            0,
+        );
         relay_chunk(chunk, &mut out, &mut parser).unwrap();
         assert_eq!(
             out, chunk,
@@ -2366,8 +2394,16 @@ mod tests {
         let outbox = notify::outbox_dir(dir.path());
         let deadline = Instant::now() + Duration::from_secs(5);
         let queued = loop {
+            // `notify::queue` writes `<stamp>.tmp` and renames it to `<stamp>.json`: take only a finished
+            // file, never the temporary one that is gone by the time it is read (the flake: 2 of 25
+            // full-suite runs failed at the `read_to_string` on a `.tmp` that had just been renamed).
             let files: Vec<_> = std::fs::read_dir(&outbox)
-                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                .map(|d| {
+                    d.filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                        .collect()
+                })
                 .unwrap_or_default();
             if let Some(f) = files.into_iter().next() {
                 break std::fs::read_to_string(f).unwrap();

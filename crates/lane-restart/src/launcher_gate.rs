@@ -181,7 +181,9 @@ pub fn memory_held(free_gb: Option<f64>, floor_gb: f64) -> Option<f64> {
 
 /// Available memory in GiB, as `agentlife restore` measures it; `None` when the OS reports none.
 pub fn free_memory_gb() -> Option<f64> {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return None;
+    };
     sys.refresh_memory();
     let bytes = sys.available_memory();
     (bytes > 0).then(|| bytes as f64 / (1u64 << 30) as f64)
