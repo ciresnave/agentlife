@@ -639,7 +639,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use tempfile::tempdir;
 
-    const NWO: &str = "ThinkersJournal/rockfish";
+    const NWO: &str = "ThinkersJournal/zetafish";
 
     /// The files of a remote's `main` by path, and the commit they are at.
     type Tree = BTreeMap<String, Vec<u8>>;
@@ -820,7 +820,7 @@ mod tests {
     }
 
     fn seed() -> Vec<SeedFile> {
-        render("ThinkersJournal", "rockfish", "rockfish").unwrap()
+        render("ThinkersJournal", "zetafish", "zetafish").unwrap()
     }
 
     #[test]
@@ -916,7 +916,7 @@ mod tests {
         assert!(render("o", "r", "a.b").is_err());
         assert!(render("o", "r", "a b").is_err());
         assert!(render("o", "r", "open-clown_fish2").is_ok());
-        assert!(cargo_name_ok("rockfish") && !cargo_name_ok("-x"));
+        assert!(cargo_name_ok("zetafish") && !cargo_name_ok("-x"));
     }
 
     #[test]
@@ -952,7 +952,7 @@ mod tests {
     #[test]
     fn step_2_seeds_an_empty_repo_pushes_and_reads_back_every_file() {
         let d = tempdir().unwrap();
-        let dir = d.path().join("rockfish");
+        let dir = d.path().join("zetafish");
         let v = Fake::default().with_repo(NWO);
         let (o, msg) = step_seed(&v, NWO, &dir, &seed(), true, true).unwrap();
         assert_eq!(o, Outcome::Ok, "{msg}");
@@ -988,13 +988,13 @@ mod tests {
             ..Fake::default()
         }
         .with_repo(NWO);
-        let e = step_seed(&v, NWO, &d.path().join("rockfish"), &seed(), true, true).unwrap_err();
+        let e = step_seed(&v, NWO, &d.path().join("zetafish"), &seed(), true, true).unwrap_err();
         assert!(e.contains("remote's main reads None"), "{e}");
         // control: the same run with an honest push succeeds
         let d2 = tempdir().unwrap();
         let ok = Fake::default().with_repo(NWO);
         assert_eq!(
-            step_seed(&ok, NWO, &d2.path().join("rockfish"), &seed(), true, true)
+            step_seed(&ok, NWO, &d2.path().join("zetafish"), &seed(), true, true)
                 .unwrap()
                 .0,
             Outcome::Ok
@@ -1004,7 +1004,7 @@ mod tests {
     #[test]
     fn a_dry_run_changes_nothing_and_says_what_it_would_do() {
         let d = tempdir().unwrap();
-        let dir = d.path().join("rockfish");
+        let dir = d.path().join("zetafish");
         let v = Fake::default().with_repo(NWO);
         let (o, msg) = step_seed(&v, NWO, &dir, &seed(), false, true).unwrap();
         assert_eq!(o, Outcome::Would, "{msg}");
@@ -1033,7 +1033,7 @@ mod tests {
         v.remote
             .borrow_mut()
             .insert(NWO.into(), (id_of(&other), other));
-        let e = step_seed(&v, NWO, &d.path().join("rockfish"), &seed(), true, true).unwrap_err();
+        let e = step_seed(&v, NWO, &d.path().join("zetafish"), &seed(), true, true).unwrap_err();
         assert!(
             e.contains("README.md") && e.contains("not overwriting"),
             "{e}"
@@ -1044,7 +1044,7 @@ mod tests {
         );
         // in the checkout
         let d2 = tempdir().unwrap();
-        let dir = d2.path().join("rockfish");
+        let dir = d2.path().join("zetafish");
         let v2 = Fake::default().with_repo(NWO);
         v2.clone_repo(NWO, &dir).unwrap();
         std::fs::write(dir.join("README.md"), b"mine").unwrap();
@@ -1085,14 +1085,14 @@ mod tests {
                     ("notes/private.txt", b"somebody's work"),
                 ],
             );
-            let e = step_seed(&v, NWO, &d.path().join("rockfish"), &s, apply, true).unwrap_err();
+            let e = step_seed(&v, NWO, &d.path().join("zetafish"), &s, apply, true).unwrap_err();
             assert!(
                 e.contains("not empty and not seed-only") && e.contains("notes/private.txt"),
                 "apply={apply}: {e}"
             );
             assert!(!pushed_or_committed(&v), "apply={apply}: {:?}", v.calls);
             assert_eq!(v.remote.borrow()[NWO].1, before, "the remote changed");
-            assert!(!d.path().join("rockfish").exists());
+            assert!(!d.path().join("zetafish").exists());
         }
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
         let d = tempdir().unwrap();
         let v = Fake::default().with_repo(NWO);
         remote_with(&v, &[("README.md", readme.bytes.as_slice())]);
-        let (o, detail) = step_seed(&v, NWO, &d.path().join("rockfish"), &s, true, true).unwrap();
+        let (o, detail) = step_seed(&v, NWO, &d.path().join("zetafish"), &s, true, true).unwrap();
         assert_eq!(o, Outcome::Ok, "{detail}");
         let have: Vec<String> = v.remote.borrow()[NWO].1.keys().cloned().collect();
         let mut want: Vec<String> = s.iter().map(|f| f.path.to_string()).collect();
@@ -1118,7 +1118,7 @@ mod tests {
     fn a_checkout_holding_an_unrelated_file_is_refused_before_anything_is_committed() {
         let s = seed();
         let d = tempdir().unwrap();
-        let dir = d.path().join("rockfish");
+        let dir = d.path().join("zetafish");
         let v = Fake::default().with_repo(NWO);
         let before = remote_with(&v, &[]);
         v.clone_repo(NWO, &dir).unwrap();
@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn a_commit_made_but_not_pushed_is_pushed_on_the_rerun() {
         let d = tempdir().unwrap();
-        let dir = d.path().join("rockfish");
+        let dir = d.path().join("zetafish");
         let v = Fake {
             lie_push: true,
             ..Fake::default()
@@ -1204,8 +1204,8 @@ mod tests {
         run_with(
             r,
             Some(v),
-            "rockfish",
-            "rockfish",
+            "zetafish",
+            "zetafish",
             "sonnet",
             apply,
             Utc::now(),
@@ -1238,8 +1238,8 @@ mod tests {
             "{}",
             rep.render(true)
         );
-        assert!(r.projects.join("rockfish").join("Cargo.toml").exists());
-        assert!(r.state_dir.join("rockfish.launch.json").exists());
+        assert!(r.projects.join("zetafish").join("Cargo.toml").exists());
+        assert!(r.state_dir.join("zetafish.launch.json").exists());
         let again = go(&r, &v, true);
         assert_eq!(
             st(&again),
@@ -1262,7 +1262,7 @@ mod tests {
         let line = again.rows.iter().find(|x| x.n == 8).unwrap();
         assert!(
             line.detail
-                .contains("protect-main.sh ThinkersJournal/rockfish")
+                .contains("protect-main.sh ThinkersJournal/zetafish")
                 && line.detail.contains("\"test (windows-latest)\""),
             "{}",
             line.detail
@@ -1288,8 +1288,8 @@ mod tests {
             rep.render(false)
         );
         assert!(v.repos.borrow().is_empty() && v.remote.borrow().is_empty());
-        assert!(!r.projects.join("rockfish").exists());
-        assert!(!r.state_dir.join("rockfish.launch.json").exists());
+        assert!(!r.projects.join("zetafish").exists());
+        assert!(!r.state_dir.join("zetafish.launch.json").exists());
         assert!(
             v.calls.borrow().iter().all(|c| c == "repo_state"),
             "{:?}",
@@ -1314,8 +1314,8 @@ mod tests {
             rep.render(true)
         );
         assert!(
-            !r.state_dir.join("rockfish.launch.json").exists()
-                && !r.state_dir.join("rockfish.mcp.json").exists()
+            !r.state_dir.join("zetafish.launch.json").exists()
+                && !r.state_dir.join("zetafish.mcp.json").exists()
         );
         assert!(!v
             .calls
@@ -1327,7 +1327,7 @@ mod tests {
         let r2 = world(&d2);
         let v2 = Fake::default();
         std::fs::create_dir_all(&r2.projects).unwrap();
-        v2.clone_repo("ThinkersJournal/bonefish", &r2.projects.join("rockfish"))
+        v2.clone_repo("ThinkersJournal/bonefish", &r2.projects.join("zetafish"))
             .unwrap();
         let rep = go(&r2, &v2, true);
         assert!(
@@ -1346,7 +1346,7 @@ mod tests {
         let d = tempdir().unwrap();
         let r = world(&d);
         let rep =
-            crate::lane_new::run_local(&r, "rockfish", "rockfish", "sonnet", false, Utc::now());
+            crate::lane_new::run_local(&r, "zetafish", "zetafish", "sonnet", false, Utc::now());
         assert!(rep
             .rows
             .iter()

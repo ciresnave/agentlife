@@ -2,9 +2,13 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.29.48
+## 0.29.50
 
-- **Docs only (PM TASK 2026-10-30, board 340 option A): `docs/RUNNER-ACCOUNTS.md`, the changeover for the live runners.** Read from the machine and GitHub, nothing applied: PersistAnt (`gh-runner`, untouched, keeps `Hyper-V Administrators` for `machine-durability.yml` line 49), `licence-tools` (private, persistent) moves to `ghr-licence-tools` in `C:\ghr-licence-tools`, and `ThinkersFoundation-site` is found **public with a persistent runner (RUNNER-SETUP 2a forbids it), service Stopped, runner offline**, so it is removed and, if wanted, re-registered ephemeral as `ghr-tf-site`. Pastes the unedited dry runs (exit 0, new accounts and roots absent before), the no-jobs precheck, order, read-back and undo. Not measured and said so: PersistAnt's labels and ephemeral mode (bot gets 403; the PM reads them in step 0). Version 0.29.48 is provisional.
+- **Docs only (PM TASK 2026-10-30, board 340 option A): `docs/RUNNER-ACCOUNTS.md`, the changeover for the live runners.** Read from the machine and GitHub, nothing applied: PersistAnt (`gh-runner`, untouched, keeps `Hyper-V Administrators` for `machine-durability.yml` line 49), `licence-tools` (private, persistent) moves to `ghr-licence-tools` in `C:\ghr-licence-tools`, and `ThinkersFoundation-site` is found **public with a persistent runner (RUNNER-SETUP 2a forbids it), service Stopped, runner offline**, so it is removed and, if wanted, re-registered ephemeral as `ghr-tf-site`. Pastes the unedited dry runs (exit 0, new accounts and roots absent before), the no-jobs precheck, order, read-back and undo. Not measured and said so: PersistAnt's labels and ephemeral mode (bot gets 403; the PM reads them in step 0). Version 0.29.50 is provisional.
+
+## 0.29.49
+
+- **Fixed (PM HOLD on #200): `lane_new_host::run_tests::an_honest_run_provisions_then_starts_and_cleans_up_its_roles_file` failed on Linux CI on `main` since 7ab6da2.** Cause (read from the CI log, run 41167811564): step 7 reported "no non-empty host-<role>-<pid>.log ... written since the start" while steps 0-6 were fine. The fake host wrote its log within milliseconds of `since = SystemTime::now()`, and Linux stamps a file with a coarse kernel clock that can read behind that, so `mtime < since` and the log was skipped. It was **not** the forge: steps 1 and 2 read `later` (the fake), step 0 read `nothing in the way`, and `run_full` is called with no `Vcs`. The fake now stamps its log 5 s ahead, as a real host's later write is. Production code is unchanged. Tests also stop using the real lane name: `rockfish` becomes `zetafish` in the `lane_new*` test modules. Control: the 40 `lane_new` lib tests pass with `gh` removed from `PATH` (`Get-Command gh` empty first). Not reproduced locally (Windows has a fine clock); the fix is argued from the log, and CI on this PR is the test.
 
 ## 0.29.47
 
