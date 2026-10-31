@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.48
+
+- **Docs only (PM TASK 2026-10-30, board 340 option A): `docs/RUNNER-ACCOUNTS.md`, the changeover for the live runners.** Read from the machine and GitHub, nothing applied: PersistAnt (`gh-runner`, untouched, keeps `Hyper-V Administrators` for `machine-durability.yml` line 49), `licence-tools` (private, persistent) moves to `ghr-licence-tools` in `C:\ghr-licence-tools`, and `ThinkersFoundation-site` is found **public with a persistent runner (RUNNER-SETUP 2a forbids it), service Stopped, runner offline**, so it is removed and, if wanted, re-registered ephemeral as `ghr-tf-site`. Pastes the unedited dry runs (exit 0, new accounts and roots absent before), the no-jobs precheck, order, read-back and undo. Not measured and said so: PersistAnt's labels and ephemeral mode (bot gets 403; the PM reads them in step 0). Version 0.29.48 is provisional.
+
 ## 0.29.47
 
 - **Docs only (PM TASK 2026-10-30, board 339 option A): `docs/RUNNER-ACCOUNTS.md`, the cpufish runner.** Corrects a wrong fact: oneAPI/oneMKL **is** installed, at `C:\Program Files (x86)\Intel\oneAPI` (`2026.1`, `latest`, `mkl\latest\include\mkl.h` present, `icpx.exe` under `compiler\latest\bin`, `BUILTIN\Users` read-and-execute); the earlier note looked under `C:\Program Files` only. `MKLROOT`/`ONEAPI_ROOT` are unset. Re-ran the cpufish dry run at `origin/main` ce69169 and pasted its output (exit 0, `ACL preflight: clean`; `gh-runner-cpufish` and `C:\gh-runner-cpufish` absent before and after, read with `Get-LocalUser` and `Test-Path`). Adds an explicit undo block (removal token, `-Remove -Apply`, `Remove-LocalUser`, delete the root, a read-back with a positive control). The elevated paste block is unchanged. No machine change. Version 0.29.47 is provisional.
