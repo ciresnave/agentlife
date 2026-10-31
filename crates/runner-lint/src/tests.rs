@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::*;
 
 fn wf(on: &str, job_body: &str) -> String {
