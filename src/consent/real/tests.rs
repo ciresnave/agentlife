@@ -64,7 +64,34 @@ fn submit(b: &mut UserRequestBackend, h: &str) -> String {
     b.submit(&request_for(h), &Grant::OneUse, h).unwrap()
 }
 
-/// Answers with what it is told and counts how often it was asked.
+/// A `user-request` person: answers what it is told, so a test can put a REAL channel (`HelloChannel`)
+/// in front of it and get the approval the channel issues, the only kind of approval there is.
+struct ScriptedPerson(fn() -> ur::ConsentOutcome);
+
+impl ur::Consent for ScriptedPerson {
+    fn ask(&self, _: &str, _: Duration) -> ur::ConsentOutcome {
+        (self.0)()
+    }
+}
+
+/// What the channel returns for `asking` when the person says `says`, in this crate's terms (with the
+/// channel's own approval when it gave one).
+fn through_the_channel(asking: &Asking, says: fn() -> ur::ConsentOutcome) -> Answer {
+    use ur::Channel;
+    let channel = ur::HelloChannel::new(ScriptedPerson(says));
+    answer_from_channel(&channel.present(
+        &hello_request(asking),
+        &to_ur_grant(&asking.grant),
+        Duration::from_secs(1),
+    ))
+}
+
+fn person_approves() -> ur::ConsentOutcome {
+    ur::ConsentOutcome::Approved
+}
+
+/// Answers with what it is told and counts how often it was asked. An approval is minted by the real
+/// channel, never written by the test.
 struct Scripted {
     outcome: Outcome,
     asked: Cell<u32>,
@@ -80,9 +107,12 @@ impl Scripted {
 }
 
 impl Prompt for Scripted {
-    fn ask(&self, _: &Asking) -> Outcome {
+    fn ask(&self, asking: &Asking) -> Answer {
         self.asked.set(self.asked.get() + 1);
-        self.outcome
+        match self.outcome {
+            Outcome::Approved => through_the_channel(asking, person_approves),
+            other => Answer::without_proof(other),
+        }
     }
 }
 
@@ -265,7 +295,9 @@ fn withdrawing_ends_the_request_and_a_prompt_already_up_can_no_longer_be_approve
         !r.backend.withdraw(&id).unwrap(),
         "false when there is none"
     );
-    assert!(r.backend.resolve(&asking, Outcome::Approved).is_err());
+    // even a real approval from the channel cannot revive a request that was withdrawn
+    let approved = through_the_channel(&asking, person_approves);
+    assert!(r.backend.resolve(&asking, approved).is_err());
     let subject = restore_plan_subject(&h).unwrap();
     assert!(r
         .backend
@@ -284,8 +316,9 @@ fn a_second_prompt_for_the_same_request_is_refused_while_one_is_up() {
         AnswerError::AlreadyAnswering
     );
     // The first can still be answered.
+    let approved = through_the_channel(&first, person_approves);
     assert_eq!(
-        r.backend.resolve(&first, Outcome::Approved).unwrap(),
+        r.backend.resolve(&first, approved).unwrap(),
         Resolved::Granted
     );
 }
@@ -396,34 +429,152 @@ fn this_process_is_an_unregistered_requester_with_its_own_pid_and_start() {
 
 #[test]
 fn the_channels_answer_maps_without_ever_inventing_an_approval() {
-    let approval = ur::Approval {
-        kind: ur::KindId::RestorePlan,
-        subject: "plan x".into(),
-        requester: to_ur_requester(&me()),
-        approved_at: Utc::now(),
-        expires_at: None,
-    };
+    // The only approval there is comes out of the channel: it is minted here the way the real
+    // prompt gets it, not written by the test (`ur::Approval` cannot be written outside its crate).
+    let approved = through_the_channel(&asking_for(&hash('1')), person_approves);
+    assert_eq!(approved.outcome, Outcome::Approved);
+    assert!(approved.proof().is_some());
+    // every other answer carries NO proof
+    for (said, want) in [
+        (ur::Outcome::Denied, Outcome::Cancelled),
+        (ur::Outcome::TimedOut, Outcome::TimedOut),
+        (
+            ur::Outcome::Unavailable("no Hello".into()),
+            Outcome::Unavailable,
+        ),
+        // Refused (over the maximum, malformed, ended while deciding) was not an answer: it leaves the
+        // request pending rather than closing it as a denial.
+        (
+            ur::Outcome::Refused("over the maximum".into()),
+            Outcome::Unavailable,
+        ),
+    ] {
+        let a = answer_from_channel(&said);
+        assert_eq!(a.outcome, want, "{said:?}");
+        assert!(a.proof().is_none(), "{said:?} carried a proof");
+    }
+}
+
+fn asking_for(h: &str) -> Asking {
+    Asking {
+        pending_id: "p1".into(),
+        request: request_for(h),
+        grant: Grant::OneUse,
+        bound_hash: h.into(),
+        reservation: "r".into(),
+        requester: me(),
+    }
+}
+
+#[test]
+fn an_approval_without_the_channels_proof_is_refused_and_nothing_is_granted() {
+    let mut r = rig();
+    let h = hash('5');
+    let id = submit(&mut r.backend, &h);
+    let asking = r.backend.begin_answer(&id, &h).unwrap();
+    // `Approved` that no channel gave: a test double's, a bug's, or a forgery's
+    let forged = Answer::without_proof(Outcome::Approved);
+    let err = r.backend.resolve(&asking, forged).unwrap_err();
+    assert!(err.contains("no proof"), "{err}");
+    let subject = restore_plan_subject(&h).unwrap();
+    assert!(r
+        .backend
+        .spend_one_use(Kind::RestorePlan, &subject, &me())
+        .is_err());
+    // the request is still pending and the prompt is free again: a real approval still works
+    assert_eq!(r.backend.pending_ids().unwrap(), vec![id.clone()]);
+    let again = r.backend.begin_answer(&id, &h).unwrap();
+    let approved = through_the_channel(&again, person_approves);
     assert_eq!(
-        outcome_from_channel(&ur::Outcome::Approved(approval)),
-        Outcome::Approved
+        r.backend.resolve(&again, approved).unwrap(),
+        Resolved::Granted
     );
+}
+
+#[test]
+fn an_approval_the_channel_gave_for_another_request_is_refused() {
+    let mut r = rig();
+    let (h1, h2) = (hash('6'), hash('7'));
+    let (id1, id2) = (submit(&mut r.backend, &h1), submit(&mut r.backend, &h2));
+    let first = r.backend.begin_answer(&id1, &h1).unwrap();
+    let second = r.backend.begin_answer(&id2, &h2).unwrap();
+    // the person approved the SECOND plan; that approval is offered for the first
+    let for_second = through_the_channel(&second, person_approves);
+    let err = r.backend.resolve(&first, for_second).unwrap_err();
+    assert!(err.contains("other than the held request"), "{err}");
+    let s1 = restore_plan_subject(&h1).unwrap();
+    assert!(r
+        .backend
+        .spend_one_use(Kind::RestorePlan, &s1, &me())
+        .is_err());
+}
+
+#[test]
+fn one_approval_cannot_be_replayed_on_a_second_restore() {
+    let mut r = rig();
+    let h = hash('8');
+    let id = submit(&mut r.backend, &h);
+    let asking = r.backend.begin_answer(&id, &h).unwrap();
+    let approved = through_the_channel(&asking, person_approves);
     assert_eq!(
-        outcome_from_channel(&ur::Outcome::Denied),
-        Outcome::Cancelled
+        r.backend.resolve(&asking, approved).unwrap(),
+        Resolved::Granted
     );
+    // a `Proof` is not `Clone`, so the same one cannot be offered twice (a compile_fail doctest on
+    // `Proof`); a fresh approval for the SAME, now-spent request is no more use
+    let another = through_the_channel(&asking, person_approves);
+    assert!(r.backend.resolve(&asking, another).is_err());
+    // and the one-use grant is spent once
+    let subject = restore_plan_subject(&h).unwrap();
+    assert!(r
+        .backend
+        .spend_one_use(Kind::RestorePlan, &subject, &me())
+        .is_ok());
+    assert!(r
+        .backend
+        .spend_one_use(Kind::RestorePlan, &subject, &me())
+        .is_err());
+}
+
+#[test]
+fn a_refused_or_absent_channel_denies_the_restore() {
+    let says: [(fn() -> ur::ConsentOutcome, Resolved); 3] = [
+        (|| ur::ConsentOutcome::Denied, Resolved::Closed),
+        (|| ur::ConsentOutcome::TimedOut, Resolved::StillPending),
+        (
+            || ur::ConsentOutcome::Unavailable("no Hello".into()),
+            Resolved::StillPending,
+        ),
+    ];
+    for (n, (says, want)) in says.into_iter().enumerate() {
+        let mut r = rig();
+        let h = hash(char::from(b'a' + n as u8));
+        let id = submit(&mut r.backend, &h);
+        let asking = r.backend.begin_answer(&id, &h).unwrap();
+        let given = through_the_channel(&asking, says);
+        assert!(given.proof().is_none());
+        assert_eq!(r.backend.resolve(&asking, given).unwrap(), want);
+        let subject = restore_plan_subject(&h).unwrap();
+        assert!(
+            r.backend
+                .spend_one_use(Kind::RestorePlan, &subject, &me())
+                .is_err(),
+            "case {n}: a restore was authorised"
+        );
+    }
+    // the channel itself refuses (a subject that is not a plan): not asked, nothing granted
+    let mut r = rig();
+    let h = hash('d');
+    let id = submit(&mut r.backend, &h);
+    let mut asking = r.backend.begin_answer(&id, &h).unwrap();
+    asking.request.subject = "not a plan".into();
+    let given = through_the_channel(&asking, person_approves);
+    assert_eq!(given.outcome, Outcome::Unavailable);
+    assert!(given.proof().is_none());
+    asking.request.subject = restore_plan_subject(&h).unwrap();
     assert_eq!(
-        outcome_from_channel(&ur::Outcome::TimedOut),
-        Outcome::TimedOut
-    );
-    assert_eq!(
-        outcome_from_channel(&ur::Outcome::Unavailable("no Hello".into())),
-        Outcome::Unavailable
-    );
-    // Refused (over the maximum, malformed, ended while deciding) was not an answer: it leaves the
-    // request pending rather than closing it as a denial.
-    assert_eq!(
-        outcome_from_channel(&ur::Outcome::Refused("over the maximum".into())),
-        Outcome::Unavailable
+        r.backend.resolve(&asking, given).unwrap(),
+        Resolved::StillPending
     );
 }
 
@@ -551,7 +702,22 @@ fn hello_is_never_shown_when_the_debug_switch_is_set_and_the_answer_is_unavailab
     };
     let out = HelloPrompt::new().ask(&asking);
     std::env::remove_var(super::NO_HELLO_ENV);
-    assert_eq!(out, Outcome::Unavailable);
+    assert_eq!(out, Answer::without_proof(Outcome::Unavailable));
+}
+
+/// user-request 0.16 would open the store off Windows (a key-encrypting-key file beside it); the PM
+/// pinned the 0.11.1 behaviour. The guard is a function of a bool so this runs on every OS: refused with
+/// the old DPAPI message when not Windows, allowed on Windows, and `production` really calls it.
+#[test]
+fn the_production_store_is_refused_off_windows_with_the_old_message() {
+    assert!(refuse_off_windows(true).is_ok());
+    let err = refuse_off_windows(false).unwrap_err();
+    assert!(err.contains("DPAPI"), "{err}");
+    if !cfg!(windows) {
+        // the real constructor on a host that is not Windows: refused before it looks for a store
+        let made = UserRequestBackend::production(me());
+        assert!(made.err().is_some_and(|e| e.contains("DPAPI")));
+    }
 }
 
 /// The production constructor, through the crate's own `locate` (debug overrides). On Windows the
