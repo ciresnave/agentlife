@@ -401,7 +401,9 @@ impl Spawner for RealSpawner {
 fn has_child_named(parent: u32, name: &str) -> bool {
     let want = name.to_ascii_lowercase();
     let want = want.strip_suffix(".exe").unwrap_or(&want).to_string();
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return false;
+    };
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,

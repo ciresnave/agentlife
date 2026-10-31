@@ -341,8 +341,9 @@ impl ShutdownMarker for EventLogMarker {
 
 /// When this boot began, from the OS.
 pub fn boot_time() -> DateTime<Utc> {
-    Utc.timestamp_opt(sysinfo::System::boot_time() as i64, 0)
-        .single()
+    sysinfo::System::boot_time()
+        .ok()
+        .and_then(|secs| Utc.timestamp_opt(secs as i64, 0).single())
         .unwrap_or_else(Utc::now)
 }
 

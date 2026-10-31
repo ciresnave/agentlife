@@ -278,7 +278,9 @@ fn state_dir_of(cfg: &Config) -> std::path::PathBuf {
 }
 
 fn free_memory_gb() -> Option<f64> {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return None;
+    };
     sys.refresh_memory();
     let bytes = sys.available_memory();
     (bytes > 0).then(|| bytes as f64 / (1u64 << 30) as f64)
