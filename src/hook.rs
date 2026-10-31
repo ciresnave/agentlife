@@ -449,7 +449,11 @@ pub struct SnapshotParents {
 
 impl SnapshotParents {
     pub fn capture() -> Self {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return Self {
+                procs: Default::default(),
+            };
+        };
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -532,7 +536,9 @@ impl ParentProcess for SnapshotParents {
     /// the `claude` pid, so it never costs a whole-table refresh.
     fn cmdline_of(&self, pid: u32) -> Option<Vec<String>> {
         let p = Pid::from_u32(pid);
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return None;
+        };
         sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[p]),
             true,

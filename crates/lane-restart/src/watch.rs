@@ -105,7 +105,7 @@ impl WatchHub {
 /// contents of the `vt100` screen.
 pub fn snapshot_of(parser: &vt100::Parser) -> Vec<u8> {
     let mut out = b"\x1b[2J\x1b[H".to_vec();
-    out.extend_from_slice(&parser.screen().contents_formatted());
+    out.extend_from_slice(parser.screen().contents_formatted().as_bytes());
     out
 }
 
@@ -306,7 +306,11 @@ mod tests {
 
     #[test]
     fn the_snapshot_is_a_clear_then_the_screen_contents() {
-        let mut p = vt100::Parser::new(5, 20, 0);
+        let mut p = vt100::Parser::new(
+            std::num::NonZeroU16::new(5).unwrap(),
+            std::num::NonZeroU16::new(20).unwrap(),
+            0,
+        );
         p.process(b"hello\r\nworld");
         let s = snapshot_of(&p);
         assert!(s.starts_with(b"\x1b[2J\x1b[H"));

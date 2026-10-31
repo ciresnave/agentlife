@@ -140,7 +140,9 @@ pub struct SysinfoTable;
 
 impl ProcessTable for SysinfoTable {
     fn identity_of(&self, pid: u32) -> Option<ProcessIdentity> {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return None;
+        };
         let p = Pid::from_u32(pid);
         // Explicit, never the default: sysinfo's default refresh leaves `exe`, `cwd` and `cmd`
         // unset, which is exactly the bug that made every real identity check in OverMind fail
@@ -172,7 +174,9 @@ impl SnapshotTable {
     /// part of a refresh, and every caller here compares start times; `check` skips the exe
     /// comparison when either side has none.
     pub fn capture() -> Self {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return Self(Default::default());
+        };
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,

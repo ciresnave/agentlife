@@ -10,7 +10,7 @@ description = "The decision engine of agentlife's launch-on-message service: Ove
 [dependencies]
 lane-state.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 
 [dev-dependencies]
 tempfile = "3.27.0"

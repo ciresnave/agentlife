@@ -1802,7 +1802,7 @@ mod tests {
 
     /// `(pid, start secs)` of this process's parent, read the way `identity::SysinfoTable` does.
     fn facts_parent_identity() -> (u32, u64) {
-        let mut sys = sysinfo::System::new();
+        let mut sys = sysinfo::System::new().expect("the process table opens");
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         let me = sys
             .process(sysinfo::Pid::from_u32(std::process::id()))
