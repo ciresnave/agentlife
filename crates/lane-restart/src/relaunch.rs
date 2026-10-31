@@ -1258,6 +1258,72 @@ mod tests {
         }
     }
 
+    /// Shadows the real `kill_and_relaunch` (imported by `use super::*`) for every test below. The real one
+    /// reads, and on a launch writes, the machine's own state directory (`C:\Projects\.lane-state`), so a
+    /// test that names a real lane (`overmind` is one) read that lane's recorded spec, whose flags replaced
+    /// the ones under test (#205: the `;` test failed on any box running the lane). This one runs the same
+    /// code with an EMPTY temporary state directory, a policy of `sonnet`, no Opus permit, and a spawn that
+    /// must never be reached: these tests all expect a refusal before anything starts.
+    fn kill_and_relaunch(
+        facts: &dyn SystemFacts,
+        state_reader: &dyn StateReader,
+        state: &LaneState,
+        identity: &ProcessIdentity,
+        on_awaiting: &mut dyn FnMut(),
+    ) -> Result<RelaunchOutcome, RelaunchError> {
+        let dir = tempfile::tempdir().unwrap();
+        kill_and_relaunch_persisting(
+            facts,
+            state_reader,
+            state,
+            identity,
+            "sonnet",
+            None,
+            &DirSpecStore {
+                dir: dir.path().to_path_buf(),
+            },
+            &|_, _| panic!("a refused launch must not spawn anything"),
+            &mut |_| {},
+            on_awaiting,
+        )
+    }
+
+    /// The guard (PM, 2026-10-31): nothing in this module's tests may call the real, state-dir-reading
+    /// `kill_and_relaunch`, and no test may name a role that has a recorded spec or state in the real state
+    /// directory on the machine running it. The first half is a source scan; the second only bites on a box
+    /// that runs lanes (a clean CI runner has none), which is exactly where the hazard is.
+    #[test]
+    fn no_test_here_calls_the_real_restart_or_names_a_role_the_machine_runs() {
+        let src = include_str!("relaunch.rs");
+        let tests = &src[src.find(concat!("mod ", "tests {")).unwrap()..];
+        // the one definition above is the shadow; any other `super::kill_and_relaunch` is the real one
+        assert!(
+            !tests.contains(concat!("super::", "kill_and_relaunch(")),
+            "a test names the real kill_and_relaunch"
+        );
+        let state_dir = crate::state_dir();
+        let marker = concat!("state_with_role", "(\"");
+        let mut named = std::collections::BTreeSet::new();
+        for part in tests.split(marker).skip(1) {
+            if let Some(role) = part.split('"').next() {
+                named.insert(role.to_string());
+            }
+        }
+        assert!(
+            !named.is_empty(),
+            "the scan found no role: it reads nothing (control)"
+        );
+        for role in &named {
+            for file in [format!("{role}.launch.json"), format!("{role}.json")] {
+                assert!(
+                    !state_dir.join(&file).exists(),
+                    "a test names the role {role:?}, which has {file} in the real state dir {}; use a role no lane has",
+                    state_dir.display()
+                );
+            }
+        }
+    }
+
     #[test]
     fn kill_and_relaunch_refuses_an_invalid_role_before_touching_the_process() {
         // ⚠️ THE MUTATION THIS TEST EXISTS TO CATCH: it is not enough
@@ -1276,7 +1342,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_an_invalid_name_before_touching_the_process() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.name = Some("a|calc".to_string());
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -1451,7 +1517,7 @@ mod tests {
             wsl: None,
             role: Role::new("overmind").unwrap(),
             cwd: "C:/Projects/OverMind".to_string(),
-            ..LaunchSpec::try_from(&state_with_role("overmind")).unwrap()
+            ..LaunchSpec::try_from(&state_with_role("testlane")).unwrap()
         };
         // An explicit set overrides whatever the spawner's own environment carries.
         let argv = HostedArgv::new(&spec.cwd, spec.role.as_str(), strs(&["claude"])).unwrap();
@@ -1500,7 +1566,7 @@ mod tests {
 
     #[test]
     fn a_state_recording_opus_relaunches_on_the_policy_default_not_opus() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.model = Some("claude-opus-5-5".to_string());
         state.launch_args = None;
         let model = resolve_model(&state, "sonnet", None).unwrap();
@@ -1513,7 +1579,7 @@ mod tests {
 
     #[test]
     fn an_explicit_launch_model_pin_wins_over_the_policy_default() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.model = Some("claude-opus-5-5".to_string());
         state.launch_args = Some(strs(&["claude.exe", "--model", "haiku"]));
         assert_eq!(resolve_model(&state, "sonnet", None).unwrap(), "haiku");
@@ -1521,7 +1587,7 @@ mod tests {
 
     #[test]
     fn an_explicit_opus_pin_is_refused_without_the_override() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = Some(strs(&["claude.exe", "--model", "opus"]));
         assert!(matches!(
             resolve_model(&state, "sonnet", None),
@@ -1531,7 +1597,7 @@ mod tests {
 
     #[test]
     fn a_policy_default_naming_opus_is_refused_without_the_override() {
-        let state = state_with_role("overmind");
+        let state = state_with_role("testlane");
         assert!(matches!(
             resolve_model(&state, "claude-opus-5-5", None),
             Err(RelaunchError::ModelRefused(_))
@@ -1540,7 +1606,7 @@ mod tests {
 
     #[test]
     fn the_explicit_override_allows_opus() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = Some(strs(&["claude.exe", "--model", "opus"]));
         assert_eq!(
             resolve_model(&state, "sonnet", Some(&OpusPermit::for_test())).unwrap(),
@@ -1599,7 +1665,7 @@ mod tests {
 
     #[test]
     fn the_opus_check_is_case_insensitive() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = Some(strs(&["claude.exe", "--model", "Claude-OPUS-5"]));
         assert!(resolve_model(&state, "sonnet", None).is_err());
     }
@@ -1644,7 +1710,7 @@ mod tests {
 
     #[test]
     fn claude_argv_always_pins_the_model_and_omits_permission_mode_when_absent() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.model = None;
         state.permission_mode = None;
         let argv = claude_argv("overmind", &state, "the prompt", "sonnet").unwrap();
@@ -1666,7 +1732,7 @@ mod tests {
 
     #[test]
     fn claude_argv_includes_remote_control_flag_when_set() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.remote_control = true;
         let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert!(argv.contains(&"--remote-control".to_string()));
@@ -1676,7 +1742,7 @@ mod tests {
     fn claude_argv_never_includes_resume() {
         // ⚠️ PM finding, 2026-09-18: --resume reloads the whole prior
         // transcript - exactly the cost a restart exists to cut.
-        let state = state_with_role("overmind");
+        let state = state_with_role("testlane");
         let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert!(!argv.iter().any(|a| a == "--resume"));
     }
@@ -1696,7 +1762,7 @@ mod tests {
 
     #[test]
     fn ciresnaves_exact_command_line_carries_the_channels_flag_and_drops_resume() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.model = None;
         state.permission_mode = None;
         state.remote_control = false;
@@ -1852,7 +1918,7 @@ mod tests {
 
     #[test]
     fn claude_argv_never_duplicates_name_when_the_original_launch_already_had_one() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = Some(strs(&["claude.exe", "--name", "old-name"]));
         let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert_eq!(
@@ -1872,7 +1938,7 @@ mod tests {
         // `state.launch_args` is None whenever the launch command line
         // couldn't be read this session - must not panic, and must not
         // invent anything.
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = None;
         let argv = claude_argv("overmind", &state, "p", "sonnet").unwrap();
         assert_eq!(
@@ -1914,7 +1980,7 @@ mod tests {
             ("--permission-mode", FlagArity::One),
             ("--remote-control", FlagArity::None),
         ];
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = Some(strs(&[
             "claude.exe",
             "--dangerously-load-development-channels",
@@ -2010,7 +2076,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_a_cwd_containing_a_semicolon_before_touching_the_process() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.cwd = "C:/x;calc".to_string();
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -2024,7 +2090,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_a_model_containing_a_semicolon_before_touching_the_process() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         // The model now comes only from the launch's explicit --model
         // (or the policy file), never from state.model.
         // A permitted prefix, so the model check passes and the `;` guard is what refuses it.
@@ -2041,7 +2107,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_a_permission_mode_containing_a_semicolon() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.permission_mode = Some("prompting;calc".into());
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -2060,7 +2126,7 @@ mod tests {
         // hard-coded - it scans claude_argv's full OUTPUT, so this
         // proves the two features actually compose. `--add-dir` stands
         // in for any allowlisted flag.
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("testlane");
         state.launch_args = Some(strs(&["claude.exe", "--add-dir", "C:/a;calc"]));
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -2103,7 +2169,7 @@ mod tests {
     }
 
     fn state_with_session_and_event(session_id: &str, event: &str) -> LaneState {
-        let mut s = state_with_role("overmind");
+        let mut s = state_with_role("testlane");
         s.session_id = session_id.to_string();
         s.updated_by_event = event.to_string();
         s
@@ -2383,7 +2449,7 @@ mod tests {
             }),
             role: Role::new("overmind").unwrap(),
             cwd: "/home/lane-commysdk/work/overmind".to_string(),
-            ..LaunchSpec::try_from(&state_with_role("overmind")).unwrap()
+            ..LaunchSpec::try_from(&state_with_role("testlane")).unwrap()
         };
         let argv = HostedArgv::new_wsl(
             "C:/Projects",
