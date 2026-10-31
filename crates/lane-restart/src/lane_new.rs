@@ -294,7 +294,6 @@ pub fn build_spec(
             "--mcp-config".into(),
             roots.mcp_path(role).to_string_lossy().into_owned(),
             "--dangerously-load-development-channels".into(),
-            "server:claude-peers".into(),
             "server:synapse".into(),
         ],
         handoff_path: Some(cwd.join("HANDOFF.md").to_string_lossy().into_owned()),
@@ -1216,21 +1215,31 @@ mod tests {
     }
 
     #[test]
-    fn a_new_lanes_spec_has_the_mcp_config_and_both_push_channels() {
+    fn a_new_lanes_spec_is_the_synapse_only_end_state() {
         let d = tempfile::tempdir().unwrap();
         let r = roots(&d);
         let s = build_spec(&r, "zetafish", "zetafish", "sonnet", Utc::now()).unwrap();
-        assert_eq!(crate::spec_channels::check(&s.launch_args), Ok(()));
-        // control: the same spec with each of the three removed is refused by the same check
-        for drop in ["--mcp-config", "server:claude-peers", "server:synapse"] {
+        assert_eq!(
+            crate::spec_channels::check_synapse_only(&s.launch_args),
+            Ok(())
+        );
+        // control: lacking the config or the synapse channel, or carrying claude-peers, is refused
+        for (drop, want) in [
+            ("--mcp-config", "--mcp-config"),
+            ("server:synapse", "server:synapse"),
+        ] {
             let mut a = s.launch_args.clone();
             let i = a.iter().position(|x| x == drop).unwrap();
             a.remove(i);
             if drop == "--mcp-config" {
                 a.remove(i); // its path
             }
-            let e = crate::spec_channels::check(&a).unwrap_err();
-            assert!(e.contains(drop), "{drop}: {e}");
+            let e = crate::spec_channels::check_synapse_only(&a).unwrap_err();
+            assert!(e.contains(want), "{drop}: {e}");
         }
+        let mut with_peers = s.launch_args.clone();
+        with_peers.push("server:claude-peers".into());
+        let e = crate::spec_channels::check_synapse_only(&with_peers).unwrap_err();
+        assert!(e.contains("server:claude-peers"), "{e}");
     }
 }
