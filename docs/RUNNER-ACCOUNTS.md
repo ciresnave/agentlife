@@ -163,3 +163,151 @@ Remove-Item -LiteralPath C:\gh-runner-cpufish -Recurse -Force
 Get-LocalUser gh-runner-cpufish -ErrorAction SilentlyContinue; Test-Path C:\gh-runner-cpufish
 Get-LocalUser gh-runner
 ```
+
+
+## Changeover for the live runners (board 340 option A; read-only, dry runs only, 2026-10-30, `origin/main` 4ba0d58)
+
+**Nothing here was run with `-Apply`.** Every fact below was read from this machine, or from GitHub with the bot token where it could read.
+
+### Measured state (before)
+
+| Runner | Service (`StartName`, state) | Directory | Mode / labels | Repo |
+|---|---|---|---|---|
+| `ciresnave/PersistAnt` | `.\gh-runner`, Running, Auto | `C:\gh-runner\ciresnave-PersistAnt` | labels and `ephemeral` **not readable by the bot** (HTTP 403 on `actions/runners`); `.runner` has no ephemeral field. PM: command below | **public** |
+| `ThinkersJournal/licence-tools` | `.\gh-runner-private`, Running, Auto | `C:\gh-runner\ThinkersJournal-licence-tools` | `self-hosted, Windows, X64`; online, `busy:false` (GitHub); persistent | private |
+| `ThinkersJournal/ThinkersFoundation-site` | `.\gh-runner-private`, **Stopped**, Auto | `C:\gh-runner\ThinkersJournal-ThinkersFoundation-site` | `self-hosted, Windows, X64`; **offline** (GitHub); persistent | **public** (`gh api repos/... --jq .private` = `false`) |
+
+`C:\gh-runner` root ACL now: `gh-runner (OI)(CI)(M)`, Administrators `F`, SYSTEM `F`, `cires` `F` (`gh-runner-private` removed by the 340-C step). `gh-runner` still has inherited Modify on both private runners' directories; `gh-runner-private` has explicit Modify on its own two. No `Runner.Worker` process was running. `Hyper-V Administrators`: `cires`, `gh-runner`; `Administrators`: `Administrator`, `cires`.
+
+**Two findings that change the plan.**
+1. **`ThinkersFoundation-site` is a public repo with a persistent runner**, which RUNNER-SETUP 2a forbids (public means ephemeral). `-Apply` would refuse `-Private` for it. Its service is stopped and the runner offline, so nothing is running now. The paste below **removes it and re-registers it ephemeral** (the script's default for a repo not named in `-Private`). Ephemeral costs a fresh registration token and an elevated `-Apply` per job; its `ci.yml` is `ubuntu-latest` only (section 8a), so **recommendation: do step 1 (remove) tonight and register it only when a job needs the runner.** CireSnave's call.
+2. **The password-rotation path is never touched.** Each runner gets a *new* account, so `Set-LocalUser` and `Win32_Service.Change` never run on a live service. The order below removes `ThinkersFoundation-site` first so `gh-runner-private` has one dependent service, not two, in the undo.
+
+### Decisions in the plan
+
+- **PersistAnt: service, account, registration and files untouched.** It keeps `gh-runner` and with it `Hyper-V Administrators`. The line that needs it, `.github/workflows/machine-durability.yml` at PersistAnt `main` 82dcaad (read with `gh api`): line 49 `runs-on: [self-hosted, Windows, X64]` under line 46 `power-loss:` (`name: Power loss (Hyper-V guest, self-hosted)`; line 4: "It cannot run on a GitHub-hosted runner (no nested Hyper-V)"). `synapse-power-cut.yml` has the same job on `workflow_dispatch` (section 8b). No other account gets a group.
+- New accounts: `ghr-licence-tools`, `ghr-tf-site` (standard users, no group, random password in memory), each in its **own root** (`C:\ghr-licence-tools`, `C:\ghr-tf-site`), so neither account nor `gh-runner` can write the other's tree. `gh-runner-private` is then unused and is removed at the end.
+- Labels: none added (both read `self-hosted, Windows, X64` on GitHub, which `config.cmd` gives automatically).
+
+### Dry runs (unedited; run 2026-10-30; exit 0 each; `C:\ghr-licence-tools`, `C:\ghr-tf-site`, `Get-LocalUser ghr-*` were absent before; nothing was created)
+
+```
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/licence-tools -Private ThinkersJournal/licence-tools -Account ghr-licence-tools -Root C:\ghr-licence-tools
+```
+
+```
+DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.
+
+Owners        : ciresnave, ThinkersJournal   private (persistent allowed): ThinkersJournal/licence-tools
+Runner mode   : persistent (one registration, many jobs) [default: every -Repo is declared in -Private]
+Account       : TUF-LAPTOP\ghr-licence-tools (standard user; random 32-char password held in memory only)
+Root          : C:\ghr-licence-tools  (ACL: SYSTEM, Administrators, ghr-licence-tools)
+Runner        : v2.338.0  SHA256 f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f
+  https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-win-x64-2.338.0.zip
+ACL preflight: clean (-Apply would proceed past it)
+
+[ThinkersJournal/licence-tools]
+  extract  -> C:\ghr-licence-tools\ThinkersJournal-licence-tools (only after the hash matches)
+  token    -> prompted (Read-Host -AsSecureString): PM fetches it now; not stored
+  C:\ghr-licence-tools\ThinkersJournal-licence-tools\config.cmd --unattended --url https://github.com/ThinkersJournal/licence-tools --token <token> --name TUF-LAPTOP-ThinkersJournal-licence-tools `
+      --work _work --replace --runasservice --windowslogonaccount .\ghr-licence-tools --windowslogonpassword <generated>
+  .env     -> C:\ghr-licence-tools\ThinkersJournal-licence-tools\.env: PSExecutionPolicyPreference=Bypass (before config.cmd, so the service starts with it)
+  read back: service ... StartName = .\ghr-licence-tools, State = Running; .env holds the policy line
+```
+
+```
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/ThinkersFoundation-site -Account ghr-tf-site -Root C:\ghr-tf-site
+```
+
+```
+DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.
+
+Owners        : ciresnave, ThinkersJournal   private (persistent allowed): none: every -Repo is treated as public, so ephemeral
+Runner mode   : ephemeral (one job per registration) [default: a -Repo is not declared in -Private]
+Account       : TUF-LAPTOP\ghr-tf-site (standard user; random 32-char password held in memory only)
+Root          : C:\ghr-tf-site  (ACL: SYSTEM, Administrators, ghr-tf-site)
+Runner        : v2.338.0  SHA256 f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f
+  https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-win-x64-2.338.0.zip
+ACL preflight: clean (-Apply would proceed past it)
+
+[ThinkersJournal/ThinkersFoundation-site]
+  extract  -> C:\ghr-tf-site\ThinkersJournal-ThinkersFoundation-site (only after the hash matches)
+  token    -> prompted (Read-Host -AsSecureString): PM fetches it now; not stored
+  C:\ghr-tf-site\ThinkersJournal-ThinkersFoundation-site\config.cmd --unattended --url https://github.com/ThinkersJournal/ThinkersFoundation-site --token <token> --name TUF-LAPTOP-ThinkersJournal-ThinkersFoundation-site `
+      --work _work --replace --ephemeral --runasservice --windowslogonaccount .\ghr-tf-site --windowslogonpassword <generated>
+  .env     -> C:\ghr-tf-site\ThinkersJournal-ThinkersFoundation-site\.env: PSExecutionPolicyPreference=Bypass (before config.cmd, so the service starts with it)
+  read back: service ... StartName = .\ghr-tf-site, State = Running; .env holds the policy line
+```
+
+The two `-Remove` dry runs (`-Repo ... -Root C:\gh-runner -Remove`, exit 0) print `config.cmd remove --token <removal token>` for `C:\gh-runner\ThinkersJournal-licence-tools` and `...-ThinkersFoundation-site` (they also print an Account/Mode header for the default `gh-runner`, which `-Remove` ignores).
+
+### Order
+
+0. **No-jobs precheck (PM, any shell)**: every `busy` must be `false` and the list must be what is expected.
+1. `ThinkersFoundation-site`: remove (offline already).
+2. `licence-tools`: remove, register under `ghr-licence-tools`. Short window with no licence-tools jobs.
+3. Root ACL: `gh-runner` loses its entry on `C:\gh-runner`, after its explicit grant on PersistAnt's folder is confirmed.
+4. Delete the old private directories and `gh-runner-private`.
+5. (Only when a job needs it) register `ThinkersFoundation-site` ephemeral under `ghr-tf-site`.
+
+### The paste
+
+```
+# 0. PM, any shell: no jobs running. busy must be false everywhere; PersistAnt's labels/mode are read here for the first time.
+$env:GH_TOKEN = (gh auth token --user ciresnave)
+gh api repos/ciresnave/PersistAnt/actions/runners --jq '.runners[]|{name,status,busy,labels:[.labels[].name]}'
+gh api repos/ThinkersJournal/licence-tools/actions/runners --jq '.runners[]|{name,status,busy}'
+gh api repos/ThinkersJournal/ThinkersFoundation-site/actions/runners --jq '.runners[]|{name,status,busy}'
+# also, elevated or not: no job process is running on the machine
+Get-Process Runner.Worker -ErrorAction SilentlyContinue
+
+# 1. PM: a removal token for the site runner (one hour; copy it, it is not stored). CireSnave, ELEVATED PowerShell, paste it at the prompt:
+gh api -X POST repos/ThinkersJournal/ThinkersFoundation-site/actions/runners/remove-token --jq .token
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/ThinkersFoundation-site -Root C:\gh-runner -Remove -Apply
+
+# 2. PM: a removal token, then (after it is used) a registration token for licence-tools. CireSnave, ELEVATED:
+gh api -X POST repos/ThinkersJournal/licence-tools/actions/runners/remove-token --jq .token
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/licence-tools -Root C:\gh-runner -Remove -Apply
+gh api -X POST repos/ThinkersJournal/licence-tools/actions/runners/registration-token --jq .token
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/licence-tools -Private ThinkersJournal/licence-tools -Account ghr-licence-tools -Root C:\ghr-licence-tools -Apply
+
+# 3. CireSnave, ELEVATED: PersistAnt's explicit grant is already there (explicit, not inherited); confirm, then drop gh-runner from the shared root
+icacls C:\gh-runner\ciresnave-PersistAnt
+icacls C:\gh-runner /remove:g gh-runner
+Remove-Item -LiteralPath C:\gh-runner\ThinkersJournal-licence-tools, C:\gh-runner\ThinkersJournal-ThinkersFoundation-site -Recurse -Force
+# only when the read-back below shows no service on gh-runner-private:
+Remove-LocalUser -Name gh-runner-private
+```
+
+**Read back (CireSnave or PM; each is a state read, not an exit code):**
+
+```
+Get-CimInstance Win32_Service -Filter "Name like 'actions.runner.%'" | % { "$($_.Name) | $($_.StartName) | $($_.State)" }
+#   expect: PersistAnt | .\gh-runner | Running ; licence-tools | .\ghr-licence-tools | Running ; no site service
+icacls C:\gh-runner ; icacls C:\ghr-licence-tools ; Get-LocalGroupMember 'Hyper-V Administrators'
+#   expect: C:\gh-runner has no gh-runner and no gh-runner-private entry; Hyper-V Administrators = cires, gh-runner only
+net localgroup Administrators                         # unchanged: Administrator, cires
+Get-LocalUser ghr-licence-tools; Get-LocalUser gh-runner-private -ErrorAction SilentlyContinue   # first found; second absent (control: the first)
+gh api repos/ThinkersJournal/licence-tools/actions/runners --jq '.runners[]|{name,status,labels:[.labels[].name]}'   # online; self-hosted, Windows, X64
+gh api repos/ciresnave/PersistAnt/actions/runners --jq '.runners[]|{name,status}'   # still online; never touched
+```
+
+Then dispatch one licence-tools job and read that it ran on `ghr-licence-tools` (the job's `whoami`, or the run log).
+
+### UNDO
+
+Each undo step uses the script's tested path (new account, so no password rotation). **If step 2's registration fails after the removal**, the runner is gone and licence-tools has no runner until this is run:
+
+```
+# PM: a registration token. CireSnave, ELEVATED. gh-runner-private has no service at this point (site removed, licence-tools removed), so the script's rotate-and-Change path has no dependent to break:
+pwsh -File C:\Projects\agentlife\scripts\gh-runner-setup.ps1 -Repo ThinkersJournal/licence-tools -Private ThinkersJournal/licence-tools -Account gh-runner-private -Root C:\gh-runner -Apply
+```
+
+That recreates exactly the old shape (account `gh-runner-private`, root `C:\gh-runner`, label-free). The script then re-adds the account's Modify on the whole `C:\gh-runner` root (its step 3), so afterwards re-run the 340-C ACL fix, or accept the pre-340 exposure until step 3 is repeated; say so to the PM. To undo only the new registration first, if it exists: removal token, then `... -Repo ThinkersJournal/licence-tools -Root C:\ghr-licence-tools -Remove -Apply`, `Remove-LocalUser ghr-licence-tools`, `Remove-Item C:\ghr-licence-tools -Recurse -Force`. Do **not** run `Remove-LocalUser gh-runner-private` until the undo is no longer wanted. PersistAnt needs no undo: nothing about it changes except the root-level `gh-runner` entry, restored with `icacls C:\gh-runner /grant "gh-runner:(OI)(CI)M"`.
+
+### Not measured, so not claimed
+
+- PersistAnt's runner labels and ephemeral mode (step 0 reads them); whether Public-repo section 2a is met for it (section 8b already flags this).
+- That `config.cmd` and the service come up under a brand-new account on this box: the script's comments record a live `-Apply` on 2026-10-22 (ThinkersFoundation-site); this session did not re-verify what that run created, and the cpufish new-account run is still only a dry run. Step 2 is the first new-account run I know of.
+- The per-user caches and TEMP of the old accounts (open since 340-C).
+- Whether `gh-runner` can still write the *new* roots: it is not in either ACL (SYSTEM, Administrators, the account), read in the dry-run plan, not on disk yet.
