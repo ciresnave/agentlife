@@ -440,7 +440,8 @@ struct Live {
 
 fn carries_channel(e: &Entry) -> bool {
     e.argv.windows(2).any(|w| {
-        w[0] == "--dangerously-load-development-channels" && w[1] == crate::plan::ALLOWED_CHANNEL
+        w[0] == "--dangerously-load-development-channels"
+            && crate::plan::ALLOWED_CHANNELS.contains(&w[1].as_str())
     })
 }
 

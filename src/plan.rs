@@ -46,8 +46,9 @@ pub const PLAN_SCHEMA: u32 = 1;
 /// §6.3: a lower bound; the maximum observed was 123 s).
 pub const SETTLE_SECS_ESTIMATE: u64 = 12;
 
-/// The one development-channel value restore will pass on. Every other value is dropped and listed.
-pub const ALLOWED_CHANNEL: &str = "server:claude-peers";
+/// The development-channel values restore will pass on, in the order it writes them. Every other value is
+/// dropped and listed. claude-peers stays until it is removed (CireSnave 2026-10-31); synapse is the end state.
+pub const ALLOWED_CHANNELS: [&str; 2] = ["server:claude-peers", "server:synapse"];
 
 const CHANNEL_FLAG: &str = "--dangerously-load-development-channels";
 
@@ -218,6 +219,13 @@ fn safe_value(v: &str) -> bool {
     !v.is_empty() && !v.starts_with('-') && !v.contains(';') && !v.chars().any(char::is_control)
 }
 
+/// A launch's `--mcp-config` is kept only as a file path to a `*.mcp.json` (the per-role file
+/// `lane-restart` writes): never inline JSON, which can carry a secret, and never another file name.
+/// Without it `server:synapse` names a server that never loads, so the lane could not receive.
+fn is_plain_mcp_config(v: &str) -> bool {
+    safe_value(v) && !v.starts_with('{') && v.to_ascii_lowercase().ends_with(".mcp.json")
+}
+
 struct Rebuilt {
     argv: Vec<String>,
     mode: Option<PermissionMode>,
@@ -229,7 +237,7 @@ struct Rebuilt {
 ///
 /// Kept: `--name`/`-n`, `--model`, `--permission-mode` (and `--dangerously-skip-permissions`, which
 /// is the same mode), `--remote-control`, and the development-channel flag **only** with
-/// [`ALLOWED_CHANNEL`] (without it a restarted lane can send but never receive claude-peers
+/// [`ALLOWED_CHANNELS`] (without it a restarted lane can send but never receive claude-peers
 /// messages). Everything else, including any prompt, is dropped and listed. The result is in one
 /// canonical order, so two records that differ only in flag order give one plan entry.
 fn rebuild(
@@ -241,7 +249,8 @@ fn rebuild(
     let mut model: Option<String> = None;
     let mut mode: Option<PermissionMode> = None;
     let mut remote = false;
-    let mut channel = false;
+    let mut channels: Vec<String> = Vec::new();
+    let mut mcp_config: Option<String> = None;
     let mut flags = Vec::new();
     let mut dropped = Vec::new();
 
@@ -270,13 +279,30 @@ fn rebuild(
             "--permission-mode" => mode = Some(value_of(flag, inline, &mut it)?.into()),
             "--dangerously-skip-permissions" => mode = Some(PermissionMode::BypassPermissions),
             "--remote-control" => remote = true,
-            CHANNEL_FLAG => {
+            "--mcp-config" => {
                 let v = value_of(flag, inline, &mut it)?;
-                if v == ALLOWED_CHANNEL {
-                    channel = true;
+                if is_plain_mcp_config(&v) {
+                    mcp_config = Some(v);
                 } else {
-                    flags.push(format!("channel-not-allowlisted:{v}"));
-                    dropped.push(format!("{CHANNEL_FLAG} {v}"));
+                    flags.push("mcp-config-not-allowlisted".to_string());
+                    dropped.push(format!("--mcp-config {v}"));
+                }
+            }
+            CHANNEL_FLAG => {
+                // The `server:` names run from the flag to the next token that is not one.
+                let mut values = vec![value_of(flag, inline, &mut it)?];
+                while it.peek().is_some_and(|n| n.starts_with("server:")) {
+                    values.extend(it.next().cloned());
+                }
+                for v in values {
+                    if ALLOWED_CHANNELS.contains(&v.as_str()) {
+                        if !channels.contains(&v) {
+                            channels.push(v);
+                        }
+                    } else {
+                        flags.push(format!("channel-not-allowlisted:{v}"));
+                        dropped.push(format!("{CHANNEL_FLAG} {v}"));
+                    }
                 }
             }
             _ => dropped.push(arg.clone()),
@@ -325,9 +351,19 @@ fn rebuild(
     if remote {
         argv.push("--remote-control".to_string());
     }
-    if channel {
+    if let Some(c) = &mcp_config {
+        argv.push("--mcp-config".to_string());
+        argv.push(c.clone());
+    }
+    if !channels.is_empty() {
         argv.push(CHANNEL_FLAG.to_string());
-        argv.push(ALLOWED_CHANNEL.to_string());
+        // one canonical order, whatever order the record had
+        argv.extend(
+            ALLOWED_CHANNELS
+                .iter()
+                .filter(|a| channels.iter().any(|c| c == *a))
+                .map(|s| s.to_string()),
+        );
     }
     if let Some(bad) = argv
         .iter()
@@ -966,6 +1002,125 @@ mod tests {
             cwd: format!("C:/Projects/{role}"),
             argv,
             suspended: false,
+        }
+    }
+
+    /// A recorded `<role>.launch.json` written to disk and read back through `spec_launch::load`, as
+    /// `restore` reads it.
+    fn plan_for_spec_args(args: &[&str]) -> Plan {
+        let d = tempfile::tempdir().unwrap();
+        let s = lane_restart::spec::SpecFile {
+            schema: lane_restart::spec::SCHEMA,
+            role: lane_state::role::Role::new("x").unwrap(),
+            name: lane_state::role::Role::new("x").unwrap(),
+            cwd: "C:/Projects/x".into(),
+            model: "sonnet".into(),
+            permission_mode: Some("auto".into()),
+            remote_control: false,
+            launch_args: args.iter().map(|a| a.to_string()).collect(),
+            handoff_path: None,
+            handoff_mtime: None,
+            state: lane_restart::spec::SpecState::Running,
+            written_at: chrono::Utc::now(),
+            written_by: lane_restart::spec::WrittenBy::Other("test".into()),
+            stopped_session_id: None,
+            stopped_pid_start_secs: None,
+            stop_reason: None,
+            stop_kind: None,
+            stop_mac: None,
+            tool_version: "test".into(),
+            launch: None,
+            wsl: None,
+        };
+        lane_restart::spec::write_atomic(d.path(), &s).unwrap();
+        let recs = vec![lane("a-x", "x", 1)];
+        plan_with_specs(&recs, &cfg(), &|role| {
+            crate::spec_launch::load(d.path(), role)
+        })
+    }
+
+    /// The end state (CireSnave 2026-10-31): a Synapse-only spec restores with its config and its channel.
+    #[test]
+    fn restoring_a_synapse_only_spec_keeps_the_mcp_config_and_server_synapse() {
+        let cfg = r"C:\Projects\.lane-state\x.mcp.json";
+        let p = plan_for_spec_args(&[
+            "--mcp-config",
+            cfg,
+            "--dangerously-load-development-channels",
+            "server:synapse",
+        ]);
+        let e = &p.entries[0];
+        assert_eq!(
+            e.argv[e.argv.len() - 4..],
+            [
+                "--mcp-config",
+                cfg,
+                "--dangerously-load-development-channels",
+                "server:synapse"
+            ]
+        );
+        assert!(e.dropped_args.is_empty(), "{:?}", e.dropped_args);
+        assert!(
+            e.flags.iter().all(|f| !f.starts_with("channel-")),
+            "{:?}",
+            e.flags
+        );
+        // control: the old behaviour dropped them; a spec with neither keeps neither
+        let bare = plan_for_spec_args(&[]);
+        assert!(!bare.entries[0].argv.iter().any(|a| a.contains("synapse")));
+    }
+
+    #[test]
+    fn a_transition_spec_keeps_both_channels_in_one_order_and_a_foreign_one_is_still_dropped() {
+        let cfg = r"C:\Projects\.lane-state\x.mcp.json";
+        let a = plan_for_spec_args(&[
+            "--mcp-config",
+            cfg,
+            "--dangerously-load-development-channels",
+            "server:synapse",
+            "server:claude-peers",
+        ]);
+        let b = plan_for_spec_args(&[
+            "--dangerously-load-development-channels",
+            "server:claude-peers",
+            "server:synapse",
+            "--mcp-config",
+            cfg,
+        ]);
+        assert_eq!(a.entries[0].argv, b.entries[0].argv);
+        let n = a.entries[0].argv.len();
+        assert_eq!(
+            a.entries[0].argv[n - 5..],
+            [
+                "--mcp-config",
+                cfg,
+                "--dangerously-load-development-channels",
+                "server:claude-peers",
+                "server:synapse"
+            ]
+        );
+        let evil = plan_for_spec_args(&[
+            "--dangerously-load-development-channels",
+            "server:synapse",
+            "server:evil",
+        ]);
+        let e = &evil.entries[0];
+        assert!(e.argv.iter().any(|x| x == "server:synapse"));
+        assert!(!e.argv.iter().any(|x| x == "server:evil"));
+        assert_eq!(e.flags, ["channel-not-allowlisted:server:evil"]);
+    }
+
+    #[test]
+    fn an_inline_or_foreign_mcp_config_is_dropped_and_flagged() {
+        for bad in [
+            r#"{"mcpServers":{"x":{"env":{"K":"secret"}}}}"#,
+            "C:/other/evil.json",
+        ] {
+            let p = plan_for_spec_args(&["--mcp-config", bad]);
+            let e = &p.entries[0];
+            assert!(!e.argv.iter().any(|x| x == "--mcp-config"), "{:?}", e.argv);
+            assert_eq!(e.flags, ["mcp-config-not-allowlisted"]);
+            assert_eq!(e.dropped_args, [format!("--mcp-config {bad}")]);
         }
     }
 
