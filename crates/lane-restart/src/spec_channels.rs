@@ -51,8 +51,10 @@ impl Channels {
         }
     }
 
-    pub fn complete(self) -> bool {
-        self.mcp_config && self.peers && self.synapse
+    /// Can receive Synapse pushes: the config and the synapse channel. (claude-peers is being removed, so
+    /// it is not required here; `check` is the transition form that still requires it.)
+    pub fn reaches_synapse(self) -> bool {
+        self.mcp_config && self.synapse
     }
 
     /// `mcp+peers+synapse`, with `-` for each flag that is missing (`mcp+-+synapse`).
@@ -83,6 +85,27 @@ pub fn check(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("launch args lack {}", missing.join(", ")))
+    }
+}
+
+/// The END state (CireSnave 2026-10-31, "get every lane on Synapse"): `--mcp-config` and
+/// `server:synapse`, and no `server:claude-peers`. `Ok` or what is wrong.
+pub fn check_synapse_only(args: &[String]) -> Result<(), String> {
+    let c = Channels::of(args);
+    let mut bad = Vec::new();
+    if !c.mcp_config {
+        bad.push(format!("lacks {MCP_CONFIG}"));
+    }
+    if !c.synapse {
+        bad.push(format!("lacks {SYNAPSE}"));
+    }
+    if c.peers {
+        bad.push(format!("still carries {PEERS}"));
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("launch args {}", bad.join(", ")))
     }
 }
 
@@ -214,8 +237,8 @@ mod tests {
     fn check_names_each_missing_flag_and_passes_the_full_form() {
         let full = v(&["--mcp-config", "m.json", DEV_CHANNELS, PEERS, SYNAPSE]);
         assert_eq!(check(&full), Ok(()));
-        assert!(Channels::of(&full).complete());
-        assert!(!Channels::of(&v(&["--mcp-config", "m", DEV_CHANNELS, PEERS])).complete());
+        assert!(Channels::of(&full).reaches_synapse());
+        assert!(!Channels::of(&v(&["--mcp-config", "m", DEV_CHANNELS, PEERS])).reaches_synapse());
         // control: dropping each of the three in turn fails and names exactly it
         for (args, missing) in [
             (v(&[DEV_CHANNELS, PEERS, SYNAPSE]), MCP_CONFIG),
@@ -235,6 +258,27 @@ mod tests {
             "--verbose",
         ]);
         assert!(check(&stray).is_err());
+    }
+
+    #[test]
+    fn the_end_state_wants_the_config_and_synapse_and_no_claude_peers() {
+        let ok = v(&["--mcp-config", "m", DEV_CHANNELS, SYNAPSE]);
+        assert_eq!(check_synapse_only(&ok), Ok(()));
+        // control: each way to be wrong is named
+        let both = v(&["--mcp-config", "m", DEV_CHANNELS, PEERS, SYNAPSE]);
+        assert!(check_synapse_only(&both)
+            .unwrap_err()
+            .contains("still carries"));
+        let peers_only = v(&["--mcp-config", "m", DEV_CHANNELS, PEERS]);
+        let e = check_synapse_only(&peers_only).unwrap_err();
+        assert!(
+            e.contains("lacks server:synapse") && e.contains("still carries"),
+            "{e}"
+        );
+        let no_cfg = v(&[DEV_CHANNELS, SYNAPSE]);
+        assert!(check_synapse_only(&no_cfg)
+            .unwrap_err()
+            .contains("lacks --mcp-config"));
     }
 
     #[test]
