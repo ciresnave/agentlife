@@ -178,7 +178,7 @@ pub fn host_log_since(
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
-        // `host-<role>-<pid>.log`: a longer role that begins with this one (`rock` vs `rockfish`) has a
+        // `host-<role>-<pid>.log`: a longer role that begins with this one (`zeta` vs `zetafish`) has a
         // non-numeric tail, so it is not this lane's log.
         let Some(pid) = rest.strip_suffix(".log") else {
             continue;
@@ -225,18 +225,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let before = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         let w = |n: &str, t: &str| std::fs::write(d.path().join(n), t).unwrap();
-        w("host-rockfish-100.log", "");
-        w("host-rockfishy-200.log", "not ours");
-        w("host-rockfish-abc.log", "not a pid");
-        w("host-rockfish-300.txt", "wrong ext");
-        assert_eq!(host_log_since(d.path(), "rockfish", before), None);
-        w("host-rockfish-400.log", "boot");
-        let got = host_log_since(d.path(), "rockfish", before).unwrap();
-        assert_eq!(got, d.path().join("host-rockfish-400.log"));
+        w("host-zetafish-100.log", "");
+        w("host-zetafishy-200.log", "not ours");
+        w("host-zetafish-abc.log", "not a pid");
+        w("host-zetafish-300.txt", "wrong ext");
+        assert_eq!(host_log_since(d.path(), "zetafish", before), None);
+        w("host-zetafish-400.log", "boot");
+        let got = host_log_since(d.path(), "zetafish", before).unwrap();
+        assert_eq!(got, d.path().join("host-zetafish-400.log"));
         assert!(got.is_absolute());
         // older than the step: not this run's
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        assert_eq!(host_log_since(d.path(), "rockfish", later), None);
+        assert_eq!(host_log_since(d.path(), "zetafish", later), None);
     }
 }
 
@@ -358,7 +358,17 @@ mod run_tests {
             } else {
                 "host up"
             };
-            std::fs::write(dir.join(format!("host-{role}-7777.log")), log).unwrap();
+            let path = dir.join(format!("host-{role}-7777.log"));
+            std::fs::write(&path, log).unwrap();
+            // Linux stamps a file with a coarse kernel clock that can read a few ms BEHIND the `SystemTime::now()` the caller took
+            // just before `start`, so an honest "written since the start" log looked older than `since` (CI, main, 2026-10-30).
+            // Stamp it clearly after, as a real host's seconds-later write is.
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+                .unwrap();
             Ok(if self.lie == Lie::StartAwaitingDialog {
                 2
             } else {
@@ -391,8 +401,8 @@ mod run_tests {
             r,
             None,
             Some(h),
-            "rockfish",
-            "rockfish",
+            "zetafish",
+            "zetafish",
             "sonnet",
             apply,
             Utc::now(),
@@ -431,10 +441,10 @@ mod run_tests {
             detail.contains("pid 4242 live, spec running, host log "),
             "{detail}"
         );
-        assert!(detail.contains("host-rockfish-7777.log"), "{detail}");
+        assert!(detail.contains("host-zetafish-7777.log"), "{detail}");
         // order, and the roles file held this role and no other
         assert_eq!(h.calls(), vec!["disk", "provision", "start", "alive 4242"]);
-        assert_eq!(h.roles_file_text.borrow().as_deref(), Some("rockfish\n"));
+        assert_eq!(h.roles_file_text.borrow().as_deref(), Some("zetafish\n"));
         assert!(
             !listing(&r).iter().any(|n| n.contains("roles.tmp")),
             "{:?}",
@@ -465,13 +475,13 @@ mod run_tests {
         assert!(go(&r, &full, false).plan.is_none());
         // a partial run (step 7 failed) then a new dry run: the same hash, so a resume matches the plan read
         let first = FakeHost::new(Lie::StartFails, &r);
-        let rep = apply_with(&r, &first, "rockfish", "rockfish", Some(&hash));
+        let rep = apply_with(&r, &first, "zetafish", "zetafish", Some(&hash));
         assert_eq!(row(&rep, 7).0, Status::Fail, "{}", rep.render(true));
         let again = go(&r, &FakeHost::new(Lie::Honest, &r), false);
         assert_eq!(again.plan.as_deref(), Some(hash.as_str()));
         // control: the right hash is accepted and acts
         let h = FakeHost::new(Lie::Honest, &r);
-        let rep = apply_with(&r, &h, "rockfish", "rockfish", Some(&hash));
+        let rep = apply_with(&r, &h, "zetafish", "zetafish", Some(&hash));
         assert!(!rep.failed(), "{}", rep.render(true));
         assert!(h.calls().contains(&"start".to_string()));
     }
@@ -484,18 +494,18 @@ mod run_tests {
         let before = listing(&r);
         let right = Some(hash.as_str());
         for (role, repo, model, plan, why) in [
-            ("rockfish", "rockfish", "sonnet", None, "needs --plan"),
-            ("rockfsh", "rockfish", "sonnet", right, "not the plan"),
-            ("rockfish", "rockfsh", "sonnet", right, "not the plan"),
-            ("rockfish", "rockfish", "haiku", right, "not the plan"),
+            ("zetafish", "zetafish", "sonnet", None, "needs --plan"),
+            ("rockfsh", "zetafish", "sonnet", right, "not the plan"),
+            ("zetafish", "rockfsh", "sonnet", right, "not the plan"),
+            ("zetafish", "zetafish", "haiku", right, "not the plan"),
             (
-                "rockfish",
-                "rockfish",
+                "zetafish",
+                "zetafish",
                 "sonnet",
                 Some("0123456789abcdef"),
                 "not the plan",
             ),
-            ("rockfish", "rockfish", "sonnet", Some(""), "not the plan"),
+            ("zetafish", "zetafish", "sonnet", Some(""), "not the plan"),
         ] {
             let h = FakeHost::new(Lie::Honest, &r);
             let rep =
@@ -518,12 +528,12 @@ mod run_tests {
         let hash = |role: &str, repo: &str, model: &str| {
             crate::lane_new::plan_hash(&r, role, repo, model).unwrap()
         };
-        let base = hash("rockfish", "rockfish", "sonnet");
-        assert_eq!(base, hash("rockfish", "rockfish", "sonnet"));
+        let base = hash("zetafish", "zetafish", "sonnet");
+        assert_eq!(base, hash("zetafish", "zetafish", "sonnet"));
         for other in [
-            hash("rockfis", "rockfish", "sonnet"),
-            hash("rockfish", "rockfis", "sonnet"),
-            hash("rockfish", "rockfish", "haiku"),
+            hash("rockfis", "zetafish", "sonnet"),
+            hash("zetafish", "rockfis", "sonnet"),
+            hash("zetafish", "zetafish", "haiku"),
         ] {
             assert_ne!(base, other);
         }
@@ -531,7 +541,7 @@ mod run_tests {
         let r2 = world(&d2);
         assert_ne!(
             base,
-            crate::lane_new::plan_hash(&r2, "rockfish", "rockfish", "sonnet").unwrap(),
+            crate::lane_new::plan_hash(&r2, "zetafish", "zetafish", "sonnet").unwrap(),
             "another root"
         );
     }
@@ -592,7 +602,7 @@ mod run_tests {
             (Lie::StartNoState, "wrote no state"),
             (Lie::StartDeadPid, "not a live claude"),
             (Lie::StartSpecStillSuspended, "not running"),
-            (Lie::StartEmptyLog, "no non-empty host-rockfish"),
+            (Lie::StartEmptyLog, "no non-empty host-zetafish"),
             (Lie::StartFails, "exited 1"),
         ] {
             let d = tempfile::tempdir().unwrap();
