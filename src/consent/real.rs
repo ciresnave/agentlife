@@ -30,8 +30,8 @@ use user_request as ur;
 use user_request::store::{AuditOnly, Protector, Reservation, Store};
 
 use super::{
-    AnswerError, Asking, Consent, Grant, Kind, Outcome, Prompt, Request, Requester, Resolved,
-    Voided,
+    Answer, AnswerError, Asking, Consent, Grant, Kind, Outcome, Prompt, Request, Requester,
+    Resolved, Voided,
 };
 
 /// How long the person has to answer a prompt before it counts as unanswered (and stays pending).
@@ -113,6 +113,7 @@ fn to_ur_request(req: &Request, requester: &Requester) -> ur::Request {
         summary: req.summary.clone(),
         requester: to_ur_requester(requester),
         reason: req.reason.clone(),
+        allowed_lanes: None,
     }
 }
 
@@ -248,7 +249,8 @@ impl Consent for UserRequestBackend {
         }
     }
 
-    fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String> {
+    fn resolve(&mut self, asking: &Asking, given: Answer) -> Result<Resolved, String> {
+        let outcome = given.outcome;
         let mut store = self
             .open_existing()?
             .ok_or("the consent store is gone: nothing to resolve")?;
@@ -263,17 +265,35 @@ impl Consent for UserRequestBackend {
                     asking.pending_id
                 )
             })?;
+        // `user-request` 0.16 will not let this crate write an `Approval` (it is `#[non_exhaustive]`: an
+        // approval can only come from a channel). So an approval is recorded only if it IS the channel's:
+        // the `Proof` that `Answer::from_channel` kept, and for exactly the request that is held. An
+        // `Approved` without one, or for something else, is not an approval: the reservation is released
+        // with "not asked" (the request stays pending, nothing granted, nothing spent) and the call fails.
+        let mut refused: Option<String> = None;
         let answer = match outcome {
-            // An approval is for exactly what the request asked: its kind and subject, by the
-            // requester recorded with it, ending in no time at all because a one-use grant is spent,
-            // not timed.
-            Outcome::Approved => ur::Outcome::Approved(ur::Approval {
-                kind: held.request.kind,
-                subject: held.request.subject.clone(),
-                requester: held.request.requester.clone(),
-                approved_at: Utc::now(),
-                expires_at: None,
-            }),
+            // the proof is taken by value: it is spent here whether or not it is accepted
+            Outcome::Approved => match given.proof {
+                None => {
+                    refused = Some(
+                        "an approval with no proof from the channel is no approval: nothing was granted"
+                            .to_string(),
+                    );
+                    ur::Outcome::Unavailable("the channel gave no approval".into())
+                }
+                Some(p)
+                    if p.approval().kind != held.request.kind
+                        || p.approval().subject != held.request.subject
+                        || p.approval().requester != held.request.requester =>
+                {
+                    refused = Some(
+                        "the channel's approval is for something other than the held request: nothing was granted"
+                            .to_string(),
+                    );
+                    ur::Outcome::Unavailable("the channel's approval does not match".into())
+                }
+                Some(p) => ur::Outcome::Approved(p.0),
+            },
             Outcome::Cancelled => ur::Outcome::Denied,
             Outcome::TimedOut => ur::Outcome::TimedOut,
             Outcome::Unavailable => ur::Outcome::Unavailable("the person was not asked".into()),
@@ -285,6 +305,9 @@ impl Consent for UserRequestBackend {
             &answer,
             &AuditOnly,
         )?;
+        if let Some(why) = refused {
+            return Err(why);
+        }
         match (outcome, granted) {
             (Outcome::Approved, Some(_)) => Ok(Resolved::Granted),
             (Outcome::Approved, None) => {
@@ -357,17 +380,10 @@ impl Default for HelloPrompt {
     }
 }
 
-/// What the channel said, in this crate's terms. `Refused` (over the maximum, malformed, or ended
-/// while the person decided) was not an answer: it is `Unavailable`, which leaves the request pending.
-pub fn outcome_from_channel(o: &ur::Outcome) -> Outcome {
-    match o {
-        ur::Outcome::Approved(_) => Outcome::Approved,
-        ur::Outcome::Denied => Outcome::Cancelled,
-        ur::Outcome::TimedOut => Outcome::TimedOut,
-        // `Outcome` is non-exhaustive: anything new is "not answered", never an approval.
-        ur::Outcome::Unavailable(_) | ur::Outcome::Refused(_) => Outcome::Unavailable,
-        _ => Outcome::Unavailable,
-    }
+/// What the channel said, in this crate's terms (and carrying its approval when it gave one):
+/// [`Answer::from_channel`].
+pub fn answer_from_channel(o: &ur::Outcome) -> Answer {
+    Answer::from_channel(o)
 }
 
 /// Debug builds only: a test that runs the real binary sets this so no Windows Hello dialog is ever put
@@ -385,14 +401,14 @@ pub(crate) fn hello_request(asking: &Asking) -> ur::Request {
 }
 
 impl Prompt for HelloPrompt {
-    fn ask(&self, asking: &Asking) -> Outcome {
+    fn ask(&self, asking: &Asking) -> Answer {
         use ur::Channel;
         if hello_disabled_for_tests() {
-            return Outcome::Unavailable;
+            return Answer::without_proof(Outcome::Unavailable);
         }
         let channel = ur::HelloChannel::new(ur::hello::HelloConsent::default());
         let req = hello_request(asking);
-        outcome_from_channel(&channel.present(&req, &to_ur_grant(&asking.grant), self.wait))
+        answer_from_channel(&channel.present(&req, &to_ur_grant(&asking.grant), self.wait))
     }
 }
 
