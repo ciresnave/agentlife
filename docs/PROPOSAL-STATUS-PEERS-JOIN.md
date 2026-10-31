@@ -1,5 +1,7 @@
 # Proposal: `lane-restart status --peers` (slice 3 (a)3)
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 **Status: built in 0.14.23** (PM rulings 2026-10-14: go; opt-in, read-only and soft-failing is enough; extend
 `notify::Peer` and add `list_all` in `lane-restart/notify.rs`, no dependency onto `agentlife`; summary printed only
 under `--peers`, truncated, never in the default JSON). The proposal as written follows; the measurements are at the end.

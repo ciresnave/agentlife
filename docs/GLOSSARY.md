@@ -1,5 +1,7 @@
 # Glossary
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 The terms this repository's docs and CLI use, each defined once. Where a term has a design page, it is
 named; nothing here overrides that page.
 

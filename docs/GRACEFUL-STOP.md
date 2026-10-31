@@ -1,5 +1,7 @@
 # Graceful stop of a running agent (M2b)
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 `agentlife park <agent>` and `agentlife stop <agent>` on an agent that is **running**. This is the first
 code in agentlife that ends a process, so this page says exactly what it does, what it refuses, and
 what is not built. Design: `DESIGN.md` §3, `DESIGN-REVISION-2.md` §3 to §4, `DESIGN-REVISION-3.md` §4.2.

@@ -1,5 +1,7 @@
 # Session restart tool — design spec
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 **Status: SPEC, settled — not yet built.** Written per the task from CireSnave via the PM,
 2026-09-18: pulled ahead of the throttle ("it is another project that will help us avoid the
 condition that required the throttle in the first place"). Location decided: a Cargo workspace crate

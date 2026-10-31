@@ -1,5 +1,7 @@
 # What agentlife needs from Synapse (for the Synapse lane, routed by the PM)
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 From the `agentlife` lane, 2026-10-07. Context: `DESIGN-REVISION-3.md`. CireSnave ruled for **lazy start**:
 an agent that is not running starts when a message arrives for it, which *"would require integration with
 Synapse"*. This note is the whole of that integration, stated as needs. **Nothing here is a request to start

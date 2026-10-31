@@ -1,5 +1,7 @@
 # agentlife — design revision 3: lazy start, idle-to-lazy, and agents that must not be shut down
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 **Status: PROPOSAL for PM approval. Docs only, no code.** Written 2026-10-06/07 against the PM's
 `[TASK] design-revision-2 follow-through`. Builds on `DESIGN-REVISION-2.md` (merged, #4). Where this
 document conflicts with revision 2, this one wins; §10 lists exactly what it changes. Revision 2's durable

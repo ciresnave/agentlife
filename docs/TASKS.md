@@ -1,5 +1,7 @@
 # Task Scheduler tasks: logon and unlock
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 `agentlife install-task` prints, and with `--register` creates, two per-user tasks (module `src/task.rs`).
 Both are "run only when the user is logged on" (`InteractiveToken`, `LeastPrivilege`, no stored password, no
 elevation) because a `wt.exe` tab needs the desktop. There is no execution time limit.

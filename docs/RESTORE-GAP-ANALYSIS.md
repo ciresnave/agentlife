@@ -1,5 +1,7 @@
 # What `agentlife restore` lacks to bring the fleet back after a reboot, unattended
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 Task from the PM, 2026-10-10 (CireSnave asked for it). **Analysis only: nothing was launched, installed
 or written outside this worktree.** Ref for every "at" below: `origin/main` = `037c7fe` (0.11.3). Live-box
 facts were read 2026-10-10 about 14:00-14:40Z, read-only.

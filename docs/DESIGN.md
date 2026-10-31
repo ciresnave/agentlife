@@ -1,5 +1,7 @@
 # agentlife — design
 
+> **claude-peers is being retired (CireSnave 2026-10-31: "Get claude-peers out of our workflow and get every lane on Synapse.").** This document is kept as written; where it says claude-peers, broker or peer id, read it as the state when it was written. The live code that still speaks to the broker stays until every lane answers a PING on Synapse (PM ruling 2026-10-31), then goes in its own PR. Current launch form: `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 > **REVISED 2026-10-04: see `DESIGN-REVISION-1.md`.** It supersedes §1 (roster), §2.1–2.4 (what restore
 > reads), §4.1/§4.3/§4.4 (trust model) and the roster-lost row of §7. The rest of this document stands.
 > The sections it supersedes are left as written, as the dated record of the first proposal.
