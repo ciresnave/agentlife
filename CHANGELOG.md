@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.29.49
+
+- **Fixed (PM HOLD on #200): `lane_new_host::run_tests::an_honest_run_provisions_then_starts_and_cleans_up_its_roles_file` failed on Linux CI on `main` since 7ab6da2.** Cause (read from the CI log, run 41167811564): step 7 reported "no non-empty host-<role>-<pid>.log ... written since the start" while steps 0-6 were fine. The fake host wrote its log within milliseconds of `since = SystemTime::now()`, and Linux stamps a file with a coarse kernel clock that can read behind that, so `mtime < since` and the log was skipped. It was **not** the forge: steps 1 and 2 read `later` (the fake), step 0 read `nothing in the way`, and `run_full` is called with no `Vcs`. The fake now stamps its log 5 s ahead, as a real host's later write is. Production code is unchanged. Tests also stop using the real lane name: `rockfish` becomes `zetafish` in the `lane_new*` test modules. Control: the 40 `lane_new` lib tests pass with `gh` removed from `PATH` (`Get-Command gh` empty first). Not reproduced locally (Windows has a fine clock); the fix is argued from the log, and CI on this PR is the test.
+
 ## 0.29.47
 
 - **Docs only (PM TASK 2026-10-30, board 339 option A): `docs/RUNNER-ACCOUNTS.md`, the cpufish runner.** Corrects a wrong fact: oneAPI/oneMKL **is** installed, at `C:\Program Files (x86)\Intel\oneAPI` (`2026.1`, `latest`, `mkl\latest\include\mkl.h` present, `icpx.exe` under `compiler\latest\bin`, `BUILTIN\Users` read-and-execute); the earlier note looked under `C:\Program Files` only. `MKLROOT`/`ONEAPI_ROOT` are unset. Re-ran the cpufish dry run at `origin/main` ce69169 and pasted its output (exit 0, `ACL preflight: clean`; `gh-runner-cpufish` and `C:\gh-runner-cpufish` absent before and after, read with `Get-LocalUser` and `Test-Path`). Adds an explicit undo block (removal token, `-Remove -Apply`, `Remove-LocalUser`, delete the root, a read-back with a positive control). The elevated paste block is unchanged. No machine change. Version 0.29.47 is provisional.

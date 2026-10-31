@@ -950,7 +950,7 @@ mod tests {
     }
 
     fn go(r: &Roots, role: &str, apply: bool) -> Report {
-        run_local(r, role, "rockfish", "sonnet", apply, Utc::now())
+        run_local(r, role, "zetafish", "sonnet", apply, Utc::now())
     }
 
     fn statuses(rep: &Report) -> Vec<(u8, Status)> {
@@ -984,7 +984,7 @@ mod tests {
         assert!(bad
             .unwrap_err()
             .contains("state dir is not an absolute path"));
-        let rep = go(&ok, "rockfish", false);
+        let rep = go(&ok, "zetafish", false);
         assert!(!rep.paths.is_empty());
         assert!(rep.paths.iter().all(|p| p.is_absolute()), "{:?}", rep.paths);
     }
@@ -994,7 +994,7 @@ mod tests {
         let d = tempdir().unwrap();
         let r = roots(&d);
         let before = listing(&r);
-        let dry = go(&r, "rockfish", false);
+        let dry = go(&r, "zetafish", false);
         assert!(!dry.failed(), "{}", dry.render(false));
         assert_eq!(
             statuses(&dry),
@@ -1002,7 +1002,7 @@ mod tests {
         );
         assert_eq!(listing(&r), before, "a dry run changed the state dir");
         // control: the same run with --apply does change it
-        let run = go(&r, "rockfish", true);
+        let run = go(&r, "zetafish", true);
         assert_eq!(
             statuses(&run),
             vec![(3, Status::Ok), (4, Status::Ok), (5, Status::Ok)],
@@ -1011,8 +1011,8 @@ mod tests {
         );
         let after = listing(&r);
         assert!(
-            after.contains(&"rockfish.mcp.json".to_string())
-                && after.contains(&"rockfish.launch.json".to_string())
+            after.contains(&"zetafish.mcp.json".to_string())
+                && after.contains(&"zetafish.launch.json".to_string())
         );
     }
 
@@ -1020,9 +1020,9 @@ mod tests {
     fn rerunning_converges_and_a_missing_artifact_is_the_only_thing_redone() {
         let d = tempdir().unwrap();
         let r = roots(&d);
-        go(&r, "rockfish", true);
-        let spec_bytes = std::fs::read(r.spec_path("rockfish")).unwrap();
-        let again = go(&r, "rockfish", true);
+        go(&r, "zetafish", true);
+        let spec_bytes = std::fs::read(r.spec_path("zetafish")).unwrap();
+        let again = go(&r, "zetafish", true);
         assert_eq!(
             statuses(&again),
             vec![
@@ -1032,12 +1032,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            std::fs::read(r.spec_path("rockfish")).unwrap(),
+            std::fs::read(r.spec_path("zetafish")).unwrap(),
             spec_bytes,
             "an already-step rewrote the spec"
         );
-        std::fs::remove_file(r.spec_path("rockfish")).unwrap();
-        let third = go(&r, "rockfish", true);
+        std::fs::remove_file(r.spec_path("zetafish")).unwrap();
+        let third = go(&r, "zetafish", true);
         assert_eq!(
             statuses(&third),
             vec![(3, Status::Already), (4, Status::Ok), (5, Status::Already)]
@@ -1048,23 +1048,23 @@ mod tests {
     fn the_spec_is_suspended_with_no_kind_reads_back_whole_and_the_launcher_refuses_it() {
         let d = tempdir().unwrap();
         let r = roots(&d);
-        go(&r, "rockfish", true);
-        let s = spec::read(&r.state_dir, "rockfish").unwrap();
+        go(&r, "zetafish", true);
+        let s = spec::read(&r.state_dir, "zetafish").unwrap();
         assert_eq!(s.state, SpecState::Suspended);
         assert!(s.stop_kind.is_none());
-        assert_eq!(s.cwd, r.projects.join("rockfish").to_string_lossy());
-        assert_eq!(s.launch_args[1], r.mcp_path("rockfish").to_string_lossy());
+        assert_eq!(s.cwd, r.projects.join("zetafish").to_string_lossy());
+        assert_eq!(s.launch_args[1], r.mcp_path("zetafish").to_string_lossy());
         assert!(matches!(
             start::launcher_may_start(&s),
             Err(start::StartRefusal::StopNotSoft("stop-unclassified"))
         ));
         // an unknown variant is a parse failure, not a spec (the PM's `stopped`)
-        let p = r.spec_path("rockfish");
+        let p = r.spec_path("zetafish");
         let t = std::fs::read_to_string(&p)
             .unwrap()
             .replace("\"suspended\"", "\"stopped\"");
         std::fs::write(&p, t).unwrap();
-        assert!(spec::read(&r.state_dir, "rockfish").is_err());
+        assert!(spec::read(&r.state_dir, "zetafish").is_err());
     }
 
     #[test]
@@ -1083,25 +1083,25 @@ mod tests {
             b.join("bin").join("chan"),
         )
         .unwrap();
-        let rep = go(&r, "rockfish", true);
+        let rep = go(&r, "zetafish", true);
         assert!(!rep.failed(), "{}", rep.render(true));
-        let s = spec::read(&r.state_dir, "rockfish").unwrap();
-        assert_eq!(s.cwd, proj.join("rockfish").to_string_lossy());
+        let s = spec::read(&r.state_dir, "zetafish").unwrap();
+        assert_eq!(s.cwd, proj.join("zetafish").to_string_lossy());
         let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(r.mcp_path("rockfish")).unwrap())
+            serde_json::from_str(&std::fs::read_to_string(r.mcp_path("zetafish")).unwrap())
                 .unwrap();
         let home = v["mcpServers"]["synapse"]["env"]["SYNAPSE_HOME"]
             .as_str()
             .unwrap()
             .to_string();
-        assert_eq!(home, fwd(&r.lane_home("rockfish")));
+        assert_eq!(home, fwd(&r.lane_home("zetafish")));
     }
 
     #[test]
     fn the_mcp_config_has_the_shape_of_a_lane_that_works() {
         let d = tempdir().unwrap();
         let r = roots(&d);
-        let v = mcp_config(&r, "rockfish");
+        let v = mcp_config(&r, "zetafish");
         let s = &v["mcpServers"]["synapse"];
         let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["args", "command", "env"]);
@@ -1111,7 +1111,7 @@ mod tests {
             .iter()
             .map(|a| a.as_str().unwrap())
             .collect();
-        assert_eq!(&args[..2], &["--role", "rockfish"]);
+        assert_eq!(&args[..2], &["--role", "zetafish"]);
         assert_eq!(args[2], "--home");
         let env: Vec<&str> = s["env"]
             .as_object()
@@ -1134,10 +1134,10 @@ mod tests {
         for (role, repo, model, why) in [
             ("pm", "x", "sonnet", "pm"),
             ("a/b", "x", "sonnet", "plain identifier"),
-            ("rockfish", "a/b", "sonnet", "repository name"),
-            ("rockfish", "..", "sonnet", "repository name"),
-            ("rockfish", "x", "opus", "never Opus"),
-            ("rockfish", "x", "claude-opus-5-5", "never Opus"),
+            ("zetafish", "a/b", "sonnet", "repository name"),
+            ("zetafish", "..", "sonnet", "repository name"),
+            ("zetafish", "x", "opus", "never Opus"),
+            ("zetafish", "x", "claude-opus-5-5", "never Opus"),
         ] {
             let rep = run_local(&r, role, repo, model, true, Utc::now());
             assert!(
@@ -1147,16 +1147,16 @@ mod tests {
             );
         }
         // a lane that has run
-        std::fs::write(r.state_dir.join("rockfish.json"), "{}").unwrap();
-        let rep = go(&r, "rockfish", true);
+        std::fs::write(r.state_dir.join("zetafish.json"), "{}").unwrap();
+        let rep = go(&r, "zetafish", true);
         assert!(rep.failed() && rep.rows[0].detail.contains("has run"));
-        std::fs::remove_file(r.state_dir.join("rockfish.json")).unwrap();
+        std::fs::remove_file(r.state_dir.join("zetafish.json")).unwrap();
         // an existing spec for another cwd differs: refused, and nothing else was written either
-        let mut other = build_spec(&r, "rockfish", "elsewhere", "sonnet", Utc::now()).unwrap();
+        let mut other = build_spec(&r, "zetafish", "elsewhere", "sonnet", Utc::now()).unwrap();
         other.state = SpecState::Suspended;
         spec::write_atomic(&r.state_dir, &other).unwrap();
         let before2 = listing(&r);
-        let rep = go(&r, "rockfish", true);
+        let rep = go(&r, "zetafish", true);
         assert!(
             rep.failed() && rep.rows[0].detail.contains("differs"),
             "{}",
@@ -1173,8 +1173,8 @@ mod tests {
         );
         // a missing soak file
         std::fs::remove_file(r.soak_path()).unwrap();
-        std::fs::remove_file(r.spec_path("rockfish")).unwrap();
-        assert!(go(&r, "rockfish", true).rows[0]
+        std::fs::remove_file(r.spec_path("zetafish")).unwrap();
+        assert!(go(&r, "zetafish", true).rows[0]
             .detail
             .contains("not found"));
     }
@@ -1184,26 +1184,26 @@ mod tests {
         let d = tempdir().unwrap();
         let r = roots(&d);
         // CRLF file with no final newline, and the role only in a comment
-        std::fs::write(r.soak_path(), "# rockfish soon\r\nfuel").unwrap();
-        let rep = go(&r, "rockfish", true);
+        std::fs::write(r.soak_path(), "# zetafish soon\r\nfuel").unwrap();
+        let rep = go(&r, "zetafish", true);
         assert!(!rep.failed(), "{}", rep.render(true));
         assert_eq!(
             std::fs::read_to_string(r.soak_path()).unwrap(),
-            "# rockfish soon\r\nfuel\r\nrockfish\r\n"
+            "# zetafish soon\r\nfuel\r\nzetafish\r\n"
         );
         // an unsafe line anywhere fails the run, as the weekly script would
         std::fs::write(r.soak_path(), "fuel\n..\\x\n").unwrap();
-        std::fs::remove_file(r.spec_path("rockfish")).unwrap();
-        std::fs::remove_file(r.mcp_path("rockfish")).unwrap();
-        let rep = go(&r, "rockfish", true);
+        std::fs::remove_file(r.spec_path("zetafish")).unwrap();
+        std::fs::remove_file(r.mcp_path("zetafish")).unwrap();
+        let rep = go(&r, "zetafish", true);
         assert!(
             rep.failed() && rep.rows[0].detail.contains("unsafe"),
             "{}",
             rep.render(true)
         );
         // listed twice: step 5 refuses to guess
-        std::fs::write(r.soak_path(), "rockfish\nrockfish\n").unwrap();
-        let rep = go(&r, "rockfish", true);
+        std::fs::write(r.soak_path(), "zetafish\nzetafish\n").unwrap();
+        let rep = go(&r, "zetafish", true);
         assert!(
             rep.failed()
                 && rep
