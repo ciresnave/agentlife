@@ -161,6 +161,10 @@ pub trait Vcs {
     fn remote_head(&self, nwo: &str) -> Result<Option<String>, String>;
     /// The file's bytes at that commit on the remote, `None` when it is not there.
     fn remote_file(&self, nwo: &str, sha: &str, path: &str) -> Result<Option<Vec<u8>>, String>;
+    /// Every file path in the tree at that commit on the remote (no directories). `Err` if the listing is truncated.
+    fn remote_paths(&self, nwo: &str, sha: &str) -> Result<Vec<String>, String>;
+    /// Every file in the checkout that `git add -A` would commit (tracked, or untracked and not ignored).
+    fn local_paths(&self, dir: &Path) -> Result<Vec<String>, String>;
     fn clone_repo(&self, nwo: &str, dir: &Path) -> Result<(), String>;
     fn local_state(&self, dir: &Path) -> Result<LocalState, String>;
     /// Stages everything, commits on `main`, returns the new commit.
@@ -263,6 +267,37 @@ impl Vcs for GhGit {
             Ok(None)
         } else {
             Err(format!("gh api contents/{path}: {e}"))
+        }
+    }
+
+    fn remote_paths(&self, nwo: &str, sha: &str) -> Result<Vec<String>, String> {
+        let o = run(
+            "gh",
+            &[
+                "api",
+                &format!("repos/{nwo}/git/trees/{sha}?recursive=1"),
+                "--jq",
+                r#"if .truncated then error("truncated") else (.tree[] | select(.type != "tree") | .path) end"#,
+            ],
+            None,
+        )?;
+        if o.status.success() {
+            Ok(text(&o).lines().map(str::to_string).collect())
+        } else {
+            Err(format!("gh api git/trees: {}", short_err(&o)))
+        }
+    }
+
+    fn local_paths(&self, dir: &Path) -> Result<Vec<String>, String> {
+        let o = run(
+            "git",
+            &["ls-files", "--cached", "--others", "--exclude-standard"],
+            Some(dir),
+        )?;
+        if o.status.success() {
+            Ok(text(&o).lines().map(str::to_string).collect())
+        } else {
+            Err(format!("git ls-files: {}", short_err(&o)))
         }
     }
 
@@ -405,6 +440,26 @@ pub fn step_repo(vcs: &dyn Vcs, nwo: &str, apply: bool) -> Result<(Outcome, Stri
     }
 }
 
+/// The paths that are not a seed file's, sorted.
+fn not_in_seed(paths: Vec<String>, seed: &[SeedFile]) -> Vec<String> {
+    let mut v: Vec<String> = paths
+        .into_iter()
+        .filter(|p| !seed.iter().any(|f| f.path == p))
+        .collect();
+    v.sort();
+    v
+}
+
+/// At most three names, and how many more.
+fn list_some(v: &[String]) -> String {
+    let shown: Vec<&str> = v.iter().take(3).map(String::as_str).collect();
+    if v.len() > 3 {
+        format!("{} and {} more", shown.join(", "), v.len() - 3)
+    } else {
+        shown.join(", ")
+    }
+}
+
 fn read_local(dir: &Path, path: &str) -> Option<Vec<u8>> {
     std::fs::read(dir.join(path)).ok()
 }
@@ -426,6 +481,17 @@ pub fn step_seed(
     } else {
         None
     };
+    // An existing public repo is used only if it is empty or holds nothing but seed files (the resume case
+    // after a failed step 7). Anything else in it is somebody's work: refuse, push nothing.
+    if let Some(sha) = &head {
+        let extra = not_in_seed(vcs.remote_paths(nwo, sha)?, seed);
+        if !extra.is_empty() {
+            return Err(format!(
+                "{nwo} is not empty and not seed-only: its main also holds {}; lane-new only uses an empty repo or one holding the seed",
+                list_some(&extra)
+            ));
+        }
+    }
     let mut remote_missing = Vec::new();
     let mut remote_differs = Vec::new();
     for f in seed {
@@ -452,6 +518,17 @@ pub fn step_seed(
             return Err(format!("{} is a checkout of another remote", dir.display()))
         }
         _ => {}
+    }
+    // `commit_all` runs `git add -A`: a stray file in an existing checkout would be pushed to a public repo.
+    if matches!(state, LocalState::Repo { .. }) {
+        let extra = not_in_seed(vcs.local_paths(dir)?, seed);
+        if !extra.is_empty() {
+            return Err(format!(
+                "{} holds files that are not part of the seed ({}): nothing is committed or pushed",
+                dir.display(),
+                list_some(&extra)
+            ));
+        }
     }
     let local_clean_at_head = matches!(&state, LocalState::Repo { head: Some(h), clean: true, .. } if Some(h) == head.as_ref());
     if remote_missing.is_empty() && local_clean_at_head {
@@ -665,6 +742,18 @@ mod tests {
                 .get(nwo)
                 .filter(|(h, _)| h == sha)
                 .and_then(|(_, f)| f.get(path).cloned()))
+        }
+        fn remote_paths(&self, nwo: &str, sha: &str) -> Result<Vec<String>, String> {
+            Ok(self
+                .remote
+                .borrow()
+                .get(nwo)
+                .filter(|(h, _)| h == sha)
+                .map(|(_, f)| f.keys().cloned().collect())
+                .unwrap_or_default())
+        }
+        fn local_paths(&self, dir: &Path) -> Result<Vec<String>, String> {
+            Ok(tree_of(dir).into_keys().collect())
         }
         fn clone_repo(&self, nwo: &str, dir: &Path) -> Result<(), String> {
             self.note("clone");
@@ -962,6 +1051,89 @@ mod tests {
         let e = step_seed(&v2, NWO, &dir, &seed(), true, true).unwrap_err();
         assert!(e.contains("differs: not overwriting"), "{e}");
         assert_eq!(std::fs::read(dir.join("README.md")).unwrap(), b"mine");
+    }
+
+    fn remote_with(v: &Fake, files: &[(&str, &[u8])]) -> Tree {
+        let t: Tree = files
+            .iter()
+            .map(|(k, b)| (k.to_string(), b.to_vec()))
+            .collect();
+        v.remote
+            .borrow_mut()
+            .insert(NWO.into(), (id_of(&t), t.clone()));
+        t
+    }
+
+    fn pushed_or_committed(v: &Fake) -> bool {
+        v.calls
+            .borrow()
+            .iter()
+            .any(|c| c == "clone" || c == "commit" || c == "push")
+    }
+
+    #[test]
+    fn an_existing_repo_with_an_unrelated_file_is_refused_and_nothing_is_pushed() {
+        let s = seed();
+        let readme = s.iter().find(|f| f.path == "README.md").unwrap();
+        for apply in [false, true] {
+            let d = tempdir().unwrap();
+            let v = Fake::default().with_repo(NWO);
+            let before = remote_with(
+                &v,
+                &[
+                    ("README.md", readme.bytes.as_slice()),
+                    ("notes/private.txt", b"somebody's work"),
+                ],
+            );
+            let e = step_seed(&v, NWO, &d.path().join("rockfish"), &s, apply, true).unwrap_err();
+            assert!(
+                e.contains("not empty and not seed-only") && e.contains("notes/private.txt"),
+                "apply={apply}: {e}"
+            );
+            assert!(!pushed_or_committed(&v), "apply={apply}: {:?}", v.calls);
+            assert_eq!(v.remote.borrow()[NWO].1, before, "the remote changed");
+            assert!(!d.path().join("rockfish").exists());
+        }
+    }
+
+    #[test]
+    fn an_existing_repo_holding_only_some_seed_files_is_the_resume_case_and_is_completed() {
+        let s = seed();
+        let readme = s.iter().find(|f| f.path == "README.md").unwrap();
+        let d = tempdir().unwrap();
+        let v = Fake::default().with_repo(NWO);
+        remote_with(&v, &[("README.md", readme.bytes.as_slice())]);
+        let (o, detail) = step_seed(&v, NWO, &d.path().join("rockfish"), &s, true, true).unwrap();
+        assert_eq!(o, Outcome::Ok, "{detail}");
+        let have: Vec<String> = v.remote.borrow()[NWO].1.keys().cloned().collect();
+        let mut want: Vec<String> = s.iter().map(|f| f.path.to_string()).collect();
+        want.sort();
+        assert_eq!(
+            have, want,
+            "control: the seed is now complete and nothing else"
+        );
+    }
+
+    #[test]
+    fn a_checkout_holding_an_unrelated_file_is_refused_before_anything_is_committed() {
+        let s = seed();
+        let d = tempdir().unwrap();
+        let dir = d.path().join("rockfish");
+        let v = Fake::default().with_repo(NWO);
+        let before = remote_with(&v, &[]);
+        v.clone_repo(NWO, &dir).unwrap();
+        std::fs::write(dir.join("api-key.txt"), b"hunter2").unwrap();
+        v.calls.borrow_mut().clear();
+        for apply in [false, true] {
+            let e = step_seed(&v, NWO, &dir, &s, apply, true).unwrap_err();
+            assert!(
+                e.contains("not part of the seed") && e.contains("api-key.txt"),
+                "apply={apply}: {e}"
+            );
+            assert!(!pushed_or_committed(&v), "apply={apply}: {:?}", v.calls);
+        }
+        assert_eq!(v.remote.borrow()[NWO].1, before);
+        assert!(dir.join("api-key.txt").exists(), "the file was left alone");
     }
 
     #[test]
