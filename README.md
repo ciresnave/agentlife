@@ -1,5 +1,7 @@
 # agentlife
 
+> **Retired 2026-10-31 (CireSnave: "Get claude-peers out of our workflow and get every lane on Synapse.").** Where this document describes claude-peers, the broker or peer ids as how things work today, that is being removed: the code stays until every lane answers a PING on Synapse (PM ruling 2026-10-31) and is then deleted in its own PR. The current launch form is `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 Agent lifecycle control. **Status: skeleton; the design is the first deliverable.**
 
 ## Why
