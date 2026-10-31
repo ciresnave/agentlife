@@ -292,7 +292,11 @@ fn channels_text(r: &lane_restart::spec::RoleStatus) -> String {
         (Some(_), Some(c)) => format!(
             "\tchannels={}{}",
             c.text(),
-            if c.complete() { "" } else { " INCOMPLETE" }
+            if c.reaches_synapse() {
+                ""
+            } else {
+                " NO-SYNAPSE"
+            }
         ),
         (Some(_), None) => "\tchannels=?".to_string(),
         (None, _) => String::new(),
