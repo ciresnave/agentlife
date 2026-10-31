@@ -582,6 +582,11 @@ pub struct RoleStatus {
     /// killed mid-turn cannot read as busy. Absent for every other role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Activity>,
+    /// Which of `--mcp-config`, `server:claude-peers` and `server:synapse` the LIVE session was launched
+    /// with, read from the launch arguments its own state recorded. Absent for a role that is not live
+    /// and for a state that recorded no launch arguments (shown as `?`, never as "none").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<crate::spec_channels::Channels>,
     /// Size of the role's HANDOFF file against its ceiling (8 KB lane, 20 KB PM), read from the
     /// role's recorded cwd. `None` when no cwd is known or there is no such file: "none", never
     /// 0 bytes.
@@ -677,6 +682,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         detail: None,
         model: None,
         activity: None,
+        channels: None,
         handoff: None,
         nested_in: None,
         peers: None,
@@ -699,6 +705,10 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 quiet_secs: (facts.now() - st.updated_at).num_seconds().max(0),
                 quiet_over: None,
             });
+            out.channels = st
+                .launch_args
+                .as_deref()
+                .map(crate::spec_channels::Channels::of);
         }
     }
     if let Ok(st) = &lane_state {
@@ -1592,6 +1602,62 @@ mod tests {
             serde_json::to_string(&st).unwrap(),
         )
         .unwrap();
+    }
+
+    fn lane_state_with_args(dir: &Path, role: &str, args: Option<Vec<String>>) {
+        let mut st = crate::testing::state_at(role, "s", "Stop");
+        st.pid = 55;
+        st.pid_start_secs = Some(100);
+        st.launch_args = args;
+        std::fs::write(
+            dir.join(format!("{role}.json")),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_live_role_shows_which_push_channels_it_was_launched_with() {
+        let args = |a: &[&str]| Some(a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let ch = |role: &str, a: Option<Vec<String>>, facts: &RecordingFacts| {
+            let d = tempdir().unwrap();
+            lane_state_with_args(d.path(), role, a);
+            role_status(d.path(), role, facts)
+                .channels
+                .map(|c| c.text())
+        };
+        let live = facts_with_live(55, 100);
+        assert_eq!(
+            ch(
+                "a",
+                args(&[
+                    "--mcp-config",
+                    "m",
+                    "--dangerously-load-development-channels",
+                    "server:claude-peers",
+                    "server:synapse"
+                ]),
+                &live
+            )
+            .as_deref(),
+            Some("mcp+peers+synapse")
+        );
+        // control: a different launch reads differently
+        assert_eq!(
+            ch(
+                "b",
+                args(&[
+                    "--dangerously-load-development-channels",
+                    "server:claude-peers"
+                ]),
+                &live
+            )
+            .as_deref(),
+            Some("-+peers+-")
+        );
+        // recorded nothing: no verdict (the column prints `?`); not live: no column
+        assert_eq!(ch("c", None, &live), None);
+        assert_eq!(ch("d", args(&["--mcp-config", "m"]), &dead_facts()), None);
     }
 
     #[test]

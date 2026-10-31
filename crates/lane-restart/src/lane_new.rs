@@ -1214,4 +1214,23 @@ mod tests {
             rep.render(true)
         );
     }
+
+    #[test]
+    fn a_new_lanes_spec_has_the_mcp_config_and_both_push_channels() {
+        let d = tempfile::tempdir().unwrap();
+        let r = roots(&d);
+        let s = build_spec(&r, "zetafish", "zetafish", "sonnet", Utc::now()).unwrap();
+        assert_eq!(crate::spec_channels::check(&s.launch_args), Ok(()));
+        // control: the same spec with each of the three removed is refused by the same check
+        for drop in ["--mcp-config", "server:claude-peers", "server:synapse"] {
+            let mut a = s.launch_args.clone();
+            let i = a.iter().position(|x| x == drop).unwrap();
+            a.remove(i);
+            if drop == "--mcp-config" {
+                a.remove(i); // its path
+            }
+            let e = crate::spec_channels::check(&a).unwrap_err();
+            assert!(e.contains(drop), "{drop}: {e}");
+        }
+    }
 }
