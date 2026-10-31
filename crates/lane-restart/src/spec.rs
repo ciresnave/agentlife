@@ -518,6 +518,12 @@ fn sweep_temp_files(dir: &Path, role: &str) {
 /// Where a restart persists specs. The real one is `DirSpecStore`; tests record.
 pub trait SpecStore {
     fn write(&self, spec: &SpecFile) -> Result<(), SpecError>;
+    /// The spec already recorded for `role`, when one reads and is complete. A restart keeps ITS
+    /// launch flags (`specs both-channels` and the like edit them), not the running session's. A
+    /// store with none says `None`.
+    fn existing(&self, _role: &str) -> Option<SpecFile> {
+        None
+    }
 }
 
 pub struct DirSpecStore {
@@ -527,6 +533,11 @@ pub struct DirSpecStore {
 impl SpecStore for DirSpecStore {
     fn write(&self, spec: &SpecFile) -> Result<(), SpecError> {
         write_atomic(&self.dir, spec)
+    }
+    fn existing(&self, role: &str) -> Option<SpecFile> {
+        read(&self.dir, role)
+            .ok()
+            .filter(|s| s.role.as_str() == role && s.check().is_ok())
     }
 }
 

@@ -236,6 +236,7 @@ pub fn plan_stop(
     )
     .map_err(StopRefusal::Target)?;
     build_stop_plan(
+        dir,
         decided.state,
         decided.identity,
         decided.will_act,
@@ -247,10 +248,25 @@ pub fn plan_stop(
     )
 }
 
+/// The state with the launch flags of the spec recorded in `dir` (when one is complete) in place of
+/// the running session's. Pure apart from reading that spec.
+fn with_recorded_flags(mut state: LaneState, dir: &Path) -> LaneState {
+    let store = crate::spec::DirSpecStore {
+        dir: dir.to_path_buf(),
+    };
+    if let Some(prev) = store.existing(&state.role) {
+        if let Ok(l) = crate::launch::LaunchSpec::try_from(&state) {
+            state.launch_args = crate::relaunch::carry_spec_flags(l, &prev).launch_args;
+        }
+    }
+    state
+}
+
 /// The checks that need a decided target: the HANDOFF and a complete spec. Separate from
 /// `plan_stop` so they are testable without a process table.
 #[allow(clippy::too_many_arguments)]
 pub fn build_stop_plan(
+    dir: &Path,
     state: LaneState,
     identity: ProcessIdentity,
     will_act: bool,
@@ -260,6 +276,9 @@ pub fn build_stop_plan(
     now: DateTime<Utc>,
     policy_default: &str,
 ) -> Result<StopPlan, StopRefusal> {
+    // The recorded spec's launch flags win over the running session's, as for a restart: a
+    // `specs ...` edit made while the lane runs must survive the stop that suspends it.
+    let state = with_recorded_flags(state, dir);
     // Another lane's idle claim is `updated_at` here: the idle gate has already required
     // `no_background_shells`, which only the assert-idle event sets and every later turn clears.
     let idle_claimed_at = (!self_stop).then_some(state.updated_at);
@@ -383,7 +402,11 @@ mod tests {
 
     fn plan_for(state: LaneState, self_stop: bool) -> Result<StopPlan, StopRefusal> {
         let now = Utc.timestamp_opt(5_000, 0).unwrap();
+        // the spec directory is the state's cwd in these tests: a test that wants a recorded spec
+        // writes it there
+        let dir = std::path::PathBuf::from(&state.cwd);
         build_stop_plan(
+            &dir,
             state,
             identity(),
             true,
@@ -766,5 +789,48 @@ mod tests {
             "sonnet",
         );
         assert!(matches!(r, Err(StopRefusal::InvalidRole(_))), "{r:?}");
+    }
+
+    /// A `specs ...` edit made while the lane runs survives the stop that suspends it (the suspended
+    /// spec a `start` then launches from carries the edited flags, not the running session's).
+    #[test]
+    fn a_stop_keeps_the_edited_specs_launch_flags() {
+        let edited: Vec<String> = [
+            "--mcp-config",
+            "C:/Projects/.lane-state/baracuda.mcp.json",
+            "--dangerously-load-development-channels",
+            "server:claude-peers",
+            "server:synapse",
+        ]
+        .map(String::from)
+        .to_vec();
+        let d = tempdir().unwrap();
+        write_handoff(d.path(), 100);
+        let mut s = state_in(d.path());
+        s.updated_at = Utc.timestamp_opt(1_900, 0).unwrap();
+        s.launch_args = Some(
+            [
+                "claude",
+                "--dangerously-load-development-channels",
+                "server:claude-peers",
+            ]
+            .map(String::from)
+            .to_vec(),
+        );
+        // control: nothing recorded, so the running session's flags are what the stop records
+        let plain = plan_for(s.clone(), false).unwrap();
+        assert_eq!(
+            plain.stopping.launch_args,
+            [
+                "--dangerously-load-development-channels",
+                "server:claude-peers"
+            ]
+        );
+        let mut prev = plain.stopping.clone();
+        prev.launch_args = edited.clone();
+        prev.state = SpecState::Running;
+        spec::write_atomic(d.path(), &prev).unwrap();
+        let plan = plan_for(s, false).unwrap();
+        assert_eq!(plan.stopping.launch_args, edited);
     }
 }
