@@ -45,6 +45,12 @@ pub fn is_shell(name: &str) -> bool {
     SHELLS.contains(&b.as_str())
 }
 
+/// This tool's own executable. A `lane-restart` command that starts another `lane-restart` command
+/// (`lane-new` runs `start` as a child) sits between the child and the `claude` session that asked.
+pub fn is_lane_restart(name: &str) -> bool {
+    image_base(name) == "lane-restart"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
