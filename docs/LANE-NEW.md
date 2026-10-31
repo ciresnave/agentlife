@@ -12,7 +12,7 @@ Read from rockfish, a lane created this way **[read]**:
 | artifact | where | shape |
 |---|---|---|
 | repo | `ThinkersJournal/<repo>`, public **[PM]** | clone at `C:\Projects\<repo>`; seed: `LICENSE-APACHE`, `LICENSE-MIT`, `.gitignore`, `.gitattributes`, `README.md`, `HANDOFF.md` |
-| launch spec | `.lane-state/<role>.launch.json` | schema 1, `role`, `name`, `cwd`, `model: sonnet`, `permission_mode: auto`, `launch_args` = `--mcp-config <state>\<role>.mcp.json --dangerously-load-development-channels server:claude-peers server:synapse`, `handoff_path`, `state` |
+| launch spec | `.lane-state/<role>.launch.json` | schema 1, `role`, `name`, `cwd`, `model: sonnet`, `permission_mode: auto`, `launch_args` = `--mcp-config <state>\<role>.mcp.json --dangerously-load-development-channels server:synapse`, `handoff_path`, `state` |
 | MCP config | `.lane-state/<role>.mcp.json` | one `synapse` server: `synapse-claude-channel.exe --role R --home <LOCALAPPDATA>/synapse-lanes/R`, env `SYNAPSE_HOME`, `SYNAPSE_ADDR=127.0.0.1:7920`, `SYNAPSE_DAEMON_HOME` = the pilot home |
 | soak list | `.lane-state/roles-soak.txt` | one role per line, `#` comments |
 | Synapse identity | `<LOCALAPPDATA>\synapse-lanes\<role>\` | certificate from `synapse id provision`, plus the daemon's `synapsed.json` copied in |
