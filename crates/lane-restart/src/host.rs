@@ -2366,8 +2366,16 @@ mod tests {
         let outbox = notify::outbox_dir(dir.path());
         let deadline = Instant::now() + Duration::from_secs(5);
         let queued = loop {
+            // `notify::queue` writes `<stamp>.tmp` and renames it to `<stamp>.json`: take only a finished
+            // file, never the temporary one that is gone by the time it is read (the flake: 2 of 25
+            // full-suite runs failed at the `read_to_string` on a `.tmp` that had just been renamed).
             let files: Vec<_> = std::fs::read_dir(&outbox)
-                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                .map(|d| {
+                    d.filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                        .collect()
+                })
                 .unwrap_or_default();
             if let Some(f) = files.into_iter().next() {
                 break std::fs::read_to_string(f).unwrap();
