@@ -1079,10 +1079,16 @@ fn run_specs_synapse_only_cmd(roles: Vec<String>, strict: bool, dry_run: bool) -
     }
 }
 
-/// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). Slice 1:
-/// plans every step and can run the local-file ones in tests; `--apply` is refused until the repo, seed,
-/// provisioning and start steps exist, so a half-made lane cannot be left behind by the binary.
-fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> ExitCode {
+/// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). A dry run
+/// by default; `--apply` creates the repo, seeds it, writes the lane files, provisions the Synapse
+/// identity and starts the lane, stopping at the first step whose read-back fails.
+fn run_lane_new_cmd(
+    role: String,
+    repo: String,
+    model: String,
+    apply: bool,
+    plan: Option<String>,
+) -> ExitCode {
     let facts = SysinfoFacts::new(claude_config_dir());
     let caller = verified_caller(&facts);
     let caller_role = caller.as_ref().ok().cloned();
@@ -1109,10 +1115,6 @@ fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> E
         );
         return ExitCode::FAILURE;
     }
-    if apply {
-        eprintln!("lane-restart lane-new: --apply is not available yet: this build plans and checks only (docs/LANE-NEW.md slice 1); the repo, seed, provisioning and start steps are slices 2 and 3");
-        return ExitCode::FAILURE;
-    }
     let roots = match lane_restart::lane_new::Roots::standard(state_dir()) {
         Ok(r) => r,
         Err(e) => {
@@ -1120,18 +1122,65 @@ fn run_lane_new_cmd(role: String, repo: String, model: String, apply: bool) -> E
             return ExitCode::FAILURE;
         }
     };
-    // Slice 2: the dry run also reads GitHub (repo visibility, main's head and files) and the clone
-    // directory; it creates, clones and writes nothing.
-    let report = lane_restart::lane_new::run_with(
-        &roots,
-        Some(&lane_restart::lane_new_remote::GhGit),
-        &role,
-        &repo,
-        &model,
-        false,
-        chrono::Utc::now(),
+    // The dry run also reads GitHub (repo visibility, main's head and files), the clone directory and
+    // the disk; it creates, clones, provisions and starts nothing. `--apply` does all of it, step by
+    // step, each read back (docs/LANE-NEW.md).
+    let host = lane_restart::lane_new_host::RealHost::new(
+        &roots.projects,
+        &roots.lane_homes,
+        &roots.pilot_home,
+        claude_config_dir(),
     );
-    print!("{}", report.render(false));
+    // `--apply` goes through `run_apply`, which refuses unless `--plan` is the hash a dry run of exactly
+    // these arguments printed: a typo'd role or repo cannot be applied without being planned first.
+    let report = if apply {
+        lane_restart::lane_new::run_apply(
+            &roots,
+            Some(&lane_restart::lane_new_remote::GhGit),
+            Some(&host),
+            &role,
+            &repo,
+            &model,
+            plan.as_deref(),
+            chrono::Utc::now(),
+        )
+    } else {
+        lane_restart::lane_new::run_full(
+            &roots,
+            Some(&lane_restart::lane_new_remote::GhGit),
+            Some(&host),
+            &role,
+            &repo,
+            &model,
+            false,
+            chrono::Utc::now(),
+        )
+    };
+    print!("{}", report.render(apply));
+    if apply {
+        let steps: Vec<String> = report
+            .rows
+            .iter()
+            .map(|r| format!("{}:{:?}", r.n, r.status))
+            .collect();
+        log_ledger(
+            &requested_by,
+            &role,
+            "lane-new",
+            caller_role.as_deref(),
+            Some(&model),
+            Some(&format!("repo {repo}")),
+            &format!(
+                "{}: {}",
+                if report.failed() { "failed" } else { "created" },
+                steps.join(" ")
+            ),
+            report
+                .rows
+                .iter()
+                .any(|r| r.status == lane_restart::lane_new::Status::Ok),
+        );
+    }
     if report.failed() {
         ExitCode::FAILURE
     } else {
@@ -1433,12 +1482,14 @@ USAGE:
         (resume it with `start`) and a role with a live process are refused
         with the reason. First and last lines say whether anything moved.
 
-    lane-restart lane-new <role> <repo> [--model sonnet|haiku]
-        PM only (docs/LANE-NEW.md, slices 1 and 2). Dry run: validates the names and what
-        exists (reading GitHub: repo, main, files), and prints the plan for the repo, seed, MCP config, launch spec (suspended,
-        no stop_kind) and soak-list entry, with every absolute path, plus the repo,
-        seed, provisioning and start steps still to come. Writes nothing; --apply is
-        refused until those steps exist.
+    lane-restart lane-new <role> <repo> [--model sonnet|haiku] [--apply --plan <hash>]
+        PM only (docs/LANE-NEW.md). Dry run (default): validates the names, the disk and
+        what exists (reading GitHub: repo, main, files), prints every step with its
+        absolute paths, writes and runs nothing, and ends with `plan <hash>`.
+        --apply creates the public repo, seeds it, writes the lane files, provisions the
+        Synapse identity and starts the lane; it is refused unless --plan is the hash of
+        a dry run of exactly the same role, repo and model. An existing repo is used only
+        if empty or holding nothing but the seed.
 
     lane-restart specs synapse-only --role <name> [--role <name>]... [--strict] [--dry-run]
         PM only (docs/SYNAPSE-ONLY-CUTOVER.md). Rewrite a role's launch_args so its
@@ -1570,10 +1621,12 @@ fn main() -> ExitCode {
         }
         if first == "lane-new" {
             return match cli::lane_new(rest) {
-                Ok((role, repo, model, apply)) => run_lane_new_cmd(role, repo, model, apply),
+                Ok((role, repo, model, apply, plan)) => {
+                    run_lane_new_cmd(role, repo, model, apply, plan)
+                }
                 Err(e) => {
                     eprintln!(
-                        "lane-restart lane-new: {e}; expected `lane-new <role> <repo> [--model sonnet|haiku] [--apply]`"
+                        "lane-restart lane-new: {e}; expected `lane-new <role> <repo> [--model sonnet|haiku] [--apply --plan <hash>]`"
                     );
                     ExitCode::FAILURE
                 }

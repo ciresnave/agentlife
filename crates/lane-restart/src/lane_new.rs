@@ -17,6 +17,7 @@
 //! nothing, so rerunning converges. Nothing is overwritten: an existing artifact that differs from what
 //! this would write is a failure, found by step 0 before any step writes.
 
+use crate::lane_new_host::{host_log_since, Host};
 use crate::lane_new_remote::{self as remote, Vcs};
 use crate::spec::{self, SpecFile, SpecState, WrittenBy};
 use crate::start;
@@ -141,6 +142,9 @@ pub struct Report {
     pub rows: Vec<StepRow>,
     /// Every path the report names (all absolute; tested).
     pub paths: Vec<PathBuf>,
+    /// Set by a dry run that found nothing wrong: [`plan_hash`] of the arguments it planned. `--apply` must
+    /// be given this value.
+    pub plan: Option<String>,
 }
 
 impl Report {
@@ -170,7 +174,71 @@ impl Report {
                 r.n, r.name, tag, r.detail
             ));
         }
+        if let Some(p) = &self.plan {
+            s.push_str(&format!(
+                "plan {p}\n  to act, repeat the same role, repo and model with: --apply --plan {p}\n"
+            ));
+        }
         s
+    }
+}
+
+/// Fingerprint of what a run would do, from the arguments alone (never from what exists, so a resume after a
+/// failed step still matches the plan that was read): role, org/repo, model, the roots every path derives
+/// from, and the name and SHA-256 of every seed file (which carries the repo name into the stub crate). A
+/// typo in the role or repo changes it, and so does a new build with a different seed. Sixteen hex digits.
+pub fn plan_hash(roots: &Roots, role: &str, repo: &str, model: &str) -> Result<String, String> {
+    let seed = remote::render(ORG, role, repo)?;
+    let mut s = format!(
+        "lane-new plan v1\nrole={role}\nrepo={ORG}/{repo}\nmodel={model}\nstate_dir={}\nprojects={}\nlane_homes={}\npilot_home={}\nchannel_exe={}\n",
+        roots.state_dir.display(),
+        roots.projects.display(),
+        roots.lane_homes.display(),
+        roots.pilot_home.display(),
+        roots.channel_exe.display()
+    );
+    for f in &seed {
+        s.push_str(&format!(
+            "seed {} {}\n",
+            f.path,
+            remote::sha256_hex(&f.bytes)
+        ));
+    }
+    Ok(remote::sha256_hex(s.as_bytes())[..16].to_string())
+}
+
+/// `--apply`: refuses unless `plan` is the [`plan_hash`] of exactly these arguments, then runs for real. The
+/// only way the binary reaches `run_full` with `apply` true. Nothing is read, written or run on a mismatch.
+#[allow(clippy::too_many_arguments)]
+pub fn run_apply(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
+    role: &str,
+    repo: &str,
+    model: &str,
+    plan: Option<&str>,
+    now: DateTime<Utc>,
+) -> Report {
+    let refuse = |why: String| Report {
+        rows: vec![StepRow {
+            n: 0,
+            name: "plan",
+            status: Status::Fail,
+            detail: why,
+        }],
+        paths: Vec::new(),
+        plan: None,
+    };
+    let Some(given) = plan else {
+        return refuse("--apply needs --plan <hash>, printed at the end of a dry run of the same role, repo and model".to_string());
+    };
+    match plan_hash(roots, role, repo, model) {
+        Ok(want) if want == given => run_full(roots, vcs, host, role, repo, model, true, now),
+        Ok(_) => refuse(format!(
+            "--plan {given} is not the plan for role {role:?}, repo {repo:?}, model {model:?}: dry-run these exact arguments again and use the hash it prints"
+        )),
+        Err(e) => refuse(format!("cannot plan these arguments: {e}")),
     }
 }
 
@@ -317,6 +385,115 @@ fn fail(rows: &mut Vec<StepRow>, n: u8, name: &'static str, detail: String) {
     });
 }
 
+/// Step 6: the Synapse identity. `already` if the lane home holds the certificate and the announce file;
+/// else (with `apply`) runs the provisioning script for this role alone and reads back both its counts
+/// and the files.
+fn step_identity(
+    host: &dyn Host,
+    roots: &Roots,
+    role: &str,
+    apply: bool,
+) -> Result<(Status, String), String> {
+    let home = roots.lane_home(role);
+    let cert = home.join("roles").join(role).join("cert.pem");
+    let announce = home.join("synapsed.json");
+    let files = || (cert.is_file(), announce.is_file());
+    if files() == (true, true) {
+        return Ok((Status::Already, home.display().to_string()));
+    }
+    if !apply {
+        return Ok((
+            Status::Would,
+            format!(
+                "synapse-provision-weekly.ps1 -Apply for {role} alone; home {}",
+                home.display()
+            ),
+        ));
+    }
+    let roles_file = roots.state_dir.join(format!(".lane-new-{role}.roles.tmp"));
+    write_text_atomic(&roles_file, &format!("{role}\n"))?;
+    let counts = host.provision(&roles_file);
+    let _ = std::fs::remove_file(&roles_file);
+    let c = counts?;
+    if c.refused != 0 || c.other != 0 || c.total() != 1 || c.created + c.ok + c.renewed != 1 {
+        return Err(format!(
+            "the provisioning script reported ok={} created={} renewed={} refused={} other={}; expected exactly one role, none refused",
+            c.ok, c.created, c.renewed, c.refused, c.other
+        ));
+    }
+    match files() {
+        (true, true) => Ok((
+            Status::Ok,
+            format!(
+                "created={} ok={}; certificate and announce file in {}",
+                c.created,
+                c.ok,
+                home.display()
+            ),
+        )),
+        (has_cert, has_announce) => Err(format!(
+            "the script reported success but {} lacks {}",
+            home.display(),
+            match (has_cert, has_announce) {
+                (false, false) => "the certificate and synapsed.json",
+                (false, true) => "the certificate",
+                _ => "synapsed.json",
+            }
+        )),
+    }
+}
+
+/// Step 7: start the lane. The spec is `suspended` until this; the read-back is the lane's own state file
+/// naming a live `claude`, the spec now `running`, and a non-empty host log written since this step began.
+fn step_start(
+    host: &dyn Host,
+    roots: &Roots,
+    role: &str,
+    model: &str,
+    apply: bool,
+) -> Result<(Status, String), String> {
+    let cmd = format!("lane-restart start --role {role} --model {model} --reason lane-new");
+    if !apply {
+        return Ok((Status::Would, cmd));
+    }
+    let since = std::time::SystemTime::now();
+    let code = host.start(role, model)?;
+    let state = crate::state::load(&roots.state_dir, role)
+        .map_err(|e| format!("start returned {code} but the lane wrote no state: {e}"))?;
+    if !host.claude_alive(state.pid) {
+        return Err(format!(
+            "start returned {code} but pid {} in {role}.json is not a live claude",
+            state.pid
+        ));
+    }
+    let have = spec::read(&roots.state_dir, role).map_err(|e| e.to_string())?;
+    if have.state != SpecState::Running {
+        return Err(format!(
+            "start returned {code} but the spec is {:?}, not running",
+            have.state
+        ));
+    }
+    let log = host_log_since(&roots.state_dir, role, since).ok_or_else(|| {
+        format!(
+            "start returned {code} but there is no non-empty host-{role}-<pid>.log in {} written since the start",
+            roots.state_dir.display()
+        )
+    })?;
+    let dialog = if code == 2 {
+        "; AWAITING the dev-channels dialog: someone must confirm it"
+    } else {
+        ""
+    };
+    Ok((
+        Status::Ok,
+        format!(
+            "pid {} live, spec running, host log {}{dialog}",
+            state.pid,
+            log.display()
+        ),
+    ))
+}
+
 /// Slice 1: steps 0, 3, 4 and 5 with no `gh`/`git`; steps 1 and 2 are listed as later.
 pub fn run_local(
     roots: &Roots,
@@ -341,6 +518,22 @@ pub fn run_with(
     apply: bool,
     now: DateTime<Utc>,
 ) -> Report {
+    run_full(roots, vcs, None, role, repo, model, apply, now)
+}
+
+/// Slice 3: as [`run_with`], plus the disk floor in step 0 and steps 6 (Synapse identity) and 7 (start)
+/// through `host`. With `host` `None` those two steps are listed as later.
+#[allow(clippy::too_many_arguments)]
+pub fn run_full(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
+    role: &str,
+    repo: &str,
+    model: &str,
+    apply: bool,
+    now: DateTime<Utc>,
+) -> Report {
     let nwo = format!("{ORG}/{repo}");
     let mut rows = Vec::new();
     let mut paths = vec![
@@ -352,7 +545,11 @@ pub fn run_with(
         roots.lane_home(role),
     ];
     paths.dedup();
-    let rep = |rows: Vec<StepRow>, paths: Vec<PathBuf>| Report { rows, paths };
+    let rep = |rows: Vec<StepRow>, paths: Vec<PathBuf>| Report {
+        rows,
+        paths,
+        plan: None,
+    };
 
     // --- step 0: validate, and read what exists -----------------------------------------------
     let mut problems = Vec::new();
@@ -460,6 +657,11 @@ pub fn run_with(
     };
     if let Some(v) = vcs {
         problems.extend(remote::local_problems(v, &roots.repo_dir(repo), &nwo));
+    }
+    if let Some(h) = host {
+        if let Err(why) = h.disk_floor(&roots.state_dir) {
+            problems.push(format!("disk floor: {why}"));
+        }
     }
     if !problems.is_empty() {
         fail(&mut rows, 0, "validate", problems.join("; "));
@@ -667,19 +869,47 @@ pub fn run_with(
             ),
         ));
     }
-    rows.push(later(
-        6,
-        "synapse identity",
-        format!(
-            "synapse-provision-weekly.ps1 for {role}; home {}",
-            roots.lane_home(role).display()
-        ),
-    ));
-    rows.push(later(
-        7,
-        "start",
-        format!("lane-restart start --role {role} --model {model} --reason lane-new"),
-    ));
+    if let Some(h) = host {
+        // One at a time: step 7 never runs after a failed step 6.
+        match step_identity(h, roots, role, apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 6,
+                name: "synapse identity",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 6, "synapse identity", e);
+                return rep(rows, paths);
+            }
+        }
+        match step_start(h, roots, role, model, apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 7,
+                name: "start",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 7, "start", e);
+                return rep(rows, paths);
+            }
+        }
+    } else {
+        rows.push(later(
+            6,
+            "synapse identity",
+            format!(
+                "synapse-provision-weekly.ps1 for {role}; home {}",
+                roots.lane_home(role).display()
+            ),
+        ));
+        rows.push(later(
+            7,
+            "start",
+            format!("lane-restart start --role {role} --model {model} --reason lane-new"),
+        ));
+    }
     rows.push(later(
         8,
         "protect main (PM)",
@@ -693,7 +923,11 @@ pub fn run_with(
         ),
     ));
     rows.sort_by_key(|r| r.n);
-    rep(rows, paths)
+    let mut report = rep(rows, paths);
+    if !apply && !report.failed() {
+        report.plan = plan_hash(roots, role, repo, model).ok();
+    }
+    report
 }
 
 #[cfg(test)]

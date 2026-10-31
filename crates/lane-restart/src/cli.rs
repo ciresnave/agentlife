@@ -176,16 +176,22 @@ struct LaneNew {
     model: Option<String>,
     #[arg(long, overrides_with = "apply")]
     apply: bool,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "plan")]
+    plan: Option<String>,
 }
 
-/// `lane-new <role> <repo> [--model M] [--apply]` -> `(role, repo, model, apply)`; the model defaults to `sonnet`.
-pub fn lane_new(rest: &[String]) -> Result<(String, String, String, bool), String> {
-    let a: LaneNew = parse("lane-new", &["--model"], rest)?;
+/// `(role, repo, model, apply, plan)` of a `lane-new` command line.
+pub type LaneNewArgs = (String, String, String, bool, Option<String>);
+
+/// `lane-new <role> <repo> [--model M] [--apply --plan H]`; the model defaults to `sonnet`.
+pub fn lane_new(rest: &[String]) -> Result<LaneNewArgs, String> {
+    let a: LaneNew = parse("lane-new", &["--model", "--plan"], rest)?;
     Ok((
         a.role,
         a.repo,
         a.model.unwrap_or_else(|| "sonnet".to_string()),
         a.apply,
+        a.plan,
     ))
 }
 
@@ -341,4 +347,34 @@ pub fn host(rest: &[String]) -> Result<(String, Vec<String>), String> {
     )
     .map_err(|e| e.render().to_string().trim_end().to_string())?;
     Ok((a.role, a.child))
+}
+
+#[cfg(test)]
+mod lane_new_tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn lane_new_takes_a_plan_hash_and_defaults_to_a_dry_run_without_one() {
+        let (role, repo, model, apply, plan) = lane_new(&args(&[
+            "rockfish",
+            "rockfish",
+            "--apply",
+            "--plan",
+            "0123456789abcdef",
+        ]))
+        .unwrap();
+        assert_eq!(
+            (role.as_str(), repo.as_str(), model.as_str()),
+            ("rockfish", "rockfish", "sonnet")
+        );
+        assert!(apply);
+        assert_eq!(plan.as_deref(), Some("0123456789abcdef"));
+        // control: no flags is a dry run with no plan
+        let (_, _, _, apply, plan) = lane_new(&args(&["rockfish", "rockfish"])).unwrap();
+        assert!(!apply && plan.is_none());
+    }
 }
