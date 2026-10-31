@@ -196,7 +196,7 @@ pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
 /// parent was `bash.exe`, not `claude.exe`, so the single-hop check this
 /// module shipped with (verified only against a headless `claude -p`
 /// session, §10.3) refused every real interactive write.
-use crate::platform::names::{image_base, is_shell};
+use crate::platform::names::{image_base, is_lane_restart, is_shell};
 
 /// How many shell layers this walk tolerates before giving up. The real chain needed 2
 /// (RESTART-TOOL-DESIGN.md §11.1), but a Bash-tool command's own shape adds layers: on this box
@@ -205,11 +205,17 @@ use crate::platform::names::{image_base, is_shell};
 /// is still refused at once, so a larger limit loosens nothing but depth.
 const MAX_ANCESTRY_HOPS: u32 = 8;
 
-/// Walks up from `my_pid`, skipping ONLY known shell images, and returns
-/// the pid of the first `claude` found. Refuses (never skips past) any
-/// ancestor that is neither a known shell nor `claude` - a stranger
-/// appearing before `claude` is exactly what this check exists to catch,
-/// not something to tolerate the way a shell hop is tolerated.
+/// Walks up from `my_pid`, skipping ONLY known shell images and this tool's own `lane-restart`, and
+/// returns the pid of the first `claude` found. Refuses (never skips past) any
+/// ancestor that is neither - a stranger appearing before `claude` is exactly
+/// what this check exists to catch, not something to tolerate the way a shell
+/// hop is tolerated.
+///
+/// `lane-restart` is let through because `lane-new --apply` runs `lane-restart start` as a CHILD of
+/// itself (2026-10-31: "this command is not running under a claude session", with the PM's session
+/// two shells above). It cannot be used to borrow another session's identity: the answer is still the
+/// NEAREST `claude` above, so a process under a lane's `claude` is that lane, and one under no
+/// `claude` is still refused.
 pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32, PidError> {
     let mut current = my_pid;
     for _ in 0..MAX_ANCESTRY_HOPS {
@@ -218,7 +224,7 @@ pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32,
         if base == "claude" {
             return Ok(parent_pid);
         }
-        if !is_shell(&base) {
+        if !is_shell(&base) && !is_lane_restart(&base) {
             return Err(PidError::UnexpectedAncestor(name));
         }
         current = parent_pid;
@@ -373,6 +379,40 @@ mod tests {
             claude_parent_pid(1, &lookup),
             Err(PidError::UnexpectedAncestor(_))
         ));
+    }
+
+    /// 2026-10-31, `lane-new --apply`: step 7 runs `lane-restart start` as a child of the `lane-restart`
+    /// that is running `lane-new`: `start(1) <- lane-restart(10) <- bash(20) <- bash(30) <- bash(40) <-
+    /// claude(99)`. The walk refused `lane-restart` as a stranger. Controls: a stranger in the same
+    /// position is still refused, and a `lane-restart` with no `claude` above it is refused too.
+    #[test]
+    fn walks_past_the_tools_own_parent_process_to_the_claude_above_it() {
+        let lookup = FakeAncestry::chain(&[
+            (1, 10, "lane-restart.exe"),
+            (10, 20, "bash.exe"),
+            (20, 30, "bash.exe"),
+            (30, 40, "bash.exe"),
+            (40, 99, "claude.exe"),
+        ]);
+        assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+        let stranger = FakeAncestry::chain(&[(1, 10, "node.exe"), (10, 99, "claude.exe")]);
+        assert!(matches!(
+            claude_parent_pid(1, &stranger),
+            Err(PidError::UnexpectedAncestor(_))
+        ));
+        let no_claude =
+            FakeAncestry::chain(&[(1, 10, "lane-restart.exe"), (10, 20, "services.exe")]);
+        assert!(matches!(
+            claude_parent_pid(1, &no_claude),
+            Err(PidError::UnexpectedAncestor(_))
+        ));
+        // the answer is the NEAREST claude: a lane's own session is that lane, not whoever is above it
+        let nested = FakeAncestry::chain(&[
+            (1, 10, "lane-restart.exe"),
+            (10, 50, "claude.exe"),
+            (50, 99, "claude.exe"),
+        ]);
+        assert_eq!(claude_parent_pid(1, &nested).unwrap(), 50);
     }
 
     #[test]
