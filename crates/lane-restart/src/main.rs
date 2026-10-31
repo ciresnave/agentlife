@@ -285,6 +285,20 @@ fn peers_text(p: &lane_restart::peers_join::RolePeers) -> String {
     }
 }
 
+/// The `channels=` column of a live lane: `mcp+peers+synapse`, each missing flag shown as `-` and a
+/// lane whose state recorded no launch arguments as `?`. Not live: no column.
+fn channels_text(r: &lane_restart::spec::RoleStatus) -> String {
+    match (&r.activity, &r.channels) {
+        (Some(_), Some(c)) => format!(
+            "\tchannels={}{}",
+            c.text(),
+            if c.complete() { "" } else { " INCOMPLETE" }
+        ),
+        (Some(_), None) => "\tchannels=?".to_string(),
+        (None, _) => String::new(),
+    }
+}
+
 /// `lane-restart status [--json]` - RESTART-TOOL-DESIGN.md 14.2 / 14.10. Read-only: for every
 /// role with a lane state or a launch spec, whether it is running, suspended, crashed or never
 /// run, and whether it can be started again from its spec. Liveness is the process table's
@@ -367,7 +381,8 @@ fn run_status_cmd(json: bool, quiet_over: Option<i64>, with_peers: bool) -> Exit
                 .nested_in
                 .as_deref()
                 .map(|p| format!("\tnested-in={p}"))
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                + &channels_text(r),
             r.detail
                 .as_deref()
                 .map(|d| format!("\t{d}"))
@@ -1079,6 +1094,68 @@ fn run_specs_synapse_only_cmd(roles: Vec<String>, strict: bool, dry_run: bool) -
     }
 }
 
+/// `lane-restart specs both-channels --role R... [--dry-run]` - writing is PM only; a dry run writes
+/// nothing and any caller may read it. Brings a spec to `--mcp-config <role>.mcp.json` plus
+/// `server:claude-peers server:synapse`; one backup, never overwritten.
+fn run_specs_both_channels_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
+    use lane_restart::spec_channels::rewrite_roles;
+    use lane_restart::spec_synapse::{render, RewriteOutcome};
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let caller = verified_caller(&facts);
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    if !dry_run && caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may rewrite specs; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may rewrite specs, and the caller could not be verified: {e}"
+            ),
+        };
+        eprintln!("lane-restart specs both-channels: refused - {why}");
+        log_ledger(
+            &requested_by,
+            &roles.join(","),
+            "both-channels",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    let rows = rewrite_roles(&state_dir(), &roles, dry_run, chrono::Utc::now());
+    let mut refused = false;
+    for r in &rows {
+        let (outcome, acted) = match &r.outcome {
+            RewriteOutcome::Rewrote(a) => (format!("rewrote launch_args to {}", a.join(" ")), true),
+            RewriteOutcome::Refused(why) => {
+                refused = true;
+                (format!("refused: {why}"), false)
+            }
+            RewriteOutcome::WouldRewrite(_) | RewriteOutcome::Unchanged => continue,
+        };
+        log_ledger(
+            &requested_by,
+            &r.role,
+            "both-channels",
+            caller_role.as_deref(),
+            None,
+            None,
+            &outcome,
+            acted,
+        );
+    }
+    print!("{}", render(&rows, dry_run));
+    if refused {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). A dry run
 /// by default; `--apply` creates the repo, seeds it, writes the lane files, provisions the Synapse
 /// identity and starts the lane, stopping at the first step whose read-back fails.
@@ -1491,6 +1568,15 @@ USAGE:
         a dry run of exactly the same role, repo and model. An existing repo is used only
         if empty or holding nothing but the seed.
 
+    lane-restart specs both-channels --role <name> [--role <name>]... [--dry-run]
+        Writing is PM only; --dry-run writes nothing and any caller may run it. Bring a
+        role's launch_args to the full push-channel form: --mcp-config <role>.mcp.json
+        and --dangerously-load-development-channels server:claude-peers server:synapse
+        (other channels are kept). Refused, untouched: the config file missing or without
+        a synapse server, or --strict-mcp-config in the spec. The old spec is copied once
+        to <role>.launch.json.pre-both-channels. A running session is not touched: it
+        takes the change at its next launch. `status` shows each running lane's flags.
+
     lane-restart specs synapse-only --role <name> [--role <name>]... [--strict] [--dry-run]
         PM only (docs/SYNAPSE-ONLY-CUTOVER.md). Rewrite a role's launch_args so its
         NEXT launch loads server:synapse and not server:claude-peers; --strict also
@@ -1611,9 +1697,18 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 },
+                Some((sub, tail)) if sub == "both-channels" => {
+                    match cli::specs_both_channels(tail) {
+                        Ok((roles, dry_run)) => run_specs_both_channels_cmd(roles, dry_run),
+                        Err(e) => {
+                            eprintln!("lane-restart specs both-channels: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
                 _ => {
                     eprintln!(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]` or `specs synapse-only --role <name>... [--strict] [--dry-run]`"
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]` or `specs both-channels --role <name>... [--dry-run]`"
                     );
                     ExitCode::FAILURE
                 }

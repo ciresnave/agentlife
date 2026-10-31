@@ -41,6 +41,7 @@ pub mod notify;
 pub mod peers_join;
 pub mod relaunch;
 pub mod spec;
+pub mod spec_channels;
 pub mod spec_import;
 pub mod spec_retire;
 pub mod spec_synapse;

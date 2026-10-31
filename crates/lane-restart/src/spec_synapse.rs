@@ -18,11 +18,11 @@ use crate::spec;
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
-const DEV_CHANNELS: &str = "--dangerously-load-development-channels";
-const MCP_CONFIG: &str = "--mcp-config";
-const STRICT: &str = "--strict-mcp-config";
-const PEERS: &str = "server:claude-peers";
-const SYNAPSE: &str = "server:synapse";
+pub(crate) const DEV_CHANNELS: &str = "--dangerously-load-development-channels";
+pub(crate) const MCP_CONFIG: &str = "--mcp-config";
+pub(crate) const STRICT: &str = "--strict-mcp-config";
+pub(crate) const PEERS: &str = "server:claude-peers";
+pub(crate) const SYNAPSE: &str = "server:synapse";
 const BACKUP_SUFFIX: &str = ".pre-synapse";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,14 +44,14 @@ pub struct RewriteRow {
 }
 
 /// The path after `--mcp-config`, if the arguments carry one.
-fn mcp_config_arg(args: &[String]) -> Option<&str> {
+pub(crate) fn mcp_config_arg(args: &[String]) -> Option<&str> {
     let i = args.iter().position(|a| a == MCP_CONFIG)?;
     args.get(i + 1).map(String::as_str)
 }
 
 /// `Ok` when the file parses as JSON and `mcpServers` has a `synapse` entry. Values are never read
 /// into the message: the file can hold a home path and role names, and nothing here needs more.
-fn config_names_synapse(path: &str) -> Result<(), String> {
+pub(crate) fn config_names_synapse(path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| format!("{path} is not valid JSON"))?;

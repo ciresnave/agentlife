@@ -167,6 +167,12 @@ pub fn specs_synapse_only(rest: &[String]) -> Result<(Vec<String>, bool, bool), 
     Ok((a.roles, a.strict, a.dry_run))
 }
 
+/// `specs both-channels --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
+pub fn specs_both_channels(rest: &[String]) -> Result<(Vec<String>, bool), String> {
+    let a: SpecsRetire = parse("specs both-channels", &["--role"], rest)?;
+    Ok((a.roles, a.dry_run))
+}
+
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 struct LaneNew {
