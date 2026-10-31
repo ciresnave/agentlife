@@ -1,5 +1,7 @@
 # The restore planner (M3a)
 
+> **Retired 2026-10-31 (CireSnave: "Get claude-peers out of our workflow and get every lane on Synapse.").** Where this document describes claude-peers, the broker or peer ids as how things work today, that is being removed: the code stays until every lane answers a PING on Synapse (PM ruling 2026-10-31) and is then deleted in its own PR. The current launch form is `--mcp-config <role>.mcp.json --dangerously-load-development-channels server:synapse` (docs/SYNAPSE-ONLY-CUTOVER.md).
+
 What `agentlife restore --dry-run` computes, the rules it applies, and what it does **not** do. Code:
 `src/plan.rs`. Design it implements: `DESIGN.md` §2, `DESIGN-REVISION-1.md` §3 and §6,
 `DESIGN-REVISION-2.md` §3 and §5.
