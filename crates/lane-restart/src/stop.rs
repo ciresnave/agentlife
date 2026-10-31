@@ -507,4 +507,111 @@ mod tests {
             Err(RelaunchError::SessionNeverProcessedPrompt)
         ));
     }
+
+    fn spec_with_args(role: &str, args: &[&str]) -> SpecFile {
+        SpecFile {
+            schema: spec::SCHEMA,
+            role: lane_state::role::Role::new(role).unwrap(),
+            name: lane_state::role::Role::new(role).unwrap(),
+            cwd: "C:/Projects/x".into(),
+            model: "sonnet".into(),
+            permission_mode: Some("prompting".into()),
+            remote_control: false,
+            launch_args: args.iter().map(|a| a.to_string()).collect(),
+            handoff_path: None,
+            handoff_mtime: None,
+            state: SpecState::Running,
+            written_at: chrono::Utc::now(),
+            written_by: spec::WrittenBy::Other("specs".into()),
+            stopped_session_id: None,
+            stopped_pid_start_secs: None,
+            stop_reason: None,
+            stop_kind: None,
+            stop_mac: None,
+            tool_version: "test".into(),
+            launch: None,
+            wsl: None,
+        }
+    }
+
+    /// kiss, 2026-10-31: `specs both-channels` edited the spec, then the lane's own `--self` restart
+    /// wrote the RUNNING session's flags (claude-peers only) back over it and launched from those.
+    /// A restart keeps the recorded spec's launch flags, in the spec and in the launch.
+    #[test]
+    fn a_restart_keeps_the_edited_specs_flags_in_the_spec_and_in_the_launch() {
+        let edited = [
+            "--mcp-config",
+            "C:/Projects/.lane-state/overmind.mcp.json",
+            "--dangerously-load-development-channels",
+            "server:claude-peers",
+            "server:synapse",
+        ];
+        let running_args: Vec<String> = [
+            "claude.exe",
+            "--dangerously-load-development-channels",
+            "server:claude-peers",
+        ]
+        .map(String::from)
+        .to_vec();
+        let run = |dir: &std::path::Path| {
+            let l = log();
+            let facts = RecordingFacts::new(&l);
+            let mut st = state_at("overmind", "old", "Stop");
+            st.launch_args = Some(running_args.clone());
+            let store = DirSpecStore {
+                dir: dir.to_path_buf(),
+            };
+            let reader = ScriptedReader::new(
+                &l,
+                vec![Some(state_at("overmind", "new", "UserPromptSubmit"))],
+            );
+            let launched = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let cap = std::rc::Rc::clone(&launched);
+            kill_and_relaunch_persisting(
+                &facts,
+                &reader,
+                &st,
+                &identity(),
+                "sonnet",
+                None,
+                &store,
+                &move |_, argv| {
+                    cap.borrow_mut().extend(argv.iter().cloned());
+                    Ok(())
+                },
+                &mut |_| {},
+                &mut || {},
+            )
+            .unwrap();
+            let after = spec::read(dir, "overmind").unwrap().launch_args;
+            let got = launched.borrow().clone();
+            (after, got)
+        };
+        // an edited spec on disk: it is kept, and the new session is launched with it
+        let d = tempfile::tempdir().unwrap();
+        spec::write_atomic(d.path(), &spec_with_args("overmind", &edited)).unwrap();
+        let (after, launched) = run(d.path());
+        assert_eq!(
+            after,
+            edited.map(String::from).to_vec(),
+            "the spec was overwritten"
+        );
+        for want in edited {
+            assert!(
+                launched.iter().any(|a| a == want),
+                "launch lacks {want}: {launched:?}"
+            );
+        }
+        // control: with no spec on disk the running session's flags are what is recorded and launched
+        let empty = tempfile::tempdir().unwrap();
+        let (after, launched) = run(empty.path());
+        assert_eq!(
+            after,
+            vec![
+                "--dangerously-load-development-channels",
+                "server:claude-peers"
+            ]
+        );
+        assert!(!launched.iter().any(|a| a == "server:synapse"));
+    }
 }

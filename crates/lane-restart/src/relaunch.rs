@@ -980,6 +980,20 @@ fn prepare(spec: &LaunchSpec) -> Result<PreparedLaunch, RelaunchError> {
     )
 }
 
+/// The launch with the recorded spec's flags in place of the running session's. Pure. The session's
+/// explicit `--model` is kept (the spec's model is a separate field and the restart still resolves
+/// and pins it as before); every other carried flag comes from `prev.launch_args`.
+pub(crate) fn carry_spec_flags(mut spec: LaunchSpec, prev: &spec::SpecFile) -> LaunchSpec {
+    let mut args = vec!["claude".to_string()];
+    if let Some(m) = explicit_launch_model(spec.launch_args.as_ref()) {
+        args.push("--model".to_string());
+        args.push(m);
+    }
+    args.extend(prev.launch_args.iter().cloned());
+    spec.launch_args = Some(args);
+    spec
+}
+
 /// `kill_and_relaunch_persisting` without a spec store: persists nothing. For callers that
 /// inject their own spawn (tests, a batch restore); the real restart is `kill_and_relaunch`,
 /// which persists.
@@ -1030,7 +1044,13 @@ pub fn kill_and_relaunch_persisting(
     sleep: &mut dyn FnMut(std::time::Duration),
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<RelaunchOutcome, RelaunchError> {
-    let spec = LaunchSpec::try_from(state)?;
+    let mut spec = LaunchSpec::try_from(state)?;
+    // The recorded spec's launch flags win over the running session's argv: the session is the
+    // LAST launch, a `specs both-channels` or `synapse-only` edit is the NEXT one, and a restart
+    // that wrote the session's flags back undid the edit (kiss, 2026-10-31).
+    if let Some(prev) = specs.existing(state.role.as_str()) {
+        spec = carry_spec_flags(spec, &prev);
+    }
     // every check runs BEFORE anything is killed
     // Checked here, before anything is written or killed; the launch itself comes from the
     // spec below.
