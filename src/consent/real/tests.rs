@@ -705,6 +705,21 @@ fn hello_is_never_shown_when_the_debug_switch_is_set_and_the_answer_is_unavailab
     assert_eq!(out, Answer::without_proof(Outcome::Unavailable));
 }
 
+/// user-request 0.16 would open the store off Windows (a key-encrypting-key file beside it); the PM
+/// pinned the 0.11.1 behaviour. The guard is a function of a bool so this runs on every OS: refused with
+/// the old DPAPI message when not Windows, allowed on Windows, and `production` really calls it.
+#[test]
+fn the_production_store_is_refused_off_windows_with_the_old_message() {
+    assert!(refuse_off_windows(true).is_ok());
+    let err = refuse_off_windows(false).unwrap_err();
+    assert!(err.contains("DPAPI"), "{err}");
+    if !cfg!(windows) {
+        // the real constructor on a host that is not Windows: refused before it looks for a store
+        let made = UserRequestBackend::production(me());
+        assert!(made.err().is_some_and(|e| e.contains("DPAPI")));
+    }
+}
+
 /// The production constructor, through the crate's own `locate` (debug overrides). On Windows the
 /// key is really DPAPI-protected; elsewhere the crate refuses DPAPI and the backend fails closed.
 #[test]

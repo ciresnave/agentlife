@@ -125,10 +125,24 @@ pub struct UserRequestBackend {
     requester: Requester,
 }
 
+/// Off Windows nothing is opened. `user-request` 0.16 changed `locate::PROTECTOR` from DPAPI to a tiered
+/// protector that, off Windows, keeps the store's key under a key-encrypting-key FILE beside the store:
+/// weaker than DPAPI, and of no use to a Windows-only restore path. We keep the 0.11.1 behaviour on
+/// purpose (PM, 2026-10-31) instead of inheriting a weaker property from a dependency bump: the message
+/// is the old one, so what callers and tests saw before they still see.
+pub(crate) fn refuse_off_windows(windows: bool) -> Result<(), String> {
+    if windows {
+        Ok(())
+    } else {
+        Err("DPAPI is Windows-only: the consent store is not opened on this host".into())
+    }
+}
+
 impl UserRequestBackend {
     /// The production store, where every `user-request` user looks for it (`locate`), protected by
-    /// DPAPI. Opens nothing yet.
+    /// DPAPI. Opens nothing yet; off Windows it refuses ([`refuse_off_windows`]).
     pub fn production(requester: Requester) -> Result<Self, String> {
+        refuse_off_windows(cfg!(windows))?;
         Ok(Self::with_parts(
             ur::locate::dir()?,
             ur::locate::head_copy(),
