@@ -54,7 +54,10 @@ state (refuse, never overwrite); the second `lane-new` run after a partial first
 * **PM only, by process** (the same `caller_role` check `specs import` uses), not by `LANE_ROLE`. A lane's refusal is
   the first line of output, exit 1.
 * **Dry run by default.** No switch: prints the ordered plan, with every absolute path, writes nothing, runs nothing.
-  `--apply` acts.
+  `--apply` acts, and only with `--plan <hash>`: a clean dry run ends with `plan <hash>`, a fingerprint of the role,
+  `org/repo`, model, roots and seed; `--apply` with any other hash (a typo'd role or repo, another model) or none runs
+  nothing. An existing repo is used only if it is empty or holds nothing but seed files (and a checkout only if it holds
+  nothing `git add -A` would commit beyond the seed): anything else is somebody's work and is refused (PM HOLD on #198).
 * **Every step: check, act, read back, print `ok`/`FAIL` with the property read.** An exit code is never the
   read-back (CLAUDE.md §5). A step that finds its end state already true prints `already` and does nothing.
 * **Resume = rerun.** No checkpoint file: each step is check-then-act, so rerunning converges. A failed read-back

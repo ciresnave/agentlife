@@ -442,6 +442,100 @@ mod run_tests {
         );
     }
 
+    fn apply_with(r: &Roots, h: &FakeHost, role: &str, repo: &str, plan: Option<&str>) -> Report {
+        crate::lane_new::run_apply(r, None, Some(h), role, repo, "sonnet", plan, Utc::now())
+    }
+
+    #[test]
+    fn a_dry_run_prints_the_plan_hash_and_apply_needs_exactly_that_hash() {
+        let d = tempfile::tempdir().unwrap();
+        let r = world(&d);
+        let dry = go(&r, &FakeHost::new(Lie::Honest, &r), false);
+        let hash = dry
+            .plan
+            .clone()
+            .expect("a clean dry run prints a plan hash");
+        assert_eq!(hash.len(), 16);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(dry
+            .render(false)
+            .contains(&format!("--apply --plan {hash}")));
+        // a failed dry run prints none
+        let full = FakeHost::new(Lie::DiskFull, &r);
+        assert!(go(&r, &full, false).plan.is_none());
+        // a partial run (step 7 failed) then a new dry run: the same hash, so a resume matches the plan read
+        let first = FakeHost::new(Lie::StartFails, &r);
+        let rep = apply_with(&r, &first, "rockfish", "rockfish", Some(&hash));
+        assert_eq!(row(&rep, 7).0, Status::Fail, "{}", rep.render(true));
+        let again = go(&r, &FakeHost::new(Lie::Honest, &r), false);
+        assert_eq!(again.plan.as_deref(), Some(hash.as_str()));
+        // control: the right hash is accepted and acts
+        let h = FakeHost::new(Lie::Honest, &r);
+        let rep = apply_with(&r, &h, "rockfish", "rockfish", Some(&hash));
+        assert!(!rep.failed(), "{}", rep.render(true));
+        assert!(h.calls().contains(&"start".to_string()));
+    }
+
+    #[test]
+    fn apply_without_the_plan_or_with_a_typod_name_or_a_changed_argument_runs_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let r = world(&d);
+        let hash = go(&r, &FakeHost::new(Lie::Honest, &r), false).plan.unwrap();
+        let before = listing(&r);
+        let right = Some(hash.as_str());
+        for (role, repo, model, plan, why) in [
+            ("rockfish", "rockfish", "sonnet", None, "needs --plan"),
+            ("rockfsh", "rockfish", "sonnet", right, "not the plan"),
+            ("rockfish", "rockfsh", "sonnet", right, "not the plan"),
+            ("rockfish", "rockfish", "haiku", right, "not the plan"),
+            (
+                "rockfish",
+                "rockfish",
+                "sonnet",
+                Some("0123456789abcdef"),
+                "not the plan",
+            ),
+            ("rockfish", "rockfish", "sonnet", Some(""), "not the plan"),
+        ] {
+            let h = FakeHost::new(Lie::Honest, &r);
+            let rep =
+                crate::lane_new::run_apply(&r, None, Some(&h), role, repo, model, plan, Utc::now());
+            let (st, detail) = row(&rep, 0);
+            let case = format!("{role} {repo} {model} {plan:?}");
+            assert!(
+                st == Status::Fail && detail.contains(why),
+                "{case}: {detail}"
+            );
+            assert!(h.calls().is_empty(), "{case} ran {:?}", h.calls());
+            assert_eq!(listing(&r), before, "{case} wrote something");
+        }
+    }
+
+    #[test]
+    fn the_hash_covers_the_role_the_repo_the_model_and_the_roots() {
+        let d = tempfile::tempdir().unwrap();
+        let r = world(&d);
+        let hash = |role: &str, repo: &str, model: &str| {
+            crate::lane_new::plan_hash(&r, role, repo, model).unwrap()
+        };
+        let base = hash("rockfish", "rockfish", "sonnet");
+        assert_eq!(base, hash("rockfish", "rockfish", "sonnet"));
+        for other in [
+            hash("rockfis", "rockfish", "sonnet"),
+            hash("rockfish", "rockfis", "sonnet"),
+            hash("rockfish", "rockfish", "haiku"),
+        ] {
+            assert_ne!(base, other);
+        }
+        let d2 = tempfile::tempdir().unwrap();
+        let r2 = world(&d2);
+        assert_ne!(
+            base,
+            crate::lane_new::plan_hash(&r2, "rockfish", "rockfish", "sonnet").unwrap(),
+            "another root"
+        );
+    }
+
     #[test]
     fn a_dry_run_runs_nothing_and_says_would() {
         let d = tempfile::tempdir().unwrap();

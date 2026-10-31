@@ -142,6 +142,9 @@ pub struct Report {
     pub rows: Vec<StepRow>,
     /// Every path the report names (all absolute; tested).
     pub paths: Vec<PathBuf>,
+    /// Set by a dry run that found nothing wrong: [`plan_hash`] of the arguments it planned. `--apply` must
+    /// be given this value.
+    pub plan: Option<String>,
 }
 
 impl Report {
@@ -171,7 +174,71 @@ impl Report {
                 r.n, r.name, tag, r.detail
             ));
         }
+        if let Some(p) = &self.plan {
+            s.push_str(&format!(
+                "plan {p}\n  to act, repeat the same role, repo and model with: --apply --plan {p}\n"
+            ));
+        }
         s
+    }
+}
+
+/// Fingerprint of what a run would do, from the arguments alone (never from what exists, so a resume after a
+/// failed step still matches the plan that was read): role, org/repo, model, the roots every path derives
+/// from, and the name and SHA-256 of every seed file (which carries the repo name into the stub crate). A
+/// typo in the role or repo changes it, and so does a new build with a different seed. Sixteen hex digits.
+pub fn plan_hash(roots: &Roots, role: &str, repo: &str, model: &str) -> Result<String, String> {
+    let seed = remote::render(ORG, role, repo)?;
+    let mut s = format!(
+        "lane-new plan v1\nrole={role}\nrepo={ORG}/{repo}\nmodel={model}\nstate_dir={}\nprojects={}\nlane_homes={}\npilot_home={}\nchannel_exe={}\n",
+        roots.state_dir.display(),
+        roots.projects.display(),
+        roots.lane_homes.display(),
+        roots.pilot_home.display(),
+        roots.channel_exe.display()
+    );
+    for f in &seed {
+        s.push_str(&format!(
+            "seed {} {}\n",
+            f.path,
+            remote::sha256_hex(&f.bytes)
+        ));
+    }
+    Ok(remote::sha256_hex(s.as_bytes())[..16].to_string())
+}
+
+/// `--apply`: refuses unless `plan` is the [`plan_hash`] of exactly these arguments, then runs for real. The
+/// only way the binary reaches `run_full` with `apply` true. Nothing is read, written or run on a mismatch.
+#[allow(clippy::too_many_arguments)]
+pub fn run_apply(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
+    role: &str,
+    repo: &str,
+    model: &str,
+    plan: Option<&str>,
+    now: DateTime<Utc>,
+) -> Report {
+    let refuse = |why: String| Report {
+        rows: vec![StepRow {
+            n: 0,
+            name: "plan",
+            status: Status::Fail,
+            detail: why,
+        }],
+        paths: Vec::new(),
+        plan: None,
+    };
+    let Some(given) = plan else {
+        return refuse("--apply needs --plan <hash>, printed at the end of a dry run of the same role, repo and model".to_string());
+    };
+    match plan_hash(roots, role, repo, model) {
+        Ok(want) if want == given => run_full(roots, vcs, host, role, repo, model, true, now),
+        Ok(_) => refuse(format!(
+            "--plan {given} is not the plan for role {role:?}, repo {repo:?}, model {model:?}: dry-run these exact arguments again and use the hash it prints"
+        )),
+        Err(e) => refuse(format!("cannot plan these arguments: {e}")),
     }
 }
 
@@ -478,7 +545,11 @@ pub fn run_full(
         roots.lane_home(role),
     ];
     paths.dedup();
-    let rep = |rows: Vec<StepRow>, paths: Vec<PathBuf>| Report { rows, paths };
+    let rep = |rows: Vec<StepRow>, paths: Vec<PathBuf>| Report {
+        rows,
+        paths,
+        plan: None,
+    };
 
     // --- step 0: validate, and read what exists -----------------------------------------------
     let mut problems = Vec::new();
@@ -852,7 +923,11 @@ pub fn run_full(
         ),
     ));
     rows.sort_by_key(|r| r.n);
-    rep(rows, paths)
+    let mut report = rep(rows, paths);
+    if !apply && !report.failed() {
+        report.plan = plan_hash(roots, role, repo, model).ok();
+    }
+    report
 }
 
 #[cfg(test)]
