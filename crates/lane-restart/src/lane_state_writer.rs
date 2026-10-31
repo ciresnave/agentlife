@@ -642,20 +642,22 @@ impl RealParentProcess {
         self.full_scans.get()
     }
 
-    fn with_snapshot<R>(&self, f: impl FnOnce(&mut sysinfo::System) -> R) -> R {
+    /// `None` when the process table cannot be opened (sysinfo 0.40 made `System::new` fallible): every
+    /// caller then answers as it would for a process it cannot find.
+    fn with_snapshot<R>(&self, f: impl FnOnce(&mut sysinfo::System) -> Option<R>) -> Option<R> {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
         let mut slot = self.snapshot.borrow_mut();
-        let sys = slot.get_or_insert_with(|| {
-            let mut sys = System::new();
+        if slot.is_none() {
+            let mut sys = System::new().ok()?;
             sys.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
                 ProcessRefreshKind::nothing(),
             );
             self.full_scans.set(self.full_scans.get() + 1);
-            sys
-        });
-        f(sys)
+            *slot = Some(sys);
+        }
+        slot.as_mut().and_then(f)
     }
 }
 

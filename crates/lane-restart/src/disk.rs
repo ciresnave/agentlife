@@ -117,9 +117,9 @@ pub fn volume_for<'a>(path: &str, mounts: &'a [(String, u64)]) -> Option<&'a (St
 /// Free bytes on the volume holding `path`, from the operating system. `Err` says why it could not
 /// be read; that is not the same as "too little".
 pub fn probe(path: &Path) -> Result<Free, String> {
-    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disks = sysinfo::Disks::new_with_refreshed_list()
+        .map_err(|e| format!("cannot read the disk list: {e}"))?;
     let mounts: Vec<(String, u64)> = disks
-        .list()
         .iter()
         .map(|d| {
             (

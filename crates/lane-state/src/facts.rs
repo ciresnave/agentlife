@@ -164,7 +164,9 @@ pub fn exe_matches(current: &Option<PathBuf>, expected: &Option<PathBuf>) -> boo
 
 impl SystemFacts for SysinfoFacts {
     fn is_alive_claude_process(&self, pid: u32) -> bool {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return false;
+        };
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
@@ -177,7 +179,9 @@ impl SystemFacts for SysinfoFacts {
     }
 
     fn cwd_of(&self, pid: u32) -> Option<PathBuf> {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return None;
+        };
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
@@ -189,7 +193,8 @@ impl SystemFacts for SysinfoFacts {
     }
 
     fn has_live_shell_descendant(&self, pid: u32) -> Result<bool, ShellCheckError> {
-        let mut sys = System::new();
+        let mut sys =
+            System::new().map_err(|e| ShellCheckError::EnumerationFailed(e.to_string()))?;
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
@@ -240,7 +245,9 @@ impl SystemFacts for SysinfoFacts {
     }
 
     fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return None;
+        };
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
@@ -256,7 +263,7 @@ impl SystemFacts for SysinfoFacts {
         // ⚠️ RE-READ, DO NOT TRUST `expected` ALONE. The whole point is that
         // time has passed since `expected` was recorded; a fresh read is
         // what makes this a check rather than a formality.
-        let mut sys = System::new();
+        let mut sys = System::new().map_err(|e| KillError::SignalRejected(e.to_string()))?;
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
@@ -313,7 +320,8 @@ impl SystemFacts for SysinfoFacts {
     }
 
     fn process_table(&self) -> Result<Vec<ProcEntry>, ShellCheckError> {
-        let mut sys = System::new();
+        let mut sys =
+            System::new().map_err(|e| ShellCheckError::EnumerationFailed(e.to_string()))?;
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
@@ -355,7 +363,9 @@ pub const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(unix)]
 fn presence(pid: u32, start: u64, exe: &Option<PathBuf>) -> crate::platform::signal::Presence {
     use crate::platform::signal::Presence;
-    let mut sys = System::new();
+    let Ok(mut sys) = System::new() else {
+        return Presence::Other;
+    };
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,
@@ -383,7 +393,9 @@ fn presence(pid: u32, start: u64, exe: &Option<PathBuf>) -> crate::platform::sig
 /// spawn an actual `claude.exe` - production always calls it with
 /// `&["claude"]`.
 fn find_process_in(cwd: &str, after_start_time_secs: u64, image_names: &[&str]) -> Option<u32> {
-    let mut sys = System::new();
+    let Ok(mut sys) = System::new() else {
+        return None;
+    };
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,

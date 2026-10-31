@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_an_invalid_name_before_touching_the_process() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("nospec-testlane");
         state.name = Some("a|calc".to_string());
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -2010,7 +2010,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_a_cwd_containing_a_semicolon_before_touching_the_process() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("nospec-testlane");
         state.cwd = "C:/x;calc".to_string();
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -2024,7 +2024,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_a_model_containing_a_semicolon_before_touching_the_process() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("nospec-testlane");
         // The model now comes only from the launch's explicit --model
         // (or the policy file), never from state.model.
         // A permitted prefix, so the model check passes and the `;` guard is what refuses it.
@@ -2041,7 +2041,7 @@ mod tests {
 
     #[test]
     fn kill_and_relaunch_refuses_a_permission_mode_containing_a_semicolon() {
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("nospec-testlane");
         state.permission_mode = Some("prompting;calc".into());
         let result = kill_and_relaunch(
             &NeverCalled,
@@ -2053,6 +2053,9 @@ mod tests {
         assert!(matches!(result, Err(RelaunchError::UnsafeArgument(_))));
     }
 
+    // These tests call the REAL `kill_and_relaunch`, whose spec store reads the machine's state dir: a role that has a
+    // recorded spec there (overmind has) would have the spec's flags replace the ones under test (#205). A role with
+    // no spec makes them independent of the machine.
     #[test]
     fn kill_and_relaunch_refuses_a_launch_arg_carried_over_flag_value_containing_a_semicolon() {
         // ⚠️ The ';' gate must cover the NEW launch_args-derived
@@ -2060,7 +2063,7 @@ mod tests {
         // hard-coded - it scans claude_argv's full OUTPUT, so this
         // proves the two features actually compose. `--add-dir` stands
         // in for any allowlisted flag.
-        let mut state = state_with_role("overmind");
+        let mut state = state_with_role("nospec-testlane");
         state.launch_args = Some(strs(&["claude.exe", "--add-dir", "C:/a;calc"]));
         let result = kill_and_relaunch(
             &NeverCalled,
