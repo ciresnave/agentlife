@@ -119,6 +119,12 @@ fn rewrite_one(
         Ok(a) => a,
         Err(why) => return RewriteOutcome::Refused(why),
     };
+    // The result must BE the end state (config, `server:synapse`, no claude-peers): checked, not assumed.
+    if let Err(why) = crate::spec_channels::check_synapse_only(&new_args) {
+        return RewriteOutcome::Refused(format!(
+            "the rewrite would not reach the end state: {why}"
+        ));
+    }
     if new_args == s.launch_args {
         return RewriteOutcome::Unchanged;
     }
@@ -381,6 +387,35 @@ mod tests {
                 .path()
                 .join(format!("{r}.launch.json.pre-synapse"))
                 .exists());
+        }
+    }
+
+    /// The rewrite is checked against the end-state definition (`spec_channels::check_synapse_only`), not just
+    /// trusted to have produced it: peers-only, both, and another channel kept all land there, with and without
+    /// `--strict`.
+    #[test]
+    fn a_synapse_only_rewrite_lands_in_the_checked_end_state() {
+        for (role, extra, strict) in [
+            ("p", vec![DEV_CHANNELS, PEERS], false),
+            ("b", vec![DEV_CHANNELS, PEERS, SYNAPSE], false),
+            ("o", vec![DEV_CHANNELS, "server:other", PEERS], true),
+        ] {
+            let d = tempdir().unwrap();
+            let cfg = mcp_file(d.path(), &format!("{role}.mcp.json"), r#""synapse":{}"#);
+            let mut args = vec!["--mcp-config", cfg.as_str()];
+            args.extend(extra);
+            write_spec(d.path(), role, &args);
+            let rows = run(d.path(), &[role], strict, false);
+            assert!(
+                matches!(rows[0].outcome, RewriteOutcome::Rewrote(_)),
+                "{role}: {rows:?}"
+            );
+            let got = spec::read(d.path(), role).unwrap().launch_args;
+            assert_eq!(
+                crate::spec_channels::check_synapse_only(&got),
+                Ok(()),
+                "{role}: {got:?}"
+            );
         }
     }
 

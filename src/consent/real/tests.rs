@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::*;
 use crate::consent::{answer, restore_plan_subject};
 use std::cell::Cell;
