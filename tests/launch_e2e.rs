@@ -345,6 +345,7 @@ fn run_plan(
         registry: &registry,
         table: &table,
         lane_state_dir: &lane_state,
+        hook_log: Some(rig.home.join("hook.log")),
     };
     let programs = Programs {
         host: cfg.host_program.to_string(),
@@ -942,6 +943,7 @@ fn restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_start
             registry: &registry,
             table: &table,
             lane_state_dir: &lane_state,
+            hook_log: Some(rig.home.join("hook.log")),
         };
         let sleep = |d: Duration| std::thread::sleep(d);
         execute(

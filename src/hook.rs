@@ -29,6 +29,7 @@ use lane_state::claude_proc::{
 };
 use serde_json::json;
 use std::collections::HashMap;
+use std::time::Duration;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// The most sessions kept per agent; older ones fall off the front. The journal keeps the full
@@ -79,6 +80,12 @@ pub enum Outcome {
 impl Outcome {
     /// The one line `hook.log` gets.
     pub fn log_line(&self, event: &str, at: DateTime<Utc>) -> String {
+        self.log_line_for(event, at, None)
+    }
+
+    /// As `log_line`, naming the agent a launch gave this hook (`AGENTLIFE_AGENT_ID`) on a skip or
+    /// error, so a restore can tell which of its agents the hook declined to register.
+    pub fn log_line_for(&self, event: &str, at: DateTime<Utc>, agent: Option<&str>) -> String {
         let what = match self {
             Outcome::Registered { agent_id, created } => {
                 format!(
@@ -87,11 +94,16 @@ impl Outcome {
                 )
             }
             Outcome::Ended { agent_id } => format!("ok ended {agent_id}"),
-            Outcome::Skipped(why) => format!("skipped: {why}"),
-            Outcome::Error(e) => format!("ERROR: {e}"),
+            Outcome::Skipped(why) => format!("skipped: {why}{}", agent_tag(agent)),
+            Outcome::Error(e) => format!("ERROR: {e}{}", agent_tag(agent)),
         };
         format!("{} {event} {what}", at.to_rfc3339())
     }
+}
+
+/// The ` [agent <id>]` suffix `restore::skip_for_agent` looks for.
+fn agent_tag(agent: Option<&str>) -> String {
+    agent.map_or_else(String::new, |a| format!(" [agent {a}]"))
 }
 
 fn norm_image(name: &str) -> String {
@@ -434,6 +446,10 @@ fn session_end(ctx: &Ctx, input: &HookInput, reason: Option<&str>) -> Result<Out
     Ok(Outcome::Ended { agent_id: id })
 }
 
+/// Reads of the process table tried before a hook concludes anything from one that lacks itself.
+const CAPTURE_ATTEMPTS: u32 = 3;
+const CAPTURE_PAUSE: Duration = Duration::from_millis(25);
+
 /// One refresh of the process table, served as the copied `ParentProcess` trait.
 ///
 /// **Why not OverMind's own `RealParentProcess` (deliberately not copied)?** It refreshes every process with
@@ -448,7 +464,43 @@ pub struct SnapshotParents {
 }
 
 impl SnapshotParents {
+    /// A snapshot that contains this process. sysinfo returns an empty table without an error when
+    /// the OS snapshot call fails (seen as a hook that "skipped" with exit 0 and no stderr), so one
+    /// read that lacks our own pid is retried before the hook is allowed to conclude anything.
     pub fn capture() -> Self {
+        Self::capture_valid(
+            Self::read_once,
+            std::process::id(),
+            CAPTURE_ATTEMPTS,
+            CAPTURE_PAUSE,
+        )
+    }
+
+    /// Read until a snapshot holds `own_pid`, at most `attempts` times, sleeping `pause` between
+    /// reads. Returns the last read when none qualified.
+    fn capture_valid(
+        mut read: impl FnMut() -> Self,
+        own_pid: u32,
+        attempts: u32,
+        pause: Duration,
+    ) -> Self {
+        let mut last = read();
+        for _ in 1..attempts {
+            if last.procs.contains_key(&own_pid) {
+                break;
+            }
+            std::thread::sleep(pause);
+            last = read();
+        }
+        last
+    }
+
+    /// Whether the table has this process in it: false means the read itself failed.
+    pub fn holds(&self, pid: u32) -> bool {
+        self.procs.contains_key(&pid)
+    }
+
+    fn read_once() -> Self {
         let Ok(mut sys) = System::new() else {
             return Self {
                 procs: Default::default(),
@@ -575,7 +627,13 @@ impl Default for RealEnv {
 
 impl HookEnv for RealEnv {
     fn claude_pid(&self) -> Result<u32, String> {
-        claude_parent_pid(std::process::id(), &self.parents).map_err(|e| e.to_string())
+        let me = std::process::id();
+        if !self.parents.holds(me) {
+            return Err(format!(
+                "the process table did not contain this process (pid {me}) after {CAPTURE_ATTEMPTS} reads"
+            ));
+        }
+        claude_parent_pid(me, &self.parents).map_err(|e| e.to_string())
     }
 
     fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
@@ -1296,6 +1354,8 @@ mod tests {
         assert!(l.contains("SessionStart ok registered a1"), "{l}");
         let l = Outcome::Skipped("headless".into()).log_line("SessionStart", at);
         assert!(l.contains("skipped: headless"), "{l}");
+        let l = Outcome::Skipped("headless".into()).log_line_for("SessionStart", at, Some("a9"));
+        assert!(l.ends_with("skipped: headless [agent a9]"), "{l}");
         let l = Outcome::Error("boom".into()).log_line("SessionEnd", at);
         assert!(l.contains("SessionEnd ERROR: boom"), "{l}");
         let l = Outcome::Ended { agent_id: id }.log_line("SessionEnd", at);
@@ -1343,6 +1403,55 @@ mod tests {
             None,
             "the stranger is not claude's parent"
         );
+    }
+
+    #[test]
+    fn capture_retries_an_empty_read_until_it_holds_this_process() {
+        let reads = std::cell::Cell::new(0u32);
+        let snap = SnapshotParents::capture_valid(
+            || {
+                reads.set(reads.get() + 1);
+                if reads.get() < 3 {
+                    SnapshotParents::from_entries(&[])
+                } else {
+                    SnapshotParents::from_entries(&[(7, Some(1), "hook.exe", 5)])
+                }
+            },
+            7,
+            3,
+            Duration::ZERO,
+        );
+        assert!(snap.holds(7));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn capture_gives_up_after_the_attempts_and_a_good_first_read_is_one_read() {
+        let reads = std::cell::Cell::new(0u32);
+        let snap = SnapshotParents::capture_valid(
+            || {
+                reads.set(reads.get() + 1);
+                SnapshotParents::from_entries(&[])
+            },
+            7,
+            3,
+            Duration::ZERO,
+        );
+        assert!(!snap.holds(7));
+        assert_eq!(reads.get(), 3);
+
+        let reads = std::cell::Cell::new(0u32);
+        let snap = SnapshotParents::capture_valid(
+            || {
+                reads.set(reads.get() + 1);
+                SnapshotParents::from_entries(&[(7, None, "hook.exe", 5)])
+            },
+            7,
+            3,
+            Duration::ZERO,
+        );
+        assert!(snap.holds(7));
+        assert_eq!(reads.get(), 1);
     }
 
     #[test]

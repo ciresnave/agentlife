@@ -148,7 +148,11 @@ fn run_hook(event: &str, reason: Option<&str>) -> ExitCode {
     // hook that blows it fails silently.
     let line = format!(
         "{} [stdin {read_ms} ms, +snapshot to {snapshot_ms} ms, total {} ms]",
-        outcome.log_line(event, chrono::Utc::now()),
+        outcome.log_line_for(
+            event,
+            chrono::Utc::now(),
+            std::env::var("AGENTLIFE_AGENT_ID").ok().as_deref()
+        ),
         began.elapsed().as_millis()
     );
     let _ = std::fs::create_dir_all(home.root());
@@ -345,6 +349,7 @@ fn run_with_runtime(
             registry: &registry,
             table: &live,
             lane_state_dir: &lane_state_dir,
+            hook_log: Some(home.hook_log()),
         };
         let sleep = |d: std::time::Duration| std::thread::sleep(d);
         let mut pre = restore::preflight(&programs, &restore::program_exists);
