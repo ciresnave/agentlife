@@ -4,7 +4,7 @@ One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
 ## 0.30.8
 
-- **ROADMAP: waits v3 row (PM 2026-11-01).** The `synapse:<role> replied` check, named in the v2 ask and left out of v2, is now a row in "Waits that cannot be forgotten": it needs a Synapse read, which the published `lane-restart` crate must not depend on, so it belongs in the `agentlife` crate or the supervisor, and the row records the open question of where `waits-poll` lives once one check needs Synapse. Docs only; no code, no behaviour change.
+- **ROADMAP: waits v3 row (PM 2026-11-01).** The `synapse:<role> replied` check, named in the v2 ask and left out of v2, is now a row in "Waits that cannot be forgotten", marked **blocked on board 359 (Synapse events), no code**: "replied" means reading the waiting lane's inbox, `synapse inbox` leases messages (leased until acked, then the dead set after the delivery cap), so a supervisor polling an inbox would steal or burn the lane's own mail. `waits-poll` stays in `lane-restart` and dependency-free. Docs only; no code, no behaviour change.
 
 ## 0.30.7
 
