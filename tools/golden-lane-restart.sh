@@ -53,6 +53,13 @@ run_case poll_badflag "$E" -- waits-poll --bogus
 run_case poll_positional "$E" -- waits-poll extra
 run_case poll_help "$E" -- waits-poll --help
 run_case poll_dry_run_help "$E" -- waits-poll --dry-run -h
+# status: same rule (a real `status` reads the machine's lane state); the argument errors and help.
+run_case status_badflag "$E" -- status --bogus
+run_case status_quiet_missing "$E" -- status --quiet-over
+run_case status_quiet_text "$E" -- status --quiet-over x
+run_case status_quiet_zero "$E" -- status --quiet-over 0
+run_case status_positional "$E" -- status extra
+run_case status_help "$E" -- status --json -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail

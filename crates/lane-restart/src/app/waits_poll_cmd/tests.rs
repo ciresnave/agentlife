@@ -3,17 +3,14 @@
 //! `waits-poll` through the `Ctx` seam: a fixture state directory with a LIVE lane (fake process
 //! facts), a fake check runner, a capturing sender, and the text the command printed.
 
+use super::super::test_fixtures::{fixture, live_facts};
 use super::*;
 use crate::app::run_with;
-use crate::launch::LaunchSpec;
-use crate::role::Role;
-use crate::spec::{build, write_atomic, SpecInputs, SpecState, WrittenBy};
-use crate::testing::{log, state_at, RecordingFacts};
+use crate::testing::{log, RecordingFacts};
 use crate::waits_poll::CheckRunner;
-use chrono::TimeZone;
 use std::cell::RefCell;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 
 fn ok(code: ExitCode) -> bool {
@@ -25,68 +22,6 @@ fn failed(code: ExitCode) -> bool {
 }
 
 const PR_CHECK: &str = "gh pr view 7 --json state,mergedAt";
-
-/// A tempdir holding a state directory with one LIVE lane `role` (recorded pid 55 started at 100,
-/// which the fake facts call alive) that has a complete spec and a HANDOFF with the given text.
-/// Returns `(state_dir, lane_dir)`.
-fn fixture(root: &Path, role: &str, handoff: &str) -> (PathBuf, PathBuf) {
-    let state = root.join("state");
-    let lane = root.join(format!("lane-{role}"));
-    std::fs::create_dir_all(&state).unwrap();
-    std::fs::create_dir_all(&lane).unwrap();
-    std::fs::write(lane.join("HANDOFF.md"), handoff).unwrap();
-    let mut st = state_at(role, "s", "Stop");
-    st.pid = 55;
-    st.pid_start_secs = Some(100);
-    st.cwd = lane.to_string_lossy().into_owned();
-    std::fs::write(
-        state.join(format!("{role}.json")),
-        serde_json::to_string(&st).unwrap(),
-    )
-    .unwrap();
-    let launch = LaunchSpec {
-        wsl: None,
-        role: Role::new(role).unwrap(),
-        name: Role::new(role).unwrap(),
-        cwd: lane.to_string_lossy().into_owned(),
-        permission_mode: Some("auto".into()),
-        remote_control: false,
-        launch_args: Some(
-            [
-                "claude.exe",
-                "prompt",
-                "--name",
-                role,
-                "--model",
-                "sonnet",
-                "--dangerously-load-development-channels",
-                "server:claude-peers",
-            ]
-            .map(String::from)
-            .to_vec(),
-        ),
-    };
-    let spec = build(&SpecInputs {
-        launch: &launch,
-        model: "sonnet",
-        session_id: Some("sess-1"),
-        pid_start_secs: Some(100),
-        state: SpecState::Running,
-        written_by: WrittenBy::Restart,
-        now: chrono::Utc
-            .with_ymd_and_hms(2026, 10, 11, 12, 0, 0)
-            .unwrap(),
-    })
-    .unwrap();
-    write_atomic(&state, &spec).unwrap();
-    (state, lane)
-}
-
-fn live_facts() -> RecordingFacts {
-    let mut f = RecordingFacts::new(&log());
-    f.live_pid = Some((55, 100));
-    f
-}
 
 fn wait_line(wake: &str) -> String {
     format!("WAIT: build green | check: {PR_CHECK} | wake: {wake}\n")

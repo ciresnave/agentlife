@@ -10,6 +10,9 @@
 
 mod assert_idle_cmd;
 mod ctx;
+mod status_cmd;
+#[cfg(test)]
+mod test_fixtures;
 mod waits_cmd;
 mod waits_poll_cmd;
 
@@ -221,201 +224,6 @@ fn run_approvals_cmd(role: Option<String>) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
-}
-
-/// ` QUIET>Ns` after the quiet seconds when `--quiet-over N` was given and the role is over it.
-fn quiet_mark(a: &lane_restart::spec::Activity, quiet_over: Option<i64>) -> String {
-    match (a.quiet_over, quiet_over) {
-        (Some(true), Some(n)) => format!(" QUIET>{n}s"),
-        _ => String::new(),
-    }
-}
-
-/// `\tduplicate-risk: host pid N, claude pid M`, or nothing for a normal row.
-fn duplicate_text(d: &[lane_restart::duplicate::Duplicate]) -> String {
-    if d.is_empty() {
-        return String::new();
-    }
-    let list: Vec<String> = d.iter().map(ToString::to_string).collect();
-    format!("\tduplicate-risk: {}", list.join(", "))
-}
-
-fn peers_text(p: &lane_restart::peers_join::RolePeers) -> String {
-    use lane_restart::peers_join::RolePeers;
-    match p {
-        RolePeers::Unknown(u) => u.clone(),
-        RolePeers::Peers(v) if v.is_empty() => "-".to_string(),
-        RolePeers::Peers(v) => v
-            .iter()
-            .map(|p| match &p.summary {
-                Some(s) => format!("{} {s:?}", p.id),
-                None => p.id.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join("; "),
-    }
-}
-
-/// The `channels=` column of a live lane: `mcp+peers+synapse`, each missing flag shown as `-` and a
-/// lane whose state recorded no launch arguments as `?`. Not live: no column.
-fn channels_text(r: &lane_restart::spec::RoleStatus) -> String {
-    match (&r.activity, &r.channels) {
-        (Some(_), Some(c)) => format!(
-            "\tchannels={}{}",
-            c.text(),
-            if c.reaches_synapse() {
-                ""
-            } else {
-                " NO-SYNAPSE"
-            }
-        ),
-        (Some(_), None) => "\tchannels=?".to_string(),
-        (None, _) => String::new(),
-    }
-}
-
-/// `lane-restart status [--json]` - RESTART-TOOL-DESIGN.md 14.2 / 14.10. Read-only: for every
-/// role with a lane state or a launch spec, whether it is running, suspended, crashed or never
-/// run, and whether it can be started again from its spec. Liveness is the process table's
-/// (pid and start time), never a file's age.
-fn run_status_cmd(json: bool, quiet_over: Option<i64>, with_peers: bool) -> ExitCode {
-    use lane_restart::spec;
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let mut report = spec::status_all(&state_dir(), &facts);
-    if let Some(secs) = quiet_over {
-        report.mark_quiet_over(secs);
-    }
-    lane_restart::duplicate::annotate(&mut report, &state_dir(), &facts);
-    let peers_moved = with_peers
-        && lane_restart::approvals::configured_transport(
-            lane_restart::paths::home_dir().as_deref(),
-        ) == lane_restart::notify::Transport::Synapse;
-    if peers_moved {
-        // The published lane-restart crate does not depend on Synapse: the join moved.
-        eprintln!(
-            "lane-restart status --peers: moved (notify_transport is synapse): run `agentlife status --peers`"
-        );
-    }
-    if with_peers && !peers_moved {
-        let parents = RealParentProcess::new();
-        lane_restart::peers_join::annotate(
-            &mut report,
-            &state_dir(),
-            &facts,
-            &|pid| {
-                lane_restart::lane_state_writer::ParentProcess::parent_of(&parents, pid)
-                    .map(|p| p.0)
-            },
-            lane_restart::notify::list_all(lane_restart::notify::broker_addr()),
-        );
-    }
-    if json {
-        // The JSON shape is unchanged; the disk line goes to stderr so a reader of stdout is not
-        // broken by it.
-        eprintln!("{}", lane_restart::disk::status_line(&state_dir()));
-        match serde_json::to_string_pretty(&report) {
-            Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("lane-restart status: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-        return ExitCode::SUCCESS;
-    }
-    println!("{}", lane_restart::disk::status_line(&state_dir()));
-    for r in &report.roles {
-        println!(
-            "{}\t{:?}\tspec={:?}\tstartable={}\t{}{}{}",
-            r.role,
-            r.state,
-            r.spec,
-            r.startable,
-            match &r.activity {
-                Some(a) if a.idle => format!(
-                    "idle=true quiet={}s{}",
-                    a.quiet_secs,
-                    quiet_mark(a, quiet_over)
-                ),
-                Some(a) => format!(
-                    "idle=false({}) quiet={}s{}",
-                    a.idle_blockers.join("+"),
-                    a.quiet_secs,
-                    quiet_mark(a, quiet_over)
-                ),
-                None => "idle=-".to_string(),
-            },
-            match &r.handoff {
-                Some(h) => format!(
-                    "\thandoff={}B/{}B{}",
-                    h.bytes,
-                    h.ceiling,
-                    if h.over { " OVER" } else { "" }
-                ),
-                None => "\thandoff=none".to_string(),
-            } + &r
-                .nested_in
-                .as_deref()
-                .map(|p| format!("\tnested-in={p}"))
-                .unwrap_or_default()
-                + &channels_text(r),
-            r.detail
-                .as_deref()
-                .map(|d| format!("\t{d}"))
-                .unwrap_or_default()
-                + &duplicate_text(&r.duplicate_risk)
-        );
-        if let Some(p) = &r.peers {
-            println!("  peers: {}", peers_text(p));
-        }
-    }
-    if let Some(e) = &report.duplicate_error {
-        println!(
-            "(duplicate-risk: the process table could not be read, so no role was checked: {e})"
-        );
-    }
-    if let Some(e) = &report.peers_error {
-        println!("(peers: the broker could not be read, so every role is unknown: {e})");
-    }
-    if let Some(un) = &report.peers_unmatched {
-        for u in un {
-            println!(
-                "unmatched peer {} in {}: no role's live claude is its parent{}",
-                u.id,
-                u.cwd,
-                u.summary
-                    .as_deref()
-                    .map(|s| format!(" - {s:?}"))
-                    .unwrap_or_default()
-            );
-        }
-    }
-    let cov = &report.coverage;
-    println!(
-        "launch specs: {} of {} role(s) have a complete one{}",
-        cov.complete,
-        cov.total,
-        if cov.gaps.is_empty() {
-            ""
-        } else {
-            "; without:"
-        }
-    );
-    for g in &cov.gaps {
-        println!(
-            "  {} role(s): {}: {}",
-            g.roles.len(),
-            g.why,
-            g.roles.join(", ")
-        );
-    }
-    if !report.skipped.is_empty() {
-        println!(
-            "({} other file(s) in the state directory are neither a lane state nor a launch spec: {})",
-            report.skipped.len(),
-            report.skipped.join(", ")
-        );
-    }
-    ExitCode::SUCCESS
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1676,11 +1484,11 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         }
         if first == "status" {
             return match cli::status(rest) {
-                Ok((json, quiet_over, peers)) => run_status_cmd(json, quiet_over, peers),
+                Ok((json, quiet_over, peers)) => status_cmd::run(ctx, json, quiet_over, peers),
                 Err(e) => {
-                    eprintln!(
+                    ctx.errln(&format!(
                         "lane-restart status: {e}; expected `status [--json] [--quiet-over <secs>] [--peers]`"
-                    );
+                    ));
                     ExitCode::FAILURE
                 }
             };
