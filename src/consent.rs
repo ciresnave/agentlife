@@ -138,9 +138,17 @@ pub enum Outcome {
 ///     approved_at: chrono::Utc::now(), expires_at: None };
 /// ```
 ///
-/// A proof is **spent by value**: it is neither `Clone` nor `Copy`, and [`Consent::resolve`] takes the
-/// [`Answer`] that holds it, so one approval from the channel cannot be kept and replayed on a second
-/// restore (PM, 2026-10-31).
+/// **What stops a replay, in two layers (PM, 2026-10-31):**
+///
+/// 1. *This crate never holds a second copy.* [`Answer::from_channel`] takes the channel's
+///    `user_request::Outcome` BY VALUE and moves the approval into the `Proof`; a `Proof` is neither
+///    `Clone` nor `Copy`; [`Consent::resolve`] takes the [`Answer`] that holds it. (Anyone who still holds the
+///    same `user_request::Outcome` could build a second `Proof`; today only `HelloPrompt::ask` holds it, and
+///    it hands it over and drops it.)
+/// 2. *The store makes a second use worthless.* A resolved request's reservation is spent and its pending
+///    request is closed, so a second `resolve` for it fails, whatever approval is offered (the test
+///    `one_approval_cannot_be_replayed_on_a_second_restore` offers a fresh, genuine one). That is what a
+///    replay actually runs into.
 ///
 /// ```compile_fail
 /// fn needs_clone<T: Clone>() {}
@@ -199,12 +207,15 @@ impl Answer {
     /// (over the maximum, malformed, or ended while the person decided) was not an answer: it is
     /// `Unavailable`, which leaves the request pending. `Outcome` is non-exhaustive, so anything new is
     /// "not answered", never an approval.
-    pub fn from_channel(o: &user_request::Outcome) -> Self {
+    ///
+    /// Takes the outcome **by value**: the approval is moved into the [`Proof`], not cloned out of a
+    /// borrow, so this crate holds the only copy it was given.
+    pub fn from_channel(o: user_request::Outcome) -> Self {
         use user_request::Outcome as Ur;
         match o {
             Ur::Approved(a) => Self {
                 outcome: Outcome::Approved,
-                proof: Some(Proof(a.clone())),
+                proof: Some(Proof(a)),
             },
             Ur::Denied => Self::without_proof(Outcome::Cancelled),
             Ur::TimedOut => Self::without_proof(Outcome::TimedOut),
