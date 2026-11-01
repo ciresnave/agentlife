@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.5
+
+- **`crates/launcher` is renamed `agentlife-launcher` and becomes publishable, so `agentlife` can be.** The root crate depends on it, and a crate with a `publish = false` dependency cannot be published. The old name `launcher` on crates.io belongs to another author (an unrelated CLI task launcher, 2023), so our crate can never be published under it. The PM claimed `agentlife-launcher` 0.0.0 on crates.io. The root dependency uses the `package =` alias form (`launcher = { package = "agentlife-launcher", ... }`), so the 7 `launcher::` uses in `src/launcher_service.rs`, its tests and `src/main.rs` are untouched and no code changes. The crate gains `readme`, `keywords`, `categories`, the two licence files (copied from `lane-state`, same `MIT OR Apache-2.0`) and a README that says why the name differs; `publish = false` is gone. No API of an already-published crate changes, so this is not Breaking. The four crates (`lane-state`, `lane-restart`, `agentlife-launcher`, `agentlife`) are then published at one version, from the merge commit. The `cargo package` check cannot run offline until `lane-state` at this version is on crates.io (UNVERIFIED here).
+
 ## 0.30.4
 
 - **`docs/SUPERVISION-INPUTS.md`: facts-only input to the supervision stack mapping (PM-requested; no design, no code).** What the state model is today, 12 failure modes already paid for (each with its rule and merged PR, or marked open with cause UNVERIFIED), what a generic layer could take unchanged versus what stays Claude-specific, what depends on AgentLife's commands and files, and what is not measured. Failure 12 is the restore that said "no session appeared" on `5c62f44` (open defect, cause UNVERIFIED; #215 and #216 merged). Docs only.
