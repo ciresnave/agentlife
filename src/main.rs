@@ -281,7 +281,30 @@ fn state_dir_of(cfg: &Config) -> std::path::PathBuf {
     std::path::PathBuf::from(&cfg.lane_state_dir)
 }
 
+/// Debug builds only: the free memory (GB) the restore plan sees, instead of the machine's, so a
+/// test does not depend on how much RAM is free while other builds run. A release build ignores it,
+/// because a lane that could set it to a large number would have no memory floor (the same rule as
+/// the disk floor's `LANE_DISK_FLOOR_BYTES`, `lane-restart`'s `disk.rs`).
+const FREE_RAM_ENV: &str = "AGENTLIFE_FREE_RAM_GB";
+
+/// `value` of [`FREE_RAM_ENV`] as the injected free memory: only in a debug build, and only a finite
+/// number above zero; anything else (release, unset, text, NaN, zero, negative) is "not injected".
+fn injected_free_ram_gb(value: Option<&str>, debug_build: bool) -> Option<f64> {
+    if !debug_build {
+        return None;
+    }
+    value?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|gb| gb.is_finite() && *gb > 0.0)
+}
+
 fn free_memory_gb() -> Option<f64> {
+    let var = std::env::var(FREE_RAM_ENV).ok();
+    if let Some(gb) = injected_free_ram_gb(var.as_deref(), cfg!(debug_assertions)) {
+        return Some(gb);
+    }
     let Ok(mut sys) = sysinfo::System::new() else {
         return None;
     };
@@ -1653,5 +1676,22 @@ fn control_report(command: &str, id: &str, result: Result<(), ControlError>) -> 
             eprintln!("agentlife {command}: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod free_ram_tests {
+    use super::injected_free_ram_gb;
+
+    #[test]
+    fn only_a_debug_build_honours_a_positive_finite_number() {
+        assert_eq!(injected_free_ram_gb(Some("1"), true), Some(1.0));
+        assert_eq!(injected_free_ram_gb(Some(" 64.5 "), true), Some(64.5));
+        // A release build ignores it, however good the value: the floor cannot be dodged.
+        assert_eq!(injected_free_ram_gb(Some("64"), false), None);
+        for junk in ["", "abc", "0", "-3", "NaN", "inf", "1e999"] {
+            assert_eq!(injected_free_ram_gb(Some(junk), true), None, "{junk:?}");
+        }
+        assert_eq!(injected_free_ram_gb(None, true), None);
     }
 }
