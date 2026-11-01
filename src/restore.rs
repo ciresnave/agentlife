@@ -236,6 +236,8 @@ pub struct Progress {
     pub session: Option<SessionSeen>,
     /// Its lane state shows progress past `SessionStart`.
     pub working: bool,
+    /// No session, but `hook.log` shows this agent's `SessionStart` hook declined to register it.
+    pub skipped: Option<String>,
 }
 
 /// Where the launcher learns what happened. The real one reads the registry the hook writes.
@@ -258,6 +260,43 @@ pub struct RegistryObserver<'a> {
     pub registry: &'a Registry,
     pub table: &'a dyn ProcessTable,
     pub lane_state_dir: &'a Path,
+    /// `hook.log`, read so a hook that declined to register an agent is reported at once instead of
+    /// after the liveness timeout.
+    pub hook_log: Option<PathBuf>,
+}
+
+/// The newest `... skipped: <why> [agent <id>]` line for `agent_id` stamped at or after `since`
+/// (the `Outcome::log_line_for` format). Pure over the log text.
+pub fn skip_for_agent(log_text: &str, agent_id: &str, since: DateTime<Utc>) -> Option<String> {
+    let tag = format!(" [agent {agent_id}]");
+    log_text.lines().rev().find_map(|line| {
+        let (stamp, rest) = line.split_once(' ')?;
+        let at = DateTime::parse_from_rfc3339(stamp).ok()?;
+        if at.with_timezone(&Utc) < since {
+            return None;
+        }
+        let (_, tail) = rest.split_once(" skipped: ")?;
+        let (why, _) = tail.split_once(&tag)?;
+        Some(why.to_string())
+    })
+}
+
+impl RegistryObserver<'_> {
+    /// What an agent with no new session looks like: nothing, unless its hook said why.
+    fn without_session(&self, agent_id: &str, launched_at: DateTime<Utc>) -> Progress {
+        let skipped = self.hook_log.as_ref().and_then(|p| {
+            let text = std::fs::read_to_string(p).ok()?;
+            skip_for_agent(
+                &text,
+                agent_id,
+                launched_at - ChronoDuration::seconds(START_SLACK_SECS),
+            )
+        });
+        Progress {
+            skipped,
+            ..Progress::default()
+        }
+    }
 }
 
 impl Observer for RegistryObserver<'_> {
@@ -287,7 +326,7 @@ impl Observer for RegistryObserver<'_> {
             .ok()
             .and_then(|id| self.registry.get(&id).ok().flatten())
         else {
-            return Progress::default();
+            return self.without_session(agent_id, launched_at);
         };
         let earliest = launched_at - ChronoDuration::seconds(START_SLACK_SECS);
         let Some(s) = rec
@@ -296,7 +335,7 @@ impl Observer for RegistryObserver<'_> {
             .rev()
             .find(|s| Some(s.session_id.as_str()) != before && s.started_at >= earliest)
         else {
-            return Progress::default();
+            return self.without_session(agent_id, launched_at);
         };
         let alive = s.ended_at.is_none()
             && match s.process_start_secs {
@@ -321,6 +360,7 @@ impl Observer for RegistryObserver<'_> {
                 alive,
             }),
             working,
+            skipped: None,
         }
     }
 }
@@ -676,6 +716,10 @@ fn settle(plan: &Plan, d: &Deps, reports: &mut [EntryReport], mut live: Vec<Live
                 Some(_) if elapsed >= d.progress_timeout && l.carries_channel => {
                     Some(Outcome::AwaitingDialog)
                 }
+                None if p.skipped.is_some() => Some(Outcome::Failed(format!(
+                    "its SessionStart hook skipped: {}",
+                    p.skipped.as_deref().unwrap_or_default()
+                ))),
                 _ if elapsed >= liveness => Some(if seen_alive {
                     Outcome::Started
                 } else {
@@ -858,6 +902,8 @@ mod tests {
         running_before: HashSet<String>,
         spawn_fails: HashSet<String>,
         spawn_calls: RefCell<Vec<TabLaunch>>,
+        /// Agents whose hook logged a skip, so they never get a session.
+        hook_skips: HashSet<String>,
     }
 
     impl Fleet {
@@ -871,6 +917,7 @@ mod tests {
                 running_before: HashSet::new(),
                 spawn_fails: HashSet::new(),
                 spawn_calls: RefCell::new(Vec::new()),
+                hook_skips: HashSet::new(),
             }
         }
         fn set(&self, id: &str, b: Behavior) {
@@ -913,7 +960,10 @@ mod tests {
             let secs = (self.clock.now() - at).num_seconds().max(0) as u64;
             let b = self.behavior_of(id);
             let Some(a) = b.appears.filter(|a| secs >= *a) else {
-                return Progress::default();
+                return Progress {
+                    skipped: self.hook_skips.contains(id).then(|| "headless".to_string()),
+                    ..Progress::default()
+                };
             };
             let _ = a;
             let alive = !b.dies.is_some_and(|d| secs >= d);
@@ -923,6 +973,7 @@ mod tests {
                     alive,
                 }),
                 working: alive && b.works.is_some_and(|w| secs >= w),
+                skipped: None,
             }
         }
     }
@@ -1111,6 +1162,52 @@ mod tests {
         }
         assert!(r.report.halted.is_none(), "one failed batch is not a halt");
         assert!(r.report.render_text().contains("Failed"));
+    }
+
+    #[test]
+    fn a_visible_hook_skip_fails_the_agent_at_once_not_after_the_liveness_timeout() {
+        let plan = plan_of(2, true, 3, true);
+        let mut f = Fleet::new(GOOD);
+        f.set("a-0", NEVER);
+        f.hook_skips.insert("a-0".into());
+        let r = run(f, &plan);
+        let e = r
+            .report
+            .entries
+            .iter()
+            .find(|e| e.agent_id == "a-0")
+            .unwrap();
+        assert_eq!(
+            e.outcome,
+            Outcome::Failed("its SessionStart hook skipped: headless".into())
+        );
+        assert!(
+            e.seconds_to_settle.unwrap() < 120,
+            "settled before the timeout: {:?}",
+            e.seconds_to_settle
+        );
+    }
+
+    #[test]
+    fn skip_for_agent_reads_only_this_agents_newer_skip_lines() {
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let log = "2026-10-31T10:00:00+00:00 SessionStart skipped: old [agent a1] [stdin 1 ms]
+2026-10-31T10:05:00+00:00 SessionStart skipped: other [agent a2] [stdin 1 ms]
+2026-10-31T10:05:01+00:00 SessionStart ok registered a1
+2026-10-31T10:05:02+00:00 SessionStart skipped: not under a claude process [agent a1] [stdin 1 ms]
+2026-10-31T10:05:03+00:00 SessionStart skipped: untagged
+";
+        let since = t("2026-10-31T10:04:00+00:00");
+        assert_eq!(
+            skip_for_agent(log, "a1", since).as_deref(),
+            Some("not under a claude process")
+        );
+        assert_eq!(skip_for_agent(log, "a2", since).as_deref(), Some("other"));
+        assert_eq!(skip_for_agent(log, "a3", since), None);
+        assert_eq!(
+            skip_for_agent(log, "a1", t("2026-10-31T10:06:00+00:00")),
+            None
+        );
     }
 
     #[test]
@@ -1547,6 +1644,7 @@ mod tests {
             registry: &reg,
             table: &table,
             lane_state_dir: &lane_state,
+            hook_log: None,
         };
         let launched = t0() + ChronoDuration::seconds(1000);
         assert_eq!(obs.latest_session("a-x").as_deref(), Some("old"));
@@ -1578,6 +1676,7 @@ mod tests {
             registry: &reg,
             table: &table,
             lane_state_dir: &lane_state,
+            hook_log: None,
         };
         let p = obs.progress("a-x", Some("old"), launched);
         assert_eq!(
@@ -1605,6 +1704,7 @@ mod tests {
             registry: &reg,
             table: &gone,
             lane_state_dir: &lane_state,
+            hook_log: None,
         };
         assert!(
             !obs.progress("a-x", Some("old"), launched)
@@ -1634,6 +1734,7 @@ mod tests {
             registry: &reg,
             table: &table,
             lane_state_dir: dir.path(),
+            hook_log: None,
         };
         assert_eq!(
             obs.progress("a-x", Some("old"), launched),
@@ -1669,6 +1770,7 @@ mod tests {
             registry: &reg,
             table: &table,
             lane_state_dir: dir.path(),
+            hook_log: None,
         };
         assert_eq!(obs.progress("a-x", None, launched), Progress::default());
         // Within the 5 s clock slack it still counts.
@@ -1690,6 +1792,7 @@ mod tests {
             registry: &reg,
             table: &table,
             lane_state_dir: dir.path(),
+            hook_log: None,
         };
         assert_eq!(
             obs.progress("a-x", None, launched)
