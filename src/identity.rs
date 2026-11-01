@@ -138,8 +138,47 @@ pub fn process_is_dead(p: &sysinfo::Process) -> bool {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SysinfoTable;
 
+/// Reads taken of a pid whose image reads as the empty path before the answer is believed.
+const IMAGE_READS: u32 = 40;
+/// The pause between those reads: the whole wait is at most 1 s, and only for a pid in that state.
+const IMAGE_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// `Some("")`, as `sysinfo` reports it on Windows when the image cannot be read at all
+/// (`get_exe` ignores the failure of `GetModuleFileNameExW`). A live process whose image we may
+/// read never has it; a process that is exiting or has just exited does, for a moment, while the
+/// OS still lists it. An empty path is neither "a different exe" nor "gone".
+fn image_unreadable(i: &ProcessIdentity) -> bool {
+    i.exe.as_deref() == Some("")
+}
+
+/// Re-reads while the image is unreadable, so a process caught between exit and removal from the
+/// table settles into either "gone" (`None`) or its real image. If it is still unreadable after
+/// `reads` reads, the empty image is returned as it is: the result then never matches a recorded
+/// exe, which is the safe direction (never `Same`, never a pid taken for a live lane).
+fn settle_image(
+    mut read: impl FnMut() -> Option<ProcessIdentity>,
+    reads: u32,
+    pause: std::time::Duration,
+) -> Option<ProcessIdentity> {
+    let mut last = read();
+    for _ in 1..reads {
+        if !last.as_ref().is_some_and(image_unreadable) {
+            break;
+        }
+        std::thread::sleep(pause);
+        last = read();
+    }
+    last
+}
+
 impl ProcessTable for SysinfoTable {
     fn identity_of(&self, pid: u32) -> Option<ProcessIdentity> {
+        settle_image(|| self.read_once(pid), IMAGE_READS, IMAGE_PAUSE)
+    }
+}
+
+impl SysinfoTable {
+    fn read_once(&self, pid: u32) -> Option<ProcessIdentity> {
         let Ok(mut sys) = System::new() else {
             return None;
         };
@@ -416,6 +455,130 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(check(&SysinfoTable, &got), Match::NotRunning);
+    }
+
+    fn ident(exe: Option<&str>) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: 7,
+            start_secs: 100,
+            exe: exe.map(str::to_string),
+        }
+    }
+
+    /// Runs `settle_image` over a scripted sequence of reads (the last one repeats), counting them.
+    fn settle(script: &[Option<ProcessIdentity>], reads: u32) -> (Option<ProcessIdentity>, u32) {
+        let n = std::cell::Cell::new(0usize);
+        let got = settle_image(
+            || {
+                let i = n.get();
+                n.set(i + 1);
+                script[i.min(script.len() - 1)].clone()
+            },
+            reads,
+            std::time::Duration::ZERO,
+        );
+        (got, n.get() as u32)
+    }
+
+    #[test]
+    fn an_empty_image_that_then_vanishes_is_gone_not_a_different_exe() {
+        // The #221 failure, scripted: the OS still lists the exited process with an empty image,
+        // then drops it. Verdict through `check` is NotRunning.
+        let (got, reads) = settle(&[Some(ident(Some(""))), Some(ident(Some(""))), None], 40);
+        assert_eq!((got.clone(), reads), (None, 3));
+        let table = Scripted(got);
+        let mut expected = ident(Some("C:\\Windows\\System32\\PING.EXE"));
+        expected.start_secs = 100;
+        assert_eq!(check(&table, &expected), Match::NotRunning);
+    }
+
+    #[test]
+    fn an_empty_image_that_then_reads_is_the_real_process() {
+        let real = ident(Some("C:\\a\\b.exe"));
+        let (got, reads) = settle(&[Some(ident(Some(""))), Some(real.clone())], 40);
+        assert_eq!((got, reads), (Some(real), 2));
+    }
+
+    #[test]
+    fn a_readable_gone_or_unknown_image_is_one_read_and_a_stuck_empty_one_stays_empty() {
+        let real = ident(Some("C:\\a\\b.exe"));
+        assert_eq!(settle(&[Some(real.clone())], 40), (Some(real), 1));
+        assert_eq!(settle(&[None], 40), (None, 1));
+        // `None` is "the OS would not say", not "empty": no waiting, and the comparison is skipped.
+        let unknown = ident(None);
+        assert_eq!(settle(&[Some(unknown.clone())], 40), (Some(unknown), 1));
+        // Still empty after every read: returned as it is (never Same against a recorded exe).
+        let empty = ident(Some(""));
+        assert_eq!(settle(&[Some(empty.clone())], 5), (Some(empty.clone()), 5));
+        let mut expected = ident(Some("C:\\a\\b.exe"));
+        expected.start_secs = 100;
+        assert!(matches!(
+            check(&Scripted(Some(empty)), &expected),
+            Match::DifferentExe { .. }
+        ));
+    }
+
+    struct Scripted(Option<ProcessIdentity>);
+    impl ProcessTable for Scripted {
+        fn identity_of(&self, _pid: u32) -> Option<ProcessIdentity> {
+            self.0.clone()
+        }
+    }
+
+    /// The verdict on a real child the instant after it is killed and reaped, `rounds` times over,
+    /// each round a fresh child. A killed pid is `NotRunning`: never `DifferentExe`, never `Same`.
+    /// Found 2026-11-01 on a Windows CI leg of #221 (`DifferentExe { actual: "" }`): for a moment
+    /// after exit the OS still lists the process, and `sysinfo` reads its image as the EMPTY path
+    /// (`get_exe` ignores the failure of `GetModuleFileNameExW`), which is not "a different exe"
+    /// and not "gone".
+    fn verdicts_for_killed_children(rounds: usize) -> Vec<Match> {
+        (0..rounds)
+            .map(|_| {
+                let mut child = long_running_child();
+                let pid = child.id();
+                // The recorded identity carries the exe, as the strict callers' do: wait for the
+                // image to become the program we started (fork-to-exec shows the parent's).
+                let mut expected = None;
+                for _ in 0..80 {
+                    if let Some(i) = SysinfoTable.identity_of(pid) {
+                        let exe = i.exe.clone().unwrap_or_default().to_lowercase();
+                        if exe.contains("ping") || exe.contains("sleep") {
+                            expected = Some(i);
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                let expected = expected.expect("the child's image became ping/sleep");
+                child.kill().unwrap();
+                child.wait().unwrap();
+                check(&SysinfoTable, &expected)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_killed_child_is_never_a_different_exe_over_many_real_rounds() {
+        // Eight threads at once: the failure was seen on a CI runner running the whole suite in
+        // parallel, and on an idle machine one thread did not show it in 450 rounds.
+        let (threads, per_thread) = (8, 40);
+        let rounds = threads * per_thread;
+        let handles: Vec<_> = (0..threads)
+            .map(|_| std::thread::spawn(move || verdicts_for_killed_children(per_thread)))
+            .collect();
+        let verdicts: Vec<Match> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a round panicked"))
+            .collect();
+        let bad: Vec<&Match> = verdicts
+            .iter()
+            .filter(|v| **v != Match::NotRunning)
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "{} of {rounds} killed children were not NotRunning: {bad:?}",
+            bad.len()
+        );
     }
 
     #[test]
