@@ -7,6 +7,15 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::process::ExitCode;
+
+/// Runs one `lane-restart` command line: `args` is the whole command line, program name first, as
+/// `std::env::args_os()` gives it. The `lane-restart` binary is exactly this call, so everything
+/// the tool does can be driven (and tested) in-process. The argument grammars below are this
+/// module's own; the commands they feed are in `app.rs`.
+pub fn run(args: Vec<std::ffi::OsString>) -> ExitCode {
+    crate::app::run(args)
+}
 
 /// One subcommand's tail, parsed as if `lane-restart <name>` had been typed. `takes_value` names
 /// the flags that consume the next token whatever it is: a bare `--` anywhere else would be clap's
@@ -33,7 +42,7 @@ struct Install {
 }
 
 /// `install --from <exe> [--dry-run]` -> `(exe, dry_run)`.
-pub fn install(rest: &[String]) -> Result<(PathBuf, bool), String> {
+pub(crate) fn install(rest: &[String]) -> Result<(PathBuf, bool), String> {
     let a: Install = parse("install", &["--from"], rest)?;
     Ok((a.from, a.dry_run))
 }
@@ -58,7 +67,7 @@ fn positive_seconds(v: &str) -> Result<i64, String> {
 }
 
 /// `status [--json] [--quiet-over <secs>] [--peers]` -> `(json, quiet_over, peers)`.
-pub fn status(rest: &[String]) -> Result<(bool, Option<i64>, bool), String> {
+pub(crate) fn status(rest: &[String]) -> Result<(bool, Option<i64>, bool), String> {
     let a: Status = parse("status", &["--quiet-over"], rest)?;
     Ok((a.json, a.quiet_over, a.peers))
 }
@@ -86,16 +95,16 @@ struct Ledger {
 
 /// `ledger [--role R] [--kind K] [--since T] [--acted|--refused] [--last N] [--json] [--by-lane]`
 /// -> `(filter, json, since as typed, by_lane)`.
-pub fn ledger(
+pub(crate) fn ledger(
     rest: &[String],
-) -> Result<(lane_restart::ledger::Filter, bool, Option<String>, bool), String> {
+) -> Result<(crate::ledger::Filter, bool, Option<String>, bool), String> {
     let a: Ledger = parse("ledger", &["--role", "--kind", "--since", "--last"], rest)?;
     let acted = match (a.acted, a.refused) {
         (true, _) => Some(true),
         (_, true) => Some(false),
         _ => None,
     };
-    let f = lane_restart::ledger::Filter {
+    let f = crate::ledger::Filter {
         role: a.role,
         kind: a.kind,
         acted,
@@ -113,13 +122,13 @@ struct AssertIdle {
 }
 
 /// `assert-idle [--role <name>]` and `approvals [--role <name>]` -> the role.
-pub fn assert_idle(rest: &[String]) -> Result<Option<String>, String> {
+pub(crate) fn assert_idle(rest: &[String]) -> Result<Option<String>, String> {
     let a: AssertIdle = parse("assert-idle", &["--role"], rest)?;
     Ok(a.role)
 }
 
 /// `waits [--role <name>]` -> the role.
-pub fn waits(rest: &[String]) -> Result<Option<String>, String> {
+pub(crate) fn waits(rest: &[String]) -> Result<Option<String>, String> {
     let a: AssertIdle = parse("waits", &["--role"], rest)?;
     Ok(a.role)
 }
@@ -132,7 +141,7 @@ struct WaitsPoll {
 }
 
 /// `waits-poll [--dry-run]` -> `dry_run`.
-pub fn waits_poll(rest: &[String]) -> Result<bool, String> {
+pub(crate) fn waits_poll(rest: &[String]) -> Result<bool, String> {
     let a: WaitsPoll = parse("waits-poll", &[], rest)?;
     Ok(a.dry_run)
 }
@@ -149,7 +158,7 @@ struct SpecsImport {
 }
 
 /// `specs import [--role R] [--dry-run] [--verbose]` -> `(role, dry_run, verbose)`.
-pub fn specs_import(rest: &[String]) -> Result<(Option<String>, bool, bool), String> {
+pub(crate) fn specs_import(rest: &[String]) -> Result<(Option<String>, bool, bool), String> {
     let a: SpecsImport = parse("specs import", &["--role"], rest)?;
     Ok((a.role, a.dry_run, a.verbose))
 }
@@ -164,7 +173,7 @@ struct SpecsRetire {
 }
 
 /// `specs retire --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
-pub fn specs_retire(rest: &[String]) -> Result<(Vec<String>, bool), String> {
+pub(crate) fn specs_retire(rest: &[String]) -> Result<(Vec<String>, bool), String> {
     let a: SpecsRetire = parse("specs retire", &["--role"], rest)?;
     Ok((a.roles, a.dry_run))
 }
@@ -181,13 +190,13 @@ struct SpecsSynapseOnly {
 }
 
 /// `specs synapse-only --role R [--role R]... [--strict] [--dry-run]` -> `(roles, strict, dry_run)`.
-pub fn specs_synapse_only(rest: &[String]) -> Result<(Vec<String>, bool, bool), String> {
+pub(crate) fn specs_synapse_only(rest: &[String]) -> Result<(Vec<String>, bool, bool), String> {
     let a: SpecsSynapseOnly = parse("specs synapse-only", &["--role"], rest)?;
     Ok((a.roles, a.strict, a.dry_run))
 }
 
 /// `specs both-channels --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
-pub fn specs_both_channels(rest: &[String]) -> Result<(Vec<String>, bool), String> {
+pub(crate) fn specs_both_channels(rest: &[String]) -> Result<(Vec<String>, bool), String> {
     let a: SpecsRetire = parse("specs both-channels", &["--role"], rest)?;
     Ok((a.roles, a.dry_run))
 }
@@ -209,7 +218,7 @@ struct LaneNew {
 pub type LaneNewArgs = (String, String, String, bool, Option<String>);
 
 /// `lane-new <role> <repo> [--model M] [--apply --plan H]`; the model defaults to `sonnet`.
-pub fn lane_new(rest: &[String]) -> Result<LaneNewArgs, String> {
+pub(crate) fn lane_new(rest: &[String]) -> Result<LaneNewArgs, String> {
     let a: LaneNew = parse("lane-new", &["--model", "--plan"], rest)?;
     Ok((
         a.role,
@@ -244,10 +253,10 @@ struct Start {
 
 /// `start --role R [--reason <text>] [--model M] [--signal-id I] [--dry-run] [--json]`. A missing
 /// `--reason` is an empty one: `start::validate_reason` owns that refusal.
-pub fn start(rest: &[String]) -> Result<crate::StartArgs, String> {
+pub(crate) fn start(rest: &[String]) -> Result<crate::app::StartArgs, String> {
     let takes = ["--role", "--reason", "--model", "--signal-id"];
     let a: Start = parse("start", &takes, rest)?;
-    Ok(crate::StartArgs {
+    Ok(crate::app::StartArgs {
         role: a.role,
         reason: a.reason.unwrap_or_default(),
         model: a.model,
@@ -282,14 +291,14 @@ struct Stop {
 }
 
 /// `stop --role R [--reason <text>] [--self] [--soft|--hard] [--dry-run] [--yes]`.
-pub fn stop(rest: &[String]) -> Result<crate::StopArgs, String> {
+pub(crate) fn stop(rest: &[String]) -> Result<crate::app::StopArgs, String> {
     let a: Stop = parse("stop", &["--role", "--reason"], rest)?;
     let kind = match (a.soft, a.hard) {
-        (true, _) => Some(lane_restart::spec::StopKind::Soft),
-        (_, true) => Some(lane_restart::spec::StopKind::Hard),
+        (true, _) => Some(crate::spec::StopKind::Soft),
+        (_, true) => Some(crate::spec::StopKind::Hard),
         _ => None,
     };
-    Ok(crate::StopArgs {
+    Ok(crate::app::StopArgs {
         role: a.role,
         reason: a.reason.unwrap_or_default(),
         target_self: a.target_self,
@@ -310,7 +319,7 @@ struct Attach {
 
 /// `attach --role <r> --watch` -> `(role, watch)`. Whether the role is an identifier and whether
 /// `--watch` was given are the caller's refusals, each with its own message.
-pub fn attach(rest: &[String]) -> Result<(Option<String>, bool), String> {
+pub(crate) fn attach(rest: &[String]) -> Result<(Option<String>, bool), String> {
     let a: Attach = parse("attach", &["--role"], rest)?;
     Ok((a.role, a.watch))
 }
@@ -339,9 +348,9 @@ struct Restart {
 /// lane" - the SAFER default is the one that requires `--yes` to act for
 /// real, not the one that acts unconditionally. A caller who wants to
 /// restart their own session must say so explicitly.
-pub fn restart(rest: &[String]) -> Result<crate::Args, String> {
+pub(crate) fn restart(rest: &[String]) -> Result<crate::app::Args, String> {
     let a: Restart = parse("", &["--role"], rest)?;
-    Ok(crate::Args {
+    Ok(crate::app::Args {
         role: a.role,
         target_self: a.target_self,
         dry_run: a.dry_run,
@@ -366,7 +375,7 @@ struct Host {
 
 /// `host --role <role> -- <child argv...>` -> `(role, child_argv)`. The `--` separator belongs to
 /// this grammar, so `parse`'s refusal of a bare `--` does not apply.
-pub fn host(rest: &[String]) -> Result<(String, Vec<String>), String> {
+pub(crate) fn host(rest: &[String]) -> Result<(String, Vec<String>), String> {
     let a = Host::try_parse_from(
         std::iter::once("lane-restart host".to_string()).chain(rest.iter().cloned()),
     )
