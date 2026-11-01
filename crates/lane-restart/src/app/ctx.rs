@@ -10,11 +10,17 @@
 //! directory of its own.
 
 use crate::facts::{SysinfoFacts, SystemFacts};
+use crate::lane_state_writer::{ParentProcess, RealParentProcess};
+use crate::notify::{Peer, Transport};
 use crate::waits_poll::{CheckRunner, ProcessRunner};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// A notice to a lane: `(role, text)`.
 type Sender = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
+
+/// The claude-peers broker's live sessions.
+type BrokerPeers = Box<dyn Fn() -> Result<Vec<Peer>, String>>;
 
 /// Where one stream of text goes. `Real` is the process's own stdout or stderr, written with
 /// `print!`/`eprint!` exactly as the commands wrote before this seam existed.
@@ -34,13 +40,17 @@ pub(crate) struct Ctx {
     pub(crate) lane_role: Option<String>,
     out: Sink,
     err: Sink,
-    // What a command reads from the machine that a test replaces. All three are `None` in the real
+    // What a command reads from the machine that a test replaces. All are `None` in the real
     // context and are BUILT ON DEMAND the way the commands built them before this seam: building
     // the real process facts resolves the Claude config directory, which panics when there is no
-    // home, so a command that never asks for them (`--help`, `waits`) must never pay for them.
-    facts: Option<Box<dyn SystemFacts>>,
+    // home, so a command that never asks for them (`--help`, `waits`) must never pay for them. The
+    // shared ones are handed out as owned `Rc` handles, so a command can hold several at once.
+    facts: Option<Rc<dyn SystemFacts>>,
+    parents: Option<Rc<dyn ParentProcess>>,
     runner: Option<Box<dyn CheckRunner>>,
     sender: Option<Sender>,
+    transport: Option<Transport>,
+    broker_peers: Option<BrokerPeers>,
 }
 
 impl Ctx {
@@ -54,17 +64,44 @@ impl Ctx {
             out: Sink::Stdout,
             err: Sink::Stderr,
             facts: None,
+            parents: None,
             runner: None,
             sender: None,
+            transport: None,
+            broker_peers: None,
         }
     }
 
     /// The process facts: the real `sysinfo` ones unless a test supplied its own.
-    pub(crate) fn facts(&mut self) -> &dyn SystemFacts {
+    pub(crate) fn facts(&mut self) -> Rc<dyn SystemFacts> {
         if self.facts.is_none() {
-            self.facts = Some(Box::new(SysinfoFacts::new(super::claude_config_dir())));
+            self.facts = Some(Rc::new(SysinfoFacts::new(super::claude_config_dir())));
         }
-        self.facts.as_deref().expect("set just above")
+        Rc::clone(self.facts.as_ref().expect("set just above"))
+    }
+
+    /// The process-parent walk: the real one unless a test supplied its own.
+    pub(crate) fn parents(&mut self) -> Rc<dyn ParentProcess> {
+        if self.parents.is_none() {
+            self.parents = Some(Rc::new(RealParentProcess::new()));
+        }
+        Rc::clone(self.parents.as_ref().expect("set just above"))
+    }
+
+    /// How notices travel (`notify_transport` in `~/.overmind/lane-restart.json`; the broker when
+    /// there is no file): read when asked, as before.
+    pub(crate) fn transport(&self) -> Transport {
+        self.transport.unwrap_or_else(|| {
+            crate::approvals::configured_transport(crate::paths::home_dir().as_deref())
+        })
+    }
+
+    /// The claude-peers broker's live sessions, or why they could not be read.
+    pub(crate) fn broker_peers(&self) -> Result<Vec<Peer>, String> {
+        match &self.broker_peers {
+            Some(f) => f(),
+            None => crate::notify::list_all(crate::notify::broker_addr()),
+        }
     }
 
     /// Runs a `waits-poll` check: the real direct-exec runner unless a test supplied its own.
@@ -81,18 +118,15 @@ impl Ctx {
         if let Some(sender) = self.sender.as_mut() {
             return sender(role, text);
         }
-        let transport = crate::approvals::configured_transport(crate::paths::home_dir().as_deref());
-        match transport {
-            crate::notify::Transport::Broker => crate::notify::notify_role(
+        match self.transport() {
+            Transport::Broker => crate::notify::notify_role(
                 crate::notify::broker_addr(),
                 &self.state_dir,
                 role,
                 text,
             )
             .map(|_| ()),
-            crate::notify::Transport::Synapse => {
-                crate::notify::enqueue(&self.state_dir, role, text).map(|_| ())
-            }
+            Transport::Synapse => crate::notify::enqueue(&self.state_dir, role, text).map(|_| ()),
         }
     }
 
@@ -135,15 +169,42 @@ impl Ctx {
             out: Sink::Capture(String::new()),
             err: Sink::Capture(String::new()),
             facts: None,
+            parents: None,
             runner: None,
             sender: None,
+            transport: None,
+            broker_peers: None,
         }
     }
 
     /// Test only: these process facts instead of the real ones.
     #[cfg(test)]
     pub(crate) fn with_facts(mut self, facts: impl SystemFacts + 'static) -> Self {
-        self.facts = Some(Box::new(facts));
+        self.facts = Some(Rc::new(facts));
+        self
+    }
+
+    /// Test only: this process-parent walk instead of the real one.
+    #[cfg(test)]
+    pub(crate) fn with_parents(mut self, parents: impl ParentProcess + 'static) -> Self {
+        self.parents = Some(Rc::new(parents));
+        self
+    }
+
+    /// Test only: this notify transport instead of the configured one.
+    #[cfg(test)]
+    pub(crate) fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Test only: this broker answer instead of the live broker's.
+    #[cfg(test)]
+    pub(crate) fn with_broker_peers(
+        mut self,
+        peers: impl Fn() -> Result<Vec<Peer>, String> + 'static,
+    ) -> Self {
+        self.broker_peers = Some(Box::new(peers));
         self
     }
 

@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 pub(super) fn run(ctx: &mut Ctx, dry_run: bool) -> ExitCode {
     let state = ctx.state_dir.clone();
-    let report = spec::status_all(&state, ctx.facts());
+    let report = spec::status_all(&state, &*ctx.facts());
     // Live (the recorded process is running: only then is `activity` present), a complete spec, a
     // HANDOFF to read; never the PM's own.
     let subjects: Vec<Subject> = report

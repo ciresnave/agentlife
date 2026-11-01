@@ -373,6 +373,18 @@ agent record of the rig, so the next occurrence names its cause. After that, if 
 should retry the snapshot once (or fall back to the parent walk it already has) instead of skipping on one empty read, and `settle`
 should report a hook skip it can see. Not done here: no production code changed.
 
+## Open defect: `host::tests::no_helper_thread_outlives_a_host_run` flakes in the full suite (issue #228, 2026-11-01)
+
+The PTY reader thread is still blocked 3 s after the child exited and the ConPTY was closed (`helper threads still alive after return:
+["pty-reader"]`). **Measured when it fires** (one Windows box, 32 cores): not alone (idle 0/30; under 64 CPU spinners 0/30), not with the
+`host::` tests together (0/20), not with any one process-spawning group (10 groups x 30 runs, 0/300); **only in the whole `lane-restart`
+lib suite**, about 1 run in 12 (+ about 2 in 12 earlier, + once in a `cargo test --workspace`); never on CI so far. **Cause UNVERIFIED**
+(hypotheses and what is ruled out are in the issue).
+
+| row | what | state |
+|---|---|---|
+| F1 | **Instrument it, then decide** (PM 2026-11-01: "the instrumentation row goes right behind `status`"): make `run_with_handlers` record the time from child exit to reader end (and, on the timeout path, the pipe handle's inheritance flags), then run the whole suite 50+ times collecting the distribution. A long tail points at ConPTY/conhost teardown latency; a bimodal result (instant or never) points at a handle held open by something else. No fix before the cause is known: a longer timeout would only hide it. | not started; not a gate blocker (never on CI) |
+
 ## Waits that cannot be forgotten (CireSnave 2026-11-01; PM ruled 1A, 2A, 3A the same day)
 
 CireSnave: "Perhaps if a lane is waiting for something it must be required to set a timer or arrange for a callback that it can't ignore?"
