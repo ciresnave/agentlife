@@ -1045,7 +1045,7 @@ mod tests {
         assert!(a.contains(&"--dangerously-load-development-channels".to_string()));
         assert!(p.carries_dev_channels_flag);
         assert_eq!(p.pinned_from, None);
-        assert_eq!(a[1], "read baracuda HANDOFF and continue");
+        assert_eq!(a[1], crate::launch::startup_prompt("baracuda"));
     }
 
     /// The bypassPermissions the spec recorded is replaced, never carried to a start.

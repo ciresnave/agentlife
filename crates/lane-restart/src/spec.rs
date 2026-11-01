@@ -2096,7 +2096,7 @@ mod tests {
             ]
         );
         assert_eq!(argv[10], "claude");
-        assert_eq!(argv[11], "read commy-sdk-rust HANDOFF and continue");
+        assert_eq!(argv[11], crate::launch::startup_prompt("commy-sdk-rust"));
         let tail = &argv[12..];
         let pos = |x: &str| tail.iter().position(|a| a == x).unwrap();
         assert_eq!(tail[pos("--model") + 1], "sonnet");

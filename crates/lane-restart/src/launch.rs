@@ -105,6 +105,13 @@ pub fn launch_argv(spec: &LaunchSpec, prompt: &str, model: &str) -> Vec<String> 
     argv
 }
 
+/// The first prompt of every launched lane. The second clause is the re-arm half of "waits that
+/// cannot be forgotten" (`waits.rs`): a session timer dies with its session, so the next session
+/// must set it again from the HANDOFF.
+pub fn startup_prompt(role: &str) -> String {
+    format!("read {role} HANDOFF and continue, and arm every WAIT in it (lane-restart waits)")
+}
+
 /// Every check a launch must pass BEFORE anything is killed or spawned: a
 /// plain role and name, a model that is not Opus (unless overridden), and no
 /// `;` in the working directory or any argv element (`wt.exe` reads it as a
@@ -114,7 +121,7 @@ pub fn prepare_launch(
     policy_default: &str,
     permit: Option<&OpusPermit>,
 ) -> Result<PreparedLaunch, RelaunchError> {
-    let prompt = format!("read {} HANDOFF and continue", spec.role);
+    let prompt = startup_prompt(spec.role.as_str());
     let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, permit)?;
     let argv = launch_argv(spec, &prompt, model.as_str());
     // Checked as the FINAL command line (cwd + host-wrapped argv, the `lane-restart.exe` path
@@ -944,7 +951,10 @@ mod tests {
         );
         assert_eq!(
             log[1],
-            "spawn fuel C:/Projects/fuel claude read fuel HANDOFF and continue --name fuel --model sonnet"
+            format!(
+                "spawn fuel C:/Projects/fuel claude {} --name fuel --model sonnet",
+                startup_prompt("fuel")
+            )
         );
         assert!(!log.iter().any(|e| e.starts_with("kill")), "{log:?}");
     }
@@ -1092,7 +1102,7 @@ mod tests {
         );
         // what runs inside the distro is the same claude argv a Windows lane gets: prompt first
         assert_eq!(p.argv[0], "claude");
-        assert_eq!(p.argv[1], "read commy-sdk-rust HANDOFF and continue");
+        assert_eq!(p.argv[1], startup_prompt("commy-sdk-rust"));
         assert_eq!(wsl_cmd[wsl_cmd.len() - p.argv.len()..], p.argv[..]);
         assert!(p.carries_dev_channels_flag, "the dialog flag is still seen");
         // the terminal starts in a Windows folder, never the POSIX cwd

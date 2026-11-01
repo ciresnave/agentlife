@@ -373,6 +373,21 @@ agent record of the rig, so the next occurrence names its cause. After that, if 
 should retry the snapshot once (or fall back to the parent walk it already has) instead of skipping on one empty read, and `settle`
 should report a hook skip it can see. Not done here: no production code changed.
 
+## Waits that cannot be forgotten (CireSnave 2026-11-01; PM ruled 1A, 2A, 3A the same day)
+
+CireSnave: "Perhaps if a lane is waiting for something it must be required to set a timer or arrange for a callback that it can't ignore?"
+**Why:** Unpopped sat about 10 h idle on a merge notice; lanes have no loop and a "start after X merges" note in a HANDOFF is never re-read.
+
+| slice | what | state |
+|---|---|---|
+| v1a | HANDOFF grammar, one line per wait: `WAIT: <event> \| check: <command> \| wake: <RFC3339 UTC time>` (`waits.rs`). Absolute time only (a relative one goes stale at the restart that loses the wait). | built (0.30.6) |
+| v1b | `lane-restart assert-idle` **refuses** (exit 1, nothing recorded) a HANDOFF with a malformed wait: no event, no `check`, no `wake`, or a `wake` that is not absolute RFC3339. A wake already in the past is a warning. "Registered" means exactly this: the line carries a valid wake. `lane-restart` cannot see a session timer. | built |
+| v1c | The startup prompt of every launch gains ", and arm every WAIT in it (lane-restart waits)"; `lane-restart waits [--role R]` prints each wait soonest first with the time left and exits 1 on a malformed line. | built |
+| v1d | One line in `C:\Projects\CLAUDE.md` (every lane needs it) | PM writes it after v1 merges, so the rule never names tooling that is not there |
+| v2 | A supervisor polls each wait's `check` and delivers a message to the lane when it passes or the wake time passes: the callback comes from outside, so the lane cannot ignore it. Event contract via Synapse, per `docs/SUPERVISION-INPUTS.md`. | not started; its own PR |
+
+**Not verified:** that a real lane, given the new prompt, arms a timer for each wait (only the prompt text and the parser are tested; arming is the model's act). **Known limit:** a lane that never runs `assert-idle` is not caught; v2 is what catches it.
+
 ## Waiting on someone else
 
 | item | who | why it waits |
