@@ -72,7 +72,8 @@ fn handoff(dir: &std::path::Path, body: &str) {
     std::fs::write(dir.join("HANDOFF.md"), body).unwrap();
 }
 
-const GOOD_WAIT: &str = "WAIT: a merge | check: gh pr view 1 --json state,mergedAt | wake: 2099-01-01T00:00:00Z\n";
+const GOOD_WAIT: &str =
+    "WAIT: a merge | check: gh pr view 1 --json state,mergedAt | wake: 2099-01-01T00:00:00Z\n";
 
 #[test]
 fn waits_prints_a_good_handoff_and_fails_a_malformed_one() {
@@ -84,7 +85,10 @@ fn waits_prints_a_good_handoff_and_fails_a_malformed_one() {
     handoff(d.path(), GOOD_WAIT);
     assert!(is_success(run_in(d.path(), &["waits", "--role", "r"])));
     // A wait with no wake time is malformed: exit 1.
-    handoff(d.path(), "WAIT: a merge | check: gh pr view 1 --json state,mergedAt\n");
+    handoff(
+        d.path(),
+        "WAIT: a merge | check: gh pr view 1 --json state,mergedAt\n",
+    );
     assert!(is_failure(run_in(d.path(), &["waits", "--role", "r"])));
 }
 
