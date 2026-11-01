@@ -1,0 +1,20 @@
+# lane-restart is a published crate, so its pub items have no consumer in this repository. One entry per ITEM (`symbol`),
+# not per file, each with its own reason; a new unused item in these files is still reported.
+# 2026-10-31, CodeRipper 0.10.0 `reachability` (18 rows in lane-restart): five were test-only and became `#[cfg(test)]`
+# (LICENSE_MIT_SHA256, LICENSE_APACHE_SHA256, watcher_count, run_with_handlers, run_with_handlers_and_window),
+# `check_synapse_only` got a real caller (the end-state check in `specs synapse-only`); these twelve remain.
+[reachability]
+public_api = [
+  { file = "src/handlers.rs", symbol = "find_matching_handler", reason = "plain form of the dialog matcher; the host calls find_matching_handler_resolved (resolver explicit) for the same job; public API of the published lane-restart crate, exercised by its tests; removing it would be a Breaking change" },
+  { file = "src/launch.rs", symbol = "launch_and_wait", reason = "the 'lane-start' seam documented for OverMind's reuse (docs/OVERMIND-EXTRACTION-NOTE.md item 3, RESTART-TOOL-DESIGN.md); lane-restart's own start composes the same steps in start.rs; exercised by the seam-3 tests; removing it would be a Breaking change" },
+  { file = "src/relaunch.rs", symbol = "resolve_model", reason = "public API: the model a relaunch is pinned to, from a state file; the CLI path uses resolve_launch_model (the same rule from launch flags); exercised by its tests; removing it would be a Breaking change" },
+  { file = "src/start.rs", symbol = "LAUNCHER_RECORD", reason = "deprecated since 0.15.2 on purpose and kept so code that still names it compiles (its own doc says so); callers should use launcher_record_name; removal is a Breaking change" },
+  { file = "src/spec.rs", symbol = "with_wsl", reason = "builds a WSL-mode spec (schema 2); the WSL launch mode is built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), so there is no production caller until the hold lifts; exercised by the spec and authorize tests" },
+  { file = "src/wsl.rs", symbol = "default_state_dir", reason = "WSL launch mode helper; built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+  { file = "src/wsl.rs", symbol = "state_dir_or_default", reason = "WSL launch mode helper; built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+  { file = "src/wsl.rs", symbol = "unc_path", reason = "WSL launch mode helper (\\\\wsl$ path of a distro file); built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+  { file = "src/wsl.rs", symbol = "unc_state_dir", reason = "WSL launch mode helper; built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+  { file = "src/wsl.rs", symbol = "unc_claude_dir", reason = "WSL launch mode helper; built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+  { file = "src/wsl.rs", symbol = "parse_distro_list", reason = "WSL launch mode helper (reads `wsl -l -q` output); built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+  { file = "src/wsl.rs", symbol = "distro_installed", reason = "WSL launch mode helper; built and HELD for CireSnave (docs/LANE-RESTART-WSL.md), no production caller until the hold lifts; exercised by the wsl tests" },
+]

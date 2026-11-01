@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 /// SHA-256 of onemkl's `LICENSE-MIT` and `LICENSE-APACHE` at its `origin/main` (read 2026-10-30,
 /// holder Eric Evans: "correct until the entities exist"). The embedded copies must hash to these.
-pub const LICENSE_MIT_SHA256: &str =
-    "b92c79e2189193acd8e0d7644c5af65f55bf1924ba0b41163529ca7440b5aa85";
-pub const LICENSE_APACHE_SHA256: &str =
+#[cfg(test)]
+const LICENSE_MIT_SHA256: &str = "b92c79e2189193acd8e0d7644c5af65f55bf1924ba0b41163529ca7440b5aa85";
+#[cfg(test)]
+const LICENSE_APACHE_SHA256: &str =
     "eb6cb356f35e63dddebf36659842103b68458610f79a677fc0b577e1cd0c2995";
 
 /// Status contexts a protection rule should require (the CI template's job names). `portfolio` is

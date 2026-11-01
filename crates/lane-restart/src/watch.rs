@@ -95,7 +95,8 @@ impl WatchHub {
         });
     }
 
-    /// Watchers currently registered.
+    /// Watchers currently registered. Tests only: nothing outside them asks.
+    #[cfg(test)]
     pub fn watcher_count(&self) -> usize {
         self.watchers.lock().map_or(0, |w| w.len())
     }
