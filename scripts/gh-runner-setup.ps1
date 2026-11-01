@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 <#
 .SYNOPSIS
   Set up self-hosted GitHub Actions runners for our own repos (owned by ciresnave or ThinkersJournal), under a restricted local account (docs/RUNNER-SETUP.md).
