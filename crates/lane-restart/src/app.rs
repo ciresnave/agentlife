@@ -10,6 +10,7 @@
 
 mod assert_idle_cmd;
 mod ctx;
+mod ledger_cmd;
 mod status_cmd;
 #[cfg(test)]
 mod test_fixtures;
@@ -1167,60 +1168,6 @@ fn run_install_cmd(from: PathBuf, dry_run: bool) -> ExitCode {
     }
 }
 
-/// `lane-restart ledger` - read-only: prints `restart.log` filtered. Writes nothing.
-fn run_ledger_cmd(
-    mut f: lane_restart::ledger::Filter,
-    json: bool,
-    since: Option<String>,
-    by_lane: bool,
-) -> ExitCode {
-    use lane_restart::ledger;
-    if let Some(s) = since {
-        match ledger::parse_since(&s, chrono::Utc::now()) {
-            Ok(t) => f.since = Some(t),
-            Err(e) => {
-                eprintln!("lane-restart ledger: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-    let read = match ledger::read(&log_path()) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("lane-restart ledger: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let shown = ledger::select(&read.rows, &f);
-    if by_lane {
-        print!("{}", ledger::render_by_lane(&shown, read.rows.len()));
-        return ExitCode::SUCCESS;
-    }
-    if json {
-        for r in &shown {
-            match serde_json::to_string(r) {
-                Ok(l) => println!("{l}"),
-                Err(e) => {
-                    eprintln!("lane-restart ledger: {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        eprintln!(
-            "({} of {} entries shown; {} unreadable line(s))",
-            shown.len(),
-            read.rows.len(),
-            read.unreadable.len()
-        );
-    } else {
-        print!(
-            "{}",
-            ledger::render(&shown, read.rows.len(), &read.unreadable)
-        );
-    }
-    ExitCode::SUCCESS
-}
-
 const USAGE: &str = "\
 lane-restart - a bulletproof session-restart tool. RESTART-TOOL-DESIGN.md.
 
@@ -1579,9 +1526,9 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         }
         if first == "ledger" {
             return match cli::ledger(rest) {
-                Ok((f, json, since, by_lane)) => run_ledger_cmd(f, json, since, by_lane),
+                Ok((f, json, since, by_lane)) => ledger_cmd::run(ctx, f, json, since, by_lane),
                 Err(e) => {
-                    eprintln!("lane-restart ledger: {e}");
+                    ctx.errln(&format!("lane-restart ledger: {e}"));
                     ExitCode::FAILURE
                 }
             };
