@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Scratch-daemon check of the notify-outbox -> Synapse path (docs/LAUNCHER-SERVICE.md).
 //! `SYNAPSE_HOME` / `SYNAPSE_ADDR` must name a THROWAWAY home; argument 1 is a scratch state dir.
 //! Queues one message to `pm` and one to a role nobody claimed, relays the queue twice, then

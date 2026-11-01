@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The five Synapse approval records as they stand in `ciresnave/ciresnave`
 //! (`.overmind/lane-restart/approvals/`), vendored under `tests/fixtures/approvals/` byte for byte
 //! from commit 3b5d50823e57bec8316c670930b6a38d934074ec (2026-10-22T14:26:00Z); the any-lane record

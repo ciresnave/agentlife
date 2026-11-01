@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::*;
 use crate::clock::{Clock, ManualClock};
 use crate::consent::fake::{FakeConsent, COOLDOWN_SECS};

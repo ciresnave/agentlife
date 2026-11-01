@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 <#
 .SYNOPSIS
   The Task Scheduler task that starts `synapsed` at logon (Synapse spec 2026-10-15-daemon-contract-and-pilot.md, section 1).

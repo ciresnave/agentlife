@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! OPS-011 cli-basics: `--version` prints the crate version and exits 0; a bad flag exits 2.
 use std::process::Command;
 
