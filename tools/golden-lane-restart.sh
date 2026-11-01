@@ -60,6 +60,15 @@ run_case status_quiet_text "$E" -- status --quiet-over x
 run_case status_quiet_zero "$E" -- status --quiet-over 0
 run_case status_positional "$E" -- status extra
 run_case status_help "$E" -- status --json -h
+# ledger: a real `ledger` reads the machine's restart.log (it only grows, so the real-path
+# comparison is made back to back outside this harness); here, the argument errors, the
+# --since parse error (raised before the log is read) and help.
+run_case ledger_badflag "$E" -- ledger --bogus
+run_case ledger_last_text "$E" -- ledger --last x
+run_case ledger_since_bad "$E" -- ledger --since soon
+run_case ledger_since_missing "$E" -- ledger --since
+run_case ledger_positional "$E" -- ledger extra
+run_case ledger_help "$E" -- ledger --by-lane -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
