@@ -91,6 +91,78 @@ fn handoff_text(cwd: &str, role: &str) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// `lane-restart waits-poll [--dry-run]` - one supervisor pass over every live role's `WAIT:` lines
+/// (waits_poll.rs). Tells a lane once when a wait is due. Read-only apart from the ledger and the
+/// notice itself; it registers nothing and leaves nothing running.
+fn run_waits_poll_cmd(dry_run: bool) -> ExitCode {
+    use lane_restart::spec::{self, Lifecycle, SpecStatus};
+    use lane_restart::waits_poll::{self, Ledger, Outcome, ProcessRunner, Subject};
+    let state = state_dir();
+    let facts = SysinfoFacts::new(claude_config_dir());
+    let report = spec::status_all(&state, &facts);
+    // Live (the recorded process is running: only then is `activity` present), a complete spec, a
+    // HANDOFF to read; never the PM's own.
+    let subjects: Vec<Subject> = report
+        .roles
+        .iter()
+        .filter(|r| {
+            r.role != "pm"
+                && r.state == Lifecycle::Running
+                && r.activity.is_some()
+                && r.spec == SpecStatus::Complete
+        })
+        .filter_map(|r| {
+            let path = std::path::PathBuf::from(&r.handoff.as_ref()?.path);
+            let handoff = std::fs::read_to_string(&path).ok()?;
+            Some(Subject {
+                role: r.role.clone(),
+                cwd: path.parent()?.to_path_buf(),
+                handoff,
+            })
+        })
+        .collect();
+    let now = chrono::Utc::now();
+    let due = waits_poll::poll(&subjects, now, &ProcessRunner::default());
+    let transport =
+        lane_restart::approvals::configured_transport(lane_restart::paths::home_dir().as_deref());
+    let mut ledger = Ledger::load(&state);
+    let mut send = |role: &str, text: &str| match transport {
+        lane_restart::notify::Transport::Broker => lane_restart::notify::notify_role(
+            lane_restart::notify::broker_addr(),
+            &state,
+            role,
+            text,
+        )
+        .map(|_| ()),
+        lane_restart::notify::Transport::Synapse => {
+            lane_restart::notify::enqueue(&state, role, text).map(|_| ())
+        }
+    };
+    let results = waits_poll::deliver(&due, &mut ledger, dry_run, &mut send);
+    println!(
+        "waits-poll: {} live role(s) read, {} wait(s) due{}",
+        subjects.len(),
+        due.len(),
+        if dry_run {
+            " (dry run: nothing sent)"
+        } else {
+            ""
+        }
+    );
+    let mut any_sent = false;
+    for (d, o) in &results {
+        any_sent |= *o == Outcome::Sent;
+        println!("{}\t{}\t{}\t{:?}", d.role, d.reason.slug(), d.wait.event, o);
+    }
+    if any_sent {
+        if let Err(e) = ledger.save(&state) {
+            eprintln!("lane-restart waits-poll: could not save the ledger ({e}); the next pass may repeat a notice");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// `lane-restart waits [--role <name>]` - prints the `WAIT:` lines of this lane's HANDOFF, soonest
 /// first, so a starting lane can arm each (waits.rs). Exit 1 when a line is malformed.
 fn run_waits_cmd(role_override: Option<String>) -> ExitCode {
@@ -1540,6 +1612,18 @@ USAGE:
         it and arms a timer (ScheduleWakeup or a cron) for every `wake`, because a
         session timer dies with its session. Exit 1 when a line is malformed.
 
+    lane-restart waits-poll [--dry-run]
+        The supervisor's pass over those WAIT lines: for every live role with a
+        complete spec (never the PM) it reads the HANDOFF and tells the lane, once
+        per (role, event, wake), when a wait is due: the check passed, the wake time
+        came, or the check is not one the supervisor will run. It NEVER runs a
+        lane-written command: only `gh pr view <N> --json state,mergedAt`,
+        `gh run view <N> --json conclusion,status` and `git ls-remote --heads
+        <remote> <branch>` (argv exec, no shell, 30 s timeout); anything else is
+        reported 'unverified, look yourself'. One pass, no daemon: call it from a
+        periodic job. The notice goes out on the configured notify_transport.
+        --dry-run sends and records nothing.
+
     lane-restart host --role <name> -- <argv...>
         Internal: runs inside the relaunched session's own terminal tab
         (RESTART-TOOL-DESIGN.md §12.5). Loads the user's approvals, owns a
@@ -1710,6 +1794,15 @@ fn main() -> ExitCode {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "waits-poll" {
+            return match cli::waits_poll(rest) {
+                Ok(dry_run) => run_waits_poll_cmd(dry_run),
+                Err(e) => {
+                    eprintln!("lane-restart waits-poll: {e}");
                     ExitCode::FAILURE
                 }
             };
