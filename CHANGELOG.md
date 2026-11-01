@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.4
+
+- **`docs/SUPERVISION-INPUTS.md`: facts-only input to the supervision stack mapping (PM-requested; no design, no code).** What the state model is today, 12 failure modes already paid for (each with its rule and merged PR, or marked open with cause UNVERIFIED), what a generic layer could take unchanged versus what stays Claude-specific, what depends on AgentLife's commands and files, and what is not measured. Failure 12 is the restore that said "no session appeared" on `5c62f44` (open defect, cause UNVERIFIED; #215 and #216 merged). Docs only.
+
 ## 0.30.3
 
 - **A hook that cannot see itself retries, and a restore reports a visible hook skip at once (PM-accepted follow-up to the unverified restore failure on `5c62f44`).** `SnapshotParents::capture()` now re-reads the process table (3 reads, 25 ms apart) until it contains the hook's own pid, because `sysinfo` returns an empty table without an error when the OS snapshot call fails; if all reads lack the hook, `claude_pid` says "the process table did not contain this process after 3 reads" instead of the hook skipping on a bare "not under a claude process". `hook.log` skip and error lines now end ` [agent <id>]` when `AGENTLIFE_AGENT_ID` is set, and `restore` reads them (`RegistryObserver::hook_log`, `skip_for_agent`): an agent with no session whose hook skipped since its launch is reported `Failed("its SessionStart hook skipped: <why>")` at the next poll instead of after the liveness timeout. Tests: retry until valid, give up after the attempts, one read when the first is good, the log line and its parser (other agent, older, untagged lines ignored), and `settle` failing early. **Cause of the `5c62f44` failure remains UNVERIFIED**; this removes one candidate (one empty read) and makes the next occurrence name its cause.
