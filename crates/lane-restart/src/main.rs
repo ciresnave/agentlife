@@ -85,6 +85,48 @@ fn run_state_hook(event: &str) -> ExitCode {
     }
 }
 
+/// The text of `role`'s HANDOFF under `cwd`, if it has one and it is readable.
+fn handoff_text(cwd: &str, role: &str) -> Option<String> {
+    let (path, _) = lane_restart::spec::find_handoff(cwd, role)?;
+    std::fs::read_to_string(path).ok()
+}
+
+/// `lane-restart waits [--role <name>]` - prints the `WAIT:` lines of this lane's HANDOFF, soonest
+/// first, so a starting lane can arm each (waits.rs). Exit 1 when a line is malformed.
+fn run_waits_cmd(role_override: Option<String>) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            eprintln!("lane-restart waits: could not read the current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let role = role_override
+        .or_else(|| std::env::var("LANE_ROLE").ok())
+        .unwrap_or_else(|| {
+            std::path::Path::new(&cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    let Some(text) = handoff_text(&cwd, &role) else {
+        println!("no HANDOFF for {role} under {cwd}: nothing to arm");
+        return ExitCode::SUCCESS;
+    };
+    let now = chrono::Utc::now();
+    let report = lane_restart::waits::report(&text, now);
+    if report.is_empty() {
+        println!("no WAIT lines in the HANDOFF for {role}: nothing to arm");
+        return ExitCode::SUCCESS;
+    }
+    print!("{report}");
+    if lane_restart::waits::refusal(&text, now).is_err() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// `lane-restart assert-idle [--role <name>]` - run by a lane itself, right
 /// after writing HANDOFF. Separate from `cli::restart` for the same reason
 /// `state` is: a positional subcommand, not the restart CLI's own flags.
@@ -99,6 +141,25 @@ fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The role the lint and the waits read the HANDOFF for: --role, then LANE_ROLE, then the cwd's leaf.
+    let role = lint_role.unwrap_or_else(|| {
+        std::path::Path::new(&cwd)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    // A wait that cannot be woken is refused BEFORE anything is recorded: a refused assert-idle
+    // must not leave the lane looking idle (waits.rs).
+    let mut wait_warnings = Vec::new();
+    if let Some(text) = handoff_text(&cwd, &role) {
+        match lane_restart::waits::refusal(&text, chrono::Utc::now()) {
+            Ok(w) => wait_warnings = w,
+            Err(e) => {
+                eprintln!("lane-restart assert-idle: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     match lane_state_writer::run_assert_idle(
         &state_dir(),
         my_pid,
@@ -107,14 +168,10 @@ fn run_assert_idle_cmd(role_override: Option<String>) -> ExitCode {
         &cwd,
     ) {
         Ok(()) => {
-            // A warning, never a refusal: a restart is mandatory at a task boundary. The role is
-            // the same one assert-idle resolved: --role, then LANE_ROLE, then the cwd's leaf.
-            let role = lint_role.unwrap_or_else(|| {
-                std::path::Path::new(&cwd)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            });
+            for w in &wait_warnings {
+                eprintln!("lane-restart assert-idle: WARNING: {w}");
+            }
+            // A warning, never a refusal: a restart is mandatory at a task boundary.
             if let Some(w) = lane_restart::handoff_lint::check(&cwd, &role) {
                 eprintln!("lane-restart assert-idle: {w}");
             }
@@ -1471,7 +1528,17 @@ USAGE:
         (CIRESNAVE-EXPECTATIONS.md 2.3c). Required before any restart of that lane can be
         authorized - RESTART-TOOL-DESIGN.md §1a. Role defaults to
         LANE_ROLE, then falls back to the current directory's leaf name,
-        the same as the state hook.
+        the same as the state hook. REFUSES (exit 1, nothing recorded) a
+        HANDOFF with a malformed `WAIT:` line; see `waits`.
+
+    lane-restart waits [--role <name>]
+        Waits that cannot be forgotten. A lane that waits for something puts one
+        line per wait in its HANDOFF:
+            WAIT: <event> | check: <command> | wake: <RFC3339 UTC time>
+        (absolute time; no `check` or no `wake` is refused by assert-idle). This
+        prints each wait soonest first with the time left; a starting lane runs
+        it and arms a timer (ScheduleWakeup or a cron) for every `wake`, because a
+        session timer dies with its session. Exit 1 when a line is malformed.
 
     lane-restart host --role <name> -- <argv...>
         Internal: runs inside the relaunched session's own terminal tab
@@ -1643,6 +1710,15 @@ fn main() -> ExitCode {
                 Ok(role_override) => run_assert_idle_cmd(role_override),
                 Err(e) => {
                     eprintln!("lane-restart assert-idle: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "waits" {
+            return match cli::waits(rest) {
+                Ok(role_override) => run_waits_cmd(role_override),
+                Err(e) => {
+                    eprintln!("lane-restart waits: {e}");
                     ExitCode::FAILURE
                 }
             };

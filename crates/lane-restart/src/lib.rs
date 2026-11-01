@@ -51,6 +51,7 @@ pub mod stop;
 pub mod tab_close;
 #[cfg(test)]
 mod testing;
+pub mod waits;
 pub mod watch;
 pub mod wsl;
 pub mod wsl_facts;

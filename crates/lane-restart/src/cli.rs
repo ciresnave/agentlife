@@ -118,6 +118,12 @@ pub fn assert_idle(rest: &[String]) -> Result<Option<String>, String> {
     Ok(a.role)
 }
 
+/// `waits [--role <name>]` -> the role.
+pub fn waits(rest: &[String]) -> Result<Option<String>, String> {
+    let a: AssertIdle = parse("waits", &["--role"], rest)?;
+    Ok(a.role)
+}
+
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 struct SpecsImport {
