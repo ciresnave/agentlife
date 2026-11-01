@@ -126,6 +126,19 @@ pub fn waits(rest: &[String]) -> Result<Option<String>, String> {
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct WaitsPoll {
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+}
+
+/// `waits-poll [--dry-run]` -> `dry_run`.
+pub fn waits_poll(rest: &[String]) -> Result<bool, String> {
+    let a: WaitsPoll = parse("waits-poll", &[], rest)?;
+    Ok(a.dry_run)
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct SpecsImport {
     #[arg(long, allow_hyphen_values = true, overrides_with = "role")]
     role: Option<String>,
