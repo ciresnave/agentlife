@@ -395,8 +395,8 @@ impl Default for HelloPrompt {
 }
 
 /// What the channel said, in this crate's terms (and carrying its approval when it gave one):
-/// [`Answer::from_channel`].
-pub fn answer_from_channel(o: &ur::Outcome) -> Answer {
+/// [`Answer::from_channel`]. Takes the outcome by value, so the approval is moved into the answer.
+pub fn answer_from_channel(o: ur::Outcome) -> Answer {
     Answer::from_channel(o)
 }
 
@@ -422,7 +422,7 @@ impl Prompt for HelloPrompt {
         }
         let channel = ur::HelloChannel::new(ur::hello::HelloConsent::default());
         let req = hello_request(asking);
-        answer_from_channel(&channel.present(&req, &to_ur_grant(&asking.grant), self.wait))
+        answer_from_channel(channel.present(&req, &to_ur_grant(&asking.grant), self.wait))
     }
 }
 
