@@ -45,12 +45,12 @@ dependencies = [
 
 [[package]]
 name = "agentlife"
-version = "0.30.10"
+version = "0.30.12"
 dependencies = [
  "agentlife-launcher",
  "chrono",
  "lane-restart",
- "lane-state 0.30.10",
+ "lane-state 0.30.12",
  "persistant",
  "serde",
  "serde_json",
@@ -64,9 +64,9 @@ dependencies = [
 
 [[package]]
 name = "agentlife-launcher"
-version = "0.30.10"
+version = "0.30.12"
 dependencies = [
- "lane-state 0.30.10",
+ "lane-state 0.30.12",
  "serde",
  "serde_json",
  "tempfile",
@@ -2119,13 +2119,13 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.30.10"
+version = "0.30.12"
 dependencies = [
  "chrono",
  "clap",
  "getrandom 0.4.3",
  "hmac 0.13.0",
- "lane-state 0.30.10",
+ "lane-state 0.30.12",
  "portable-pty",
  "rustix",
  "serde",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.30.10"
+version = "0.30.12"
 dependencies = [
  "chrono",
  "rustix",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "pin-plan"
-version = "0.30.10"
+version = "0.30.12"
 
 [[package]]
 name = "pin-project"
@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "runner-lint"
-version = "0.30.10"
+version = "0.30.12"
 dependencies = [
  "saphyr",
 ]
