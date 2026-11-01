@@ -138,6 +138,13 @@ impl Rig {
     }
 
     fn agentlife(&self, args: &[&str]) -> std::process::Output {
+        self.agentlife_ram(args, "64")
+    }
+
+    /// As [`Rig::agentlife`] but the restore plan sees `free_gb` of free memory (debug builds only).
+    /// The test does not depend on how much RAM this machine has free: three `restore` tests failed
+    /// once with `held: memory` at 5.77 GB free while other builds were running.
+    fn agentlife_ram(&self, args: &[&str], free_gb: &str) -> std::process::Output {
         Command::new(AGENTLIFE)
             .args(args)
             .env("AGENTLIFE_HOME", &self.home)
@@ -148,6 +155,7 @@ impl Rig {
             .env("AGENTLIFE_NO_HELLO", "1")
             // The test does not depend on how full this machine's disk is (debug builds only).
             .env("LANE_DISK_FLOOR_BYTES", "0")
+            .env("AGENTLIFE_FREE_RAM_GB", free_gb)
             .output()
             .expect("run agentlife")
     }
@@ -161,6 +169,7 @@ impl Rig {
             .env("USER_REQUEST_HEAD", self.dir.path().join("consent-head"))
             .env("AGENTLIFE_NO_HELLO", "1")
             .env("LANE_DISK_FLOOR_BYTES", floor)
+            .env("AGENTLIFE_FREE_RAM_GB", "64")
             // The lane state directory is `C:/Projects/.lane-state`, which is on no mount off
             // Windows: measure this test's own directory so the refusal is exercised everywhere.
             .env("LANE_DISK_PROBE_PATH", self.dir.path())
@@ -1462,6 +1471,68 @@ fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_o
     );
     // Nothing was written by either dry run.
     assert!(!rig.home.join("plans").exists());
+}
+
+/// The restore plan depends on the free memory it is GIVEN, never on this machine's: the same
+/// scenario gives the same plan at 1 GB and at 64 GB of injected free memory (the floor in the
+/// config is 0.5 GB), and a free memory below the floor holds the lane, which is the control that
+/// shows the injection is read at all.
+#[test]
+fn the_restore_plan_depends_on_injected_free_memory_not_on_the_hosts() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(&rig.home).unwrap();
+    std::fs::write(
+        rig.home.join("config.json"),
+        serde_json::json!({
+            "portfolio_root": rig.cwd(),
+            "lane_state_dir": rig.dir.path().join("no-specs").display().to_string(),
+            "free_ram_floor_gb": 0.5
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let start = rig.payload("start.json", "SessionStart", "sess-gone", Some("startup"));
+    let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
+    rig.run(LANE_ARGS, &script, &[]);
+
+    let plan_at = |gb: &str| -> serde_json::Value {
+        let out = rig.agentlife_ram(&["restore", "--dry-run", "--json"], gb);
+        assert!(
+            out.status.success(),
+            "{gb} GB: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("the plan is JSON")
+    };
+    let (small, big) = (plan_at("1"), plan_at("64"));
+    for (gb, plan) in [("1", &small), ("64", &big)] {
+        assert_eq!(
+            plan["entries"].as_array().map(Vec::len),
+            Some(1),
+            "{gb} GB free, floor 0.5: the gone lane is planned: {plan}"
+        );
+        assert_eq!(
+            plan["held"].as_array().map(Vec::len),
+            Some(0),
+            "{gb} GB: {plan}"
+        );
+    }
+    // The same plan but for the free memory it reports (and so the hash that covers it).
+    let strip = |p: &serde_json::Value| {
+        let mut p = p.clone();
+        p["free_ram_gb"] = serde_json::Value::Null;
+        p["hash"] = serde_json::Value::Null;
+        p
+    };
+    assert_eq!(strip(&small), strip(&big));
+    assert_eq!(small["free_ram_gb"], 1.0, "{small}");
+    assert_eq!(big["free_ram_gb"], 64.0, "{big}");
+
+    // Control: below the floor the same lane is held for memory, so a plan that ignored the
+    // injection (and read the host's memory) could not have produced the two results above.
+    let low = plan_at("0.1");
+    assert_eq!(low["entries"].as_array().map(Vec::len), Some(0), "{low}");
+    assert_eq!(low["held"][0]["why"], "memory", "{low}");
 }
 
 #[test]
