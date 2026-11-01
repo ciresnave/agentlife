@@ -381,6 +381,9 @@ fn is_alive(flag: &Arc<std::sync::atomic::AtomicBool>) -> bool {
 /// window. A handler that matched (even a different one than whatever's
 /// still on screen) means a human or the handler itself is already
 /// handling it; capture exists for the case nothing did.
+// Tests only: the host's own entry is `run_with_handlers_and_window_watched`; this is the unwatched shape the
+// host tests run through (CodeRipper `reachability`: zero callers outside them).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_handlers(
     role: &str,
@@ -412,6 +415,7 @@ pub fn run_with_handlers(
 /// The real implementation, with `startup_window` injected so tests don't
 /// have to wait out the real 60s `STARTUP_WINDOW` to exercise what happens
 /// once it ends (§12.6's unhandled-prompt capture, in particular).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn run_with_handlers_and_window(
     role: &str,

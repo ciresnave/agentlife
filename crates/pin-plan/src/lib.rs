@@ -171,6 +171,10 @@ pub fn scan(file: &str, text: &str) -> Vec<Use> {
 /// `line` (no newline; a trailing CR is kept) with `u`'s `target@ref` replaced by `target@sha`
 /// and the old ref written after it as a comment: `uses: a/b@<sha> # v4`. A comment the line
 /// already had follows: `# v4 - old note`. `None` when the line does not carry `u.raw`.
+///
+/// Tests only: the planner calls [`pin_line_as`]. (`pin-plan` is `publish = false`, so nothing downstream
+/// names this.)
+#[cfg(test)]
 pub fn pin_line(line: &str, u: &Use, sha: &str) -> Option<String> {
     pin_line_as(line, u, sha, &u.reference)
 }

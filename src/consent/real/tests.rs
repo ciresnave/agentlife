@@ -80,7 +80,7 @@ impl ur::Consent for ScriptedPerson {
 fn through_the_channel(asking: &Asking, says: fn() -> ur::ConsentOutcome) -> Answer {
     use ur::Channel;
     let channel = ur::HelloChannel::new(ScriptedPerson(says));
-    answer_from_channel(&channel.present(
+    answer_from_channel(channel.present(
         &hello_request(asking),
         &to_ur_grant(&asking.grant),
         Duration::from_secs(1),
@@ -450,9 +450,10 @@ fn the_channels_answer_maps_without_ever_inventing_an_approval() {
             Outcome::Unavailable,
         ),
     ] {
-        let a = answer_from_channel(&said);
-        assert_eq!(a.outcome, want, "{said:?}");
-        assert!(a.proof().is_none(), "{said:?} carried a proof");
+        let label = format!("{said:?}");
+        let a = answer_from_channel(said);
+        assert_eq!(a.outcome, want, "{label}");
+        assert!(a.proof().is_none(), "{label} carried a proof");
     }
 }
 
