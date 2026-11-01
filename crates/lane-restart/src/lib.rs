@@ -9,6 +9,9 @@
 //! only place real OS calls happen is behind that one trait's real
 //! implementation, wired in `main.rs`.
 
+// The command line (`app.rs`, once the binary's `main.rs`) names this crate as `lane_restart::`.
+extern crate self as lane_restart;
+
 // Moved to the `lane-state` crate; the old paths keep working.
 pub use lane_state::{facts, paths, permission_mode, role, state};
 
@@ -17,8 +20,10 @@ pub fn platform_diag(pid: u32) -> String {
     lane_state::platform::diag::start_readings(pid)
 }
 
+mod app;
 pub mod approvals;
 pub mod authorize;
+pub mod cli;
 pub mod disk;
 pub mod duplicate;
 pub mod folder_trust;
