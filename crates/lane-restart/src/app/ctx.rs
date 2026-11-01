@@ -9,7 +9,12 @@
 //! elsewhere). Only an in-crate `#[cfg(test)]` module can build a [`Ctx::capture`] with a state
 //! directory of its own.
 
+use crate::facts::{SysinfoFacts, SystemFacts};
+use crate::waits_poll::{CheckRunner, ProcessRunner};
 use std::path::PathBuf;
+
+/// A notice to a lane: `(role, text)`.
+type Sender = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 
 /// Where one stream of text goes. `Real` is the process's own stdout or stderr, written with
 /// `print!`/`eprint!` exactly as the commands wrote before this seam existed.
@@ -29,6 +34,13 @@ pub(crate) struct Ctx {
     pub(crate) lane_role: Option<String>,
     out: Sink,
     err: Sink,
+    // What a command reads from the machine that a test replaces. All three are `None` in the real
+    // context and are BUILT ON DEMAND the way the commands built them before this seam: building
+    // the real process facts resolves the Claude config directory, which panics when there is no
+    // home, so a command that never asks for them (`--help`, `waits`) must never pay for them.
+    facts: Option<Box<dyn SystemFacts>>,
+    runner: Option<Box<dyn CheckRunner>>,
+    sender: Option<Sender>,
 }
 
 impl Ctx {
@@ -41,6 +53,46 @@ impl Ctx {
             lane_role: std::env::var("LANE_ROLE").ok(),
             out: Sink::Stdout,
             err: Sink::Stderr,
+            facts: None,
+            runner: None,
+            sender: None,
+        }
+    }
+
+    /// The process facts: the real `sysinfo` ones unless a test supplied its own.
+    pub(crate) fn facts(&mut self) -> &dyn SystemFacts {
+        if self.facts.is_none() {
+            self.facts = Some(Box::new(SysinfoFacts::new(super::claude_config_dir())));
+        }
+        self.facts.as_deref().expect("set just above")
+    }
+
+    /// Runs a `waits-poll` check: the real direct-exec runner unless a test supplied its own.
+    pub(crate) fn runner(&mut self) -> &dyn CheckRunner {
+        if self.runner.is_none() {
+            self.runner = Some(Box::new(ProcessRunner::default()));
+        }
+        self.runner.as_deref().expect("set just above")
+    }
+
+    /// Sends `text` to `role`'s lane on the configured `notify_transport` (the claude-peers broker,
+    /// or the Synapse outbox), unless a test supplied its own sender.
+    pub(crate) fn send(&mut self, role: &str, text: &str) -> Result<(), String> {
+        if let Some(sender) = self.sender.as_mut() {
+            return sender(role, text);
+        }
+        let transport = crate::approvals::configured_transport(crate::paths::home_dir().as_deref());
+        match transport {
+            crate::notify::Transport::Broker => crate::notify::notify_role(
+                crate::notify::broker_addr(),
+                &self.state_dir,
+                role,
+                text,
+            )
+            .map(|_| ()),
+            crate::notify::Transport::Synapse => {
+                crate::notify::enqueue(&self.state_dir, role, text).map(|_| ())
+            }
         }
     }
 
@@ -82,7 +134,34 @@ impl Ctx {
             lane_role: lane_role.map(str::to_string),
             out: Sink::Capture(String::new()),
             err: Sink::Capture(String::new()),
+            facts: None,
+            runner: None,
+            sender: None,
         }
+    }
+
+    /// Test only: these process facts instead of the real ones.
+    #[cfg(test)]
+    pub(crate) fn with_facts(mut self, facts: impl SystemFacts + 'static) -> Self {
+        self.facts = Some(Box::new(facts));
+        self
+    }
+
+    /// Test only: this check runner instead of the real one.
+    #[cfg(test)]
+    pub(crate) fn with_runner(mut self, runner: impl CheckRunner + 'static) -> Self {
+        self.runner = Some(Box::new(runner));
+        self
+    }
+
+    /// Test only: this sender instead of the transport.
+    #[cfg(test)]
+    pub(crate) fn with_sender(
+        mut self,
+        sender: impl FnMut(&str, &str) -> Result<(), String> + 'static,
+    ) -> Self {
+        self.sender = Some(Box::new(sender));
+        self
     }
 
     /// What a `capture` context has been given so far: `(stdout, stderr)`.

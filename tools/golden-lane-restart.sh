@@ -47,6 +47,12 @@ run_case idle_refused "$B" -- assert-idle --role goldenrole-$$
 run_case idle_nostate "$G" -- assert-idle --role goldenrole-$$
 run_case idle_nohandoff "$E" -- assert-idle --role goldenrole-$$
 run_case idle_badarg "$B" -- assert-idle --bogus
+# waits-poll: only its argument errors and help are hermetic (a real pass reads the machine's
+# lane state), so those are the cases; the pass itself is tested in-crate with a fixture ctx.
+run_case poll_badflag "$E" -- waits-poll --bogus
+run_case poll_positional "$E" -- waits-poll extra
+run_case poll_help "$E" -- waits-poll --help
+run_case poll_dry_run_help "$E" -- waits-poll --dry-run -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
