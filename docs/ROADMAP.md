@@ -338,6 +338,41 @@ still in `licence-tools`). No installed binary is involved anywhere in step 7.
 
 Out of scope here, per the PM's stop line: creating either repo, moving anything, publishing.
 
+## Open defect: restore said "no session appeared" for a session whose hook had run (main `5c62f44`, 2026-11-01)
+
+PM, 2026-10-31: treat it as a defect in the restore path even if a re-run is green. **Facts** (main run 41261691630, attempt 1,
+Windows leg; ubuntu, deny and portfolio green; the same tree had passed as PR #213's own run at `81ce7f4`): the test
+`tests/launch_e2e.rs restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_starts_nothing` panicked at the
+`came_up()` assertion after 40.7 s. Report summary `working 0, awaiting_dialog 1, started 0, failed 1`. beta: `AwaitingDialog`.
+alpha: `Failed("no session appeared within 40 s")`, `seconds_to_settle 40`, `session_id None`, `spawned_via Direct`. The stand-ins'
+own hook log: beta `start` 01:42:01.545Z, `hook-begin SessionStart` .546, `hook-end exit=0 millis=161 stderr=""` .708; alpha `start`
+.584, `hook-begin` .585, `hook-end exit=0 millis=36 stderr=""` .622. Both agent ids reached their stand-in (`env log: agent_id=a-12710b9e957d7834` for alpha).
+Locally: 6 runs of the same test pass in 6-9 s each, and 36 runs at 12x concurrency pass (3 rounds of 12), so it did not reproduce.
+
+**Read (from `src/restore.rs` `settle()` / `RegistryObserver::progress` and `src/hook.rs`).** `Failed("no session appeared ...")` is what
+`settle` emits when `progress()` returned **no session** at the deadline; a session that exists but is dead is a different message
+("its process ended after it started"), and one that exists and is alive is `Started`/`Working`/`AwaitingDialog`. `progress()` returns a
+session only if the agent's registry record has one with `started_at >= launched_at - START_SLACK_SECS` and an id other than the one seen
+before the launch. The registry is one file and one lock **per agent** (`registry.rs`), so alpha's and beta's writes do not contend. So
+alpha's hook finished (exit 0, no stderr) **without a session landing in alpha's record**. `hook::session_start` has three ways to return
+`Ok(Outcome::Skipped(..))` and write nothing: `claude_pid()` fails ("not under a claude process"), a headless command line, or "another
+claude is above this one". A skip is only logged to `<home>/hook.log` (exit 0, nothing on stderr), and 36 ms against beta's 161 ms is
+what an early return looks like. **UNVERIFIED** (no `hook.log` or registry was printed by the test): that this is the cause.
+**Candidate for the early return (not tested):** `SnapshotParents::capture()` takes one process-table snapshot, and `sysinfo`'s
+Windows `refresh_processes_specifics` returns 0 processes, silently, when `CreateToolhelp32Snapshot` fails (read in 0.40.1
+`src/windows/system.rs`; `System::new()` itself cannot fail on Windows there, so the `sysinfo` 0.40 change in #208 is not the cause).
+An empty snapshot makes `claude_pid()` fail, and the hook skips quietly. That would be older than #208 and rare.
+**Supporting observation (this box, 2026-11-01; not evidence about the CI run):** the same test run in the foreground under this
+session's own `claude` fails at its first plan assertion with an empty registry (every stand-in hook skips because another `claude`
+is above the stand-in), and passes when run detached from it. So a hook skip does produce exactly a silent empty registry and a clean
+exit 0, which is the shape of the CI failure.
+
+**What is wrong whichever it was:** a hook that decides "skip" leaves no trace the restore can see, so restore waits the whole 40 s and then
+blames the session. **Next step (small, test-side first):** the failure message of this test now prints the agentlife `hook.log` and every
+agent record of the rig, so the next occurrence names its cause. After that, if `skipped: not under a claude process` shows up, the hook
+should retry the snapshot once (or fall back to the parent walk it already has) instead of skipping on one empty read, and `settle`
+should report a hook skip it can see. Not done here: no production code changed.
+
 ## Waiting on someone else
 
 | item | who | why it waits |

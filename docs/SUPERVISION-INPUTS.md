@@ -199,9 +199,9 @@ Each: what happened, the rule it became, the test that holds it. "PR" = not yet 
     reproduced locally (6 runs, then 3 rounds of 12 concurrent). Read from the code: `hook::session_start` returns a skip
     with no write and no stderr in three cases (not under a claude process, headless, another claude above), logging only
     to `hook.log`; one candidate is an empty process snapshot (`sysinfo` returns 0 processes, without an error, if the OS
-    snapshot call fails). **State:** logged in `docs/ROADMAP.md`; #215 makes the failing test print `hook.log` and the agent
-    records; #216 retries an empty snapshot and makes `restore` report a visible hook skip at once (open PRs at the time of
-    writing, not merged). **Input to the layer:** a supervisor must not infer "never started" from the absence of a
+    snapshot call fails). **State:** logged in `docs/ROADMAP.md`; **merged: #215** (the failing test prints `hook.log` and
+    the agent records) and **#216** (a hook retries an empty snapshot; `restore` reports a visible hook skip at once). No
+    repeat has been seen since, so the cause stays UNVERIFIED. **Input to the layer:** a supervisor must not infer "never started" from the absence of a
     record when the component that writes it can decline silently; the decline needs to be readable by the supervisor.
 
 ## 3. What a generic layer could take unchanged, and what stays Claude-specific
