@@ -187,11 +187,22 @@ Each: what happened, the rule it became, the test that holds it. "PR" = not yet 
     an `Approved` without one, or for another kind/subject/requester than the held request, releases the reservation and
     fails. 0.16 also changed the store's protector off Windows to a key file beside the store; the backend refuses off
     Windows instead (`refuse_off_windows`), the 0.11.1 behaviour, on the PM's ruling. **Merged: #210** (tests with controls,
-    three `compile_fail` doctests, two mutations). A follow-up, `Answer::from_channel` taking the channel's outcome by value
-    so no second copy exists, is a separate PR.
+    three `compile_fail` doctests, two mutations). The follow-up, `Answer::from_channel` taking the channel's outcome by
+    value so no second copy exists, is **merged: #214**.
 11. **Dependency bumps that change what "cannot happen" means.** `sysinfo` 0.40 made `System::new()` and
     `System::boot_time()` fallible; each of 19 call sites now answers as it would for a process it cannot find (liveness
     false, identity none, a kill refused, a shell check unsafe), never as "fine". **Merged: #208.**
+12. **A restore that said "no session appeared" while both hooks had exited 0 (open defect, cause UNVERIFIED).** On main
+    `5c62f44` (#213) the Windows leg failed attempt 1 and passed attempt 2 on the same commit: in
+    `tests/launch_e2e.rs restore_now_asks_spends_and_starts_the_real_stand_ins_...` alpha was `Failed("no session appeared
+    within 40 s")` and beta `AwaitingDialog`, although both stand-in hooks exited 0 (36 ms and 161 ms, stderr empty). Not
+    reproduced locally (6 runs, then 3 rounds of 12 concurrent). Read from the code: `hook::session_start` returns a skip
+    with no write and no stderr in three cases (not under a claude process, headless, another claude above), logging only
+    to `hook.log`; one candidate is an empty process snapshot (`sysinfo` returns 0 processes, without an error, if the OS
+    snapshot call fails). **State:** logged in `docs/ROADMAP.md`; #215 makes the failing test print `hook.log` and the agent
+    records; #216 retries an empty snapshot and makes `restore` report a visible hook skip at once (open PRs at the time of
+    writing, not merged). **Input to the layer:** a supervisor must not infer "never started" from the absence of a
+    record when the component that writes it can decline silently; the decline needs to be readable by the supervisor.
 
 ## 3. What a generic layer could take unchanged, and what stays Claude-specific
 
