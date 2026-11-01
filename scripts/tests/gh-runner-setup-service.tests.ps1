@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 <#
 .SYNOPSIS
   Tests three functions of scripts\gh-runner-setup.ps1 that a live run (2026-10-22) showed wrong:

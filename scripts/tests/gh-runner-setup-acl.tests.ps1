@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 <#
 .SYNOPSIS
   Tests the ACL preflight of scripts\gh-runner-setup.ps1 (board 224) on real ACLs in a temp directory.

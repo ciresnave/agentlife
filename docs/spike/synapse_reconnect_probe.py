@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """Scratch-only MCP reconnect probe. Never touches the live synapsed.
 
 usage: python -I reconnect_probe.py <gap_seconds|control> <tag>

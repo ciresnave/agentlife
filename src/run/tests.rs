@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::*;
 use crate::clock::ManualClock;
 use crate::consent::fake::FakeConsent;
-use crate::consent::{AnswerError, Asking, Grant, Kind, Outcome, Request, Requester, Resolved};
+use crate::consent::{
+    Answer, AnswerError, Asking, Grant, Kind, Outcome, Request, Requester, Resolved,
+};
 use crate::identity::SysinfoTable;
 use crate::plan::{Entry, Params, PLAN_SCHEMA};
 use crate::restore::{Summary, REPORT_SCHEMA};
@@ -90,8 +93,8 @@ impl Consent for Shared {
     fn begin_answer(&mut self, id: &str, bound_hash: &str) -> Result<Asking, AnswerError> {
         self.0.borrow_mut().begin_answer(id, bound_hash)
     }
-    fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String> {
-        self.0.borrow_mut().resolve(asking, outcome)
+    fn resolve(&mut self, asking: &Asking, given: Answer) -> Result<Resolved, String> {
+        self.0.borrow_mut().resolve(asking, given)
     }
     fn approved_at(
         &mut self,
@@ -127,11 +130,11 @@ struct Scripted {
 }
 
 impl Prompt for Scripted {
-    fn ask(&self, _: &Asking) -> Outcome {
+    fn ask(&self, _: &Asking) -> Answer {
         self.asked.set(self.asked.get() + 1);
         self.events.borrow_mut().push("ask".into());
         (self.during)();
-        self.outcome
+        Answer::without_proof(self.outcome)
     }
 }
 

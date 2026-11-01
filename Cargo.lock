@@ -49,7 +49,7 @@ version = "0.29.63"
 dependencies = [
  "chrono",
  "lane-restart",
- "lane-state",
+ "lane-state 0.29.63",
  "launcher",
  "persistant",
  "serde",
@@ -2115,7 +2115,7 @@ dependencies = [
  "clap",
  "getrandom 0.4.3",
  "hmac 0.13.0",
- "lane-state",
+ "lane-state 0.29.63",
  "portable-pty",
  "rustix",
  "serde",
@@ -2125,6 +2125,18 @@ dependencies = [
  "tempfile",
  "vt100",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lane-state"
+version = "0.14.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "943ac184a9e8b14383255b9289c1e2f49cf076ac6ec14976c8cf798852691ac3"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sysinfo 0.39.6",
 ]
 
 [[package]]
@@ -2143,7 +2155,7 @@ dependencies = [
 name = "launcher"
 version = "0.29.63"
 dependencies = [
- "lane-state",
+ "lane-state 0.29.63",
  "serde",
  "serde_json",
  "tempfile",
@@ -3852,6 +3864,21 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "objc2-open-directory",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "sysinfo"
 version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e8a3edbe0394ce115f3917a00349dd242be09eb5a091ed509eaf67b55cfb8a8"
@@ -4377,13 +4404,15 @@ dependencies = [
 
 [[package]]
 name = "user-request"
-version = "0.11.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb8400ed83888436865a7e5f8ab010558c54e57c580cdc4a0754cfe715860776"
+checksum = "c97ffca774a14fb77232e880ed2552f4dc226ab167ce70ed59a2c001b13402c3"
 dependencies = [
+ "chacha20poly1305",
  "chrono",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "lane-state 0.14.27",
  "serde",
  "serde_json",
  "sha2",

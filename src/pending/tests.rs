@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::*;
 use crate::clock::{Clock, ManualClock};
 use crate::consent::fake::{FakeConsent, COOLDOWN_SECS};
-use crate::consent::{Asking, NoBackend, Outcome};
+use crate::consent::{Answer, Asking, NoBackend, Outcome};
 use crate::plan::{Entry, Params, PLAN_SCHEMA};
 use chrono::TimeZone;
 use std::cell::Cell;
@@ -77,9 +78,9 @@ impl Scripted {
 }
 
 impl Prompt for Scripted {
-    fn ask(&self, _: &Asking) -> Outcome {
+    fn ask(&self, _: &Asking) -> Answer {
         self.asked.set(self.asked.get() + 1);
-        self.outcome
+        Answer::without_proof(self.outcome)
     }
 }
 
@@ -101,8 +102,8 @@ impl Consent for ForwardConsent<'_> {
     fn begin_answer(&mut self, id: &str, bound_hash: &str) -> Result<Asking, AnswerError> {
         self.0.lock().unwrap().begin_answer(id, bound_hash)
     }
-    fn resolve(&mut self, asking: &Asking, outcome: Outcome) -> Result<Resolved, String> {
-        self.0.lock().unwrap().resolve(asking, outcome)
+    fn resolve(&mut self, asking: &Asking, given: Answer) -> Result<Resolved, String> {
+        self.0.lock().unwrap().resolve(asking, given)
     }
     fn approved_at(
         &mut self,
