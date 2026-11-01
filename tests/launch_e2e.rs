@@ -1012,10 +1012,28 @@ fn restore_now_asks_spends_and_starts_the_real_stand_ins_and_a_lane_caller_start
         panic!("expected a run, got {ran:?}")
     };
     assert_eq!(report.plan_hash, plan.hash);
+    // What the next failure needs to name its cause (ROADMAP "Open defect: restore said no session appeared"):
+    // agentlife's own hook.log (a hook that SKIPS logs only there, exit 0, nothing on stderr) and every agent
+    // record the rig holds (a skipped hook leaves no session in it).
+    let agentlife_hook_log = std::fs::read_to_string(home.hook_log()).unwrap_or_default();
+    let agent_records: String = std::fs::read_dir(home.agents_dir())
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .map(|e| {
+                    format!(
+                        "{}: {}\n",
+                        e.file_name().to_string_lossy(),
+                        std::fs::read_to_string(e.path()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for n in ["alpha", "beta"] {
         assert!(
             outcome(&report, n).came_up(),
-            "{n}: {report:#?}\nhook log:\n{}\nenv log:\n{}",
+            "{n}: {report:#?}\nstand-in hook log:\n{}\nenv log:\n{}\nagentlife hook.log:\n{agentlife_hook_log}\nagent records:\n{agent_records}",
             std::fs::read_to_string(&rig.hooklog).unwrap_or_default(),
             std::fs::read_to_string(&rig.envlog).unwrap_or_default()
         );
