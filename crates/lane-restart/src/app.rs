@@ -13,9 +13,11 @@ mod assert_idle_cmd;
 mod attach_cmd;
 mod ctx;
 mod host_cmd;
+mod info_cmd;
 mod install_cmd;
 mod lane_new_cmd;
 mod ledger_cmd;
+mod models_cmd;
 mod restart_cmd;
 mod shared;
 mod specs_cmd;
@@ -34,14 +36,6 @@ use lane_restart::relaunch;
 use lane_restart::spec::StopKind;
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-/// `C:/Projects/.lane-state` - RESTART-TOOL-DESIGN.md §7. Not configurable
-/// via CLI on purpose: a caller-supplied state directory would defeat the
-/// whole point of a fixed, portfolio-wide location every lane and the PM
-/// agree on.
-fn state_dir() -> PathBuf {
-    lane_restart::state_dir()
-}
 
 fn claude_config_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -69,25 +63,6 @@ fn handoff_text(cwd: &str, role: &str) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// `lane-restart --version` - RESTART-TOOL-DESIGN.md §12.9: the crate
-/// version, that it embeds no approvals, and where it would fetch them
-/// from. No network: `lane-restart approvals` does the fetch.
-fn print_version() {
-    use lane_restart::approvals;
-    println!("lane-restart {}", env!("CARGO_PKG_VERSION"));
-    println!("embedded approvals: none (by design - RESTART-TOOL-DESIGN.md §12.2)");
-    match dirs_home() {
-        Some(home) => match approvals::load_config(&approvals::config_path(&home)) {
-            Ok(c) => println!(
-                "approvals source: {}:{} (default branch), notify role: {}",
-                c.approvals.repo, c.approvals.path, c.notify_role
-            ),
-            Err(e) => println!("approvals source: {e}"),
-        },
-        None => println!("approvals source: no home directory"),
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StartArgs {
     pub(crate) role: String,
@@ -109,7 +84,7 @@ pub(crate) struct StopArgs {
     pub(crate) kind: Option<StopKind>,
 }
 
-const USAGE: &str = "\
+pub(crate) const USAGE: &str = "\
 lane-restart - a bulletproof session-restart tool. RESTART-TOOL-DESIGN.md.
 
 USAGE:
@@ -330,12 +305,10 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     if argv.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{USAGE}");
-        return ExitCode::SUCCESS;
+        return info_cmd::help(ctx);
     }
     if argv.iter().any(|a| a == "--version" || a == "-V") {
-        print_version();
-        return ExitCode::SUCCESS;
+        return info_cmd::version(ctx);
     }
     if let [cmd, event] = argv.as_slice() {
         if cmd == "state" {
@@ -475,8 +448,7 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
             };
         }
         if first == "models" && rest.is_empty() {
-            print!("{}", relaunch::models_report(&state_dir()));
-            return ExitCode::SUCCESS;
+            return models_cmd::run(ctx);
         }
         if first == "approvals" {
             return match cli::assert_idle(rest) {
