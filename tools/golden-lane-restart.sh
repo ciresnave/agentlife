@@ -166,6 +166,14 @@ run_case host_help_long "$E" -- host --role r --help
 # tempdir and is not a golden case.
 run_case state_alone "$E" -- state
 run_case state_two_args "$E" -- state a b
+# models: read-only, so the real path is compared (the machine's lane states, back to back); `models x`
+# falls to the restart parser and fails.
+run_case models_real "$E" -- models
+run_case models_extra "$E" -- models extra
+# --help / --version: more spellings and the ordering rule (help wins over a bad flag; version is
+# answered before any subcommand is parsed).
+run_case help_beats_badflag "$E" -- stop --bogus --help
+run_case version_beats_badflag "$E" -- stop --bogus --version
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
