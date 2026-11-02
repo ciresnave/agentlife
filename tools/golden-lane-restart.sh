@@ -127,6 +127,17 @@ run_case lanenew_model_missing "$E" -- lane-new r p --model
 run_case lanenew_plan_missing "$E" -- lane-new r p --plan
 run_case lanenew_positional "$E" -- lane-new r p q
 run_case lanenew_help "$E" -- lane-new r p -h
+# start: argument errors and help ONLY. `start --role r` already PARSES (the reason is optional), so
+# it runs the real command and appends a refused row to the machine's real restart.log; every case
+# below fails in the parser, before the command runs.
+run_case start_none "$E" -- start
+run_case start_role_missing "$E" -- start --role
+run_case start_badflag "$E" -- start --bogus
+run_case start_reason_missing "$E" -- start --role r --reason
+run_case start_model_missing "$E" -- start --role r --reason x --model
+run_case start_signal_missing "$E" -- start --role r --reason x --signal-id
+run_case start_positional "$E" -- start extra
+run_case start_help "$E" -- start -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
