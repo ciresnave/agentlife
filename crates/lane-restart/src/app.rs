@@ -16,6 +16,7 @@ mod install_cmd;
 mod lane_new_cmd;
 mod ledger_cmd;
 mod specs_cmd;
+mod start_cmd;
 mod status_cmd;
 #[cfg(test)]
 mod test_fixtures;
@@ -26,7 +27,7 @@ use crate::cli;
 use ctx::Ctx;
 use lane_restart::authorize::{self, Target};
 use lane_restart::facts::SysinfoFacts;
-use lane_restart::lane_state_writer::{self, ParentProcess, RealParentProcess};
+use lane_restart::lane_state_writer::{self, RealParentProcess};
 use lane_restart::lane_stop;
 use lane_restart::log;
 use lane_restart::relaunch;
@@ -175,264 +176,6 @@ fn verified_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
     let pid =
         lane_state_writer::claude_parent_pid(std::process::id(), &RealParentProcess::new()).ok();
     start::caller_role(&state_dir(), pid, facts)
-}
-
-/// The caller of a `start`: the PM session by process (as for every command), else the launcher
-/// service by its record and by being this process's direct parent. Only `start` asks for the
-/// second; `stop` and a restart read `verified_caller` alone and so never see `overmind`.
-fn verified_start_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
-    match verified_caller(facts) {
-        Ok(role) => Ok(role),
-        Err(first) => {
-            let parent = RealParentProcess::new()
-                .parent_of(std::process::id())
-                .map(|(pid, _)| pid);
-            start::launcher_caller(&state_dir(), parent, facts).map_err(|_| first)
-        }
-    }
-}
-
-/// `lane-restart start --role R --reason <text> [--model sonnet|haiku] [--signal-id <id>]
-/// [--dry-run] [--json]` - 14.5.
-///
-/// A launcher caller (and only one) is also held to `restore.lock`, the caps and the memory floor
-/// (`launcher_gate`); the PM's own start is not.
-fn run_start_cmd(args: StartArgs) -> ExitCode {
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_start_caller(&facts);
-    let caller_role = caller.as_ref().ok().cloned();
-    let is_launcher = caller_role
-        .as_deref()
-        .is_some_and(start::is_launcher_caller);
-    let requested_by = caller_role
-        .clone()
-        .unwrap_or_else(|| "unverified".to_string());
-    // The ledger line names the signal this start answers, inside the 200-character reason cap.
-    let reason_for_log: String = match args.signal_id.as_deref() {
-        Some(s) => format!("{} [signal {s}]", args.reason.trim()),
-        None => args.reason.trim().to_string(),
-    }
-    .chars()
-    .take(start::REASON_MAX_CHARS)
-    .collect();
-    // One ledger line and, under `--json`, one stdout line, from one `(outcome, reason)` so the two
-    // cannot disagree. `spawned` is whether a spawn was attempted: what the launcher caps count.
-    // `--json`: `{role,outcome,reason[,launch_to_live_secs]}`; the human lines stay on stderr and
-    // the exit codes do not change.
-    let finish = |model: Option<&str>,
-                  text: &str,
-                  acted: bool,
-                  outcome: &str,
-                  reason: &str,
-                  spawned: bool,
-                  secs: Option<u64>| {
-        let result = format!("{outcome}:{reason}");
-        log_ledger_start(
-            &requested_by,
-            &args.role,
-            caller_role.as_deref(),
-            model,
-            Some(&reason_for_log),
-            text,
-            acted,
-            args.signal_id.as_deref(),
-            &result,
-            spawned,
-        );
-        if args.json {
-            let mut v = serde_json::json!({
-                "role": args.role, "outcome": outcome, "reason": reason,
-            });
-            if let Some(s) = secs {
-                v["launch_to_live_secs"] = s.into();
-            }
-            println!("{v}");
-        }
-    };
-    let refuse = |refusal: &start::StartRefusal| -> ExitCode {
-        eprintln!("lane-restart start: refused - {refusal}");
-        let (o, r) = refusal.outcome();
-        finish(
-            None,
-            &format!("refused: {refusal}"),
-            false,
-            o,
-            r,
-            false,
-            None,
-        );
-        ExitCode::from(refusal.exit_code())
-    };
-    let req = start::StartRequest {
-        role: &args.role,
-        reason: &args.reason,
-        model: args.model.as_deref(),
-        signal_id: args.signal_id.as_deref(),
-    };
-    // One starter per role from the check to the confirmed-live wait: the lock is taken before
-    // `plan_start`, so its checks are the re-check after the lock. A dry run spawns nothing.
-    let _start_lock = if args.dry_run {
-        None
-    } else {
-        match start::take_start_lock(&state_dir(), &args.role) {
-            Ok(lock) => lock,
-            Err(refusal) => return refuse(&refusal),
-        }
-    };
-    let plan = match start::plan_start(&state_dir(), &req, caller, &facts) {
-        Ok(p) => p,
-        Err(refusal) => return refuse(&refusal),
-    };
-    if let Err(refusal) = disk_gate("start") {
-        finish(
-            None,
-            &format!("refused: {refusal}"),
-            false,
-            "failed",
-            "disk-floor",
-            false,
-            None,
-        );
-        return ExitCode::FAILURE;
-    }
-    let pin_note = plan
-        .pinned_from
-        .as_deref()
-        .map(|was| format!(" model-pinned:{was}"))
-        .unwrap_or_default();
-    if args.dry_run {
-        let cmdline: Vec<String> = plan
-            .argv
-            .iter()
-            .map(|a| {
-                if a.contains(' ') {
-                    format!("{a:?}")
-                } else {
-                    a.clone()
-                }
-            })
-            .collect();
-        println!(
-            "lane-restart start: DRY RUN - would launch {} via wt.exe (conhost.exe fallback), \
-             hosted by `lane-restart host --role {} -- {}`, in {}{pin_note}",
-            plan.launch.role,
-            plan.launch.role,
-            cmdline.join(" "),
-            plan.launch.cwd
-        );
-        finish(
-            Some(&plan.model),
-            &format!("dry run - no action taken{pin_note}"),
-            false,
-            "dry-run",
-            "dry-run",
-            false,
-            None,
-        );
-        return ExitCode::SUCCESS;
-    }
-    // The launcher path's own gates, after every spec refusal (so `already-running` is still
-    // `already-running` on a full machine) and before anything spawns. `restore.lock` is taken
-    // first and held to the end, so two launcher starts cannot both read a count of 11 spawns.
-    // A dry run took none of this and says so only by not reporting it.
-    let _restore_lock = if is_launcher {
-        let home = lane_restart::launcher_gate::agentlife_home(
-            std::env::var("AGENTLIFE_HOME").ok().as_deref(),
-        );
-        let lock = match lane_restart::launcher_gate::take_restore_lock(&home, &facts) {
-            Ok(l) => l,
-            Err(refusal) => return refuse(&refusal),
-        };
-        let floor = lane_restart::launcher_gate::resolve_floor_gb(
-            &home.join("config.json"),
-            std::env::var("AGENTLIFE_FREE_RAM_FLOOR_GB").ok().as_deref(),
-        );
-        if let Err(refusal) = lane_restart::launcher_gate::decide(
-            lane_restart::launcher_gate::load_rows(&log_path()),
-            &args.role,
-            chrono::Utc::now(),
-            floor,
-            lane_restart::launcher_gate::free_memory_gb(),
-        ) {
-            return refuse(&refusal);
-        }
-        Some(lock)
-    } else {
-        None
-    };
-    eprintln!(
-        "lane-restart start: launching {} on {}...",
-        args.role, plan.model
-    );
-    let state_dir_path = state_dir();
-    let state_reader = relaunch::RealStateReader {
-        state_dir: &state_dir_path,
-    };
-    let role_for_notice = plan.launch.role.to_string();
-    let mut on_awaiting = || print_status_json("awaiting_confirmation", &role_for_notice);
-    let result = start::execute_start(
-        &plan,
-        &facts,
-        &state_reader,
-        &lane_restart::spec::DirSpecStore {
-            dir: state_dir_path.clone(),
-        },
-        &lane_restart::launch::LivenessTiming::default(),
-        &relaunch::spawn_launch,
-        &mut std::thread::sleep,
-        &mut on_awaiting,
-    );
-    match result {
-        Ok(done) => {
-            let warn = done
-                .spec_warning
-                .as_deref()
-                .map(|w| format!("; the launch spec could not be marked running: {w}"))
-                .unwrap_or_default();
-            // Seconds from spawn to confirmed progress, only when it was confirmed: an
-            // awaiting-dialog wait is a person's time, not the launch's (spec C4 `launch_wait`).
-            let (what, exit, secs, reason) = match done.outcome {
-                relaunch::RelaunchOutcome::Relaunched => (
-                    "started a fresh session (continuity via HANDOFF only)",
-                    ExitCode::SUCCESS,
-                    Some(done.launch_elapsed.as_secs()),
-                    "started",
-                ),
-                relaunch::RelaunchOutcome::AwaitingConfirmation => (
-                    "started; awaiting human confirmation at the dev-channels dialog",
-                    ExitCode::from(2),
-                    None,
-                    "awaiting-dialog",
-                ),
-            };
-            let live = secs
-                .map(|s| format!(" launch-to-live:{s}s"))
-                .unwrap_or_default();
-            finish(
-                Some(&plan.model),
-                &format!("{what}{pin_note}{warn}{live}"),
-                true,
-                "started",
-                reason,
-                true,
-                secs,
-            );
-            exit
-        }
-        Err(e) => {
-            eprintln!("lane-restart start: {e}");
-            finish(
-                Some(&plan.model),
-                &format!("action failed: {e}{pin_note}"),
-                false,
-                "failed",
-                "spawn-failed",
-                true,
-                None,
-            );
-            ExitCode::FAILURE
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -873,9 +616,9 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         }
         if first == "start" {
             return match cli::start(rest) {
-                Ok(a) => run_start_cmd(a),
+                Ok(a) => start_cmd::run(ctx, a),
                 Err(e) => {
-                    eprintln!("lane-restart start: {e}");
+                    ctx.errln(&format!("lane-restart start: {e}"));
                     ExitCode::FAILURE
                 }
             };
@@ -1345,40 +1088,6 @@ fn log_ledger(
         signal_id: None,
         result: None,
         spawned: None,
-    };
-    if let Err(e) = log::append(&log_path(), &entry) {
-        eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");
-    }
-}
-
-/// A `start` ledger line: `log_ledger`'s fields plus the signal it answered, its vocabulary-A
-/// result and whether a spawn was attempted (what the launcher's caps count).
-#[allow(clippy::too_many_arguments)]
-fn log_ledger_start(
-    requested_by: &str,
-    role: &str,
-    caller_role: Option<&str>,
-    model: Option<&str>,
-    reason: Option<&str>,
-    outcome: &str,
-    acted: bool,
-    signal_id: Option<&str>,
-    result: &str,
-    spawned: bool,
-) {
-    let entry = log::Entry {
-        timestamp: chrono::Utc::now(),
-        requested_by,
-        role,
-        outcome: outcome.to_string(),
-        acted,
-        kind: Some("start"),
-        caller_role,
-        model,
-        reason,
-        signal_id,
-        result: Some(result),
-        spawned: Some(spawned),
     };
     if let Err(e) = log::append(&log_path(), &entry) {
         eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");

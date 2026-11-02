@@ -16,11 +16,14 @@ use crate::lane_new::Roots;
 use crate::lane_new_host::Host;
 use crate::lane_new_remote::Vcs;
 use crate::lane_state_writer::{ParentProcess, RealParentProcess};
+use crate::launch::{LivenessTiming, SpawnFn};
 use crate::notify::{Peer, Transport};
 use crate::start::CallerError;
 use crate::waits_poll::{CheckRunner, ProcessRunner};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// A notice to a lane: `(role, text)`.
 type Sender = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
@@ -74,6 +77,13 @@ pub(crate) struct Ctx {
     probe: Option<Rc<dyn Probe>>,
     caller: Option<Caller>,
     lane_new: Option<LaneNewWorld>,
+    launch_spawn: Option<Rc<SpawnFn>>,
+    sleeper: Option<Rc<dyn Fn(Duration)>>,
+    liveness: Option<LivenessTiming>,
+    /// `Some`: these are ALL the environment variables the command can see through `env_var`.
+    env: Option<HashMap<String, String>>,
+    /// `Some(None)` is "free memory could not be read".
+    free_memory_gb: Option<Option<f64>>,
 }
 
 impl Ctx {
@@ -98,6 +108,11 @@ impl Ctx {
             probe: None,
             caller: None,
             lane_new: None,
+            launch_spawn: None,
+            sleeper: None,
+            liveness: None,
+            env: None,
+            free_memory_gb: None,
         }
     }
 
@@ -158,6 +173,98 @@ impl Ctx {
             crate::lane_state_writer::claude_parent_pid(std::process::id(), &*self.parents()).ok();
         let facts = self.facts();
         crate::start::caller_role(&self.state_dir, pid, &*facts)
+    }
+
+    /// The caller of a `start`: the PM session by process (as for every command), else the launcher
+    /// service by its record and by being this process's direct parent. Only `start` asks for the
+    /// second; `stop` and a restart read `verified_caller` alone and so never see `overmind`.
+    pub(crate) fn verified_start_caller(&mut self) -> Result<String, CallerError> {
+        match self.verified_caller() {
+            Ok(role) => Ok(role),
+            Err(first) => {
+                let parent = self
+                    .parents()
+                    .parent_of(std::process::id())
+                    .map(|(pid, _)| pid);
+                let facts = self.facts();
+                crate::start::launcher_caller(&self.state_dir, parent, &*facts).map_err(|_| first)
+            }
+        }
+    }
+
+    /// Opens a lane's launch window and shell: really (`relaunch::spawn_launch`), unless a test
+    /// supplied its own.
+    pub(crate) fn launch_spawn(&self) -> Rc<SpawnFn> {
+        match &self.launch_spawn {
+            Some(f) => Rc::clone(f),
+            None => Rc::new(crate::relaunch::spawn_launch),
+        }
+    }
+
+    /// Waits `d`: really, unless a test supplied its own.
+    pub(crate) fn sleeper(&self) -> Rc<dyn Fn(Duration)> {
+        match &self.sleeper {
+            Some(f) => Rc::clone(f),
+            None => Rc::new(std::thread::sleep),
+        }
+    }
+
+    /// How long a launch is given: the production timings, unless a test supplied its own.
+    pub(crate) fn liveness_timing(&self) -> LivenessTiming {
+        self.liveness.unwrap_or_default()
+    }
+
+    /// One environment variable (`None`: unset or not unicode), as `std::env::var(..).ok()`.
+    pub(crate) fn env_var(&self, name: &str) -> Option<String> {
+        match &self.env {
+            Some(vars) => vars.get(name).cloned(),
+            None => std::env::var(name).ok(),
+        }
+    }
+
+    /// Free memory in GB, or `None` when it cannot be read.
+    pub(crate) fn free_memory_gb(&self) -> Option<f64> {
+        match self.free_memory_gb {
+            Some(v) => v,
+            None => crate::launcher_gate::free_memory_gb(),
+        }
+    }
+
+    /// A `start` ledger line: `log_ledger`'s fields plus the signal it answered, its vocabulary-A
+    /// result and whether a spawn was attempted (what the launcher's caps count).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_ledger_start(
+        &mut self,
+        requested_by: &str,
+        role: &str,
+        caller_role: Option<&str>,
+        model: Option<&str>,
+        reason: Option<&str>,
+        outcome: &str,
+        acted: bool,
+        signal_id: Option<&str>,
+        result: &str,
+        spawned: bool,
+    ) {
+        let entry = crate::log::Entry {
+            timestamp: chrono::Utc::now(),
+            requested_by,
+            role,
+            outcome: outcome.to_string(),
+            acted,
+            kind: Some("start"),
+            caller_role,
+            model,
+            reason,
+            signal_id,
+            result: Some(result),
+            spawned: Some(spawned),
+        };
+        if let Err(e) = crate::log::append(&self.state_dir.join("restart.log"), &entry) {
+            self.errln(&format!(
+                "lane-restart: WARNING - could not write to the restart log: {e}"
+            ));
+        }
     }
 
     /// One `restart.log` line with the 14.7 fields, in this context's state directory. A write that
@@ -321,6 +428,11 @@ impl Ctx {
             probe: None,
             caller: None,
             lane_new: None,
+            launch_spawn: None,
+            sleeper: None,
+            liveness: None,
+            env: None,
+            free_memory_gb: None,
         }
     }
 
@@ -357,6 +469,45 @@ impl Ctx {
         host: Option<Rc<dyn Host>>,
     ) -> Self {
         self.lane_new = Some(LaneNewWorld { roots, vcs, host });
+        self
+    }
+
+    /// Test only: this launch spawner instead of really opening a window.
+    #[cfg(test)]
+    pub(crate) fn with_launch_spawn(mut self, spawn: Rc<SpawnFn>) -> Self {
+        self.launch_spawn = Some(spawn);
+        self
+    }
+
+    /// Test only: this wait instead of really sleeping.
+    #[cfg(test)]
+    pub(crate) fn with_sleeper(mut self, sleeper: Rc<dyn Fn(Duration)>) -> Self {
+        self.sleeper = Some(sleeper);
+        self
+    }
+
+    /// Test only: these launch timings instead of the production ones.
+    #[cfg(test)]
+    pub(crate) fn with_liveness_timing(mut self, timing: LivenessTiming) -> Self {
+        self.liveness = Some(timing);
+        self
+    }
+
+    /// Test only: exactly these environment variables.
+    #[cfg(test)]
+    pub(crate) fn with_env(mut self, vars: &[(&str, &str)]) -> Self {
+        self.env = Some(
+            vars.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Test only: this free memory (`None`: unreadable) instead of the machine's.
+    #[cfg(test)]
+    pub(crate) fn with_free_memory_gb(mut self, gb: Option<f64>) -> Self {
+        self.free_memory_gb = Some(gb);
         self
     }
 
