@@ -6,7 +6,7 @@
 //! `stale_after` is treated as abandoned and reclaimed so a crashed holder cannot wedge every
 //! later writer, and a waiter gives up only after `timeout`.
 //!
-//! Three lessons from that code are built in and tested here:
+//! Four lessons from that code are built in and tested here:
 //!
 //! 1. **`timeout` must exceed `stale_after`.** OverMind's first constants gave up at 2 s, before
 //!    anyone was *allowed* to reclaim a 5 s-old lock, so a dead holder blocked a legitimate
@@ -17,18 +17,33 @@
 //!    and `Drop` removes the file only if the token is still its own, so a holder whose lock was
 //!    reclaimed as stale cannot delete its successor's.
 //!
+//! 4. **A lock is abandoned only if it is old AND its owner is gone** (issue #241). Each token
+//!    names its owner as `pid:start:...`; an old lock whose owner process is still running (same
+//!    pid, same start time) is NOT reclaimed, however long the holder has been slow. A loaded
+//!    machine held one registry lock for 7 s, a waiter robbed it at 5 s, and two writers
+//!    read-modify-wrote at once: an `Ok` update silently lost. Now such a waiter waits and, past
+//!    its `timeout`, fails with [`LockError::TimedOut`]: loud, not lossy. (Start times within a
+//!    second count as equal: see `same_start`.) An unparsable token (an
+//!    empty file, or one written by an older binary) is judged by age alone, as before.
+//!
 //! A holder keeps the lock for one short read-modify-write, never across a long operation: a
-//! lock held longer than `stale_after` can legitimately be reclaimed from under it.
+//! lock whose owner has died can be reclaimed once it is `stale_after` old.
 
 use std::fmt;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
+
+use crate::identity::{ProcessTable, SysinfoTable};
 
 pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(7);
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(2);
+/// How often a waiter that finds an old lock re-asks whether its owner is still running. Reading
+/// the process table is far slower than a poll, so the answer is not asked for every 2 ms.
+const OWNER_RECHECK: Duration = Duration::from_millis(250);
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -56,16 +71,61 @@ pub struct FileLock {
     token: String,
 }
 
+/// This process's start time (Unix seconds), read once; `None` when the process table cannot be
+/// read, in which case tokens carry no owner and are judged by age alone.
+fn own_start_secs() -> Option<u64> {
+    static START: OnceLock<Option<u64>> = OnceLock::new();
+    *START.get_or_init(|| {
+        SysinfoTable
+            .identity_of(std::process::id())
+            .map(|i| i.start_secs)
+    })
+}
+
 fn new_token() -> String {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!(
-        "{}.{nanos}.{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    match own_start_secs() {
+        Some(start) => format!("{}:{start}:{nanos}.{counter}", std::process::id()),
+        None => format!("{}.{nanos}.{counter}", std::process::id()),
+    }
+}
+
+/// The owner a token names: `pid:start:...`. `None` for any other shape.
+fn parse_owner(token: &str) -> Option<(u32, u64)> {
+    let mut parts = token.splitn(3, ':');
+    let pid = parts.next()?.parse().ok()?;
+    let start = parts.next()?.parse().ok()?;
+    parts.next()?;
+    Some((pid, start))
+}
+
+/// Do two readings of a start time name the same process? Within a second counts as the same: off
+/// Windows `sysinfo` derives a start time from the boot time, which can move by a second between two
+/// reads of one live process (issue #14), and here a false "different process" would rob a live
+/// holder, the very loss this module exists to prevent. A recycled pid started within a second of
+/// the dead owner's own start is not a case worth waiting for.
+fn same_start(recorded: u64, now: u64) -> bool {
+    recorded.abs_diff(now) <= 1
+}
+
+/// Is the process that took the lock at `path` gone? `true` when the token names no owner
+/// (nothing to wait for: age decides, as it always did), when nothing runs under that pid, or
+/// when what runs there started at a different time (a recycled pid).
+fn owner_is_gone(path: &Path) -> bool {
+    let Ok(token) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let Some((pid, start)) = parse_owner(&token) else {
+        return true;
+    };
+    match SysinfoTable.identity_of(pid) {
+        None => true,
+        Some(now) => !same_start(start, now.start_secs),
+    }
 }
 
 fn is_busy(kind: ErrorKind) -> bool {
@@ -91,6 +151,8 @@ impl FileLock {
             std::fs::create_dir_all(parent).map_err(LockError::Io)?;
         }
         let start = Instant::now();
+        // When an old lock's owner was last found still running, and when to ask again.
+        let mut owner_alive_until: Option<Instant> = None;
         loop {
             match std::fs::OpenOptions::new()
                 .write(true)
@@ -106,16 +168,27 @@ impl FileLock {
                 }
                 Err(e) if is_busy(e.kind()) => {
                     if is_stale(&path, stale_after) {
-                        // Rename before removing: of several reclaimers only one rename wins.
-                        let graveyard = path.with_extension(format!(
-                            "stale.{}.{}",
-                            std::process::id(),
-                            COUNTER.fetch_add(1, Ordering::Relaxed)
-                        ));
-                        if std::fs::rename(&path, &graveyard).is_ok() {
-                            let _ = std::fs::remove_file(&graveyard);
+                        let due = owner_alive_until.is_none_or(|t| Instant::now() >= t);
+                        if due {
+                            if owner_is_gone(&path) {
+                                // Rename before removing: of several reclaimers only one rename
+                                // wins.
+                                let graveyard = path.with_extension(format!(
+                                    "stale.{}.{}",
+                                    std::process::id(),
+                                    COUNTER.fetch_add(1, Ordering::Relaxed)
+                                ));
+                                if std::fs::rename(&path, &graveyard).is_ok() {
+                                    let _ = std::fs::remove_file(&graveyard);
+                                }
+                                owner_alive_until = None;
+                                continue;
+                            }
+                            // Old, but its owner is running: slow, not dead. Wait for it.
+                            owner_alive_until = Some(Instant::now() + OWNER_RECHECK);
                         }
-                        continue;
+                    } else {
+                        owner_alive_until = None;
                     }
                     if start.elapsed() >= timeout {
                         return Err(LockError::TimedOut(path));
@@ -222,6 +295,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.lock");
         let first = FileLock::acquire(&p, Duration::from_secs(1), Duration::from_secs(5)).unwrap();
+        // The first holder's lock comes to look abandoned: old, and owned by a process that is
+        // gone (a live owner's lock is no longer reclaimed, however old; see issue #241).
+        std::fs::write(&p, "4294967290:1:0.0").unwrap();
         backdate(&p, Duration::from_secs(60));
         let second =
             FileLock::acquire(&p, Duration::from_millis(500), Duration::from_secs(5)).unwrap();
@@ -274,5 +350,140 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(total, 500, "lost updates under contention");
+    }
+
+    /// Issue #241: the lock is judged abandoned by its file's age alone, so a LIVE holder that is
+    /// slow (a loaded machine held one lock for 7 s) loses it to the next waiter and both run their
+    /// read-modify-write at once. Here the holder is slower than `stale_after` on purpose; the
+    /// waiter must still wait for it.
+    #[test]
+    fn a_live_holder_slower_than_stale_after_is_not_robbed_of_its_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        let inside = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let overlaps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enter = |inside: &std::sync::atomic::AtomicUsize,
+                     overlaps: &std::sync::atomic::AtomicUsize| {
+            if inside.fetch_add(1, Ordering::SeqCst) != 0 {
+                overlaps.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        let holder =
+            FileLock::acquire(&p, Duration::from_secs(1), Duration::from_millis(100)).unwrap();
+        enter(&inside, &overlaps);
+        let waiter = {
+            let (p, inside, overlaps) = (p.clone(), inside.clone(), overlaps.clone());
+            std::thread::spawn(move || {
+                let _l = FileLock::acquire(&p, Duration::from_secs(5), Duration::from_millis(100))
+                    .unwrap();
+                if inside.fetch_add(1, Ordering::SeqCst) != 0 {
+                    overlaps.fetch_add(1, Ordering::SeqCst);
+                }
+                inside.fetch_sub(1, Ordering::SeqCst);
+            })
+        };
+        // Four times `stale_after`, with the holder alive and inside its critical section.
+        std::thread::sleep(Duration::from_millis(400));
+        inside.fetch_sub(1, Ordering::SeqCst);
+        drop(holder);
+        waiter.join().unwrap();
+        assert_eq!(
+            overlaps.load(Ordering::SeqCst),
+            0,
+            "the waiter entered while the live holder was still inside"
+        );
+    }
+
+    /// The token names its owner as `pid:start:...`.
+    fn token_of(pid: u32, start: u64) -> String {
+        format!("{pid}:{start}:0.0")
+    }
+
+    fn own_start() -> u64 {
+        use crate::identity::ProcessTable;
+        crate::identity::SysinfoTable
+            .identity_of(std::process::id())
+            .expect("this process is in the table")
+            .start_secs
+    }
+
+    #[test]
+    fn an_old_lock_whose_owner_process_is_alive_is_not_reclaimed() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        std::fs::write(&p, token_of(std::process::id(), own_start())).unwrap();
+        backdate(&p, Duration::from_secs(60));
+        let r = FileLock::acquire(&p, Duration::from_millis(300), Duration::from_secs(5));
+        assert!(matches!(r, Err(LockError::TimedOut(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn an_old_lock_whose_owner_process_is_gone_is_reclaimed() {
+        // Positive control for the test above: the same old lock, owner not running.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        std::fs::write(&p, token_of(4_294_967_290, 1)).unwrap();
+        backdate(&p, Duration::from_secs(60));
+        let r = FileLock::acquire(&p, Duration::from_millis(500), Duration::from_secs(5));
+        assert!(
+            r.is_ok(),
+            "a dead owner's old lock must be reclaimed: {r:?}"
+        );
+    }
+
+    #[test]
+    fn a_start_time_one_second_off_is_the_same_process_and_two_seconds_off_is_not() {
+        assert!(same_start(1000, 1000));
+        assert!(same_start(1000, 1001));
+        assert!(same_start(1001, 1000));
+        assert!(!same_start(1000, 1002));
+        assert!(!same_start(1002, 1000));
+    }
+
+    #[test]
+    fn an_old_lock_whose_owner_start_reads_one_second_off_is_still_not_reclaimed() {
+        // The owner is alive; its start time reads a second differently than when it took the lock.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        std::fs::write(&p, token_of(std::process::id(), own_start() + 1)).unwrap();
+        backdate(&p, Duration::from_secs(60));
+        let r = FileLock::acquire(&p, Duration::from_millis(300), Duration::from_secs(5));
+        assert!(matches!(r, Err(LockError::TimedOut(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn an_old_lock_whose_pid_now_belongs_to_a_different_process_is_reclaimed() {
+        // The pid is alive (this process) but the recorded start time is another process's.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        std::fs::write(&p, token_of(std::process::id(), own_start() + 1000)).unwrap();
+        backdate(&p, Duration::from_secs(60));
+        let r = FileLock::acquire(&p, Duration::from_millis(500), Duration::from_secs(5));
+        assert!(r.is_ok(), "a recycled pid's lock must be reclaimed: {r:?}");
+    }
+
+    #[test]
+    fn a_fresh_lock_of_a_dead_owner_is_still_waited_for_until_it_is_old() {
+        // Age is still required: a dead owner's lock younger than `stale_after` is respected.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        std::fs::write(&p, token_of(4_294_967_290, 1)).unwrap();
+        let r = FileLock::acquire(&p, Duration::from_millis(100), Duration::from_secs(5));
+        assert!(matches!(r, Err(LockError::TimedOut(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn a_new_lock_records_its_owner_and_the_owner_is_this_process() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.lock");
+        let l = FileLock::acquire(&p, Duration::from_secs(1), Duration::from_secs(5)).unwrap();
+        let body = std::fs::read_to_string(&p).unwrap();
+        let mut parts = body.splitn(3, ':');
+        assert_eq!(
+            parts.next().unwrap().parse::<u32>().unwrap(),
+            std::process::id()
+        );
+        assert_eq!(parts.next().unwrap().parse::<u64>().unwrap(), own_start());
+        drop(l);
     }
 }
