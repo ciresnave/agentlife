@@ -374,3 +374,96 @@ fn a_session_stuck_at_the_dev_channels_dialog_is_reported_awaiting_with_exit_2()
     assert_eq!(logged[0].result.as_deref(), Some("started:awaiting-dialog"));
     assert!(logged[0].acted);
 }
+
+fn tight_disk(_: &Path) -> Result<crate::disk::GuardOk, crate::disk::Refusal> {
+    Err(crate::disk::Refusal {
+        mount: "/".into(),
+        free: 1 << 30,
+        floor: 20 << 30,
+    })
+}
+
+#[test]
+fn a_volume_below_the_disk_floor_refuses_the_start_and_spawns_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(
+        d.path(),
+        "alpha",
+        "# h
+",
+    );
+    let calls = Rc::new(RefCell::new(0));
+    let mut c = ctx(&state, Some("pm"), dead(), &calls).with_disk(tight_disk);
+    let code = run_with(
+        &mut c,
+        args(&[
+            "start",
+            "--role",
+            "alpha",
+            "--reason",
+            "a test start",
+            "--json",
+        ]),
+    );
+    assert!(code_is(code, 1), "{code:?}");
+    assert_eq!(*calls.borrow(), 0, "a refused start spawned");
+    let (out, err) = c.captured();
+    assert!(
+        err.contains(
+            "lane-restart start: refused - disk floor: / has 1.0 GB free, below the 20.0 GB floor"
+        ),
+        "{err}"
+    );
+    let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(json["reason"], "disk-floor", "{out}");
+    // control: the same call on the default (roomy) disk reaches the spawn
+    let mut c = ctx(&state, Some("pm"), dead(), &calls);
+    let code = run_with(
+        &mut c,
+        args(&[
+            "start",
+            "--role",
+            "alpha",
+            "--reason",
+            "a test start",
+            "--json",
+        ]),
+    );
+    assert!(code_is(code, 1), "{code:?}");
+    assert_eq!(*calls.borrow(), 1);
+}
+
+#[test]
+fn an_unreadable_disk_is_a_warning_not_a_refusal() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(
+        d.path(),
+        "alpha",
+        "# h
+",
+    );
+    let calls = Rc::new(RefCell::new(0));
+    let mut c = ctx(&state, Some("pm"), dead(), &calls)
+        .with_disk(|_| Ok(crate::disk::GuardOk::Unknown("no probe".into())));
+    let _ = run_with(
+        &mut c,
+        args(&[
+            "start",
+            "--role",
+            "alpha",
+            "--reason",
+            "a test start",
+            "--json",
+        ]),
+    );
+    let err = c.captured().1;
+    assert!(
+        err.contains("lane-restart start: warning - free disk space was not checked: no probe"),
+        "{err}"
+    );
+    assert_eq!(
+        *calls.borrow(),
+        1,
+        "an unreadable disk must not block the launch"
+    );
+}

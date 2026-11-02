@@ -313,3 +313,26 @@ fn a_bare_self_that_finds_no_role_says_so_and_changes_nothing() {
     assert!(kills(&l).is_empty());
     let _ = lane;
 }
+
+#[test]
+fn a_volume_below_the_disk_floor_refuses_the_restart_and_kills_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, lane, l, facts) = lane(d.path());
+    let calls = Rc::new(RefCell::new(0));
+    let mut c = ctx(&state, &lane, Some("pm"), facts, None, &calls).with_disk(|_| {
+        Err(crate::disk::Refusal {
+            mount: "/".into(),
+            free: 1 << 30,
+            floor: 20 << 30,
+        })
+    });
+    let code = run_with(&mut c, args(&["--role", "alpha", "--yes"]));
+    assert!(!code_is(code, 0), "{code:?}");
+    assert_eq!(*calls.borrow(), 0, "a refused restart launched");
+    assert_eq!(kills(&l), Vec::<String>::new(), "a refused restart killed");
+    let err = c.captured().1;
+    assert!(
+        err.contains("lane-restart restart: refused - disk floor: / has 1.0 GB free, below the 20.0 GB floor"),
+        "{err}"
+    );
+}

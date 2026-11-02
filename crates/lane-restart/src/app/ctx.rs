@@ -10,6 +10,7 @@
 //! directory of its own.
 
 use crate::approvals::{default_reader, RepoReader};
+use crate::disk::{GuardOk, Refusal};
 use crate::facts::{SysinfoFacts, SystemFacts};
 use crate::host::HostOutcome;
 use crate::install::Probe;
@@ -35,6 +36,9 @@ type Sender = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 
 /// The claude-peers broker's live sessions.
 type BrokerPeers = Box<dyn Fn() -> Result<Vec<Peer>, String>>;
+
+/// The free-disk check for the volume holding a path (`disk::guard`).
+type DiskGuard = Box<dyn Fn(&std::path::Path) -> Result<GuardOk, Refusal>>;
 
 /// Who is running this command (`Ctx::verified_caller`).
 type Caller = Box<dyn Fn() -> Result<String, CallerError>>;
@@ -95,6 +99,8 @@ pub(crate) struct Ctx {
     env: Option<HashMap<String, String>>,
     /// `Some(None)` is "free memory could not be read".
     free_memory_gb: Option<Option<f64>>,
+    /// `None`: ask the machine's disk (`disk::guard`).
+    disk: Option<DiskGuard>,
 }
 
 impl Ctx {
@@ -127,6 +133,7 @@ impl Ctx {
             liveness: None,
             env: None,
             free_memory_gb: None,
+            disk: None,
         }
     }
 
@@ -256,6 +263,17 @@ impl Ctx {
         crate::relaunch::OpusPermit::from_value(
             self.env_var(crate::relaunch::ALLOW_OPUS_ENV).as_deref(),
         )
+    }
+
+    /// The free-disk check for the volume holding this context's state directory: the machine's
+    /// (`disk::guard`, a 20 GB floor) unless a test supplied its own. A test context (`capture`)
+    /// defaults to a roomy disk, so no fixture test depends on how full the runner is (main's
+    /// ubuntu run at 3d97be7 refused nine of them: `/` had 14.0 GB free).
+    pub(crate) fn disk_guard(&self) -> Result<GuardOk, Refusal> {
+        match &self.disk {
+            Some(f) => f(&self.state_dir),
+            None => crate::disk::guard(&self.state_dir),
+        }
     }
 
     /// Free memory in GB, or `None` when it cannot be read.
@@ -487,6 +505,7 @@ impl Ctx {
             liveness: None,
             env: None,
             free_memory_gb: None,
+            disk: Some(Box::new(|_| Ok(roomy_disk()))),
         }
     }
 
@@ -607,6 +626,16 @@ impl Ctx {
         self
     }
 
+    /// Test only: this disk check instead of the roomy default.
+    #[cfg(test)]
+    pub(crate) fn with_disk(
+        mut self,
+        guard: impl Fn(&std::path::Path) -> Result<GuardOk, Refusal> + 'static,
+    ) -> Self {
+        self.disk = Some(Box::new(guard));
+        self
+    }
+
     /// Test only: this notify transport instead of the configured one.
     #[cfg(test)]
     pub(crate) fn with_transport(mut self, transport: Transport) -> Self {
@@ -650,6 +679,15 @@ impl Ctx {
         };
         (text(&self.out), text(&self.err))
     }
+}
+
+/// A volume with room to spare, for a test context's default disk.
+#[cfg(test)]
+fn roomy_disk() -> GuardOk {
+    GuardOk::Free(crate::disk::Free {
+        mount: "/".to_string(),
+        bytes: 1 << 50,
+    })
 }
 
 /// Raw bytes to stdout, for output that is not text (the watched screen of `attach`): written to
