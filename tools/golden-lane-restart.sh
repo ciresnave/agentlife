@@ -85,6 +85,17 @@ run_case approvals_badflag "$E" USERPROFILE="$H0" -- approvals --bogus
 run_case approvals_role_missing "$E" USERPROFILE="$H0" -- approvals --role
 run_case approvals_positional "$E" USERPROFILE="$H0" -- approvals extra
 run_case approvals_help "$E" -- approvals --role r -h
+# attach: nothing here touches a host. The refusals are the same on every OS; a valid `--watch` is
+# "not available on this OS" on Windows and, off Windows, a connect to a socket that does not exist
+# (the state dir is the machine's, so only the Windows answer is pinned here).
+run_case attach_badflag "$E" -- attach --bogus
+run_case attach_norole "$E" -- attach --watch
+run_case attach_unsafe_role "$E" -- attach --role a_b --watch --role "a b"
+run_case attach_no_watch "$E" -- attach --role alpha
+run_case attach_role_missing_value "$E" -- attach --role
+run_case attach_positional "$E" -- attach extra
+run_case attach_help "$E" -- attach --role alpha -h
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) run_case attach_windows "$E" -- attach --role alpha --watch;; esac
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail

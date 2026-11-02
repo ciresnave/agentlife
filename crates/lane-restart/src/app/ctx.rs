@@ -276,6 +276,31 @@ impl Ctx {
     }
 }
 
+/// Raw bytes to stdout, for output that is not text (the watched screen of `attach`): written to
+/// the process's real stdout, never through a text print, which would mangle a terminal stream.
+impl std::io::Write for Ctx {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match &mut self.out {
+            Sink::Stdout => std::io::stdout().write(buf),
+            Sink::Stderr => std::io::stderr().write(buf),
+            #[cfg(test)]
+            Sink::Capture(text) => {
+                text.push_str(&String::from_utf8_lossy(buf));
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.out {
+            Sink::Stdout => std::io::stdout().flush(),
+            Sink::Stderr => std::io::stderr().flush(),
+            #[cfg(test)]
+            Sink::Capture(_) => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

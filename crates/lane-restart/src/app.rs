@@ -10,6 +10,7 @@
 
 mod approvals_cmd;
 mod assert_idle_cmd;
+mod attach_cmd;
 mod ctx;
 mod ledger_cmd;
 mod status_cmd;
@@ -117,57 +118,6 @@ fn run_host_cmd(role: &str, child_argv: &[String]) -> ExitCode {
             eprintln!("lane-restart host: {e}");
             ExitCode::FAILURE
         }
-    }
-}
-
-/// `lane-restart attach --role <r> --watch` (`docs/PORT-LINUX-PLAN.md`, P6b): the screen of a running
-/// lane host and its live output, read-only. `--watch` is REQUIRED: interactive attach is not built
-/// and not approved (P6c), and a bare `attach` must not look like it will do that. Read-only, so it
-/// is open to any session, like `status`.
-fn run_attach_cmd(rest: &[String]) -> ExitCode {
-    let (role, watch) = match cli::attach(rest) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("lane-restart attach: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let Some(role) = role.filter(|r| lane_restart::relaunch::valid_identifier(r)) else {
-        eprintln!("lane-restart attach: --role <name> is required and must be a plain identifier");
-        return ExitCode::FAILURE;
-    };
-    if !watch {
-        eprintln!(concat!(
-            "lane-restart attach: --watch is required. Only read-only watching exists; ",
-            "interactive attach is not built (it is not approved until a threat-model note ",
-            "says how a same-user agent is kept off the socket)."
-        ));
-        return ExitCode::FAILURE;
-    }
-    #[cfg(unix)]
-    {
-        let path = lane_restart::watch::socket_path(&state_dir(), &role);
-        eprintln!(
-            "lane-restart attach: watching {role} (read-only; the host closes this when it ends)"
-        );
-        match lane_restart::watch::connect_and_copy(&path, &mut std::io::stdout()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!(
-                    "lane-restart attach: {}: {e} (is a direct host running for {role}?)",
-                    path.display()
-                );
-                ExitCode::FAILURE
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = role;
-        eprintln!(
-            "lane-restart attach: not available on this OS (a direct lane host, and so its watch              socket, exists only off Windows)"
-        );
-        ExitCode::FAILURE
     }
 }
 
@@ -1510,7 +1460,7 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
             };
         }
         if first == "attach" {
-            return run_attach_cmd(rest);
+            return attach_cmd::run(ctx, rest);
         }
         if first == "host" {
             // Before anything can fail or wait: a restart that finds no record knows the host never ran.
