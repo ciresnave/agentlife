@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.22
+
+- **Issue #228 (`no_helper_thread_outlives_a_host_run`): F1 instrumentation, the measured cause, and a test-side fix.** `HostOutcome::reader_end_after_exit` records how long after the child exited the PTY reader ended (`None` if it had not); the test failure message prints it. Measured over 80 whole-suite runs (docs/ROADMAP.md, issue #228 section): the reader ends within 100 ms in about 95% of host runs and takes 0.5 to 5 s in about 5%, and the slow ones ended in the same 60-70 ms window as a `rustup`/`cargo` child of the test process exiting (3 of 3 observed) - a process spawned while the host opens its ConPTY inherits the pipe and holds it. A test-only lock (`host::SPAWN_VS_PTY_OPEN`) is held by the host while it opens the pty and by the `cargo metadata` spawns of `lane_new_remote`'s stub-crate test around their spawn. Production code is unchanged (the new field is data only; no lock outside tests). **Result: 0 failures in 40 whole `lane-restart` lib runs, against 8 in 80 before.** `waits_poll::...kills_a_slow_check` also failed once under load; not addressed.
+
 ## 0.30.21
 
 - **thin-main PR 10: `lane-new` moves behind the `Ctx` seam (PM ruling A).** `app/lane_new_cmd.rs` holds the command, unchanged apart from reading the caller, the lane-new roots, the GitHub client and the host, and writing its text and ledger row, through the `Ctx` (new `lane_new_roots`/`lane_new_vcs`/`lane_new_host`; the real host is still built only after the roots are known good). 6 fixture tests on tempdir roots with the local-file steps (non-PM and unverifiable callers refused and recorded, unbuildable roots stop before any row, dry run writes and logs nothing, `--apply` without a plan recorded as failed, `--apply` with the dry run's plan writes the lane files and records it). `tools/golden-lane-restart.sh` gains 7 argument-error/help cases (a parsed call writes a row to the real `restart.log`); golden before/after: 73 cases, 0 differing, and a shim control differs. No behaviour change.
