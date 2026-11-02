@@ -8,6 +8,7 @@
 //! process. This file only: parses argv, wires the real `SystemFacts`, calls `authorize::decide`,
 //! and - only if it comes back `Ok` with `will_act: true` - performs the kill and the relaunch.
 
+mod approvals_cmd;
 mod assert_idle_cmd;
 mod ctx;
 mod ledger_cmd;
@@ -186,44 +187,6 @@ fn print_version() {
             Err(e) => println!("approvals source: {e}"),
         },
         None => println!("approvals source: no home directory"),
-    }
-}
-
-/// `lane-restart approvals [--role <name>]` - fetches the configured
-/// approvals exactly as `host` would and prints every active one (id,
-/// content hash, roles, expiry) and every refused one with its reason.
-/// With `--role`, marks which apply to that role right now. Exit 1 if
-/// nothing could be loaded at all.
-fn run_approvals_cmd(role: Option<String>) -> ExitCode {
-    use lane_restart::approvals;
-    let Some(home) = dirs_home() else {
-        eprintln!("lane-restart approvals: no home directory");
-        return ExitCode::FAILURE;
-    };
-    let (_, loaded) = approvals::load_configured(&home, &approvals::default_reader(&home));
-    println!("approvals: {}", loaded.summary());
-    let now = chrono::Utc::now();
-    for (h, hash) in &loaded.handlers {
-        let applies = match &role {
-            Some(r) if lane_restart::handlers::is_active(h, r, now) => format!(" [applies to {r}]"),
-            Some(r) => format!(" [NOT active for {r}]"),
-            None => String::new(),
-        };
-        let expiry = h
-            .expires_at
-            .map_or_else(|| "never".to_string(), |e| e.to_rfc3339());
-        println!(
-            "  active {} {hash} roles={:?} expires={expiry}{applies}",
-            h.id, h.scope.roles
-        );
-    }
-    for (name, reason) in &loaded.refused {
-        println!("  REFUSED {name}: {reason}");
-    }
-    if loaded.error.is_some() {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
     }
 }
 
@@ -1539,9 +1502,9 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         }
         if first == "approvals" {
             return match cli::assert_idle(rest) {
-                Ok(role) => run_approvals_cmd(role),
+                Ok(role) => approvals_cmd::run(ctx, role),
                 Err(e) => {
-                    eprintln!("lane-restart approvals: {e}");
+                    ctx.errln(&format!("lane-restart approvals: {e}"));
                     ExitCode::FAILURE
                 }
             };
