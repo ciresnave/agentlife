@@ -333,6 +333,9 @@ pub struct HostOutcome {
     /// here is a measured fact about this run, not a guess: see
     /// `LiveFlag`.
     pub abandoned_threads: Vec<&'static str>,
+    /// How long after the child exited (`child.wait()` returned) the PTY reader thread ended, or
+    /// `None` when it had not ended by the time the host returned. Measured, for issue #228.
+    pub reader_end_after_exit: Option<Duration>,
 }
 
 /// How long the host waits, after the child has exited and the ConPTY has
@@ -364,6 +367,30 @@ impl Drop for LiveFlag {
         self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+/// Stamps the moment the PTY reader thread ends (however it ends) into `ended_ns`.
+struct ReaderEndStamp {
+    clock: Instant,
+    ended_ns: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for ReaderEndStamp {
+    fn drop(&mut self) {
+        self.ended_ns.store(
+            self.clock.elapsed().as_nanos() as u64 + 1,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+/// Tests only (issue #228). On Windows a process spawned while the host is creating its ConPTY inherits
+/// the pipe's write end and keeps the reader from seeing end-of-file until THAT process exits
+/// (measured: every slow reader end in 80 full-suite runs coincided with a `rustup`/`cargo` child of
+/// the test process exiting; most ended in under 100 ms, a few took 0.5 to 5 s). The host holds this
+/// lock from before `openpty` until the pipes are cloned; a test that spawns a long-lived child takes
+/// it around the spawn. Production never spawns while a host opens its pty, so it has no lock.
+#[cfg(test)]
+pub(crate) static SPAWN_VS_PTY_OPEN: Mutex<()> = Mutex::new(());
 
 fn is_alive(flag: &Arc<std::sync::atomic::AtomicBool>) -> bool {
     flag.load(std::sync::atomic::Ordering::SeqCst)
@@ -475,6 +502,10 @@ fn run_with_handlers_and_window_watched(
     window_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> std::io::Result<HostOutcome> {
     let on_raw_io = Arc::new(on_raw_io);
+    #[cfg(test)]
+    let pty_open_guard = SPAWN_VS_PTY_OPEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -515,6 +546,8 @@ fn run_with_handlers_and_window_watched(
     let pty_writer = Arc::new(Mutex::new(
         pair.master.take_writer().map_err(std::io::Error::other)?,
     ));
+    #[cfg(test)]
+    drop(pty_open_guard);
 
     // outer input -> child, transparent, for the whole session's life.
     // ⚠️ THIS is the thread that carries WT's own real-terminal CPR reply
@@ -595,10 +628,19 @@ fn run_with_handlers_and_window_watched(
     // is still blocked, in `HostOutcome::abandoned_threads`.
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (reader_flag, reader_alive) = LiveFlag::new();
+    // When the reader ended, in nanoseconds since `clock` plus one (0: not yet). Written by the reader
+    // just before its flag clears; read by the host after the child exit, for `reader_end_after_exit`.
+    let clock = Instant::now();
+    let reader_ended_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
     {
         let on_raw_io = Arc::clone(&on_raw_io);
+        let reader_ended_ns = Arc::clone(&reader_ended_ns);
         std::thread::spawn(move || {
             let _alive = reader_flag;
+            let _stamp = ReaderEndStamp {
+                clock,
+                ended_ns: reader_ended_ns,
+            };
             let mut buf = [0u8; 4096];
             loop {
                 match pty_reader.read(&mut buf) {
@@ -692,6 +734,7 @@ fn run_with_handlers_and_window_watched(
     }
 
     let status = child.wait().ok();
+    let exited_ns = clock.elapsed().as_nanos() as u64;
 
     // Teardown. The resize thread owns the pty master: stop it, and its
     // exit closes the ConPTY, which is what ends the reader's blocking
@@ -727,9 +770,13 @@ fn run_with_handlers_and_window_watched(
     if is_alive(&resize_alive) {
         abandoned_threads.push("resize");
     }
+    let ended = reader_ended_ns.load(std::sync::atomic::Ordering::SeqCst);
+    let reader_end_after_exit =
+        (ended != 0).then(|| Duration::from_nanos((ended - 1).saturating_sub(exited_ns)));
     Ok(HostOutcome {
         child_exit_code: status.and_then(|s| s.exit_code().into()),
         abandoned_threads,
+        reader_end_after_exit,
     })
 }
 
@@ -1753,8 +1800,9 @@ mod tests {
             .expect("run_with_handlers failed");
             assert!(
                 outcome.abandoned_threads.is_empty(),
-                "run {run}: helper threads still alive after return: {:?}",
-                outcome.abandoned_threads
+                "run {run}: helper threads still alive after return: {:?} (reader ended {:?} after the child exited)",
+                outcome.abandoned_threads,
+                outcome.reader_end_after_exit
             );
         }
     }

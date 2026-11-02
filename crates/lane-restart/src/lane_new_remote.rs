@@ -863,6 +863,26 @@ mod tests {
         }
     }
 
+    /// `cargo metadata --locked --offline` in `dir`. The spawn is made under the lock the host holds
+    /// while it opens a ConPTY (issue #228): this child lives for seconds, and one spawned in that
+    /// window would hold the pty's pipe open and keep the host's reader from ending.
+    fn cargo_metadata(dir: &Path) -> std::process::Output {
+        let child = {
+            let _spawn = crate::host::SPAWN_VS_PTY_OPEN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+                .args(["metadata", "--locked", "--offline", "--format-version", "1"])
+                .current_dir(dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        child.wait_with_output().unwrap()
+    }
+
     #[test]
     fn the_stub_crate_is_publish_false_zero_zero_zero_and_its_lock_agrees_with_cargo() {
         let d = tempdir().unwrap();
@@ -877,12 +897,7 @@ mod tests {
             "{toml}"
         );
         // `cargo metadata --locked` fails if Cargo.lock would need to change: the lock is what cargo writes.
-        let o =
-            std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-                .args(["metadata", "--locked", "--offline", "--format-version", "1"])
-                .current_dir(d.path())
-                .output()
-                .unwrap();
+        let o = cargo_metadata(d.path());
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         // control: a lock with another version would be rejected
         std::fs::write(
@@ -899,12 +914,7 @@ mod tests {
             .replace("0.0.0", "9.9.9"),
         )
         .unwrap();
-        let o =
-            std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-                .args(["metadata", "--locked", "--offline", "--format-version", "1"])
-                .current_dir(d.path())
-                .output()
-                .unwrap();
+        let o = cargo_metadata(d.path());
         assert!(
             !o.status.success(),
             "a wrong lock was accepted, so the check above proves nothing"

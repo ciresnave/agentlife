@@ -383,7 +383,22 @@ lib suite**, about 1 run in 12 (+ about 2 in 12 earlier, + once in a `cargo test
 
 | row | what | state |
 |---|---|---|
-| F1 | **Instrument it, then decide** (PM 2026-11-01: "the instrumentation row goes right behind `status`"): make `run_with_handlers` record the time from child exit to reader end (and, on the timeout path, the pipe handle's inheritance flags), then run the whole suite 50+ times collecting the distribution. A long tail points at ConPTY/conhost teardown latency; a bimodal result (instant or never) points at a handle held open by something else. No fix before the cause is known: a longer timeout would only hide it. | not started; not a gate blocker (never on CI) |
+| F1 | **Instrument it, then decide** (PM 2026-11-01: "the instrumentation row goes right behind `status`"): make `run_with_handlers` record the time from child exit to reader end (and, on the timeout path, the pipe handle's inheritance flags), then run the whole suite 50+ times collecting the distribution. A long tail points at ConPTY/conhost teardown latency; a bimodal result (instant or never) points at a handle held open by something else. No fix before the cause is known: a longer timeout would only hide it. | **done (0.30.22)**: `HostOutcome::reader_end_after_exit`; measurements below |
+| F2 | **Verify the fix by the same measurement** | **done (0.30.22)**: test-side lock; 0 of 40 whole-lib runs failed, against 8 of 80 before |
+
+**F1 result (2026-11-02, same box, debug lib test binary at main `dbcf05d`, whole `lane-restart` lib suite run 80 times).** The time from
+child exit to reader end, over 878 timed host runs in the first 50 whole-suite runs: median 11 ms, p90 35 ms; **bimodal**, not a smooth tail:
+about 95% under 100 ms, about 5% between 0.5 s and 5 s, and 12 of those past the 3 s `READER_END_TIMEOUT` (the failures; 6 of those 50 suite
+runs failed, then 2 of the next 30). The reader does end, 3 to 5 s after the exit, so this is a stall, not a hang. In the second 30 runs the
+test process's own descendants were snapshotted 300 ms after a child exit when the reader had not ended, and again when it ended: **in all 3
+slow cases the reader ended in the same 60-70 ms window as a `rustup.exe` -> `cargo.exe` (-> `sccache.exe`) child of the test process
+exited** - the `cargo metadata` that `lane_new_remote::tests::the_stub_crate_is_publish_false_...` runs (~3.5 s). That fits hypothesis 1 of
+the issue: a process spawned while the host creates its ConPTY inherits the pipe's write end and holds it open until it exits. (It is a
+timing coincidence over 3 cases, not a proof; a deterministic reproducer was tried and hung on its second iteration, so none exists.)
+**Fix (test side only):** the host takes a test-only lock while it opens the pty, and the two `cargo metadata` spawns take it around the
+spawn. Production has no lock: it spawns nothing while a host opens its pty. Result: 0 failures in 40 whole-lib runs (0.9^40 = 1.5% if the
+rate had stayed at 10%). Not closed by this: `waits_poll::...kills_a_slow_check` failed once in one of the runs described in #228's thread
+(passes alone; cause unverified).
 
 ## Waits that cannot be forgotten (CireSnave 2026-11-01; PM ruled 1A, 2A, 3A the same day)
 
