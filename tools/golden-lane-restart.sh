@@ -161,6 +161,11 @@ run_case restart_self_badflag "$E" -- --self --bogus
 # before the command is dispatched.
 run_case host_help "$E" -- host -h
 run_case host_help_long "$E" -- host --role r --help
+# state: only the shapes that fall to the restart parser. `state <event>` (exactly one argument) is the
+# hook: it WRITES lane state under the machine's real state directory, so it is tested in-crate with a
+# tempdir and is not a golden case.
+run_case state_alone "$E" -- state
+run_case state_two_args "$E" -- state a b
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail

@@ -22,6 +22,7 @@ use crate::notify::{Peer, Transport};
 use crate::start::CallerError;
 use crate::waits_poll::{CheckRunner, ProcessRunner};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -70,6 +71,11 @@ pub(crate) struct Ctx {
     // shared ones are handed out as owned `Rc` handles, so a command can hold several at once.
     facts: Option<Rc<dyn SystemFacts>>,
     parents: Option<Rc<dyn ParentProcess>>,
+    /// The same walk as `parents`, kept as the concrete type when the real one was built, so the
+    /// `state` hook can report how many whole-process scans it cost (`slow_note`).
+    real_parents: Option<Rc<RealParentProcess>>,
+    /// What the command reads as its standard input; `None` is the process's real stdin.
+    stdin: Option<Box<dyn Read>>,
     runner: Option<Box<dyn CheckRunner>>,
     sender: Option<Sender>,
     transport: Option<Transport>,
@@ -103,6 +109,8 @@ impl Ctx {
             err: Sink::Stderr,
             facts: None,
             parents: None,
+            real_parents: None,
+            stdin: None,
             runner: None,
             sender: None,
             transport: None,
@@ -359,9 +367,24 @@ impl Ctx {
     /// The process-parent walk: the real one unless a test supplied its own.
     pub(crate) fn parents(&mut self) -> Rc<dyn ParentProcess> {
         if self.parents.is_none() {
-            self.parents = Some(Rc::new(RealParentProcess::new()));
+            let real = Rc::new(RealParentProcess::new());
+            self.real_parents = Some(Rc::clone(&real));
+            self.parents = Some(real);
         }
         Rc::clone(self.parents.as_ref().expect("set just above"))
+    }
+
+    /// How many times the REAL process-parent walk scanned the whole process table (0 when a test
+    /// supplied its own walk, or none was built).
+    pub(crate) fn parent_full_scans(&self) -> u32 {
+        self.real_parents.as_ref().map_or(0, |p| p.full_scans())
+    }
+
+    /// The command's standard input: the process's own, unless a test supplied one. Handed out once.
+    pub(crate) fn stdin(&mut self) -> Box<dyn Read> {
+        self.stdin
+            .take()
+            .unwrap_or_else(|| Box::new(std::io::stdin()))
     }
 
     /// How notices travel (`notify_transport` in `~/.overmind/lane-restart.json`; the broker when
@@ -446,6 +469,8 @@ impl Ctx {
             err: Sink::Capture(String::new()),
             facts: None,
             parents: None,
+            real_parents: None,
+            stdin: None,
             runner: None,
             sender: None,
             transport: None,
@@ -565,6 +590,13 @@ impl Ctx {
     #[cfg(test)]
     pub(crate) fn with_facts(mut self, facts: impl SystemFacts + 'static) -> Self {
         self.facts = Some(Rc::new(facts));
+        self
+    }
+
+    /// Test only: this text as the command's standard input.
+    #[cfg(test)]
+    pub(crate) fn with_stdin(mut self, text: &str) -> Self {
+        self.stdin = Some(Box::new(std::io::Cursor::new(text.as_bytes().to_vec())));
         self
     }
 

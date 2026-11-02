@@ -20,6 +20,7 @@ mod restart_cmd;
 mod shared;
 mod specs_cmd;
 mod start_cmd;
+mod state_cmd;
 mod status_cmd;
 mod stop_cmd;
 #[cfg(test)]
@@ -29,7 +30,6 @@ mod waits_poll_cmd;
 
 use crate::cli;
 use ctx::Ctx;
-use lane_restart::lane_state_writer::{self, RealParentProcess};
 use lane_restart::relaunch;
 use lane_restart::spec::StopKind;
 use std::path::PathBuf;
@@ -61,39 +61,6 @@ pub(crate) struct Args {
     pub(crate) target_self: bool,
     pub(crate) dry_run: bool,
     pub(crate) confirmed: bool,
-}
-
-/// `lane-restart state <event>` - the hook command. Handled separately from
-/// `cli::restart` because its shape (a positional subcommand, then a single
-/// positional event name) doesn't fit the restart CLI's own flags at all,
-/// and mixing the two would make either grammar harder to read.
-/// It stays a slice pattern in `main` (`[cmd, event]`): there is no flag loop to replace, and it is
-/// the hook hot path.
-fn run_state_hook(event: &str) -> ExitCode {
-    let started = std::time::Instant::now();
-    let my_pid = std::process::id();
-    let lane_role_env = std::env::var("LANE_ROLE").ok();
-    let mut stdin = std::io::stdin();
-    let lookup = RealParentProcess::new();
-    let result = lane_state_writer::run(
-        &state_dir(),
-        event,
-        my_pid,
-        &lookup,
-        lane_role_env.as_deref(),
-        &mut stdin,
-    );
-    if let Some(note) = lane_state_writer::slow_note(event, started.elapsed(), lookup.full_scans())
-    {
-        eprintln!("{note}");
-    }
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("lane-restart state {event}: {e}");
-            ExitCode::FAILURE
-        }
-    }
 }
 
 /// The text of `role`'s HANDOFF under `cwd`, if it has one and it is readable.
@@ -372,7 +339,7 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
     }
     if let [cmd, event] = argv.as_slice() {
         if cmd == "state" {
-            return run_state_hook(event);
+            return state_cmd::run(ctx, event);
         }
     }
     if let Some((first, rest)) = argv.split_first() {
