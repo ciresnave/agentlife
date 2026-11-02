@@ -11,8 +11,10 @@
 
 use crate::approvals::{default_reader, RepoReader};
 use crate::facts::{SysinfoFacts, SystemFacts};
+use crate::install::Probe;
 use crate::lane_state_writer::{ParentProcess, RealParentProcess};
 use crate::notify::{Peer, Transport};
+use crate::start::CallerError;
 use crate::waits_poll::{CheckRunner, ProcessRunner};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -22,6 +24,9 @@ type Sender = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 
 /// The claude-peers broker's live sessions.
 type BrokerPeers = Box<dyn Fn() -> Result<Vec<Peer>, String>>;
+
+/// Who is running this command (`Ctx::verified_caller`).
+type Caller = Box<dyn Fn() -> Result<String, CallerError>>;
 
 /// Where one stream of text goes. `Real` is the process's own stdout or stderr, written with
 /// `print!`/`eprint!` exactly as the commands wrote before this seam existed.
@@ -55,6 +60,9 @@ pub(crate) struct Ctx {
     /// `Some(None)` is "there is no home directory"; `None` is "ask the machine".
     home: Option<Option<PathBuf>>,
     repo_reader: Option<Rc<dyn RepoReader>>,
+    hooks_dir: Option<PathBuf>,
+    probe: Option<Rc<dyn Probe>>,
+    caller: Option<Caller>,
 }
 
 impl Ctx {
@@ -75,6 +83,71 @@ impl Ctx {
             broker_peers: None,
             home: None,
             repo_reader: None,
+            hooks_dir: None,
+            probe: None,
+            caller: None,
+        }
+    }
+
+    /// Where the installed `lane-restart.exe` lives (the machine's hooks directory).
+    pub(crate) fn hooks_dir(&self) -> PathBuf {
+        self.hooks_dir
+            .clone()
+            .unwrap_or_else(crate::install::hooks_dir)
+    }
+
+    /// Runs a candidate binary for `install`: really, unless a test supplied its own.
+    pub(crate) fn probe(&self) -> Rc<dyn Probe> {
+        match &self.probe {
+            Some(p) => Rc::clone(p),
+            None => Rc::new(super::install_cmd::RealProbe),
+        }
+    }
+
+    /// The role whose `claude` session is running this command, verified by pid and start time
+    /// (RESTART-TOOL-DESIGN.md 14.8), never by `LANE_ROLE`.
+    pub(crate) fn verified_caller(&mut self) -> Result<String, CallerError> {
+        if let Some(caller) = &self.caller {
+            return caller();
+        }
+        let pid =
+            crate::lane_state_writer::claude_parent_pid(std::process::id(), &*self.parents()).ok();
+        let facts = self.facts();
+        crate::start::caller_role(&self.state_dir, pid, &*facts)
+    }
+
+    /// One `restart.log` line with the 14.7 fields, in this context's state directory. A write that
+    /// fails is a warning on stderr, never a failure of the command.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_ledger(
+        &mut self,
+        requested_by: &str,
+        role: &str,
+        kind: &str,
+        caller_role: Option<&str>,
+        model: Option<&str>,
+        reason: Option<&str>,
+        outcome: &str,
+        acted: bool,
+    ) {
+        let entry = crate::log::Entry {
+            timestamp: chrono::Utc::now(),
+            requested_by,
+            role,
+            outcome: outcome.to_string(),
+            acted,
+            kind: Some(kind),
+            caller_role,
+            model,
+            reason,
+            signal_id: None,
+            result: None,
+            spawned: None,
+        };
+        if let Err(e) = crate::log::append(&self.state_dir.join("restart.log"), &entry) {
+            self.errln(&format!(
+                "lane-restart: WARNING - could not write to the restart log: {e}"
+            ));
         }
     }
 
@@ -200,7 +273,34 @@ impl Ctx {
             broker_peers: None,
             home: None,
             repo_reader: None,
+            hooks_dir: None,
+            probe: None,
+            caller: None,
         }
+    }
+
+    /// Test only: this hooks directory instead of the machine's.
+    #[cfg(test)]
+    pub(crate) fn with_hooks_dir(mut self, dir: PathBuf) -> Self {
+        self.hooks_dir = Some(dir);
+        self
+    }
+
+    /// Test only: this probe instead of really running the candidate.
+    #[cfg(test)]
+    pub(crate) fn with_probe(mut self, probe: impl Probe + 'static) -> Self {
+        self.probe = Some(Rc::new(probe));
+        self
+    }
+
+    /// Test only: this verified caller instead of the process-ancestry lookup.
+    #[cfg(test)]
+    pub(crate) fn with_caller(
+        mut self,
+        caller: impl Fn() -> Result<String, CallerError> + 'static,
+    ) -> Self {
+        self.caller = Some(Box::new(caller));
+        self
     }
 
     /// Test only: this home directory (`None`: the machine has none) instead of the real one.

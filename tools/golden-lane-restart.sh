@@ -96,6 +96,15 @@ run_case attach_role_missing_value "$E" -- attach --role
 run_case attach_positional "$E" -- attach extra
 run_case attach_help "$E" -- attach --role alpha -h
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) run_case attach_windows "$E" -- attach --role alpha --watch;; esac
+# install: ONLY cases that stop at argument parsing. A call that parses runs the real command, whose
+# first act is to check the caller and write a "refused" row into the machine's real restart.log, and
+# a golden run must not write the PM's audit trail. The command itself is tested in-crate with a
+# state directory of its own.
+run_case install_badflag "$E" -- install --bogus
+run_case install_no_from "$E" -- install
+run_case install_from_missing_value "$E" -- install --from
+run_case install_positional "$E" -- install extra
+run_case install_help "$E" -- install --from x -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
