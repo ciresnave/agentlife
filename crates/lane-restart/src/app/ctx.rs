@@ -175,6 +175,12 @@ impl Ctx {
         crate::start::caller_role(&self.state_dir, pid, &*facts)
     }
 
+    /// The pid of the `claude` session running this command (the nearest `claude` ancestor), or
+    /// `None` when there is none. `stop` needs it as well as the verified role.
+    pub(crate) fn caller_claude_pid(&mut self) -> Option<u32> {
+        crate::lane_state_writer::claude_parent_pid(std::process::id(), &*self.parents()).ok()
+    }
+
     /// The caller of a `start`: the PM session by process (as for every command), else the launcher
     /// service by its record and by being this process's direct parent. Only `start` asks for the
     /// second; `stop` and a restart read `verified_caller` alone and so never see `overmind`.
