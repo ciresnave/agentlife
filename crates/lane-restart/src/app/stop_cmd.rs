@@ -8,9 +8,11 @@
 //!
 //! Moved out of `app.rs` unchanged apart from reading the caller, the process facts and the sleep,
 //! and writing its text and ledger rows, through the [`Ctx`] (thin-main PR 12). The leftover-tab
-//! close came with it, so a test sees the shell it would terminate and never kills one.
+//! close (shared with the restart command, `shared.rs`) goes through the context's facts, so a test
+//! sees the shell it would terminate and never kills one.
 
 use super::ctx::Ctx;
+use super::shared::close_leftover_tab;
 use super::{identity_note, StopArgs};
 use crate::spec::StopKind;
 use crate::{lane_stop, relaunch, start, tab_close};
@@ -181,58 +183,6 @@ pub(super) fn run(ctx: &mut Ctx, args: StopArgs) -> ExitCode {
             );
             ExitCode::FAILURE
         }
-    }
-}
-
-/// RESTART-TOOL-DESIGN.md §5: closes the tab a hand-started lane's shell keeps open once its
-/// claude is killed (`tab_close.rs`). Only after a relaunch that acted - after a failed one the
-/// tab stays, so a human has a prompt to relaunch from. Every outcome is logged, and a closed
-/// shell is logged BEFORE the kill, in case closing the tab takes this process with it.
-/// (`app::close_leftover_tab` is the same for the restart path, which has not moved yet.)
-#[allow(clippy::too_many_arguments)]
-fn close_leftover_tab(
-    ctx: &mut Ctx,
-    facts: &dyn crate::facts::SystemFacts,
-    kind: &str,
-    requested_by: &str,
-    role: &str,
-    leftover_shell: Result<tab_close::ShellCandidate, tab_close::LeftAlone>,
-    relaunch_acted: bool,
-    killed_pid: u32,
-    killed_identity: &crate::facts::ProcessIdentity,
-) {
-    // A ledger line of `kind`, with `caller_role` set whenever `requested_by` is a verified role
-    // (that is, neither the `--self` label nor "unverified").
-    let caller_role =
-        (requested_by != "self" && requested_by != "unverified").then_some(requested_by);
-    let result = leftover_shell.and_then(|shell| {
-        if !relaunch_acted {
-            return Err(tab_close::LeftAlone::RelaunchFailed);
-        }
-        tab_close::close(facts, &shell, killed_pid, killed_identity, &mut |shell| {
-            ctx.log_ledger(
-                requested_by,
-                role,
-                kind,
-                caller_role,
-                None,
-                None,
-                &format!("closing the leftover tab: terminating shell {shell}"),
-                true,
-            );
-        })
-    });
-    if let Err(why) = result {
-        ctx.log_ledger(
-            requested_by,
-            role,
-            kind,
-            caller_role,
-            None,
-            None,
-            &format!("leftover tab's shell left alone: {why}"),
-            false,
-        );
     }
 }
 

@@ -7,9 +7,7 @@
 
 use super::*;
 use crate::app::run_with;
-use crate::app::test_fixtures::{fixture, live_facts};
-use crate::launch::SpawnFn;
-use crate::relaunch::RelaunchError;
+use crate::app::test_fixtures::{coming_up_spawn, failing_spawn, fixture, live_facts};
 use crate::start::CallerError;
 use crate::testing::{log, RecordingFacts};
 use std::cell::RefCell;
@@ -37,15 +35,6 @@ impl crate::lane_state_writer::ParentProcess for NoParents {
     fn cmdline_of(&self, _: u32) -> Option<Vec<String>> {
         None
     }
-}
-
-/// Counts spawn attempts and fails each one, so no window is ever opened.
-fn failing_spawn(calls: &Rc<RefCell<u32>>) -> Rc<SpawnFn> {
-    let calls = Rc::clone(calls);
-    Rc::new(move |_, _| {
-        *calls.borrow_mut() += 1;
-        Err(RelaunchError::Spawn("no window in a test".into()))
-    })
 }
 
 /// A context over `state` whose verified caller is `caller` (`None`: it cannot be verified).
@@ -302,22 +291,6 @@ fn a_launcher_start_is_held_for_memory_and_proceeds_with_enough() {
     assert_eq!(logged[0].requested_by, "launcher:agentlife-launcher");
     assert_eq!(logged[0].spawned, Some(false));
     assert_eq!(logged[1].spawned, Some(true));
-}
-
-/// A spawner that stands in for the launched session: it records the attempt and writes the lane's
-/// state file as a new session that has processed a prompt, which is what the wait looks for.
-fn coming_up_spawn(state: &Path, calls: &Rc<RefCell<u32>>) -> Rc<SpawnFn> {
-    let path = state.join("alpha.json");
-    let calls = Rc::clone(calls);
-    Rc::new(move |_, _| {
-        *calls.borrow_mut() += 1;
-        let mut v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        v["session_id"] = "s-new".into();
-        v["updated_by_event"] = "UserPromptSubmit".into();
-        std::fs::write(&path, v.to_string()).unwrap();
-        Ok(())
-    })
 }
 
 #[test]

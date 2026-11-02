@@ -6,7 +6,9 @@
 
 use super::*;
 use crate::app::run_with;
-use crate::app::test_fixtures::{age_lane_state, fixture, live_facts};
+use crate::app::test_fixtures::{
+    age_lane_state, fixture, live_facts, settle_handoff, LiveLaneFacts, UnderClaude,
+};
 use crate::facts::ProcEntry;
 use crate::start::CallerError;
 use crate::testing::{log, RecordingFacts};
@@ -25,57 +27,6 @@ fn args(rest: &[&str]) -> Vec<OsString> {
         .collect()
 }
 
-/// This test process's parent is the live `claude` (pid 55), as in a lane's own shell.
-struct UnderClaude;
-impl crate::lane_state_writer::ParentProcess for UnderClaude {
-    fn parent_of(&self, pid: u32) -> Option<(u32, String)> {
-        (pid == std::process::id()).then(|| (55, "claude.exe".to_string()))
-    }
-    fn cmdline_of(&self, _: u32) -> Option<Vec<String>> {
-        None
-    }
-}
-
-/// What a live lane's process looks like to the target checks: its cwd is the lane directory, it has
-/// no shell below it, and its transcript is recent. Everything else is the recording fake.
-struct StopFacts {
-    inner: RecordingFacts,
-    lane: PathBuf,
-}
-impl crate::facts::SystemFacts for StopFacts {
-    fn is_alive_claude_process(&self, pid: u32) -> bool {
-        self.inner.is_alive_claude_process(pid)
-    }
-    fn cwd_of(&self, _: u32) -> Option<PathBuf> {
-        Some(self.lane.clone())
-    }
-    fn has_live_shell_descendant(&self, _: u32) -> Result<bool, crate::facts::ShellCheckError> {
-        Ok(false)
-    }
-    fn transcript_is_recent(&self, _: &str, _: &str, _: std::time::Duration) -> bool {
-        true
-    }
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        self.inner.now()
-    }
-    fn process_identity(&self, pid: u32) -> Option<crate::facts::ProcessIdentity> {
-        self.inner.process_identity(pid)
-    }
-    fn kill_verified(
-        &self,
-        pid: u32,
-        expected: &crate::facts::ProcessIdentity,
-    ) -> Result<(), crate::facts::KillError> {
-        self.inner.kill_verified(pid, expected)
-    }
-    fn find_claude_process_in(&self, cwd: &str, after: u64) -> Option<u32> {
-        self.inner.find_claude_process_in(cwd, after)
-    }
-    fn process_table(&self) -> Result<Vec<ProcEntry>, crate::facts::ShellCheckError> {
-        self.inner.process_table()
-    }
-}
-
 /// A context over `state` whose verified caller is `caller` (`None`: it cannot be verified).
 fn ctx(state: &Path, lane: &Path, caller: Option<&'static str>, facts: RecordingFacts) -> Ctx {
     let make: Box<dyn Fn() -> Result<String, CallerError>> = match caller {
@@ -83,24 +34,13 @@ fn ctx(state: &Path, lane: &Path, caller: Option<&'static str>, facts: Recording
         None => Box::new(|| Err(CallerError::NoClaudeAncestor)),
     };
     Ctx::capture(state.to_path_buf(), Ok(state.to_path_buf()), None)
-        .with_facts(StopFacts {
+        .with_facts(LiveLaneFacts {
             inner: facts,
             lane: lane.to_path_buf(),
         })
         .with_parents(UnderClaude)
         .with_caller(make)
         .with_sleeper(Rc::new(|_| {}))
-}
-
-/// The HANDOFF was written long before the lane's idle claim (the fake clock is in 2026-10), so the
-/// "it kept working after claiming it had stopped" check passes.
-fn settle_handoff(lane: &Path) {
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(lane.join("HANDOFF.md"))
-        .unwrap();
-    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
-        .unwrap();
 }
 
 fn rows(state: &Path) -> Vec<crate::ledger::Row> {

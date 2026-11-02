@@ -551,9 +551,12 @@ pub struct OpusPermit(());
 impl OpusPermit {
     /// `Some` only when [`ALLOW_OPUS_ENV`] is exactly `1` in this process's environment.
     pub(crate) fn from_env() -> Option<Self> {
-        std::env::var(ALLOW_OPUS_ENV)
-            .is_ok_and(|v| v == "1")
-            .then_some(Self(()))
+        Self::from_value(std::env::var(ALLOW_OPUS_ENV).ok().as_deref())
+    }
+
+    /// `Some` only when the value of [`ALLOW_OPUS_ENV`] is exactly `1`.
+    pub(crate) fn from_value(value: Option<&str>) -> Option<Self> {
+        (value == Some("1")).then_some(Self(()))
     }
 
     #[cfg(test)]

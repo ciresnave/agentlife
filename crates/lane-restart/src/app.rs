@@ -15,6 +15,8 @@ mod ctx;
 mod install_cmd;
 mod lane_new_cmd;
 mod ledger_cmd;
+mod restart_cmd;
+mod shared;
 mod specs_cmd;
 mod start_cmd;
 mod status_cmd;
@@ -26,15 +28,9 @@ mod waits_poll_cmd;
 
 use crate::cli;
 use ctx::Ctx;
-use lane_restart::authorize::{self, Target};
-use lane_restart::facts::SysinfoFacts;
 use lane_restart::lane_state_writer::{self, RealParentProcess};
-use lane_restart::lane_stop;
-use lane_restart::log;
 use lane_restart::relaunch;
 use lane_restart::spec::StopKind;
-use lane_restart::start;
-use lane_restart::tab_close;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -44,10 +40,6 @@ use std::process::ExitCode;
 /// agree on.
 fn state_dir() -> PathBuf {
     lane_restart::state_dir()
-}
-
-fn log_path() -> PathBuf {
-    state_dir().join("restart.log")
 }
 
 fn claude_config_dir() -> PathBuf {
@@ -153,30 +145,6 @@ pub(crate) struct StartArgs {
     pub(crate) dry_run: bool,
     pub(crate) json: bool,
     pub(crate) signal_id: Option<String>,
-}
-
-/// The disk floor (`disk.rs`), checked before any launch. A refusal is printed as `kind: refused -
-/// ...` and the caller exits 1 and logs it; an unreadable probe is a warning, not a refusal.
-fn disk_gate(kind: &str) -> Result<(), lane_restart::disk::Refusal> {
-    match lane_restart::disk::guard(&state_dir()) {
-        Ok(lane_restart::disk::GuardOk::Free(_)) => Ok(()),
-        Ok(lane_restart::disk::GuardOk::Unknown(why)) => {
-            eprintln!("lane-restart {kind}: warning - free disk space was not checked: {why}");
-            Ok(())
-        }
-        Err(refusal) => {
-            eprintln!("lane-restart {kind}: refused - {refusal}");
-            Err(refusal)
-        }
-    }
-}
-
-/// The role whose `claude` session is running this command, verified by pid and start time
-/// (RESTART-TOOL-DESIGN.md 14.8), never by `LANE_ROLE`.
-fn verified_caller(facts: &SysinfoFacts) -> Result<String, start::CallerError> {
-    let pid =
-        lane_state_writer::claude_parent_pid(std::process::id(), &RealParentProcess::new()).ok();
-    start::caller_role(&state_dir(), pid, facts)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -583,228 +551,11 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
             };
         }
     }
-    let args = match cli::restart(&argv) {
-        Ok(a) => a,
+    match cli::restart(&argv) {
+        Ok(args) => restart_cmd::run(ctx, args),
         Err(e) => {
-            eprintln!("lane-restart: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // A bare `--self` (the documented form): the role is the caller's own, found the way
-    // `assert-idle` finds it. An explicit `--role` is never second-guessed here.
-    let role = match args.role.clone() {
-        Some(r) => r,
-        None => {
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let claude_pid =
-                lane_state_writer::claude_parent_pid(std::process::id(), &RealParentProcess::new())
-                    .ok();
-            match lane_restart::spec::resolve_self_role(
-                &state_dir(),
-                std::env::var("LANE_ROLE").ok().as_deref(),
-                &cwd,
-                claude_pid,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("lane-restart: --self without --role: {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-    };
-
-    let target = if args.target_self {
-        Target::Myself {
-            role: role.clone(),
-            // The same ancestry walk the hooks use to record `pid`: this
-            // process <- shell(s) <- claude. `decide` compares it with the
-            // state file's pid, so `--self` is a claim it can check.
-            caller_pid: lane_state_writer::claude_parent_pid(
-                std::process::id(),
-                &RealParentProcess::new(),
-            )
-            .ok(),
-        }
-    } else {
-        Target::Other { role: role.clone() }
-    };
-
-    let facts = SysinfoFacts::new(claude_config_dir());
-    // 14.7 / 14.8: `requested_by` is the VERIFIED caller (the role whose claude session ran
-    // this), not a label chosen by the absence of `--self`. A caller that cannot be verified is
-    // recorded as "unverified"; a restart of another lane is still not refused on it (the
-    // `--yes` + idle checks are unchanged), so the ledger is where a non-PM caller shows up.
-    let caller = (!args.target_self).then(|| verified_caller(&facts));
-    let caller_role = caller.as_ref().and_then(|c| c.as_ref().ok().cloned());
-    let requested_by: &str = if args.target_self {
-        "self"
-    } else {
-        caller_role.as_deref().unwrap_or("unverified")
-    };
-    // RESTART-TOOL-DESIGN.md 14.7 / 14.8, the PM's ruling of 2026-10-11: restarting ANOTHER lane
-    // is the PM session's alone, the same rule as `stop`. Refused (and logged) before anything
-    // about the target is read, even for a dry run.
-    if let Some(caller) = caller {
-        if let Err(refusal) = lane_stop::require_pm_for_other(false, caller) {
-            eprintln!("lane-restart: refused - {refusal}");
-            log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
-            return ExitCode::FAILURE;
-        }
-    }
-    let req = authorize::Request {
-        target,
-        confirmed: args.confirmed,
-        dry_run: args.dry_run,
-    };
-
-    let decision = authorize::decide(&req, &facts, &state_dir());
-    // The target's own session and its host are what this restart replaces; any OTHER host or
-    // claude of the role is a second session the state file may not show (2026-10-14).
-    if let Ok(plan) = &decision {
-        let names = lane_restart::duplicate::role_names(&state_dir(), &role);
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        if let Err(refusal) =
-            lane_restart::duplicate::check(&facts, &role, &names, Some(plan.state.pid))
-        {
-            eprintln!("lane-restart: refused - {refusal}");
-            log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
-            return ExitCode::FAILURE;
-        }
-    }
-    match decision {
-        Err(refusal) => {
-            eprintln!("lane-restart: refused - {refusal}");
-            log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
+            ctx.errln(&format!("lane-restart: {e}"));
             ExitCode::FAILURE
-        }
-        Ok(plan) if !plan.will_act => {
-            match relaunch::describe_dry_run(&plan.state) {
-                Ok(argv) => {
-                    let cmdline: Vec<String> = argv
-                        .iter()
-                        .map(|a| {
-                            if a.contains(' ') {
-                                format!("{a:?}")
-                            } else {
-                                a.clone()
-                            }
-                        })
-                        .collect();
-                    println!(
-                        "lane-restart: DRY RUN - would kill pid {} and relaunch a FRESH session \
-                         via wt.exe (conhost.exe fallback), hosted by \
-                         `lane-restart host --role {} -- {}`, in {}",
-                        plan.state.pid,
-                        plan.state.role,
-                        cmdline.join(" "),
-                        plan.state.cwd
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "lane-restart: DRY RUN - would kill pid {} but the relaunch command \
-                         itself would be refused: {e}",
-                        plan.state.pid
-                    );
-                }
-            }
-            match tab_close::capture(&facts, plan.state.pid, &plan.identity) {
-                Ok(shell) => println!(
-                    "lane-restart: DRY RUN - would then close the leftover tab by terminating \
-                     {shell}, if it has no other children by then"
-                ),
-                Err(why) => {
-                    println!("lane-restart: DRY RUN - would leave the tab's shell alone: {why}")
-                }
-            }
-            log_outcome(requested_by, &role, "dry run - no action taken", false);
-            ExitCode::SUCCESS
-        }
-        Ok(plan) => {
-            // Before the kill: after it, a refusal would leave a lane dead and not relaunched.
-            if let Err(refusal) = disk_gate("restart") {
-                log_outcome(requested_by, &role, &format!("refused: {refusal}"), false);
-                return ExitCode::FAILURE;
-            }
-            eprintln!(
-                "lane-restart: killing pid {} and relaunching a fresh session...",
-                plan.state.pid
-            );
-            let state_dir_path = state_dir();
-            let state_reader = relaunch::RealStateReader {
-                state_dir: &state_dir_path,
-            };
-            let role_for_notice = plan.state.role.clone();
-            let mut on_awaiting = || {
-                // PM finding, 2026-09-18 (fifth real-restart retest):
-                // printed immediately, the moment this is first detected -
-                // never only at the end of the (up to ~15 minute) wait -
-                // so whatever reads this stream (the PM lane, today) can
-                // notify CireSnave promptly that the dev-channels dialog
-                // needs a human.
-                print_status_json("awaiting_confirmation", &role_for_notice);
-            };
-            // Captured while claude is still alive, moments before `kill_and_relaunch` kills it:
-            // after the kill, claude's parent link is gone with it.
-            let leftover_shell = tab_close::capture(&facts, plan.state.pid, &plan.identity);
-            let relaunch_result = relaunch::kill_and_relaunch(
-                &facts,
-                &state_reader,
-                &plan.state,
-                &plan.identity,
-                &mut on_awaiting,
-            );
-            // The tab closes LAST: on `--self`, this process may share the tab's console and go
-            // with it, so everything else is already logged by then.
-            let relaunch_acted = relaunch_result.is_ok();
-            let exit = match relaunch_result {
-                Ok(outcome @ relaunch::RelaunchOutcome::Relaunched) => {
-                    log_outcome(
-                        requested_by,
-                        &role,
-                        &format!(
-                            "killed pid {} and relaunched a fresh session (continuity via HANDOFF only)",
-                            plan.state.pid
-                        ),
-                        true,
-                    );
-                    relaunch_exit_code(outcome)
-                }
-                Ok(outcome @ relaunch::RelaunchOutcome::AwaitingConfirmation) => {
-                    log_outcome(
-                        requested_by,
-                        &role,
-                        "awaiting human confirmation at the dev-channels dialog",
-                        true,
-                    );
-                    relaunch_exit_code(outcome)
-                }
-                Err(e) => {
-                    let note = identity_note(&e, plan.state.pid);
-                    eprintln!("lane-restart: {e}{note}");
-                    log_outcome(
-                        requested_by,
-                        &role,
-                        &format!("action failed: {e}{note}"),
-                        false,
-                    );
-                    ExitCode::FAILURE
-                }
-            };
-            close_leftover_tab(
-                &facts,
-                "restart",
-                requested_by,
-                &role,
-                leftover_shell,
-                relaunch_acted,
-                plan.state.pid,
-                &plan.identity,
-            );
-            exit
         }
     }
 }
@@ -821,130 +572,11 @@ fn identity_note(e: &relaunch::RelaunchError, pid: u32) -> String {
     }
 }
 
-/// RESTART-TOOL-DESIGN.md §5: closes the tab a hand-started lane's shell keeps open once its
-/// claude is killed (`tab_close.rs`). Only after a relaunch that acted - after a failed one the
-/// tab stays, so a human has a prompt to relaunch from. Every outcome is logged, and a closed
-/// shell is logged BEFORE the kill, in case closing the tab takes this process with it.
-#[allow(clippy::too_many_arguments)]
-fn close_leftover_tab(
-    facts: &SysinfoFacts,
-    kind: &str,
-    requested_by: &str,
-    role: &str,
-    leftover_shell: Result<tab_close::ShellCandidate, tab_close::LeftAlone>,
-    relaunch_acted: bool,
-    killed_pid: u32,
-    killed_identity: &lane_restart::facts::ProcessIdentity,
-) {
-    let result = leftover_shell.and_then(|shell| {
-        if !relaunch_acted {
-            return Err(tab_close::LeftAlone::RelaunchFailed);
-        }
-        tab_close::close(facts, &shell, killed_pid, killed_identity, &mut |shell| {
-            log_kind(
-                kind,
-                requested_by,
-                role,
-                &format!("closing the leftover tab: terminating shell {shell}"),
-                true,
-            );
-        })
-    });
-    if let Err(why) = result {
-        log_kind(
-            kind,
-            requested_by,
-            role,
-            &format!("leftover tab's shell left alone: {why}"),
-            false,
-        );
-    }
-}
-
-/// PM finding, 2026-09-19 (real-restart-2): exit 0 is indistinguishable
-/// from `Relaunched` for anything scripting against this tool - a
-/// genuinely different, real outcome needs a genuinely different exit
-/// code. `AwaitingConfirmation` is real, ACTED work (§5) but not the same
-/// as confirmed progress, so it gets its own code rather than sharing
-/// `Relaunched`'s 0 or `Err`'s 1.
-fn relaunch_exit_code(outcome: relaunch::RelaunchOutcome) -> ExitCode {
-    match outcome {
-        relaunch::RelaunchOutcome::Relaunched => ExitCode::SUCCESS,
-        relaunch::RelaunchOutcome::AwaitingConfirmation => ExitCode::from(2),
-    }
-}
-
-/// A machine-readable status line - PM finding, 2026-09-18 (fifth real-
-/// restart retest): so the PM lane (or anything else watching this
-/// process's stdout) can act on `awaiting_confirmation` promptly, e.g. by
-/// sending CireSnave a phone notification that a relaunched lane needs a
-/// human to confirm the dev-channels dialog.
-fn print_status_json(outcome: &str, role: &str) {
-    let line = serde_json::json!({
-        "event": "lane-restart-status",
-        "role": role,
-        "outcome": outcome,
-        "at": chrono::Utc::now().to_rfc3339(),
-    });
-    println!("{line}");
-}
-
-/// A restart-path ledger line (`kind: restart`).
-fn log_outcome(requested_by: &str, role: &str, outcome: &str, acted: bool) {
-    log_kind("restart", requested_by, role, outcome, acted);
-}
-
-/// A ledger line of `kind`, with `caller_role` set whenever `requested_by` is a verified role
-/// (that is, neither the `--self` label nor "unverified").
-fn log_kind(kind: &str, requested_by: &str, role: &str, outcome: &str, acted: bool) {
-    let caller_role =
-        (requested_by != "self" && requested_by != "unverified").then_some(requested_by);
-    log_ledger(
-        requested_by,
-        role,
-        kind,
-        caller_role,
-        None,
-        None,
-        outcome,
-        acted,
-    );
-}
-
-/// One `restart.log` line with the 14.7 fields.
-#[allow(clippy::too_many_arguments)]
-fn log_ledger(
-    requested_by: &str,
-    role: &str,
-    kind: &str,
-    caller_role: Option<&str>,
-    model: Option<&str>,
-    reason: Option<&str>,
-    outcome: &str,
-    acted: bool,
-) {
-    let entry = log::Entry {
-        timestamp: chrono::Utc::now(),
-        requested_by,
-        role,
-        outcome: outcome.to_string(),
-        acted,
-        kind: Some(kind),
-        caller_role,
-        model,
-        reason,
-        signal_id: None,
-        result: None,
-        spawned: None,
-    };
-    if let Err(e) = log::append(&log_path(), &entry) {
-        eprintln!("lane-restart: WARNING - could not write to the restart log: {e}");
-    }
-}
-
 #[cfg(test)]
 mod cli_tests {
+    use super::restart_cmd::relaunch_exit_code;
     use super::*;
+    use lane_restart::start;
 
     fn strs(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
