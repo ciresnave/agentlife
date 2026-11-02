@@ -11,6 +11,7 @@
 
 use crate::approvals::{default_reader, RepoReader};
 use crate::facts::{SysinfoFacts, SystemFacts};
+use crate::host::HostOutcome;
 use crate::install::Probe;
 use crate::lane_new::Roots;
 use crate::lane_new_host::Host;
@@ -24,6 +25,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
+
+/// Runs the lane host: `(role, child argv)`.
+type HostRunner = dyn Fn(&str, &[String]) -> std::io::Result<HostOutcome>;
 
 /// A notice to a lane: `(role, text)`.
 type Sender = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
@@ -78,6 +82,7 @@ pub(crate) struct Ctx {
     caller: Option<Caller>,
     lane_new: Option<LaneNewWorld>,
     launch_spawn: Option<Rc<SpawnFn>>,
+    host_runner: Option<Rc<HostRunner>>,
     sleeper: Option<Rc<dyn Fn(Duration)>>,
     liveness: Option<LivenessTiming>,
     /// `Some`: these are ALL the environment variables the command can see through `env_var`.
@@ -109,6 +114,7 @@ impl Ctx {
             caller: None,
             lane_new: None,
             launch_spawn: None,
+            host_runner: None,
             sleeper: None,
             liveness: None,
             env: None,
@@ -204,6 +210,14 @@ impl Ctx {
         match &self.launch_spawn {
             Some(f) => Rc::clone(f),
             None => Rc::new(crate::relaunch::spawn_launch),
+        }
+    }
+
+    /// Runs the lane host (a ConPTY around `claude`): really, unless a test supplied its own.
+    pub(crate) fn host_runner(&self) -> Rc<HostRunner> {
+        match &self.host_runner {
+            Some(f) => Rc::clone(f),
+            None => Rc::new(crate::host::run),
         }
     }
 
@@ -443,6 +457,7 @@ impl Ctx {
             caller: None,
             lane_new: None,
             launch_spawn: None,
+            host_runner: None,
             sleeper: None,
             liveness: None,
             env: None,
@@ -490,6 +505,13 @@ impl Ctx {
     #[cfg(test)]
     pub(crate) fn with_launch_spawn(mut self, spawn: Rc<SpawnFn>) -> Self {
         self.launch_spawn = Some(spawn);
+        self
+    }
+
+    /// Test only: this host instead of really opening a ConPTY.
+    #[cfg(test)]
+    pub(crate) fn with_host_runner(mut self, runner: Rc<HostRunner>) -> Self {
+        self.host_runner = Some(runner);
         self
     }
 

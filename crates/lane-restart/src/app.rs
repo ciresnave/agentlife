@@ -12,6 +12,7 @@ mod approvals_cmd;
 mod assert_idle_cmd;
 mod attach_cmd;
 mod ctx;
+mod host_cmd;
 mod install_cmd;
 mod lane_new_cmd;
 mod ledger_cmd;
@@ -99,23 +100,6 @@ fn run_state_hook(event: &str) -> ExitCode {
 fn handoff_text(cwd: &str, role: &str) -> Option<String> {
     let (path, _) = lane_restart::spec::find_handoff(cwd, role)?;
     std::fs::read_to_string(path).ok()
-}
-
-/// `lane-restart host --role <role> -- <child argv...>` - RESTART-TOOL-
-/// DESIGN.md §12.5. Runs INSIDE the relaunched session's own terminal tab
-/// (launched by `spawn_relaunch`, below) and hosts `claude` in a ConPTY
-/// this process owns.
-fn run_host_cmd(role: &str, child_argv: &[String]) -> ExitCode {
-    match lane_restart::host::run(role, child_argv) {
-        Ok(outcome) => match outcome.child_exit_code {
-            Some(0) | None => ExitCode::SUCCESS,
-            Some(_) => ExitCode::FAILURE,
-        },
-        Err(e) => {
-            eprintln!("lane-restart host: {e}");
-            ExitCode::FAILURE
-        }
-    }
 }
 
 /// `lane-restart --version` - RESTART-TOOL-DESIGN.md §12.9: the crate
@@ -540,15 +524,7 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
             return attach_cmd::run(ctx, rest);
         }
         if first == "host" {
-            // Before anything can fail or wait: a restart that finds no record knows the host never ran.
-            lane_restart::host_boot::record(&state_dir(), &argv[1..]);
-            return match cli::host(rest) {
-                Ok((role, child_argv)) => run_host_cmd(&role, &child_argv),
-                Err(e) => {
-                    eprintln!("lane-restart host: {e}");
-                    ExitCode::FAILURE
-                }
-            };
+            return host_cmd::run(ctx, rest);
         }
     }
     match cli::restart(&argv) {
