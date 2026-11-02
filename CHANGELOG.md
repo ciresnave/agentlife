@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.21
+
+- **thin-main PR 10: `lane-new` moves behind the `Ctx` seam (PM ruling A).** `app/lane_new_cmd.rs` holds the command, unchanged apart from reading the caller, the lane-new roots, the GitHub client and the host, and writing its text and ledger row, through the `Ctx` (new `lane_new_roots`/`lane_new_vcs`/`lane_new_host`; the real host is still built only after the roots are known good). 6 fixture tests on tempdir roots with the local-file steps (non-PM and unverifiable callers refused and recorded, unbuildable roots stop before any row, dry run writes and logs nothing, `--apply` without a plan recorded as failed, `--apply` with the dry run's plan writes the lane files and records it). `tools/golden-lane-restart.sh` gains 7 argument-error/help cases (a parsed call writes a row to the real `restart.log`); golden before/after: 73 cases, 0 differing, and a shim control differs. No behaviour change.
+
 ## 0.30.20
 
 - **thin-main PR 9: the four `specs` commands (`import`, `retire`, `synapse-only`, `both-channels`) move behind the `Ctx` seam (PM ruling A).** `app/specs_cmd.rs` holds them, unchanged apart from reading the caller, the process facts, their text and their `restart.log` rows through the `Ctx`; `app/specs_cmd/tests.rs` adds 11 fixture tests (PM-only refusal by name and recorded, dry-run behaviour, backups, exit codes). `tools/golden-lane-restart.sh` gains 10 argument-error/help cases (a parsed call writes a row to the machine's real `restart.log`, so none is run); golden before/after: 66 cases, 0 differing, and a shim control differs. No behaviour change.

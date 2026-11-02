@@ -12,6 +12,9 @@
 use crate::approvals::{default_reader, RepoReader};
 use crate::facts::{SysinfoFacts, SystemFacts};
 use crate::install::Probe;
+use crate::lane_new::Roots;
+use crate::lane_new_host::Host;
+use crate::lane_new_remote::Vcs;
 use crate::lane_state_writer::{ParentProcess, RealParentProcess};
 use crate::notify::{Peer, Transport};
 use crate::start::CallerError;
@@ -35,6 +38,13 @@ enum Sink {
     Stderr,
     #[cfg(test)]
     Capture(String),
+}
+
+/// What `lane-new` reads and drives outside this process, as a test replaces it.
+struct LaneNewWorld {
+    roots: Result<Roots, String>,
+    vcs: Option<Rc<dyn Vcs>>,
+    host: Option<Rc<dyn Host>>,
 }
 
 pub(crate) struct Ctx {
@@ -63,6 +73,7 @@ pub(crate) struct Ctx {
     hooks_dir: Option<PathBuf>,
     probe: Option<Rc<dyn Probe>>,
     caller: Option<Caller>,
+    lane_new: Option<LaneNewWorld>,
 }
 
 impl Ctx {
@@ -86,6 +97,7 @@ impl Ctx {
             hooks_dir: None,
             probe: None,
             caller: None,
+            lane_new: None,
         }
     }
 
@@ -101,6 +113,38 @@ impl Ctx {
         match &self.probe {
             Some(p) => Rc::clone(p),
             None => Rc::new(super::install_cmd::RealProbe),
+        }
+    }
+
+    /// The roots `lane-new` derives every path from: the machine's layout under this context's state
+    /// directory, unless a test supplied its own.
+    pub(crate) fn lane_new_roots(&self) -> Result<Roots, String> {
+        match &self.lane_new {
+            Some(w) => w.roots.clone(),
+            None => Roots::standard(self.state_dir.clone()),
+        }
+    }
+
+    /// `gh` and `git` for `lane-new` (`None`: the local-file steps only, which only a test asks for).
+    pub(crate) fn lane_new_vcs(&self) -> Option<Rc<dyn Vcs>> {
+        match &self.lane_new {
+            Some(w) => w.vcs.clone(),
+            None => Some(Rc::new(crate::lane_new_remote::GhGit)),
+        }
+    }
+
+    /// What `lane-new` runs outside this process (disk probe, provisioning script, `start`). Built
+    /// only once the roots are known good, as before: the real one resolves the Claude config
+    /// directory, which panics when there is no home.
+    pub(crate) fn lane_new_host(&self, roots: &Roots) -> Option<Rc<dyn Host>> {
+        match &self.lane_new {
+            Some(w) => w.host.clone(),
+            None => Some(Rc::new(crate::lane_new_host::RealHost::new(
+                &roots.projects,
+                &roots.lane_homes,
+                &roots.pilot_home,
+                super::claude_config_dir(),
+            ))),
         }
     }
 
@@ -276,6 +320,7 @@ impl Ctx {
             hooks_dir: None,
             probe: None,
             caller: None,
+            lane_new: None,
         }
     }
 
@@ -300,6 +345,18 @@ impl Ctx {
         caller: impl Fn() -> Result<String, CallerError> + 'static,
     ) -> Self {
         self.caller = Some(Box::new(caller));
+        self
+    }
+
+    /// Test only: these roots, GitHub client and host for `lane-new` instead of the machine's.
+    #[cfg(test)]
+    pub(crate) fn with_lane_new(
+        mut self,
+        roots: Result<Roots, String>,
+        vcs: Option<Rc<dyn Vcs>>,
+        host: Option<Rc<dyn Host>>,
+    ) -> Self {
+        self.lane_new = Some(LaneNewWorld { roots, vcs, host });
         self
     }
 

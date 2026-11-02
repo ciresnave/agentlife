@@ -13,6 +13,7 @@ mod assert_idle_cmd;
 mod attach_cmd;
 mod ctx;
 mod install_cmd;
+mod lane_new_cmd;
 mod ledger_cmd;
 mod specs_cmd;
 mod status_cmd;
@@ -598,115 +599,6 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
     }
 }
 
-/// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). A dry run
-/// by default; `--apply` creates the repo, seeds it, writes the lane files, provisions the Synapse
-/// identity and starts the lane, stopping at the first step whose read-back fails.
-fn run_lane_new_cmd(
-    role: String,
-    repo: String,
-    model: String,
-    apply: bool,
-    plan: Option<String>,
-) -> ExitCode {
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_caller(&facts);
-    let caller_role = caller.as_ref().ok().cloned();
-    let requested_by = caller_role
-        .clone()
-        .unwrap_or_else(|| "unverified".to_string());
-    if caller_role.as_deref() != Some(start::PM_ROLE) {
-        let why = match caller {
-            Ok(r) => format!("only the PM session may create a lane; this is running under {r:?}"),
-            Err(e) => format!(
-                "only the PM session may create a lane, and the caller could not be verified: {e}"
-            ),
-        };
-        eprintln!("lane-restart lane-new: refused - {why}");
-        log_ledger(
-            &requested_by,
-            &role,
-            "lane-new",
-            caller_role.as_deref(),
-            None,
-            None,
-            &format!("refused: {why}"),
-            false,
-        );
-        return ExitCode::FAILURE;
-    }
-    let roots = match lane_restart::lane_new::Roots::standard(state_dir()) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("lane-restart lane-new: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // The dry run also reads GitHub (repo visibility, main's head and files), the clone directory and
-    // the disk; it creates, clones, provisions and starts nothing. `--apply` does all of it, step by
-    // step, each read back (docs/LANE-NEW.md).
-    let host = lane_restart::lane_new_host::RealHost::new(
-        &roots.projects,
-        &roots.lane_homes,
-        &roots.pilot_home,
-        claude_config_dir(),
-    );
-    // `--apply` goes through `run_apply`, which refuses unless `--plan` is the hash a dry run of exactly
-    // these arguments printed: a typo'd role or repo cannot be applied without being planned first.
-    let report = if apply {
-        lane_restart::lane_new::run_apply(
-            &roots,
-            Some(&lane_restart::lane_new_remote::GhGit),
-            Some(&host),
-            &role,
-            &repo,
-            &model,
-            plan.as_deref(),
-            chrono::Utc::now(),
-        )
-    } else {
-        lane_restart::lane_new::run_full(
-            &roots,
-            Some(&lane_restart::lane_new_remote::GhGit),
-            Some(&host),
-            &role,
-            &repo,
-            &model,
-            false,
-            chrono::Utc::now(),
-        )
-    };
-    print!("{}", report.render(apply));
-    if apply {
-        let steps: Vec<String> = report
-            .rows
-            .iter()
-            .map(|r| format!("{}:{:?}", r.n, r.status))
-            .collect();
-        log_ledger(
-            &requested_by,
-            &role,
-            "lane-new",
-            caller_role.as_deref(),
-            Some(&model),
-            Some(&format!("repo {repo}")),
-            &format!(
-                "{}: {}",
-                if report.failed() { "failed" } else { "created" },
-                steps.join(" ")
-            ),
-            report
-                .rows
-                .iter()
-                .any(|r| r.status == lane_restart::lane_new::Status::Ok),
-        );
-    }
-    if report.failed() {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
 const USAGE: &str = "\
 lane-restart - a bulletproof session-restart tool. RESTART-TOOL-DESIGN.md.
 
@@ -1042,12 +934,12 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         if first == "lane-new" {
             return match cli::lane_new(rest) {
                 Ok((role, repo, model, apply, plan)) => {
-                    run_lane_new_cmd(role, repo, model, apply, plan)
+                    lane_new_cmd::run(ctx, role, repo, model, apply, plan)
                 }
                 Err(e) => {
-                    eprintln!(
+                    ctx.errln(&format!(
                         "lane-restart lane-new: {e}; expected `lane-new <role> <repo> [--model sonnet|haiku] [--apply --plan <hash>]`"
-                    );
+                    ));
                     ExitCode::FAILURE
                 }
             };
