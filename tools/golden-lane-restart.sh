@@ -118,6 +118,15 @@ run_case specs_synapse_badflag "$E" -- specs synapse-only --bogus
 run_case specs_both_badflag "$E" -- specs both-channels --bogus
 run_case specs_import_help "$E" -- specs import -h
 run_case specs_retire_help "$E" -- specs retire -h
+# lane-new: argument errors and help ONLY (a call that parses runs the real command, which checks the
+# caller and writes a refused row to the machine's real restart.log; a probe of that once did).
+run_case lanenew_none "$E" -- lane-new
+run_case lanenew_norepo "$E" -- lane-new r
+run_case lanenew_badflag "$E" -- lane-new r p --bogus
+run_case lanenew_model_missing "$E" -- lane-new r p --model
+run_case lanenew_plan_missing "$E" -- lane-new r p --plan
+run_case lanenew_positional "$E" -- lane-new r p q
+run_case lanenew_help "$E" -- lane-new r p -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
