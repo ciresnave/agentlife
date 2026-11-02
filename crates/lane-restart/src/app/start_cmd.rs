@@ -12,6 +12,7 @@
 //! [`Outcome`] taking the context, so the `awaiting` notice can borrow it too.
 
 use super::ctx::Ctx;
+use super::shared::{disk_gate, print_status_json};
 use super::StartArgs;
 use crate::{relaunch, start};
 use std::process::ExitCode;
@@ -79,25 +80,6 @@ impl Outcome<'_> {
             None,
         );
         ExitCode::from(refusal.exit_code())
-    }
-}
-
-/// The disk floor (`disk.rs`), checked before any launch. A refusal is printed as `kind: refused -
-/// ...` and the caller exits 1 and logs it; an unreadable probe is a warning, not a refusal.
-/// (`app::disk_gate` is the same check for the restart path, which has not moved yet.)
-fn disk_gate(ctx: &mut Ctx, kind: &str) -> Result<(), crate::disk::Refusal> {
-    match crate::disk::guard(&ctx.state_dir) {
-        Ok(crate::disk::GuardOk::Free(_)) => Ok(()),
-        Ok(crate::disk::GuardOk::Unknown(why)) => {
-            ctx.errln(&format!(
-                "lane-restart {kind}: warning - free disk space was not checked: {why}"
-            ));
-            Ok(())
-        }
-        Err(refusal) => {
-            ctx.errln(&format!("lane-restart {kind}: refused - {refusal}"));
-            Err(refusal)
-        }
     }
 }
 
@@ -232,15 +214,7 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     let spawn = ctx.launch_spawn();
     let sleeper = ctx.sleeper();
     let timing = ctx.liveness_timing();
-    let mut on_awaiting = || {
-        let line = serde_json::json!({
-            "event": "lane-restart-status",
-            "role": role_for_notice,
-            "outcome": "awaiting_confirmation",
-            "at": chrono::Utc::now().to_rfc3339(),
-        });
-        ctx.outln(&line.to_string());
-    };
+    let mut on_awaiting = || print_status_json(ctx, "awaiting_confirmation", &role_for_notice);
     let result = start::execute_start(
         &plan,
         &*facts,

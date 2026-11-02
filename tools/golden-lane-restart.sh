@@ -147,6 +147,15 @@ run_case stop_badflag "$E" -- stop --bogus
 run_case stop_reason_missing "$E" -- stop --role r --reason
 run_case stop_positional "$E" -- stop extra
 run_case stop_help "$E" -- stop -h
+# the default restart command: parser-level failures ONLY (checked against `cli::restart`: `--role` is
+# required unless `--self`, and takes a value; nothing is positional). `--role r` or a bare `--self`
+# parse, so they would run the real command and append a refused row to the real restart.log.
+run_case restart_none "$E" --
+run_case restart_role_missing "$E" -- --role
+run_case restart_dryrun_norole "$E" -- --dry-run
+run_case restart_yes_norole "$E" -- --yes
+run_case restart_positional "$E" -- --self extra
+run_case restart_self_badflag "$E" -- --self --bogus
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail

@@ -228,6 +228,14 @@ impl Ctx {
         }
     }
 
+    /// The Opus permit: only when `LANE_RESTART_ALLOW_OPUS` is exactly `1` in the environment this
+    /// context sees.
+    pub(crate) fn opus_permit(&self) -> Option<crate::relaunch::OpusPermit> {
+        crate::relaunch::OpusPermit::from_value(
+            self.env_var(crate::relaunch::ALLOW_OPUS_ENV).as_deref(),
+        )
+    }
+
     /// Free memory in GB, or `None` when it cannot be read.
     pub(crate) fn free_memory_gb(&self) -> Option<f64> {
         match self.free_memory_gb {
@@ -642,5 +650,24 @@ mod tests {
         ctx.errln("c");
         assert_eq!(ctx.captured(), ("ab\n".to_string(), "c\n".to_string()));
         assert_eq!(ctx.lane_role.as_deref(), Some("r"));
+    }
+
+    /// The Opus permit is exactly `LANE_RESTART_ALLOW_OPUS=1` in the environment the context sees,
+    /// and nothing else (CireSnave cannot afford Opus: unset, `0`, `true` and an empty value all
+    /// mean no permit).
+    #[test]
+    fn the_opus_permit_is_only_the_exact_value_1_in_the_contexts_environment() {
+        let permit = |vars: &[(&str, &str)]| {
+            Ctx::capture(PathBuf::from("s"), Ok(PathBuf::from("c")), None)
+                .with_env(vars)
+                .opus_permit()
+                .is_some()
+        };
+        assert!(permit(&[("LANE_RESTART_ALLOW_OPUS", "1")]), "control");
+        assert!(!permit(&[]));
+        for no in ["0", "true", "", "yes", "11", " 1"] {
+            assert!(!permit(&[("LANE_RESTART_ALLOW_OPUS", no)]), "{no:?}");
+        }
+        assert!(!permit(&[("SOMETHING_ELSE", "1")]));
     }
 }
