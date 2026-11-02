@@ -156,6 +156,11 @@ run_case restart_dryrun_norole "$E" -- --dry-run
 run_case restart_yes_norole "$E" -- --yes
 run_case restart_positional "$E" -- --self extra
 run_case restart_self_badflag "$E" -- --self --bogus
+# host: the help text ONLY. `host` writes its boot record into the machine's real state directory
+# before it parses a word of its arguments, so even `host --bogus` is not hermetic; `-h` is answered
+# before the command is dispatched.
+run_case host_help "$E" -- host -h
+run_case host_help_long "$E" -- host --role r --help
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
