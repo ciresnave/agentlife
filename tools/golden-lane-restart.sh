@@ -138,6 +138,15 @@ run_case start_model_missing "$E" -- start --role r --reason x --model
 run_case start_signal_missing "$E" -- start --role r --reason x --signal-id
 run_case start_positional "$E" -- start extra
 run_case start_help "$E" -- start -h
+# stop: parser-level failures ONLY (checked against `cli::stop`: `--role` is required and takes a
+# value, `--reason` takes a value, nothing else is positional). `stop --role r` parses, so it would run
+# the real command and append a refused row to the machine's real restart.log.
+run_case stop_none "$E" -- stop
+run_case stop_role_missing "$E" -- stop --role
+run_case stop_badflag "$E" -- stop --bogus
+run_case stop_reason_missing "$E" -- stop --role r --reason
+run_case stop_positional "$E" -- stop extra
+run_case stop_help "$E" -- stop -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
