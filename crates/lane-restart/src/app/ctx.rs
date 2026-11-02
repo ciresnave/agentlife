@@ -9,6 +9,7 @@
 //! elsewhere). Only an in-crate `#[cfg(test)]` module can build a [`Ctx::capture`] with a state
 //! directory of its own.
 
+use crate::approvals::{default_reader, RepoReader};
 use crate::facts::{SysinfoFacts, SystemFacts};
 use crate::lane_state_writer::{ParentProcess, RealParentProcess};
 use crate::notify::{Peer, Transport};
@@ -51,6 +52,9 @@ pub(crate) struct Ctx {
     sender: Option<Sender>,
     transport: Option<Transport>,
     broker_peers: Option<BrokerPeers>,
+    /// `Some(None)` is "there is no home directory"; `None` is "ask the machine".
+    home: Option<Option<PathBuf>>,
+    repo_reader: Option<Rc<dyn RepoReader>>,
 }
 
 impl Ctx {
@@ -69,6 +73,26 @@ impl Ctx {
             sender: None,
             transport: None,
             broker_peers: None,
+            home: None,
+            repo_reader: None,
+        }
+    }
+
+    /// The user's home directory (where `~/.overmind/lane-restart.json` lives), or `None` when the
+    /// machine has none.
+    pub(crate) fn home(&self) -> Option<PathBuf> {
+        match &self.home {
+            Some(h) => h.clone(),
+            None => super::dirs_home(),
+        }
+    }
+
+    /// The reader the approvals are fetched with: `gh` under a time budget, cached by commit under
+    /// `home`, unless a test supplied its own.
+    pub(crate) fn repo_reader(&self, home: &std::path::Path) -> Rc<dyn RepoReader> {
+        match &self.repo_reader {
+            Some(r) => Rc::clone(r),
+            None => Rc::new(default_reader(home)),
         }
     }
 
@@ -174,7 +198,23 @@ impl Ctx {
             sender: None,
             transport: None,
             broker_peers: None,
+            home: None,
+            repo_reader: None,
         }
+    }
+
+    /// Test only: this home directory (`None`: the machine has none) instead of the real one.
+    #[cfg(test)]
+    pub(crate) fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = Some(home);
+        self
+    }
+
+    /// Test only: this approvals reader instead of `gh`.
+    #[cfg(test)]
+    pub(crate) fn with_repo_reader(mut self, reader: impl RepoReader + 'static) -> Self {
+        self.repo_reader = Some(Rc::new(reader));
+        self
     }
 
     /// Test only: these process facts instead of the real ones.

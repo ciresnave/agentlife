@@ -69,6 +69,22 @@ run_case ledger_since_bad "$E" -- ledger --since soon
 run_case ledger_since_missing "$E" -- ledger --since
 run_case ledger_positional "$E" -- ledger extra
 run_case ledger_help "$E" -- ledger --by-lane -h
+# approvals: a real run fetches the approvals repo over the network, so the hermetic cases are the
+# ones that stop before any fetch: no home, no config file, a broken or invalid config, and the
+# argument errors. (The home is `USERPROFILE`, else `HOME`.)
+H0="$tmp/home-empty"; mkdir -p "$H0"
+H1="$tmp/home-brokenjson"; mkdir -p "$H1/.overmind"; printf '{nope' > "$H1/.overmind/lane-restart.json"
+H2="$tmp/home-badrepo"; mkdir -p "$H2/.overmind"
+printf '{"approvals": {"repo": "not a repo", "path": ".lane/approvals"}}' > "$H2/.overmind/lane-restart.json"
+run_case approvals_nohome "$E" -u USERPROFILE -u HOME -- approvals
+run_case approvals_noconfig "$E" USERPROFILE="$H0" -- approvals
+run_case approvals_noconfig_role "$E" USERPROFILE="$H0" -- approvals --role overmind
+run_case approvals_brokenjson "$E" USERPROFILE="$H1" -- approvals
+run_case approvals_badrepo "$E" USERPROFILE="$H2" -- approvals
+run_case approvals_badflag "$E" USERPROFILE="$H0" -- approvals --bogus
+run_case approvals_role_missing "$E" USERPROFILE="$H0" -- approvals --role
+run_case approvals_positional "$E" USERPROFILE="$H0" -- approvals extra
+run_case approvals_help "$E" -- approvals --role r -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
