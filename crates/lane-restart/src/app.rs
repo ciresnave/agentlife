@@ -14,6 +14,7 @@ mod attach_cmd;
 mod ctx;
 mod install_cmd;
 mod ledger_cmd;
+mod specs_cmd;
 mod status_cmd;
 #[cfg(test)]
 mod test_fixtures;
@@ -597,263 +598,6 @@ fn run_stop_cmd(args: StopArgs) -> ExitCode {
     }
 }
 
-/// `lane-restart specs import [--role R] [--dry-run]` - 14.9. PM only.
-fn run_specs_import_cmd(role: Option<String>, dry_run: bool, verbose: bool) -> ExitCode {
-    use lane_restart::spec_import::{import_specs, ImportOutcome};
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_caller(&facts);
-    let caller_role = caller.as_ref().ok().cloned();
-    let requested_by = caller_role
-        .clone()
-        .unwrap_or_else(|| "unverified".to_string());
-    let target = role.clone().unwrap_or_else(|| "*".to_string());
-    if caller_role.as_deref() != Some(start::PM_ROLE) {
-        let why = match caller {
-            Ok(r) => format!("only the PM session may import specs; this is running under {r:?}"),
-            Err(e) => format!(
-                "only the PM session may import specs, and the caller could not be verified: {e}"
-            ),
-        };
-        eprintln!("lane-restart specs import: refused - {why}");
-        log_ledger(
-            &requested_by,
-            &target,
-            "import",
-            caller_role.as_deref(),
-            None,
-            None,
-            &format!("refused: {why}"),
-            false,
-        );
-        return ExitCode::FAILURE;
-    }
-    let rows = import_specs(
-        &state_dir(),
-        role.as_deref(),
-        &facts,
-        &relaunch::policy_default_model(&state_dir()),
-        dry_run,
-        chrono::Utc::now(),
-    );
-    let mut refused_named = false;
-    for r in &rows {
-        match &r.outcome {
-            ImportOutcome::Written(s) => {
-                log_ledger(
-                    &requested_by,
-                    &r.role,
-                    "import",
-                    caller_role.as_deref(),
-                    None,
-                    None,
-                    &format!("imported a launch spec from the lane state file (state={s:?})"),
-                    true,
-                );
-            }
-            ImportOutcome::WouldWrite(_) | ImportOutcome::AlreadyHasSpec => {}
-            ImportOutcome::Refused(_) => refused_named |= role.is_some(),
-        }
-    }
-    print!(
-        "{}",
-        lane_restart::spec_import::render(&rows, dry_run, verbose)
-    );
-    if refused_named {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// `lane-restart specs retire --role R... [--dry-run]` - PM only. Moves, never deletes.
-fn run_specs_retire_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
-    use lane_restart::spec_retire::{render, retire_roles, RetireOutcome};
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_caller(&facts);
-    let caller_role = caller.as_ref().ok().cloned();
-    let requested_by = caller_role
-        .clone()
-        .unwrap_or_else(|| "unverified".to_string());
-    if caller_role.as_deref() != Some(start::PM_ROLE) {
-        let why = match caller {
-            Ok(r) => format!("only the PM session may retire roles; this is running under {r:?}"),
-            Err(e) => format!(
-                "only the PM session may retire roles, and the caller could not be verified: {e}"
-            ),
-        };
-        eprintln!("lane-restart specs retire: refused - {why}");
-        log_ledger(
-            &requested_by,
-            &roles.join(","),
-            "retire",
-            caller_role.as_deref(),
-            None,
-            None,
-            &format!("refused: {why}"),
-            false,
-        );
-        return ExitCode::FAILURE;
-    }
-    let rows = retire_roles(&state_dir(), &roles, &facts, dry_run, chrono::Utc::now());
-    let mut refused = false;
-    for r in &rows {
-        match &r.outcome {
-            RetireOutcome::Moved(files) => log_ledger(
-                &requested_by,
-                &r.role,
-                "retire",
-                caller_role.as_deref(),
-                None,
-                None,
-                &format!("moved {} to retired/", files.join(", ")),
-                true,
-            ),
-            RetireOutcome::WouldMove(_) => {}
-            RetireOutcome::Refused(why) => {
-                refused = true;
-                log_ledger(
-                    &requested_by,
-                    &r.role,
-                    "retire",
-                    caller_role.as_deref(),
-                    None,
-                    None,
-                    &format!("refused: {why}"),
-                    false,
-                );
-            }
-        }
-    }
-    print!("{}", render(&rows, dry_run));
-    if refused {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// `lane-restart specs synapse-only --role R... [--strict] [--dry-run]` - PM only. Rewrites a spec's
-/// `launch_args` to the Synapse-only form (docs/SYNAPSE-ONLY-CUTOVER.md); one backup, never overwritten.
-fn run_specs_synapse_only_cmd(roles: Vec<String>, strict: bool, dry_run: bool) -> ExitCode {
-    use lane_restart::spec_synapse::{render, rewrite_roles, RewriteOutcome};
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_caller(&facts);
-    let caller_role = caller.as_ref().ok().cloned();
-    let requested_by = caller_role
-        .clone()
-        .unwrap_or_else(|| "unverified".to_string());
-    if caller_role.as_deref() != Some(start::PM_ROLE) {
-        let why = match caller {
-            Ok(r) => format!("only the PM session may rewrite specs; this is running under {r:?}"),
-            Err(e) => format!(
-                "only the PM session may rewrite specs, and the caller could not be verified: {e}"
-            ),
-        };
-        eprintln!("lane-restart specs synapse-only: refused - {why}");
-        log_ledger(
-            &requested_by,
-            &roles.join(","),
-            "synapse-only",
-            caller_role.as_deref(),
-            None,
-            None,
-            &format!("refused: {why}"),
-            false,
-        );
-        return ExitCode::FAILURE;
-    }
-    let rows = rewrite_roles(&state_dir(), &roles, strict, dry_run, chrono::Utc::now());
-    let mut refused = false;
-    for r in &rows {
-        let (outcome, acted) = match &r.outcome {
-            RewriteOutcome::Rewrote(a) => (format!("rewrote launch_args to {}", a.join(" ")), true),
-            RewriteOutcome::Refused(why) => {
-                refused = true;
-                (format!("refused: {why}"), false)
-            }
-            RewriteOutcome::WouldRewrite(_) | RewriteOutcome::Unchanged => continue,
-        };
-        log_ledger(
-            &requested_by,
-            &r.role,
-            "synapse-only",
-            caller_role.as_deref(),
-            None,
-            None,
-            &outcome,
-            acted,
-        );
-    }
-    print!("{}", render(&rows, dry_run));
-    if refused {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// `lane-restart specs both-channels --role R... [--dry-run]` - writing is PM only; a dry run writes
-/// nothing and any caller may read it. Brings a spec to `--mcp-config <role>.mcp.json` plus
-/// `server:claude-peers server:synapse`; one backup, never overwritten.
-fn run_specs_both_channels_cmd(roles: Vec<String>, dry_run: bool) -> ExitCode {
-    use lane_restart::spec_channels::rewrite_roles;
-    use lane_restart::spec_synapse::{render, RewriteOutcome};
-    let facts = SysinfoFacts::new(claude_config_dir());
-    let caller = verified_caller(&facts);
-    let caller_role = caller.as_ref().ok().cloned();
-    let requested_by = caller_role
-        .clone()
-        .unwrap_or_else(|| "unverified".to_string());
-    if !dry_run && caller_role.as_deref() != Some(start::PM_ROLE) {
-        let why = match caller {
-            Ok(r) => format!("only the PM session may rewrite specs; this is running under {r:?}"),
-            Err(e) => format!(
-                "only the PM session may rewrite specs, and the caller could not be verified: {e}"
-            ),
-        };
-        eprintln!("lane-restart specs both-channels: refused - {why}");
-        log_ledger(
-            &requested_by,
-            &roles.join(","),
-            "both-channels",
-            caller_role.as_deref(),
-            None,
-            None,
-            &format!("refused: {why}"),
-            false,
-        );
-        return ExitCode::FAILURE;
-    }
-    let rows = rewrite_roles(&state_dir(), &roles, dry_run, chrono::Utc::now());
-    let mut refused = false;
-    for r in &rows {
-        let (outcome, acted) = match &r.outcome {
-            RewriteOutcome::Rewrote(a) => (format!("rewrote launch_args to {}", a.join(" ")), true),
-            RewriteOutcome::Refused(why) => {
-                refused = true;
-                (format!("refused: {why}"), false)
-            }
-            RewriteOutcome::WouldRewrite(_) | RewriteOutcome::Unchanged => continue,
-        };
-        log_ledger(
-            &requested_by,
-            &r.role,
-            "both-channels",
-            caller_role.as_deref(),
-            None,
-            None,
-            &outcome,
-            acted,
-        );
-    }
-    print!("{}", render(&rows, dry_run));
-    if refused {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
 /// `lane-restart lane-new <role> <repo> [--model M] [--apply]` - PM only (docs/LANE-NEW.md). A dry run
 /// by default; `--apply` creates the repo, seeds it, writes the lane files, provisions the Synapse
 /// identity and starts the lane, stopping at the first step whose read-back fails.
@@ -1256,40 +1000,40 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         if first == "specs" {
             return match rest.split_first() {
                 Some((sub, tail)) if sub == "import" => match cli::specs_import(tail) {
-                    Ok((role, dry_run, verbose)) => run_specs_import_cmd(role, dry_run, verbose),
+                    Ok((role, dry_run, verbose)) => specs_cmd::import(ctx, role, dry_run, verbose),
                     Err(e) => {
-                        eprintln!("lane-restart specs import: {e}");
+                        ctx.errln(&format!("lane-restart specs import: {e}"));
                         ExitCode::FAILURE
                     }
                 },
                 Some((sub, tail)) if sub == "retire" => match cli::specs_retire(tail) {
-                    Ok((roles, dry_run)) => run_specs_retire_cmd(roles, dry_run),
+                    Ok((roles, dry_run)) => specs_cmd::retire(ctx, roles, dry_run),
                     Err(e) => {
-                        eprintln!("lane-restart specs retire: {e}");
+                        ctx.errln(&format!("lane-restart specs retire: {e}"));
                         ExitCode::FAILURE
                     }
                 },
                 Some((sub, tail)) if sub == "synapse-only" => match cli::specs_synapse_only(tail) {
                     Ok((roles, strict, dry_run)) => {
-                        run_specs_synapse_only_cmd(roles, strict, dry_run)
+                        specs_cmd::synapse_only(ctx, roles, strict, dry_run)
                     }
                     Err(e) => {
-                        eprintln!("lane-restart specs synapse-only: {e}");
+                        ctx.errln(&format!("lane-restart specs synapse-only: {e}"));
                         ExitCode::FAILURE
                     }
                 },
                 Some((sub, tail)) if sub == "both-channels" => {
                     match cli::specs_both_channels(tail) {
-                        Ok((roles, dry_run)) => run_specs_both_channels_cmd(roles, dry_run),
+                        Ok((roles, dry_run)) => specs_cmd::both_channels(ctx, roles, dry_run),
                         Err(e) => {
-                            eprintln!("lane-restart specs both-channels: {e}");
+                            ctx.errln(&format!("lane-restart specs both-channels: {e}"));
                             ExitCode::FAILURE
                         }
                     }
                 }
                 _ => {
-                    eprintln!(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]` or `specs both-channels --role <name>... [--dry-run]`"
+                    ctx.errln(
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]` or `specs both-channels --role <name>... [--dry-run]`",
                     );
                     ExitCode::FAILURE
                 }

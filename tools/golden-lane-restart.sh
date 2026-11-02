@@ -105,6 +105,19 @@ run_case install_no_from "$E" -- install
 run_case install_from_missing_value "$E" -- install --from
 run_case install_positional "$E" -- install extra
 run_case install_help "$E" -- install --from x -h
+# specs (import, retire, synapse-only, both-channels): argument errors and help ONLY, for the same
+# reason as install: a call that parses runs the real command, whose first act is to check the caller
+# and write a row into the machine's real restart.log.
+run_case specs_none "$E" -- specs
+run_case specs_unknown "$E" -- specs nonsense
+run_case specs_import_badflag "$E" -- specs import --bogus
+run_case specs_import_role_missing "$E" -- specs import --role
+run_case specs_import_positional "$E" -- specs import extra
+run_case specs_retire_badflag "$E" -- specs retire --bogus
+run_case specs_synapse_badflag "$E" -- specs synapse-only --bogus
+run_case specs_both_badflag "$E" -- specs both-channels --bogus
+run_case specs_import_help "$E" -- specs import -h
+run_case specs_retire_help "$E" -- specs retire -h
 echo "golden cases: $n; differing: $fail (0 = every stdout, stderr and exit code identical)"
 rm -rf "$tmp"
 exit $fail
