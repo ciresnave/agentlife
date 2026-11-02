@@ -11,7 +11,7 @@ use crate::tab_close;
 /// The disk floor (`disk.rs`), checked before any launch. A refusal is printed as `kind: refused -
 /// ...` and the caller exits 1 and logs it; an unreadable probe is a warning, not a refusal.
 pub(super) fn disk_gate(ctx: &mut Ctx, kind: &str) -> Result<(), crate::disk::Refusal> {
-    match crate::disk::guard(&ctx.state_dir) {
+    match ctx.disk_guard() {
         Ok(crate::disk::GuardOk::Free(_)) => Ok(()),
         Ok(crate::disk::GuardOk::Unknown(why)) => {
             ctx.errln(&format!(
