@@ -421,6 +421,8 @@ pub struct StartPlan {
     pub previous_session: Option<String>,
     /// The spec as it will be written back (`running`) once the session is confirmed.
     pub spec: SpecFile,
+    /// What `heal_synapse` added to the recorded launch arguments, when it did.
+    pub healed: Option<String>,
 }
 
 /// Every check, in the order of 14.5; nothing is spawned or written.
@@ -486,6 +488,13 @@ pub fn plan_start(
         }
     };
     effective.permission_mode = Some(START_PERMISSION_MODE);
+    let healed = match crate::spec_channels::heal_synapse(dir, req.role, &effective.launch_args) {
+        crate::spec_channels::Heal::Healed { args, added } => {
+            effective.launch_args = args;
+            Some(added)
+        }
+        crate::spec_channels::Heal::NotNeeded => None,
+    };
     let launch = effective.launch_spec();
     let prepared = prepare_launch(&launch, &effective.model, None).map_err(StartRefusal::Launch)?;
     let previous_session = state::load(dir, req.role).ok().map(|s| s.session_id);
@@ -497,6 +506,7 @@ pub fn plan_start(
         previous_session,
         launch,
         spec: effective,
+        healed,
     })
 }
 
@@ -1046,6 +1056,49 @@ mod tests {
         assert!(p.carries_dev_channels_flag);
         assert_eq!(p.pinned_from, None);
         assert_eq!(a[1], crate::launch::startup_prompt("baracuda"));
+    }
+
+    /// kiss, 2026-11-04: a spec without server:synapse relaunched without the tool. A role that has
+    /// a Synapse identity gets the channel added (and written back with the spec); one without is
+    /// left exactly as recorded.
+    #[test]
+    fn a_spec_lacking_the_synapse_channel_is_healed_when_the_role_has_an_identity() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        let plan =
+            |d: &Path| plan_start(d, &req("baracuda"), pm_caller(d, &facts), &facts).unwrap();
+        // control: no mcp.json, no identity: nothing healed
+        let p = plan(d.path());
+        assert_eq!(p.healed, None);
+        assert!(
+            !p.argv.contains(&"server:synapse".to_string()),
+            "{:?}",
+            p.argv
+        );
+        // with an identity: healed, in the argv AND in the spec that will be written back
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("roles").join("baracuda")).unwrap();
+        std::fs::write(
+            d.path().join("baracuda.mcp.json"),
+            format!(
+                r#"{{"mcpServers":{{"synapse":{{"args":["--role","baracuda","--home","{}"]}}}}}}"#,
+                home.path().to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let p = plan(d.path());
+        assert_eq!(p.healed.as_deref(), Some("server:synapse"));
+        assert!(
+            p.argv.contains(&"server:synapse".to_string()),
+            "{:?}",
+            p.argv
+        );
+        assert!(
+            p.argv.contains(&"server:claude-peers".to_string()),
+            "peers is kept"
+        );
+        assert!(p.argv.contains(&"--mcp-config".to_string()), "{:?}", p.argv);
+        assert!(crate::spec_channels::Channels::of(&p.spec.launch_args).reaches_synapse());
     }
 
     /// The bypassPermissions the spec recorded is replaced, never carried to a start.

@@ -535,9 +535,18 @@ impl SpecStore for DirSpecStore {
         write_atomic(&self.dir, spec)
     }
     fn existing(&self, role: &str) -> Option<SpecFile> {
-        read(&self.dir, role)
+        let mut s = read(&self.dir, role)
             .ok()
-            .filter(|s| s.role.as_str() == role && s.check().is_ok())
+            .filter(|s| s.role.as_str() == role && s.check().is_ok())?;
+        // A restart launches THIS spec's flags (relaunch::carry_spec_flags) and writes them back,
+        // so a spec without the synapse channel for a role that has an identity is healed here.
+        if let crate::spec_channels::Heal::Healed { args, added } =
+            crate::spec_channels::heal_synapse(&self.dir, role, &s.launch_args)
+        {
+            eprintln!("lane-restart: {role}: the recorded launch lacked {added}; added it (the role has a Synapse identity)");
+            s.launch_args = args;
+        }
+        Some(s)
     }
 }
 
@@ -1126,6 +1135,45 @@ mod tests {
             written_by: WrittenBy::Restart,
             now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
         }
+    }
+
+    /// A restart launches the recorded spec's flags and writes them back, so the store heals a
+    /// spec lacking the synapse channel for a role that has an identity (kiss, 2026-11-04).
+    #[test]
+    fn the_directory_store_heals_a_spec_without_synapse_only_for_a_role_with_an_identity() {
+        let d = tempdir().unwrap();
+        let l = launch("kiss");
+        let s = build(&inputs(&l, "sonnet", SpecState::Running)).unwrap();
+        write_atomic(d.path(), &s).unwrap();
+        let store = DirSpecStore {
+            dir: d.path().to_path_buf(),
+        };
+        let before = store.existing("kiss").unwrap();
+        assert!(
+            !crate::spec_channels::Channels::of(&before.launch_args).synapse,
+            "control"
+        );
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("roles").join("kiss")).unwrap();
+        std::fs::write(
+            d.path().join("kiss.mcp.json"),
+            format!(
+                r#"{{"mcpServers":{{"synapse":{{"args":["--role","kiss","--home","{}"]}}}}}}"#,
+                home.path().to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let after = store.existing("kiss").unwrap();
+        assert!(crate::spec_channels::Channels::of(&after.launch_args).reaches_synapse());
+        assert_eq!(
+            after.model, before.model,
+            "only the launch arguments change"
+        );
+        // the stored file is untouched until the restart writes its own spec
+        assert_eq!(
+            read(d.path(), "kiss").unwrap().launch_args,
+            before.launch_args
+        );
     }
 
     // A spec written before the field existed is unclassified, never soft or hard.

@@ -151,6 +151,81 @@ pub fn full_args(args: &[String], mcp_path: &str) -> Result<Vec<String>, String>
     Ok(out)
 }
 
+/// What `heal_synapse` decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Heal {
+    /// The launch already loads the synapse channel with a config, or the role has no Synapse
+    /// identity to load it with (no `<role>.mcp.json` naming a synapse server, or its identity
+    /// directory is missing): nothing to add. `specs audit` is where that gap is reported.
+    NotNeeded,
+    /// These arguments add what was missing.
+    Healed { args: Vec<String>, added: String },
+}
+
+/// The arguments with the synapse channel added: `--mcp-config <mcp_path>` when absent, the
+/// dev-channels flag when absent, and `server:synapse` at the end of the `server:` names. Other
+/// channels (a `server:claude-peers` included) are neither added nor removed. Pure.
+pub fn with_synapse(args: &[String], mcp_path: &str) -> Vec<String> {
+    let mut out: Vec<String> = args.to_vec();
+    if mcp_config_arg(&out).is_none() {
+        let at = out
+            .iter()
+            .position(|a| a == DEV_CHANNELS)
+            .unwrap_or(out.len());
+        out.splice(at..at, [MCP_CONFIG.to_string(), mcp_path.to_string()]);
+    }
+    let flag = match out.iter().position(|a| a == DEV_CHANNELS) {
+        Some(f) => f,
+        None => {
+            out.push(DEV_CHANNELS.to_string());
+            out.len() - 1
+        }
+    };
+    if !Channels::of(&out).synapse {
+        let end = out[flag + 1..]
+            .iter()
+            .position(|a| !a.starts_with("server:"))
+            .map_or(out.len(), |n| flag + 1 + n);
+        out.insert(end, SYNAPSE.to_string());
+    }
+    out
+}
+
+/// A launch whose arguments lack the synapse channel, for a role that HAS a Synapse identity,
+/// would start without the tool and every message sent to it would queue unread (kiss,
+/// 2026-11-04). `start` and a restart call this on the recorded arguments and launch the healed
+/// ones, which are then written back with the spec. Without an identity there is nothing to heal
+/// with, and the launch is left exactly as recorded.
+pub fn heal_synapse(dir: &Path, role: &str, args: &[String]) -> Heal {
+    if Channels::of(args).reaches_synapse() {
+        return Heal::NotNeeded;
+    }
+    if !valid_identifier(role) {
+        return Heal::NotNeeded;
+    }
+    let (mcp, home) = crate::spec_audit::read_mcp(dir, role);
+    let has_identity =
+        mcp.is_ok() && home.is_some_and(|h| Path::new(&h).join("roles").join(role).is_dir());
+    if !has_identity {
+        return Heal::NotNeeded;
+    }
+    let cfg = match mcp_config_arg(args) {
+        Some(c) => c.to_string(),
+        None => windows_slashes(&dir.join(format!("{role}.mcp.json")).to_string_lossy()),
+    };
+    if config_names_synapse(&cfg).is_err() {
+        return Heal::NotNeeded;
+    }
+    let healed = with_synapse(args, &cfg);
+    if healed == args {
+        return Heal::NotNeeded;
+    }
+    Heal::Healed {
+        added: "server:synapse".to_string(),
+        args: healed,
+    }
+}
+
 /// A drive-letter path with backslashes, as the existing specs spell it (C:, then Projects, .lane-state, x.mcp.json);
 /// any other path is returned as it is.
 fn windows_slashes(p: &str) -> String {
@@ -431,5 +506,68 @@ mod tests {
             .path()
             .join("nocfg.launch.json.pre-both-channels")
             .exists());
+    }
+
+    #[test]
+    fn with_synapse_adds_only_what_is_missing_and_keeps_the_other_channels() {
+        let p = "C:/x/r.mcp.json";
+        assert_eq!(
+            with_synapse(&v(&[DEV_CHANNELS, PEERS]), p),
+            v(&[MCP_CONFIG, p, DEV_CHANNELS, PEERS, SYNAPSE])
+        );
+        assert_eq!(
+            with_synapse(&v(&["--model", "sonnet"]), p),
+            v(&["--model", "sonnet", MCP_CONFIG, p, DEV_CHANNELS, SYNAPSE])
+        );
+        // already complete: unchanged, and a following non-server token stays after the names
+        let done = v(&[MCP_CONFIG, "m", DEV_CHANNELS, SYNAPSE, "--x"]);
+        assert_eq!(with_synapse(&done, p), done);
+        assert_eq!(
+            with_synapse(&v(&[MCP_CONFIG, "m", DEV_CHANNELS, PEERS, "--x"]), p),
+            v(&[MCP_CONFIG, "m", DEV_CHANNELS, PEERS, SYNAPSE, "--x"])
+        );
+    }
+
+    fn identity(dir: &Path, home: &Path, role: &str, with_home_dir: bool) {
+        std::fs::write(
+            dir.join(format!("{role}.mcp.json")),
+            format!(
+                r#"{{"mcpServers":{{"synapse":{{"args":["--role","{role}","--home","{}"]}}}}}}"#,
+                home.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        if with_home_dir {
+            std::fs::create_dir_all(home.join("roles").join(role)).unwrap();
+        }
+    }
+
+    #[test]
+    fn heal_adds_synapse_only_for_a_role_with_an_identity_and_a_config_that_names_it() {
+        let (d, h) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let peers_only = v(&["--model", "sonnet", DEV_CHANNELS, PEERS]);
+        // no mcp.json at all: nothing to heal with, launch left as recorded
+        assert_eq!(heal_synapse(d.path(), "kiss", &peers_only), Heal::NotNeeded);
+        // mcp.json but no identity directory: still nothing
+        identity(d.path(), h.path(), "kiss", false);
+        assert_eq!(heal_synapse(d.path(), "kiss", &peers_only), Heal::NotNeeded);
+        // the identity is there: healed, with the role's own config and the synapse name
+        identity(d.path(), h.path(), "kiss", true);
+        match heal_synapse(d.path(), "kiss", &peers_only) {
+            Heal::Healed { args, added } => {
+                assert_eq!(added, "server:synapse");
+                assert!(Channels::of(&args).reaches_synapse(), "{args:?}");
+                assert!(Channels::of(&args).peers, "peers is not removed");
+                assert!(mcp_config_arg(&args).unwrap().ends_with("kiss.mcp.json"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // already complete (and a second pass over the healed result): not needed
+        let full = v(&[MCP_CONFIG, "m.json", DEV_CHANNELS, SYNAPSE]);
+        assert_eq!(heal_synapse(d.path(), "kiss", &full), Heal::NotNeeded);
+        // a config without a synapse server is not an identity
+        std::fs::write(d.path().join("kiss.mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+        assert_eq!(heal_synapse(d.path(), "kiss", &peers_only), Heal::NotNeeded);
+        assert_eq!(heal_synapse(d.path(), "../x", &peers_only), Heal::NotNeeded);
     }
 }

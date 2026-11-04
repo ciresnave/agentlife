@@ -194,7 +194,7 @@ fn mcp_home(v: &Value) -> Option<String> {
 }
 
 /// `(mcp result, home)` for `<dir>/<role>.mcp.json`.
-fn read_mcp(dir: &Path, role: &str) -> (Result<(), String>, Option<String>) {
+pub(crate) fn read_mcp(dir: &Path, role: &str) -> (Result<(), String>, Option<String>) {
     let path = dir.join(format!("{role}.mcp.json"));
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
