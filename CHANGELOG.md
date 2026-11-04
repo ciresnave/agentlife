@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.38
+
+- **Docs (PM [TASK] fleet-spec-tooling, slice 6): `docs/SYNAPSE-ROLE-ENV.md`, whether one user-level Synapse entry could serve every lane.** The adapter takes its role from `SYNAPSE_ROLE` (run with an empty temp home and a closed port: role and home resolved, failure only at "synapsed is not running"; control without the variable: usage, exit 2). It cannot derive its home from the role (`--home`, else `SYNAPSE_HOME` or one platform default), so the home must come from outside: `${LANE_ROLE}` inside a path in the entry's env, or lane-restart exporting `SYNAPSE_HOME` beside the `LANE_ROLE` it already sets. Not verified: that Claude Code expands `${LANE_ROLE}` in a user-scope entry (needs a session, which claims a role); the document gives the safe test. Lanes on the shared pilot home would need a different home from per-lane ones. No code changed.
+
 ## 0.30.36
 
 - **`lane-restart lane-provision <role> [--apply --plan <hash>]` (PM only): Synapse for an existing lane (PM [TASK] fleet-spec-tooling, slice 5).** Six lanes had no Synapse identity or `mcp.json`, so `specs both-channels` refused them and their mail queued unread (the PM provisioned eight by hand on 2026-11-04). For a role with a recorded launch spec, and with no repo, checkout or new spec and no start: step 3 writes `<role>.mcp.json` as `lane-new` writes it; step 6 provisions the identity through the same script and read-back `lane-new` uses; step 4 brings the spec to the full push-channel form (`specs both-channels`, one backup). Dry run by default; `--apply` needs the hash a dry run of the same role printed. Reruns converge (`already`). An existing `mcp.json` that differs is kept only when it already works (names a synapse server whose identity directory exists), else the run stops and overwrites nothing. A `Report::render_as` generalises the `lane-new` report text. New: `lane_provision.rs`, `app/lane_provision_cmd.rs`; nothing here ran a real provision.
