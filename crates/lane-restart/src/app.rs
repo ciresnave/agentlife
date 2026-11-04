@@ -237,6 +237,14 @@ USAGE:
         a dry run of exactly the same role, repo and model. An existing repo is used only
         if empty or holding nothing but the seed.
 
+    lane-restart specs audit [--role <name>]... [--json]
+        Any caller; writes nothing. One row per recorded role (all, or those named): launch
+        channels, model, permission mode, state, whether <role>.mcp.json loads a synapse
+        server, whether the identity home it names exists and its certificate is current
+        (a warning inside 6 hours), whether the role is online on Synapse and how old its
+        queued mail is. Exit 1 on any peers-only launch, bad mcp.json, missing identity or
+        expired certificate; other findings are warnings. --json prints the rows.
+
     lane-restart specs both-channels --role <name> [--role <name>]... [--dry-run]
         Writing is PM only; --dry-run writes nothing and any caller may run it. Bring a
         role's launch_args to the full push-channel form: --mcp-config <role>.mcp.json
@@ -407,9 +415,16 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                         }
                     }
                 }
+                Some((sub, tail)) if sub == "audit" => match cli::specs_audit(tail) {
+                    Ok((roles, json)) => specs_cmd::audit(ctx, roles, json),
+                    Err(e) => {
+                        ctx.errln(&format!("lane-restart specs audit: {e}"));
+                        ExitCode::FAILURE
+                    }
+                },
                 _ => {
                     ctx.errln(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]` or `specs both-channels --role <name>... [--dry-run]`",
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]`, `specs both-channels --role <name>... [--dry-run]` or `specs audit [--role <name>]... [--json]`",
                     );
                     ExitCode::FAILURE
                 }

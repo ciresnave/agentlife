@@ -203,6 +203,21 @@ pub(crate) fn specs_both_channels(rest: &[String]) -> Result<(Vec<String>, bool)
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct SpecsAudit {
+    #[arg(long = "role", allow_hyphen_values = true)]
+    roles: Vec<String>,
+    #[arg(long, overrides_with = "json")]
+    json: bool,
+}
+
+/// `specs audit [--role R]... [--json]` -> `(roles, json)`; no role means every recorded one.
+pub(crate) fn specs_audit(rest: &[String]) -> Result<(Vec<String>, bool), String> {
+    let a: SpecsAudit = parse("specs audit", &["--role"], rest)?;
+    Ok((a.roles, a.json))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct LaneNew {
     role: String,
     repo: String,

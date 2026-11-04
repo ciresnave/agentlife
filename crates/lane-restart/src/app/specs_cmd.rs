@@ -279,5 +279,45 @@ pub(super) fn both_channels(ctx: &mut Ctx, roles: Vec<String>, dry_run: bool) ->
     }
 }
 
+/// `lane-restart specs audit [--role R]... [--json]` - any caller; writes nothing, not even a
+/// ledger row. Exit 1 when any row has a failing finding.
+pub(super) fn audit(ctx: &mut Ctx, roles: Vec<String>, json: bool) -> ExitCode {
+    use crate::spec_audit::{audit, common_home, findings, render, Severity};
+    let now = chrono::Utc::now();
+    let state = ctx.state_dir.clone();
+    // The rows come first: they name the identity home the daemon is asked through.
+    let rows0 = audit(&state, &roles, &Err(String::new()), now);
+    let presence = ctx.presence(common_home(&rows0).as_deref());
+    let rows = audit(&state, &roles, &presence, now);
+    if json {
+        let v: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                let f = findings(r, now);
+                serde_json::json!({
+                    "row": r,
+                    "findings": f.iter().map(|(s, t)| serde_json::json!({"severity": s, "text": t})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        ctx.outln(&serde_json::to_string_pretty(&v).unwrap_or_default());
+        let failing = rows
+            .iter()
+            .any(|r| findings(r, now).iter().any(|(s, _)| *s == Severity::Fail));
+        return if failing {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+    let (text, ok) = render(&rows, &presence, now);
+    ctx.out(&text);
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 #[cfg(test)]
 mod tests;
