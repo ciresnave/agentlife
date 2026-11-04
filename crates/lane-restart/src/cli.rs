@@ -216,6 +216,73 @@ pub(crate) fn specs_synapse_only(rest: &[String]) -> Result<(Roles, bool, bool),
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct SpecsSet {
+    #[arg(long = "role", allow_hyphen_values = true)]
+    roles: Vec<String>,
+    #[arg(long, overrides_with = "all")]
+    all: bool,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "model")]
+    model: Option<String>,
+    #[arg(
+        long = "permission-mode",
+        allow_hyphen_values = true,
+        overrides_with = "permission_mode"
+    )]
+    permission_mode: Option<String>,
+    #[arg(
+        long = "remote-control",
+        allow_hyphen_values = true,
+        overrides_with = "remote_control"
+    )]
+    remote_control: Option<String>,
+    #[arg(long = "add-arg", allow_hyphen_values = true)]
+    add_args: Vec<String>,
+    #[arg(long = "remove-arg", allow_hyphen_values = true)]
+    remove_args: Vec<String>,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+}
+
+/// `specs set (--role R... | --all) [--model M] [--permission-mode P] [--remote-control true|false]
+/// [--add-arg A]... [--remove-arg A]... [--dry-run]` -> `(roles, options, dry_run)`.
+pub(crate) fn specs_set(
+    rest: &[String],
+) -> Result<(Roles, crate::spec_set::SetOptions, bool), String> {
+    let a: SpecsSet = parse(
+        "specs set",
+        &[
+            "--role",
+            "--model",
+            "--permission-mode",
+            "--remote-control",
+            "--add-arg",
+            "--remove-arg",
+        ],
+        rest,
+    )?;
+    let remote_control = match a.remote_control.as_deref() {
+        None => None,
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        Some(other) => {
+            return Err(format!(
+                "--remote-control takes true or false, not {other:?}"
+            ))
+        }
+    };
+    let opts = crate::spec_set::SetOptions {
+        model: a.model,
+        permission_mode: a.permission_mode,
+        remote_control,
+        add_args: a.add_args,
+        remove_args: a.remove_args,
+    };
+    crate::spec_set::validate(&opts)?;
+    Ok((roles_or_all(a.roles, a.all)?, opts, a.dry_run))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct SpecsBothChannels {
     #[arg(long = "role", allow_hyphen_values = true)]
     roles: Vec<String>,

@@ -254,6 +254,17 @@ USAGE:
         queued mail is. Exit 1 on any peers-only launch, bad mcp.json, missing identity or
         expired certificate; other findings are warnings. --json prints the rows.
 
+    lane-restart specs set (--role <name> [--role <name>]... | --all) [--model sonnet|haiku]
+            [--permission-mode default|acceptEdits|auto] [--remote-control true|false]
+            [--add-arg <token>]... [--remove-arg <token>]... [--dry-run]
+        Writing is PM only; --dry-run writes nothing and any caller may run it. Change recorded
+        launch fields other than the channels (those are specs both-channels / synapse-only).
+        Refused, untouched: Opus or any model but sonnet/haiku, bypassPermissions, a channel flag,
+        --model or --permission-mode as an argument, an argument to remove that the spec does not
+        carry, a result that would not launch. The old spec is copied once to
+        <role>.launch.json.pre-set; a soft-stop spec is re-signed by the write and read back. With
+        --all, refused roles are skipped and named, and the command exits 0 only if none were.
+
     lane-restart specs both-channels (--role <name> [--role <name>]... | --all) [--dry-run]
         Writing is PM only; --dry-run writes nothing and any caller may run it. Bring a
         role's launch_args to the full push-channel form: --mcp-config <role>.mcp.json
@@ -424,6 +435,13 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                         }
                     }
                 }
+                Some((sub, tail)) if sub == "set" => match cli::specs_set(tail) {
+                    Ok((roles, opts, dry_run)) => specs_cmd::set(ctx, roles, opts, dry_run),
+                    Err(e) => {
+                        ctx.errln(&format!("lane-restart specs set: {e}"));
+                        ExitCode::FAILURE
+                    }
+                },
                 Some((sub, tail)) if sub == "audit" => match cli::specs_audit(tail) {
                     Ok((roles, json)) => specs_cmd::audit(ctx, roles, json),
                     Err(e) => {
@@ -433,7 +451,7 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                 },
                 _ => {
                     ctx.errln(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only (--role <name>... | --all) [--strict] [--dry-run]`, `specs both-channels (--role <name>... | --all) [--dry-run]` or `specs audit [--role <name>]... [--json]`",
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only (--role <name>... | --all) [--strict] [--dry-run]`, `specs both-channels (--role <name>... | --all) [--dry-run]`, `specs set (--role <name>... | --all) <field options> [--dry-run]` or `specs audit [--role <name>]... [--json]`",
                     );
                     ExitCode::FAILURE
                 }
