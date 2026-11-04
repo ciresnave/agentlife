@@ -141,11 +141,17 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let pin_note = plan
-        .pinned_from
-        .as_deref()
-        .map(|was| format!(" model-pinned:{was}"))
-        .unwrap_or_default();
+    let pin_note = format!(
+        "{}{}",
+        plan.pinned_from
+            .as_deref()
+            .map(|was| format!(" model-pinned:{was}"))
+            .unwrap_or_default(),
+        plan.healed
+            .as_deref()
+            .map(|added| format!(" channel-healed:{added}"))
+            .unwrap_or_default()
+    );
     if args.dry_run {
         let cmdline: Vec<String> = plan
             .argv

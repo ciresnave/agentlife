@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.35
+
+- **`start` and a restart heal a recorded launch that lacks the synapse channel (PM [TASK] fleet-spec-tooling, slice 4).** kiss, 2026-11-04: a spec without `server:synapse` relaunched silently without the tool, so mail to the lane queued unread. `spec_channels::heal_synapse` now runs on the recorded arguments at `start` (`plan_start`) and at a restart (`DirSpecStore::existing`, whose spec `carry_spec_flags` launches and writes back): when the role has a Synapse identity (`<role>.mcp.json` names a synapse server and the identity home it names has the role's directory) and the arguments lack `--mcp-config` or `server:synapse`, it adds them (`--mcp-config <role>.mcp.json`, the dev-channels flag, `server:synapse`; other channels such as claude-peers are neither added nor removed). The healed arguments are launched and written back with the spec; `start` reports `channel-healed:server:synapse`, a restart prints a stderr line. A role with no identity is launched exactly as recorded (there is nothing to heal with; `specs audit` reports it). There is no refuse path: with an identity the fix is always computable. `specs both-channels` and `specs synapse-only` are unchanged.
+
 ## 0.30.34
 
 - **`specs both-channels` and `specs synapse-only` take `--all` (PM [TASK] fleet-spec-tooling, slice 2; stacked on #249 for `spec_audit::roles`).** Exactly one of `--role R...` and `--all` (every role with a recorded launch spec). A role that cannot be rewritten is skipped, untouched, and named with its reason in a final `SKIPPED n of m role(s) as refused` line; the command exits 0 only when none was refused (`ALL m role(s) handled, none refused`). Measured with `both-channels --all --dry-run` on the real specs: 50 roles, 10 would be rewritten, 32 unchanged, 8 refused (no mcp.json). Nothing was written and no ledger row either.
