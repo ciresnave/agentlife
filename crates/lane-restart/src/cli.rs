@@ -248,6 +248,22 @@ pub(crate) fn specs_audit(rest: &[String]) -> Result<(Vec<String>, bool), String
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct LaneProvision {
+    role: String,
+    #[arg(long, overrides_with = "apply")]
+    apply: bool,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "plan")]
+    plan: Option<String>,
+}
+
+/// `lane-provision <role> [--apply --plan <hash>]` -> `(role, apply, plan)`.
+pub(crate) fn lane_provision(rest: &[String]) -> Result<(String, bool, Option<String>), String> {
+    let a: LaneProvision = parse("lane-provision", &["--plan"], rest)?;
+    Ok((a.role, a.apply, a.plan))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct LaneNew {
     role: String,
     repo: String,

@@ -98,13 +98,13 @@ impl Roots {
         )
     }
 
-    fn mcp_path(&self, role: &str) -> PathBuf {
+    pub(crate) fn mcp_path(&self, role: &str) -> PathBuf {
         self.state_dir.join(format!("{role}.mcp.json"))
     }
-    fn spec_path(&self, role: &str) -> PathBuf {
+    pub(crate) fn spec_path(&self, role: &str) -> PathBuf {
         self.state_dir.join(format!("{role}.launch.json"))
     }
-    fn lane_home(&self, role: &str) -> PathBuf {
+    pub(crate) fn lane_home(&self, role: &str) -> PathBuf {
         self.lane_homes.join(role)
     }
     fn repo_dir(&self, repo: &str) -> PathBuf {
@@ -153,8 +153,13 @@ impl Report {
     }
 
     pub fn render(&self, apply: bool) -> String {
+        self.render_as("lane-new", "the same role, repo and model", apply)
+    }
+
+    /// As [`Report::render`] for the command `cmd`; `same` names what a repeat must keep identical.
+    pub fn render_as(&self, cmd: &str, same: &str, apply: bool) -> String {
         let mut s = format!(
-            "lane-new: {}\n",
+            "{cmd}: {}\n",
             if apply {
                 "APPLY"
             } else {
@@ -176,7 +181,7 @@ impl Report {
         }
         if let Some(p) = &self.plan {
             s.push_str(&format!(
-                "plan {p}\n  to act, repeat the same role, repo and model with: --apply --plan {p}\n"
+                "plan {p}\n  to act, repeat {same} with: --apply --plan {p}\n"
             ));
         }
         s
@@ -367,7 +372,7 @@ fn soak_with(text: &str, role: &str) -> String {
     s
 }
 
-fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
     let dir = path.parent().ok_or("no parent directory")?;
     let tmp = dir.join(format!(
         ".{}.lane-new.tmp",
@@ -385,7 +390,7 @@ struct Want {
     mcp: String,
 }
 
-fn fail(rows: &mut Vec<StepRow>, n: u8, name: &'static str, detail: String) {
+pub(crate) fn fail(rows: &mut Vec<StepRow>, n: u8, name: &'static str, detail: String) {
     rows.push(StepRow {
         n,
         name,
@@ -397,7 +402,7 @@ fn fail(rows: &mut Vec<StepRow>, n: u8, name: &'static str, detail: String) {
 /// Step 6: the Synapse identity. `already` if the lane home holds the certificate and the announce file;
 /// else (with `apply`) runs the provisioning script for this role alone and reads back both its counts
 /// and the files.
-fn step_identity(
+pub(crate) fn step_identity(
     host: &dyn Host,
     roots: &Roots,
     role: &str,
