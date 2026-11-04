@@ -325,6 +325,77 @@ pub(super) fn both_channels(ctx: &mut Ctx, roles: crate::cli::Roles, dry_run: bo
     }
 }
 
+/// `lane-restart specs set (--role R... | --all) <fields> [--dry-run]` - writing is PM only; a dry
+/// run writes nothing and any caller may read it. See `spec_set`.
+pub(super) fn set(
+    ctx: &mut Ctx,
+    roles: crate::cli::Roles,
+    opts: crate::spec_set::SetOptions,
+    dry_run: bool,
+) -> ExitCode {
+    use crate::spec_set::{render, set_roles};
+    use crate::spec_synapse::RewriteOutcome;
+    let all = roles == crate::cli::Roles::All;
+    let roles = resolve(ctx, roles);
+    let caller = ctx.verified_caller();
+    let caller_role = caller.as_ref().ok().cloned();
+    let requested_by = caller_role
+        .clone()
+        .unwrap_or_else(|| "unverified".to_string());
+    if !dry_run && caller_role.as_deref() != Some(start::PM_ROLE) {
+        let why = match caller {
+            Ok(r) => format!("only the PM session may rewrite specs; this is running under {r:?}"),
+            Err(e) => format!(
+                "only the PM session may rewrite specs, and the caller could not be verified: {e}"
+            ),
+        };
+        ctx.errln(&format!("lane-restart specs set: refused - {why}"));
+        ctx.log_ledger(
+            &requested_by,
+            &roles.join(","),
+            "set",
+            caller_role.as_deref(),
+            None,
+            None,
+            &format!("refused: {why}"),
+            false,
+        );
+        return ExitCode::FAILURE;
+    }
+    let state = ctx.state_dir.clone();
+    let rows = set_roles(&state, &roles, &opts, dry_run, chrono::Utc::now());
+    let mut refused = false;
+    for r in &rows {
+        let (outcome, acted) = match &r.outcome {
+            RewriteOutcome::Rewrote(c) => (format!("set {}", c.join("; ")), true),
+            RewriteOutcome::Refused(why) => {
+                refused = true;
+                (format!("refused: {why}"), false)
+            }
+            RewriteOutcome::WouldRewrite(_) | RewriteOutcome::Unchanged => continue,
+        };
+        ctx.log_ledger(
+            &requested_by,
+            &r.role,
+            "set",
+            caller_role.as_deref(),
+            opts.model.as_deref(),
+            None,
+            &outcome,
+            acted,
+        );
+    }
+    ctx.out(&render(&rows, dry_run));
+    if all {
+        ctx.out(&refused_summary(&rows));
+    }
+    if refused {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// `lane-restart specs audit [--role R]... [--json]` - any caller; writes nothing, not even a
 /// ledger row. Exit 1 when any row has a failing finding.
 pub(super) fn audit(ctx: &mut Ctx, roles: Vec<String>, json: bool) -> ExitCode {
