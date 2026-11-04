@@ -20,6 +20,45 @@ pub(super) fn run(
     apply: bool,
     plan: Option<String>,
 ) -> ExitCode {
+    run_target(ctx, role, repo, None, model, apply, plan)
+}
+
+/// `lane-new-worktree <role> <repo> <worktree-path>`: the same command over a git worktree of an
+/// existing checkout instead of a new repository (no GitHub repo, clone or seed).
+pub(super) fn run_worktree(
+    ctx: &mut Ctx,
+    role: String,
+    repo: String,
+    worktree: String,
+    model: String,
+    apply: bool,
+    plan: Option<String>,
+) -> ExitCode {
+    run_target(
+        ctx,
+        role,
+        repo,
+        Some(std::path::PathBuf::from(worktree)),
+        model,
+        apply,
+        plan,
+    )
+}
+
+fn run_target(
+    ctx: &mut Ctx,
+    role: String,
+    repo: String,
+    worktree: Option<std::path::PathBuf>,
+    model: String,
+    apply: bool,
+    plan: Option<String>,
+) -> ExitCode {
+    let cmd = if worktree.is_some() {
+        "lane-new-worktree"
+    } else {
+        "lane-new"
+    };
     let caller = ctx.verified_caller();
     let caller_role = caller.as_ref().ok().cloned();
     let requested_by = caller_role
@@ -32,7 +71,7 @@ pub(super) fn run(
                 "only the PM session may create a lane, and the caller could not be verified: {e}"
             ),
         };
-        ctx.errln(&format!("lane-restart lane-new: refused - {why}"));
+        ctx.errln(&format!("lane-restart {cmd}: refused - {why}"));
         ctx.log_ledger(
             &requested_by,
             &role,
@@ -48,7 +87,7 @@ pub(super) fn run(
     let roots = match ctx.lane_new_roots() {
         Ok(r) => r,
         Err(e) => {
-            ctx.errln(&format!("lane-restart lane-new: {e}"));
+            ctx.errln(&format!("lane-restart {cmd}: {e}"));
             return ExitCode::FAILURE;
         }
     };
@@ -59,7 +98,33 @@ pub(super) fn run(
     let host = ctx.lane_new_host(&roots);
     // `--apply` goes through `run_apply`, which refuses unless `--plan` is the hash a dry run of exactly
     // these arguments printed: a typo'd role or repo cannot be applied without being planned first.
-    let report = if apply {
+    let report = if let Some(wt) = worktree.as_deref() {
+        if apply {
+            crate::lane_new::run_apply_worktree(
+                &roots,
+                vcs.as_deref(),
+                host.as_deref(),
+                &role,
+                &repo,
+                wt,
+                &model,
+                plan.as_deref(),
+                chrono::Utc::now(),
+            )
+        } else {
+            crate::lane_new::run_full_worktree(
+                &roots,
+                vcs.as_deref(),
+                host.as_deref(),
+                &role,
+                &repo,
+                wt,
+                &model,
+                false,
+                chrono::Utc::now(),
+            )
+        }
+    } else if apply {
         crate::lane_new::run_apply(
             &roots,
             vcs.as_deref(),
@@ -95,7 +160,10 @@ pub(super) fn run(
             "lane-new",
             caller_role.as_deref(),
             Some(&model),
-            Some(&format!("repo {repo}")),
+            Some(&match &worktree {
+                Some(wt) => format!("repo {repo} worktree {}", wt.display()),
+                None => format!("repo {repo}"),
+            }),
             &format!(
                 "{}: {}",
                 if report.failed() { "failed" } else { "created" },

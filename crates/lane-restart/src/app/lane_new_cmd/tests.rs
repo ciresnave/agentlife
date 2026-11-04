@@ -223,3 +223,155 @@ fn apply_with_the_dry_runs_plan_writes_the_lane_files_and_records_what_was_done(
     assert_eq!(logged[0].kind.as_deref(), Some("lane-new"));
     assert_eq!(logged[0].caller_role.as_deref(), Some("pm"));
 }
+
+/// `<base>/proj/<repo>` as a checkout and `<base>/proj/<repo>-wt-<topic>` as a worktree of it (its `.git`
+/// is a file pointing into the checkout's `.git/worktrees`, as `git worktree add` writes it).
+fn worktree(base: &Path, repo: &str, topic: &str) -> PathBuf {
+    let primary = base.join("proj").join(repo);
+    std::fs::create_dir_all(primary.join(".git").join("worktrees").join(topic)).unwrap();
+    let wt = base.join("proj").join(format!("{repo}-wt-{topic}"));
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(
+        wt.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            primary.join(".git").join("worktrees").join(topic).display()
+        ),
+    )
+    .unwrap();
+    wt
+}
+
+fn lnw(role: &str, wt: &Path, rest: &[&str]) -> Vec<OsString> {
+    let mut v = vec!["lane-new-worktree", role, "zetafish"];
+    let w = wt.to_string_lossy().into_owned();
+    let mut a = args(&v);
+    a.push(OsString::from(w));
+    v.clear();
+    a.extend(rest.iter().map(OsString::from));
+    a
+}
+
+#[test]
+fn a_worktree_lane_dry_runs_then_applies_with_the_worktree_as_its_cwd_and_no_repo_steps() {
+    let d = tempfile::tempdir().unwrap();
+    let r = roots(d.path());
+    let state = r.state_dir.clone();
+    let wt = worktree(d.path(), "zetafish", "pkg-b");
+    let before = listing(&state);
+    let mut dry = ctx(Ok(r.clone()), &state, Some("pm"));
+    let code = run_with(&mut dry, lnw("zetafish-b", &wt, &[]));
+    let (out, err) = dry.captured();
+    assert!(ok(code), "{out}\n{err}");
+    assert_eq!(listing(&state), before, "a dry run changed the state dir");
+    for n in ["create repo", "clone + seed", "protect main"] {
+        assert!(!out.contains(n), "a worktree lane has no step {n:?}: {out}");
+    }
+    let plan = plan_of(&out);
+    let mut c = ctx(Ok(r), &state, Some("pm"));
+    let code = run_with(
+        &mut c,
+        lnw("zetafish-b", &wt, &["--apply", "--plan", &plan]),
+    );
+    let (out, err) = c.captured();
+    assert!(ok(code), "{out}\n{err}");
+    let spec = crate::spec::read(&state, "zetafish-b").unwrap();
+    assert_eq!(spec.cwd, wt.to_string_lossy());
+    assert_eq!(
+        spec.handoff_path.as_deref(),
+        Some(&*wt.join("HANDOFF.md").to_string_lossy())
+    );
+    assert_eq!(spec.state, crate::spec::SpecState::Suspended);
+    assert!(spec.stop_kind.is_none());
+    let logged = rows(&state);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].acted);
+    assert!(
+        logged[0].reason.as_deref().unwrap().contains("worktree"),
+        "{:?}",
+        logged[0]
+    );
+}
+
+#[test]
+fn a_plan_is_bound_to_its_worktree_and_a_non_pm_caller_is_refused_by_command_name() {
+    let d = tempfile::tempdir().unwrap();
+    let r = roots(d.path());
+    let state = r.state_dir.clone();
+    let b = worktree(d.path(), "zetafish", "pkg-b");
+    let c_wt = worktree(d.path(), "zetafish", "pkg-c");
+    let mut dry = ctx(Ok(r.clone()), &state, Some("pm"));
+    assert!(ok(run_with(&mut dry, lnw("zetafish-b", &b, &[]))));
+    let plan = plan_of(&dry.captured().0);
+    let before = listing(&state);
+    let mut c = ctx(Ok(r.clone()), &state, Some("pm"));
+    let code = run_with(
+        &mut c,
+        lnw("zetafish-b", &c_wt, &["--apply", "--plan", &plan]),
+    );
+    assert!(failed(code));
+    assert!(c.captured().0.contains("is not the plan for role"));
+    let mut after = listing(&state);
+    after.retain(|n| n != "restart.log");
+    assert_eq!(after, before);
+    let mut other = ctx(Ok(r), &state, Some("alpha"));
+    assert!(failed(run_with(&mut other, lnw("zetafish-b", &b, &[]))));
+    assert!(
+        other
+            .captured()
+            .1
+            .contains("lane-restart lane-new-worktree: refused - only the PM session"),
+        "refusal must name the command that was refused"
+    );
+}
+
+#[test]
+fn a_path_that_is_not_a_worktree_of_the_repo_is_refused_and_the_real_one_is_not() {
+    let d = tempfile::tempdir().unwrap();
+    let r = roots(d.path());
+    let state = r.state_dir.clone();
+    let good = worktree(d.path(), "zetafish", "pkg-b");
+    let plain = d.path().join("proj").join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let elsewhere = d.path().join("proj").join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(
+        elsewhere.join(".git"),
+        "gitdir: /somewhere/else/.git/worktrees/x\n",
+    )
+    .unwrap();
+    let primary = d.path().join("proj").join("zetafish");
+    for (bad, why) in [
+        (plain, "no .git file"),
+        (elsewhere, "does not point into"),
+        (primary, "the primary checkout itself"),
+        (PathBuf::from("rel/path"), "not absolute"),
+        (d.path().join("proj").join("missing"), "no .git file"),
+    ] {
+        let mut c = ctx(Ok(r.clone()), &state, Some("pm"));
+        let code = run_with(&mut c, lnw("zetafish-b", &bad, &[]));
+        let (out, _) = c.captured();
+        assert!(failed(code), "{bad:?} accepted: {out}");
+        assert!(out.contains(why), "{bad:?}: wanted {why:?} in {out}");
+    }
+    let mut c = ctx(Ok(r), &state, Some("pm"));
+    let code = run_with(&mut c, lnw("zetafish-b", &good, &[]));
+    assert!(
+        ok(code),
+        "control: a real worktree is accepted: {}",
+        c.captured().0
+    );
+}
+
+#[test]
+fn a_worktree_of_a_repo_with_no_checkout_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let r = roots(d.path());
+    let state = r.state_dir.clone();
+    let wt = d.path().join("proj").join("zetafish-wt-x");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), "gitdir: x\n").unwrap();
+    let mut c = ctx(Ok(r), &state, Some("pm"));
+    assert!(failed(run_with(&mut c, lnw("zetafish-b", &wt, &[]))));
+    assert!(c.captured().0.contains("no repo to take a worktree of"));
+}

@@ -280,8 +280,18 @@ pub fn build_spec(
     model: &str,
     now: DateTime<Utc>,
 ) -> Result<SpecFile, String> {
+    build_spec_at(roots, role, &roots.repo_dir(repo), model, now)
+}
+
+/// [`build_spec`] for a lane whose working directory is `cwd` (the repo's checkout, or a worktree of it).
+pub fn build_spec_at(
+    roots: &Roots,
+    role: &str,
+    cwd: &Path,
+    model: &str,
+    now: DateTime<Utc>,
+) -> Result<SpecFile, String> {
     let r = lane_state::role::Role::new(role).map_err(|e| format!("role {role:?}: {e}"))?;
-    let cwd = roots.repo_dir(repo);
     Ok(SpecFile {
         schema: spec::SCHEMA,
         role: r.clone(),
@@ -533,11 +543,210 @@ pub fn run_full(
     apply: bool,
     now: DateTime<Utc>,
 ) -> Report {
+    run_inner(roots, vcs, host, role, repo, None, model, apply, now)
+}
+
+/// `lane-new-worktree`: a lane whose working directory is `worktree`, a git worktree of the existing
+/// checkout `<projects>/<repo>`. No GitHub repo, no clone, no seed (steps 1, 2 and 8 do not exist here);
+/// steps 0 and 3 to 7 are the same code as [`run_full`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_full_worktree(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
+    role: &str,
+    repo: &str,
+    worktree: &Path,
+    model: &str,
+    apply: bool,
+    now: DateTime<Utc>,
+) -> Report {
+    run_inner(
+        roots,
+        vcs,
+        host,
+        role,
+        repo,
+        Some(worktree),
+        model,
+        apply,
+        now,
+    )
+}
+
+/// Fingerprint of a `lane-new-worktree` run: as [`plan_hash`] but over the worktree path, with no seed.
+pub fn plan_hash_worktree(
+    roots: &Roots,
+    role: &str,
+    repo: &str,
+    worktree: &Path,
+    model: &str,
+) -> String {
+    let s = format!(
+        "lane-new-worktree plan v1\nrole={role}\nrepo={repo}\nworktree={}\nmodel={model}\nstate_dir={}\nprojects={}\nlane_homes={}\npilot_home={}\nchannel_exe={}\n",
+        worktree.display(),
+        roots.state_dir.display(),
+        roots.projects.display(),
+        roots.lane_homes.display(),
+        roots.pilot_home.display(),
+        roots.channel_exe.display()
+    );
+    remote::sha256_hex(s.as_bytes())[..16].to_string()
+}
+
+/// `--apply` for a worktree lane: refuses unless `plan` is the [`plan_hash_worktree`] of exactly these arguments.
+#[allow(clippy::too_many_arguments)]
+pub fn run_apply_worktree(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
+    role: &str,
+    repo: &str,
+    worktree: &Path,
+    model: &str,
+    plan: Option<&str>,
+    now: DateTime<Utc>,
+) -> Report {
+    let refuse = |why: String| Report {
+        rows: vec![StepRow {
+            n: 0,
+            name: "plan",
+            status: Status::Fail,
+            detail: why,
+        }],
+        paths: Vec::new(),
+        plan: None,
+    };
+    let Some(given) = plan else {
+        return refuse("--apply needs --plan <hash>, printed at the end of a dry run of the same role, repo, worktree and model".to_string());
+    };
+    if plan_hash_worktree(roots, role, repo, worktree, model) == given {
+        run_full_worktree(roots, vcs, host, role, repo, worktree, model, true, now)
+    } else {
+        refuse(format!(
+            "--plan {given} is not the plan for role {role:?}, repo {repo:?}, worktree {}, model {model:?}: dry-run these exact arguments again and use the hash it prints",
+            worktree.display()
+        ))
+    }
+}
+
+/// Step 0 problems with a worktree argument: it must be an absolute, existing, clean git worktree whose
+/// `.git` file points into the primary checkout's `.git/worktrees`, on the same origin as the primary.
+fn worktree_problems(vcs: Option<&dyn Vcs>, primary: &Path, worktree: &Path) -> Vec<String> {
+    let mut p = Vec::new();
+    if !worktree.is_absolute() {
+        p.push(format!(
+            "the worktree path is not absolute: {}",
+            worktree.display()
+        ));
+        return p;
+    }
+    if !primary.join(".git").is_dir() {
+        p.push(format!(
+            "{} is not a git checkout: no repo to take a worktree of",
+            primary.display()
+        ));
+        return p;
+    }
+    if fwd(worktree)
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(fwd(primary).trim_end_matches('/'))
+    {
+        p.push(
+            "the worktree is the primary checkout itself; use lane-new for a first lane"
+                .to_string(),
+        );
+        return p;
+    }
+    let dotgit = worktree.join(".git");
+    match std::fs::read_to_string(&dotgit) {
+        Err(_) => {
+            p.push(format!(
+                "{} is not a git worktree: no .git file in it",
+                worktree.display()
+            ));
+            return p;
+        }
+        Ok(t) => {
+            let gitdir = t
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix("gitdir:"))
+                .map(|g| g.trim().replace('\\', "/").to_ascii_lowercase());
+            let want = format!("{}/.git/worktrees/", fwd(primary).trim_end_matches('/'))
+                .to_ascii_lowercase();
+            if !gitdir.is_some_and(|g| g.starts_with(&want)) {
+                p.push(format!(
+                    "{} is not a worktree of {} (its .git file does not point into {}.git/worktrees)",
+                    worktree.display(),
+                    primary.display(),
+                    fwd(primary).trim_end_matches('/').to_string() + "/"
+                ));
+                return p;
+            }
+        }
+    }
+    if let Some(v) = vcs {
+        match (v.local_state(worktree), v.local_state(primary)) {
+            (Err(e), _) | (_, Err(e)) => p.push(format!("cannot read the checkout: {e}")),
+            (
+                Ok(remote::LocalState::Repo {
+                    origin,
+                    head,
+                    clean,
+                }),
+                Ok(remote::LocalState::Repo { origin: o2, .. }),
+            ) => {
+                if !clean {
+                    p.push(format!(
+                        "{} has uncommitted changes; a new lane starts from a clean worktree",
+                        worktree.display()
+                    ));
+                }
+                if head.is_none() {
+                    p.push(format!("{} has no commit", worktree.display()));
+                }
+                if origin != o2 {
+                    p.push(format!(
+                        "{} has origin {origin:?} but {} has {o2:?}",
+                        worktree.display(),
+                        primary.display()
+                    ));
+                }
+            }
+            _ => p.push(format!(
+                "{} or {} is not a git checkout",
+                worktree.display(),
+                primary.display()
+            )),
+        }
+    }
+    p
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner(
+    roots: &Roots,
+    vcs: Option<&dyn Vcs>,
+    host: Option<&dyn Host>,
+    role: &str,
+    repo: &str,
+    worktree: Option<&Path>,
+    model: &str,
+    apply: bool,
+    now: DateTime<Utc>,
+) -> Report {
     let nwo = format!("{ORG}/{repo}");
+    let cwd = worktree
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| roots.repo_dir(repo));
+    // gh and the seed are for a new repo only; a worktree lane's vcs use is the local checks.
+    let wt_vcs = vcs;
+    let vcs = if worktree.is_some() { None } else { vcs };
     let mut rows = Vec::new();
     let mut paths = vec![
         roots.state_dir.clone(),
-        roots.repo_dir(repo),
+        cwd.clone(),
         roots.mcp_path(role),
         roots.spec_path(role),
         roots.soak_path(),
@@ -571,7 +780,7 @@ pub fn run_full(
         fail(&mut rows, 0, "validate", problems.join("; "));
         return rep(rows, paths);
     }
-    let want = match build_spec(roots, role, repo, model, now) {
+    let want = match build_spec_at(roots, role, &cwd, model, now) {
         Ok(spec) => Want {
             spec,
             mcp: serde_json::to_string_pretty(&mcp_config(roots, role)).unwrap_or_default() + "\n",
@@ -657,6 +866,9 @@ pub fn run_full(
     if let Some(v) = vcs {
         problems.extend(remote::local_problems(v, &roots.repo_dir(repo), &nwo));
     }
+    if let Some(wt) = worktree {
+        problems.extend(worktree_problems(wt_vcs, &roots.repo_dir(repo), wt));
+    }
     if let Some(h) = host {
         if let Err(why) = h.disk_floor(&roots.state_dir) {
             problems.push(format!("disk floor: {why}"));
@@ -670,7 +882,13 @@ pub fn run_full(
         n: 0,
         name: "validate",
         status: Status::Ok,
-        detail: format!("{role} / {nwo} / {model}; nothing in the way"),
+        detail: match worktree {
+            Some(wt) => format!(
+                "{role} / worktree {} of {repo} / {model}; nothing in the way",
+                wt.display()
+            ),
+            None => format!("{role} / {nwo} / {model}; nothing in the way"),
+        },
     });
 
     // --- steps 1 and 2: the repo, then the clone and seed (slice 2) ----------------------------
@@ -853,7 +1071,7 @@ pub fn run_full(
         status: Status::Later,
         detail,
     };
-    if vcs.is_none() {
+    if vcs.is_none() && worktree.is_none() {
         rows.push(later(
             1,
             "create repo",
@@ -909,22 +1127,27 @@ pub fn run_full(
             format!("lane-restart start --role {role} --model {model} --reason lane-new"),
         ));
     }
-    rows.push(later(
-        8,
-        "protect main (PM)",
-        format!(
-            "after the first CI run on main: tools/protect-main.sh {nwo} {}",
-            remote::REQUIRED_CONTEXTS
-                .iter()
-                .map(|c| format!("\"{c}\""))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
-    ));
+    if worktree.is_none() {
+        rows.push(later(
+            8,
+            "protect main (PM)",
+            format!(
+                "after the first CI run on main: tools/protect-main.sh {nwo} {}",
+                remote::REQUIRED_CONTEXTS
+                    .iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ));
+    }
     rows.sort_by_key(|r| r.n);
     let mut report = rep(rows, paths);
     if !apply && !report.failed() {
-        report.plan = plan_hash(roots, role, repo, model).ok();
+        report.plan = match worktree {
+            Some(wt) => Some(plan_hash_worktree(roots, role, repo, wt, model)),
+            None => plan_hash(roots, role, repo, model).ok(),
+        };
     }
     report
 }
@@ -1241,5 +1464,91 @@ mod tests {
         with_peers.push("server:claude-peers".into());
         let e = crate::spec_channels::check_synapse_only(&with_peers).unwrap_err();
         assert!(e.contains("server:claude-peers"), "{e}");
+    }
+
+    /// A `Vcs` that answers `local_state` only: what `worktree_problems` asks of git.
+    struct LocalOnly {
+        primary: remote::LocalState,
+        worktree: remote::LocalState,
+        primary_dir: PathBuf,
+    }
+    impl Vcs for LocalOnly {
+        fn repo_state(&self, _: &str) -> Result<remote::RepoState, String> {
+            unimplemented!()
+        }
+        fn create_public(&self, _: &str, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn remote_head(&self, _: &str) -> Result<Option<String>, String> {
+            unimplemented!()
+        }
+        fn remote_file(&self, _: &str, _: &str, _: &str) -> Result<Option<Vec<u8>>, String> {
+            unimplemented!()
+        }
+        fn remote_paths(&self, _: &str, _: &str) -> Result<Vec<String>, String> {
+            unimplemented!()
+        }
+        fn local_paths(&self, _: &Path) -> Result<Vec<String>, String> {
+            unimplemented!()
+        }
+        fn clone_repo(&self, _: &str, _: &Path) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn local_state(&self, dir: &Path) -> Result<remote::LocalState, String> {
+            Ok(if dir == self.primary_dir {
+                self.primary.clone()
+            } else {
+                self.worktree.clone()
+            })
+        }
+        fn commit_all(&self, _: &Path, _: &str) -> Result<String, String> {
+            unimplemented!()
+        }
+        fn push_main(&self, _: &Path) -> Result<(), String> {
+            unimplemented!()
+        }
+    }
+
+    fn repo_at(origin: &str, head: Option<&str>, clean: bool) -> remote::LocalState {
+        remote::LocalState::Repo {
+            origin: origin.into(),
+            head: head.map(String::from),
+            clean,
+        }
+    }
+
+    #[test]
+    fn a_dirty_headless_or_foreign_worktree_is_a_problem_and_a_clean_sibling_is_not() {
+        let d = tempdir().unwrap();
+        let primary = d.path().join("proj").join("zetafish");
+        std::fs::create_dir_all(primary.join(".git").join("worktrees").join("b")).unwrap();
+        let wt = d.path().join("proj").join("zetafish-wt-b");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git/worktrees/b\n", fwd(&primary)),
+        )
+        .unwrap();
+        let o = "https://github.com/ThinkersJournal/zetafish.git";
+        let check = |worktree: remote::LocalState| {
+            let v = LocalOnly {
+                primary: repo_at(o, Some("abc"), true),
+                worktree,
+                primary_dir: primary.clone(),
+            };
+            worktree_problems(Some(&v), &primary, &wt)
+        };
+        assert_eq!(
+            check(repo_at(o, Some("abc"), true)),
+            Vec::<String>::new(),
+            "control: clean, committed, same origin"
+        );
+        assert!(check(repo_at(o, Some("abc"), false))[0].contains("uncommitted changes"));
+        assert!(check(repo_at(o, None, true))[0].contains("has no commit"));
+        assert!(
+            check(repo_at("https://github.com/x/y.git", Some("abc"), true))[0]
+                .contains("has origin")
+        );
+        assert!(check(remote::LocalState::NotRepo)[0].contains("is not a git checkout"));
     }
 }

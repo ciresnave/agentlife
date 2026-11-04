@@ -139,3 +139,7 @@ exists); the bot's default token creates and pushes without a grant; a never-sta
 `stop_kind`; and question 7 (a stub crate in the seed, not guards: see "CI seed").
 
 Open: none.
+
+## `lane-new-worktree` (0.30.32): a further lane on an existing repo
+
+`lane-restart lane-new-worktree <role> <repo> <worktree-path> [--model sonnet|haiku] [--apply --plan <hash>]` (PM only) is `lane-new` without the repo: the lane's `cwd` is a git worktree of the existing checkout `<projects>\<repo>`, made by the PM with `git worktree add`. Steps 0 and 3-7 are the same functions; steps 1, 2 and 8 (create repo, clone and seed, protect main) do not exist for it. Step 0 additionally requires the worktree to be absolute, not the primary itself, to hold a `.git` file pointing into `<projects>\<repo>\.git\worktrees\`, to be clean with a commit, and to share the primary's origin. The plan hash covers the worktree path. The first lane on a repo still uses `lane-new`.

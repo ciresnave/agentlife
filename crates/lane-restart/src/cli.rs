@@ -231,6 +231,36 @@ pub(crate) fn lane_new(rest: &[String]) -> Result<LaneNewArgs, String> {
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct LaneNewWorktree {
+    role: String,
+    repo: String,
+    worktree: String,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "model")]
+    model: Option<String>,
+    #[arg(long, overrides_with = "apply")]
+    apply: bool,
+    #[arg(long, allow_hyphen_values = true, overrides_with = "plan")]
+    plan: Option<String>,
+}
+
+/// `(role, repo, worktree, model, apply, plan)` of a `lane-new-worktree` command line.
+pub type LaneNewWorktreeArgs = (String, String, String, String, bool, Option<String>);
+
+/// `lane-new-worktree <role> <repo> <worktree-path> [--model M] [--apply --plan H]`; model defaults to `sonnet`.
+pub(crate) fn lane_new_worktree(rest: &[String]) -> Result<LaneNewWorktreeArgs, String> {
+    let a: LaneNewWorktree = parse("lane-new-worktree", &["--model", "--plan"], rest)?;
+    Ok((
+        a.role,
+        a.repo,
+        a.worktree,
+        a.model.unwrap_or_else(|| "sonnet".to_string()),
+        a.apply,
+        a.plan,
+    ))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct Start {
     #[arg(
         long,
@@ -410,5 +440,40 @@ mod lane_new_tests {
         // control: no flags is a dry run with no plan
         let (_, _, _, apply, plan) = lane_new(&args(&["rockfish", "rockfish"])).unwrap();
         assert!(!apply && plan.is_none());
+    }
+
+    #[test]
+    fn lane_new_worktree_takes_a_path_a_model_and_a_plan() {
+        let (role, repo, wt, model, apply, plan) = lane_new_worktree(&args(&[
+            "coderipper-b",
+            "coderipper",
+            "C:/Projects/coderipper-wt-pkg-b",
+            "--model",
+            "haiku",
+            "--apply",
+            "--plan",
+            "0123456789abcdef",
+        ]))
+        .unwrap();
+        assert_eq!(
+            (role.as_str(), repo.as_str(), wt.as_str(), model.as_str()),
+            (
+                "coderipper-b",
+                "coderipper",
+                "C:/Projects/coderipper-wt-pkg-b",
+                "haiku"
+            )
+        );
+        assert!(apply && plan.as_deref() == Some("0123456789abcdef"));
+        // control: no flags is a dry run on sonnet
+        let (_, _, _, model, apply, plan) = lane_new_worktree(&args(&["r", "p", "w"])).unwrap();
+        assert!(model == "sonnet" && !apply && plan.is_none());
+    }
+
+    #[test]
+    fn lane_new_worktree_refuses_a_missing_path_and_an_extra_argument() {
+        assert!(lane_new_worktree(&args(&["r", "p"])).is_err());
+        assert!(lane_new_worktree(&args(&["r", "p", "w", "x"])).is_err());
+        assert!(lane_new_worktree(&args(&["r", "p", "w", "--bogus"])).is_err());
     }
 }
