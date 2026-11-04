@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.34
+
+- **`specs both-channels` and `specs synapse-only` take `--all` (PM [TASK] fleet-spec-tooling, slice 2; stacked on #249 for `spec_audit::roles`).** Exactly one of `--role R...` and `--all` (every role with a recorded launch spec). A role that cannot be rewritten is skipped, untouched, and named with its reason in a final `SKIPPED n of m role(s) as refused` line; the command exits 0 only when none was refused (`ALL m role(s) handled, none refused`). Measured with `both-channels --all --dry-run` on the real specs: 50 roles, 10 would be rewritten, 32 unchanged, 8 refused (no mcp.json). Nothing was written and no ledger row either.
+
 ## 0.30.33
 
 - **`lane-restart specs audit [--role R]... [--json]` (any caller, writes nothing): can a Synapse message reach each lane? (PM [TASK] fleet-spec-tooling, slice 1.)** One row per recorded role: launch channels (`mcp+peers+synapse`), model, permission mode, spec state, whether `<role>.mcp.json` parses and names a synapse server, whether the identity home it names has the role's directory and a certificate and when that expires (read from the certificate body, `synapse/agent-cert/v1`: an unrecognised shape is `unreadable`, never valid), whether the role is online on the daemon (one `synapse list`, acting as an existing role so no keys are created) and how old its queued mail is. Exit 1 on a peers-only or channel-less launch, a bad or missing mcp.json, a missing identity home, or a missing/expired certificate; warnings (not failures): a certificate with under 6 h left, mail queued 30 min or more to an offline role, a role the daemon never heard of, Opus recorded. Measured on the real 50 specs at this build: 13 failing, 14 warning, 23 clean; the real certificates last 24 h, not days. No `restart.log` row is written. New: `spec_audit.rs`, `Ctx::presence`.
