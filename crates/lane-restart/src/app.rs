@@ -16,6 +16,7 @@ mod host_cmd;
 mod info_cmd;
 mod install_cmd;
 mod lane_new_cmd;
+mod lane_provision_cmd;
 mod ledger_cmd;
 mod models_cmd;
 mod restart_cmd;
@@ -227,6 +228,14 @@ USAGE:
         (resume it with `start`) and a role with a live process are refused
         with the reason. First and last lines say whether anything moved.
 
+    lane-restart lane-provision <role> [--apply --plan <hash>]
+        PM only. Give an EXISTING lane (one with a recorded launch spec) what Synapse needs,
+        creating no repo, checkout or spec and starting nothing: its <role>.mcp.json (as
+        lane-new writes it; a different one that already works is kept, any other conflict
+        stops the run), its Synapse identity (the weekly provisioning script, for this role
+        alone), and its spec brought to the full push-channel form (one backup). A dry run
+        by default; --apply needs the hash the dry run of the same role printed.
+
     lane-restart lane-new <role> <repo> [--model sonnet|haiku] [--apply --plan <hash>]
     lane-restart lane-new-worktree <role> <repo> <worktree-path> [--model sonnet|haiku] [--apply --plan <hash>]
         PM only (docs/LANE-NEW.md). Dry run (default): validates the names, the disk and
@@ -426,6 +435,17 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                     ctx.errln(
                         "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only (--role <name>... | --all) [--strict] [--dry-run]`, `specs both-channels (--role <name>... | --all) [--dry-run]` or `specs audit [--role <name>]... [--json]`",
                     );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "lane-provision" {
+            return match cli::lane_provision(rest) {
+                Ok((role, apply, plan)) => lane_provision_cmd::run(ctx, role, apply, plan),
+                Err(e) => {
+                    ctx.errln(&format!(
+                        "lane-restart lane-provision: {e}; expected `lane-provision <role> [--apply --plan <hash>]`"
+                    ));
                     ExitCode::FAILURE
                 }
             };
