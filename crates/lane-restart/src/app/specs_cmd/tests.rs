@@ -459,6 +459,10 @@ fn the_command_line_reaches_each_subcommand_and_a_bad_one_does_not() {
             &["specs", "both-channels", "--bogus"][..],
             "lane-restart specs both-channels: ",
         ),
+        (
+            &["specs", "audit", "--bogus"][..],
+            "lane-restart specs audit: ",
+        ),
     ] {
         let mut c = ctx(&state, Some("pm"), dead());
         assert!(failed(run_with(&mut c, args(bad))), "{bad:?}");
@@ -467,4 +471,48 @@ fn the_command_line_reaches_each_subcommand_and_a_bad_one_does_not() {
         assert!(err.starts_with(who), "{bad:?}: {err}");
     }
     assert!(!state.join("restart.log").exists());
+}
+
+// ---- audit ----------------------------------------------------------------------------------
+
+#[test]
+fn audit_is_open_to_any_caller_reads_the_daemon_through_the_seam_and_writes_nothing() {
+    use crate::spec_audit::Presence;
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = with_synapse_config(d.path());
+    let ask = || {
+        Ok(std::collections::BTreeMap::from([(
+            "alpha".to_string(),
+            Presence {
+                online: false,
+                queued: 2,
+                oldest_enqueued_at: None,
+            },
+        )]))
+    };
+    for caller in [Some("alpha"), None] {
+        let mut c = ctx(&state, caller, dead()).with_presence(ask);
+        // peers-only and no identity home: failing, and the table says why.
+        assert!(
+            failed(run_with(&mut c, args(&["specs", "audit"]))),
+            "{caller:?}"
+        );
+        let (out, err) = c.captured();
+        assert_eq!(err, "", "{caller:?}");
+        assert!(out.starts_with("role	channels"), "{out}");
+        assert!(out.contains("alpha	mcp+peers+-"), "{out}");
+        assert!(out.contains("peers-only"), "{out}");
+        assert!(out.contains("AUDIT 1 role(s): 1 failing"), "{out}");
+    }
+    let mut c = ctx(&state, Some("alpha"), dead()).with_presence(ask);
+    assert!(failed(run_with(
+        &mut c,
+        args(&["specs", "audit", "--role", "alpha", "--json"])
+    )));
+    let (out, _) = c.captured();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["row"]["role"], "alpha");
+    assert_eq!(v[0]["row"]["presence"]["queued"], 2);
+    assert_eq!(v[0]["findings"][0]["severity"], "fail");
+    assert!(!state.join("restart.log").exists(), "an audit logs nothing");
 }

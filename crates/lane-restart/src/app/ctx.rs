@@ -101,6 +101,8 @@ pub(crate) struct Ctx {
     free_memory_gb: Option<Option<f64>>,
     /// `None`: ask the machine's disk (`disk::guard`).
     disk: Option<DiskGuard>,
+    /// `None`: ask the Synapse daemon through the `synapse` CLI (`spec_audit::real_presence`).
+    presence: Option<Box<dyn Fn() -> crate::spec_audit::PresenceMap>>,
 }
 
 impl Ctx {
@@ -134,6 +136,7 @@ impl Ctx {
             env: None,
             free_memory_gb: None,
             disk: None,
+            presence: None,
         }
     }
 
@@ -421,6 +424,21 @@ impl Ctx {
         }
     }
 
+    /// What the Synapse daemon says about every role, asked through the identity home `home`
+    /// unless a test supplied its own answer.
+    pub(crate) fn presence(
+        &self,
+        home: Option<&std::path::Path>,
+    ) -> crate::spec_audit::PresenceMap {
+        if let Some(f) = &self.presence {
+            return f();
+        }
+        match home {
+            Some(h) => crate::spec_audit::real_presence(h),
+            None => Err("no mcp.json names an identity home to ask through".to_string()),
+        }
+    }
+
     /// Runs a `waits-poll` check: the real direct-exec runner unless a test supplied its own.
     pub(crate) fn runner(&mut self) -> &dyn CheckRunner {
         if self.runner.is_none() {
@@ -506,6 +524,9 @@ impl Ctx {
             env: None,
             free_memory_gb: None,
             disk: Some(Box::new(|_| Ok(roomy_disk()))),
+            presence: Some(Box::new(|| {
+                Err("no daemon in a capture context".to_string())
+            })),
         }
     }
 
@@ -650,6 +671,16 @@ impl Ctx {
         peers: impl Fn() -> Result<Vec<Peer>, String> + 'static,
     ) -> Self {
         self.broker_peers = Some(Box::new(peers));
+        self
+    }
+
+    /// Test only: this daemon answer instead of the real daemon's.
+    #[cfg(test)]
+    pub(crate) fn with_presence(
+        mut self,
+        f: impl Fn() -> crate::spec_audit::PresenceMap + 'static,
+    ) -> Self {
+        self.presence = Some(Box::new(f));
         self
     }
 
