@@ -605,3 +605,113 @@ fn all_and_role_are_exclusive_and_one_of_them_is_required() {
         assert!(err.contains("specs "), "{err}");
     }
 }
+
+// ---- set ------------------------------------------------------------------------------------
+
+#[test]
+fn set_dry_run_is_open_to_any_caller_and_writing_is_pm_only_and_recorded() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = with_synapse_config(d.path());
+    let before = spec::read(&state, "alpha").unwrap();
+    // a dry run is a read: any caller, even an unverifiable one
+    for caller in [Some("alpha"), None] {
+        let mut c = ctx(&state, caller, live_facts());
+        assert!(
+            ok(run_with(
+                &mut c,
+                args(&[
+                    "specs",
+                    "set",
+                    "--role",
+                    "alpha",
+                    "--model",
+                    "haiku",
+                    "--dry-run"
+                ])
+            )),
+            "{caller:?}"
+        );
+        let (out, err) = c.captured();
+        assert_eq!(err, "", "{caller:?}");
+        assert!(
+            out.contains("alpha\twould set\tmodel sonnet -> haiku"),
+            "{out}"
+        );
+    }
+    assert_eq!(spec::read(&state, "alpha").unwrap(), before);
+    assert!(
+        !state.join("restart.log").exists(),
+        "nothing refused, nothing logged"
+    );
+    // writing: a non-PM caller is refused by name and recorded; nothing changes
+    let mut c = ctx(&state, Some("alpha"), live_facts());
+    assert!(failed(run_with(
+        &mut c,
+        args(&["specs", "set", "--role", "alpha", "--model", "haiku"])
+    )));
+    assert!(c
+        .captured()
+        .1
+        .starts_with("lane-restart specs set: refused - only the PM session may rewrite specs"));
+    assert_eq!(spec::read(&state, "alpha").unwrap(), before);
+    // the PM write lands and is recorded as kind "set"
+    let mut c = ctx(&state, Some("pm"), live_facts());
+    assert!(ok(run_with(
+        &mut c,
+        args(&["specs", "set", "--role", "alpha", "--model", "haiku"])
+    )));
+    assert_eq!(spec::read(&state, "alpha").unwrap().model, "haiku");
+    assert!(state.join("alpha.launch.json.pre-set").exists());
+    let l = rows(&state);
+    assert_eq!(l.len(), 2);
+    assert!(!l[0].acted && l[0].kind.as_deref() == Some("set"));
+    assert!(l[1].acted && l[1].kind.as_deref() == Some("set"));
+}
+
+#[test]
+fn set_refuses_opus_and_a_missing_selector_at_the_parser_and_all_names_the_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = with_synapse_config(d.path());
+    for bad in [
+        &["specs", "set", "--role", "alpha", "--model", "opus"][..],
+        &[
+            "specs",
+            "set",
+            "--role",
+            "alpha",
+            "--permission-mode",
+            "bypassPermissions",
+        ][..],
+        &["specs", "set", "--model", "haiku"][..],
+        &[
+            "specs", "set", "--all", "--role", "alpha", "--model", "haiku",
+        ][..],
+        &["specs", "set", "--role", "alpha"][..],
+        &[
+            "specs",
+            "set",
+            "--role",
+            "alpha",
+            "--remote-control",
+            "maybe",
+        ][..],
+    ] {
+        let mut c = ctx(&state, Some("pm"), live_facts());
+        assert!(failed(run_with(&mut c, args(bad))), "{bad:?}");
+        let (out, err) = c.captured();
+        assert_eq!(out, "", "{bad:?}");
+        assert!(err.starts_with("lane-restart specs set: "), "{err}");
+    }
+    assert_eq!(spec::read(&state, "alpha").unwrap().model, "sonnet");
+    // --all: one role, removing an argument it does not carry is refused and named, exit 1
+    let mut c = ctx(&state, Some("pm"), live_facts());
+    assert!(failed(run_with(
+        &mut c,
+        args(&["specs", "set", "--all", "--remove-arg", "--nope"])
+    )));
+    let (out, _) = c.captured();
+    assert!(
+        out.contains("SKIPPED 1 of 1 role(s) as refused, exit 1: alpha ("),
+        "{out}"
+    );
+}

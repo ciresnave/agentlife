@@ -51,6 +51,7 @@ pub mod spec_audit;
 pub mod spec_channels;
 pub mod spec_import;
 pub mod spec_retire;
+pub mod spec_set;
 pub mod spec_synapse;
 pub mod start;
 pub mod start_lock;
