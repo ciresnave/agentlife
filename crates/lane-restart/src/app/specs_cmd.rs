@@ -150,15 +150,53 @@ pub(super) fn retire(ctx: &mut Ctx, roles: Vec<String>, dry_run: bool) -> ExitCo
     }
 }
 
+/// The roles a rewrite covers: the ones named, or (`--all`) every role with a recorded launch spec.
+fn resolve(ctx: &Ctx, roles: crate::cli::Roles) -> Vec<String> {
+    match roles {
+        crate::cli::Roles::Named(v) => v,
+        crate::cli::Roles::All => crate::spec_audit::roles(&ctx.state_dir),
+    }
+}
+
+/// After an `--all` rewrite: which roles were skipped as refused and why, or that none were. The
+/// command exits 0 only when this says none.
+fn refused_summary(rows: &[crate::spec_synapse::RewriteRow]) -> String {
+    use crate::spec_synapse::RewriteOutcome;
+    let skipped: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match &r.outcome {
+            RewriteOutcome::Refused(why) => Some(format!("{} ({why})", r.role)),
+            _ => None,
+        })
+        .collect();
+    if skipped.is_empty() {
+        format!(
+            "ALL {} role(s) handled, none refused
+",
+            rows.len()
+        )
+    } else {
+        format!(
+            "SKIPPED {} of {} role(s) as refused, exit 1: {}
+",
+            skipped.len(),
+            rows.len(),
+            skipped.join("; ")
+        )
+    }
+}
+
 /// `lane-restart specs synapse-only --role R... [--strict] [--dry-run]` - PM only. Rewrites a spec's
 /// `launch_args` to the Synapse-only form (docs/SYNAPSE-ONLY-CUTOVER.md); one backup, never overwritten.
 pub(super) fn synapse_only(
     ctx: &mut Ctx,
-    roles: Vec<String>,
+    roles: crate::cli::Roles,
     strict: bool,
     dry_run: bool,
 ) -> ExitCode {
     use crate::spec_synapse::{render, rewrite_roles, RewriteOutcome};
+    let all = roles == crate::cli::Roles::All;
+    let roles = resolve(ctx, roles);
     let caller = ctx.verified_caller();
     let caller_role = caller.as_ref().ok().cloned();
     let requested_by = caller_role
@@ -208,6 +246,9 @@ pub(super) fn synapse_only(
         );
     }
     ctx.out(&render(&rows, dry_run));
+    if all {
+        ctx.out(&refused_summary(&rows));
+    }
     if refused {
         ExitCode::FAILURE
     } else {
@@ -218,9 +259,11 @@ pub(super) fn synapse_only(
 /// `lane-restart specs both-channels --role R... [--dry-run]` - writing is PM only; a dry run writes
 /// nothing and any caller may read it. Brings a spec to `--mcp-config <role>.mcp.json` plus
 /// `server:claude-peers server:synapse`; one backup, never overwritten.
-pub(super) fn both_channels(ctx: &mut Ctx, roles: Vec<String>, dry_run: bool) -> ExitCode {
+pub(super) fn both_channels(ctx: &mut Ctx, roles: crate::cli::Roles, dry_run: bool) -> ExitCode {
     use crate::spec_channels::rewrite_roles;
     use crate::spec_synapse::{render, RewriteOutcome};
+    let all = roles == crate::cli::Roles::All;
+    let roles = resolve(ctx, roles);
     let caller = ctx.verified_caller();
     let caller_role = caller.as_ref().ok().cloned();
     let requested_by = caller_role
@@ -272,6 +315,9 @@ pub(super) fn both_channels(ctx: &mut Ctx, roles: Vec<String>, dry_run: bool) ->
         );
     }
     ctx.out(&render(&rows, dry_run));
+    if all {
+        ctx.out(&refused_summary(&rows));
+    }
     if refused {
         ExitCode::FAILURE
     } else {

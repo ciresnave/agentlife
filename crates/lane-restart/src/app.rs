@@ -245,7 +245,7 @@ USAGE:
         queued mail is. Exit 1 on any peers-only launch, bad mcp.json, missing identity or
         expired certificate; other findings are warnings. --json prints the rows.
 
-    lane-restart specs both-channels --role <name> [--role <name>]... [--dry-run]
+    lane-restart specs both-channels (--role <name> [--role <name>]... | --all) [--dry-run]
         Writing is PM only; --dry-run writes nothing and any caller may run it. Bring a
         role's launch_args to the full push-channel form: --mcp-config <role>.mcp.json
         and --dangerously-load-development-channels server:claude-peers server:synapse
@@ -254,7 +254,7 @@ USAGE:
         to <role>.launch.json.pre-both-channels. A running session is not touched: it
         takes the change at its next launch. `status` shows each running lane's flags.
 
-    lane-restart specs synapse-only --role <name> [--role <name>]... [--strict] [--dry-run]
+    lane-restart specs synapse-only (--role <name> [--role <name>]... | --all) [--strict] [--dry-run]
         PM only (docs/SYNAPSE-ONLY-CUTOVER.md). Rewrite a role's launch_args so its
         NEXT launch loads server:synapse and not server:claude-peers; --strict also
         adds --strict-mcp-config so the user-scope claude-peers server stays out of
@@ -424,7 +424,7 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                 },
                 _ => {
                     ctx.errln(
-                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]`, `specs both-channels --role <name>... [--dry-run]` or `specs audit [--role <name>]... [--json]`",
+                        "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only (--role <name>... | --all) [--strict] [--dry-run]`, `specs both-channels (--role <name>... | --all) [--dry-run]` or `specs audit [--role <name>]... [--json]`",
                     );
                     ExitCode::FAILURE
                 }

@@ -126,7 +126,12 @@ fn a_non_pm_caller_is_refused_by_name_and_recorded_by_import_retire_and_synapse_
         let code = match sub {
             "import" => import(&mut c, None, false, false),
             "retire" => retire(&mut c, vec!["beta".into()], false),
-            _ => synapse_only(&mut c, vec!["beta".into()], false, false),
+            _ => synapse_only(
+                &mut c,
+                crate::cli::Roles::Named(vec!["beta".into()]),
+                false,
+                false,
+            ),
         };
         assert!(failed(code), "{sub}");
         let (out, err) = c.captured();
@@ -304,7 +309,12 @@ fn synapse_only_rewrites_the_spec_keeps_one_backup_and_records_it() {
     let (state, _) = with_synapse_config(d.path());
     let before = spec::read(&state, "alpha").unwrap().launch_args;
     let mut c = ctx(&state, Some("pm"), live_facts());
-    assert!(ok(synapse_only(&mut c, vec!["alpha".into()], false, true)));
+    assert!(ok(synapse_only(
+        &mut c,
+        crate::cli::Roles::Named(vec!["alpha".into()]),
+        false,
+        true
+    )));
     assert!(c.captured().0.contains("DRY RUN"), "{}", c.captured().0);
     assert_eq!(
         spec::read(&state, "alpha").unwrap().launch_args,
@@ -314,7 +324,12 @@ fn synapse_only_rewrites_the_spec_keeps_one_backup_and_records_it() {
     assert!(!state.join("restart.log").exists());
 
     let mut c = ctx(&state, Some("pm"), live_facts());
-    assert!(ok(synapse_only(&mut c, vec!["alpha".into()], false, false)));
+    assert!(ok(synapse_only(
+        &mut c,
+        crate::cli::Roles::Named(vec!["alpha".into()]),
+        false,
+        false
+    )));
     let after = spec::read(&state, "alpha").unwrap().launch_args;
     assert_ne!(after, before);
     assert!(after.iter().any(|a| a == "server:synapse"), "{after:?}");
@@ -343,7 +358,12 @@ fn synapse_only_refuses_a_role_without_a_usable_spec_and_one_without_an_mcp_conf
     let (state, _) = fixture(d.path(), "alpha", "# h\n"); // its spec has no --mcp-config
     let mut c = ctx(&state, Some("pm"), live_facts());
     let roles = vec!["ghost".to_string(), "alpha".to_string()];
-    assert!(failed(synapse_only(&mut c, roles, false, false)));
+    assert!(failed(synapse_only(
+        &mut c,
+        crate::cli::Roles::Named(roles),
+        false,
+        false
+    )));
     let out = c.captured().0;
     assert!(out.contains("ghost"), "{out}");
     assert!(out.contains("no usable launch spec"), "{out}");
@@ -366,7 +386,11 @@ fn both_channels_dry_run_is_open_to_any_caller_and_writes_nothing() {
     for caller in [Some("alpha"), None] {
         let mut c = ctx(&state, caller, live_facts());
         assert!(
-            ok(both_channels(&mut c, vec!["alpha".into()], true)),
+            ok(both_channels(
+                &mut c,
+                crate::cli::Roles::Named(vec!["alpha".into()]),
+                true
+            )),
             "{caller:?}"
         );
         let (out, err) = c.captured();
@@ -387,7 +411,11 @@ fn both_channels_writing_is_pm_only_and_the_pm_write_is_recorded() {
     let before = spec::read(&state, "alpha").unwrap().launch_args;
     // The control for the open dry run above: the same call, writing, as a non-PM.
     let mut c = ctx(&state, Some("alpha"), live_facts());
-    assert!(failed(both_channels(&mut c, vec!["alpha".into()], false)));
+    assert!(failed(both_channels(
+        &mut c,
+        crate::cli::Roles::Named(vec!["alpha".into()]),
+        false
+    )));
     assert!(
         c.captured().1.starts_with(
             "lane-restart specs both-channels: refused - only the PM session may rewrite specs"
@@ -403,7 +431,11 @@ fn both_channels_writing_is_pm_only_and_the_pm_write_is_recorded() {
     assert!(!state.join("alpha.launch.json.pre-both-channels").exists());
     // The PM may.
     let mut c = ctx(&state, Some("pm"), live_facts());
-    assert!(ok(both_channels(&mut c, vec!["alpha".into()], false)));
+    assert!(ok(both_channels(
+        &mut c,
+        crate::cli::Roles::Named(vec!["alpha".into()]),
+        false
+    )));
     let after = spec::read(&state, "alpha").unwrap().launch_args;
     assert!(
         after.iter().any(|a| a == "server:claude-peers")
@@ -515,4 +547,61 @@ fn audit_is_open_to_any_caller_reads_the_daemon_through_the_seam_and_writes_noth
     assert_eq!(v[0]["row"]["presence"]["queued"], 2);
     assert_eq!(v[0]["findings"][0]["severity"], "fail");
     assert!(!state.join("restart.log").exists(), "an audit logs nothing");
+}
+
+#[test]
+fn all_covers_every_recorded_role_skips_and_names_the_refused_and_exits_nonzero_only_then() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = with_synapse_config(d.path());
+    // A second role that cannot be rewritten: no mcp config file of its own.
+    let (_, _) = fixture(
+        d.path(),
+        "beta",
+        "# h
+",
+    );
+    let mut c = ctx(&state, Some("pm"), dead());
+    assert!(failed(run_with(
+        &mut c,
+        args(&["specs", "both-channels", "--all", "--dry-run"])
+    )));
+    let (out, _) = c.captured();
+    assert!(out.contains("alpha	would rewrite"), "{out}");
+    assert!(out.contains("beta	refused"), "{out}");
+    assert!(
+        out.contains("SKIPPED 1 of 2 role(s) as refused, exit 1: beta ("),
+        "{out}"
+    );
+    // With only the rewritable role, --all exits 0 and says so.
+    let d2 = tempfile::tempdir().unwrap();
+    let (state2, _) = with_synapse_config(d2.path());
+    let mut c = ctx(&state2, Some("pm"), dead());
+    assert!(ok(run_with(
+        &mut c,
+        args(&["specs", "synapse-only", "--all", "--dry-run"])
+    )));
+    assert!(c
+        .captured()
+        .0
+        .contains("ALL 1 role(s) handled, none refused"));
+}
+
+#[test]
+fn all_and_role_are_exclusive_and_one_of_them_is_required() {
+    for (cmd, bad) in [
+        ("both-channels", &["--all", "--role", "a"][..]),
+        ("both-channels", &[][..]),
+        ("synapse-only", &["--role", "a", "--all"][..]),
+        ("synapse-only", &["--strict"][..]),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let (state, _) = with_synapse_config(d.path());
+        let mut c = ctx(&state, Some("pm"), dead());
+        let mut a = vec!["specs", cmd];
+        a.extend(bad);
+        assert!(failed(run_with(&mut c, args(&a))), "{cmd} {bad:?}");
+        let (out, err) = c.captured();
+        assert_eq!(out, "", "{cmd} {bad:?}");
+        assert!(err.contains("specs "), "{err}");
+    }
 }

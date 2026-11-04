@@ -181,24 +181,54 @@ pub(crate) fn specs_retire(rest: &[String]) -> Result<(Vec<String>, bool), Strin
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 struct SpecsSynapseOnly {
-    #[arg(long = "role", allow_hyphen_values = true, required = true)]
+    #[arg(long = "role", allow_hyphen_values = true)]
     roles: Vec<String>,
+    #[arg(long, overrides_with = "all")]
+    all: bool,
     #[arg(long, overrides_with = "strict")]
     strict: bool,
     #[arg(long, overrides_with = "dry_run")]
     dry_run: bool,
 }
 
-/// `specs synapse-only --role R [--role R]... [--strict] [--dry-run]` -> `(roles, strict, dry_run)`.
-pub(crate) fn specs_synapse_only(rest: &[String]) -> Result<(Vec<String>, bool, bool), String> {
-    let a: SpecsSynapseOnly = parse("specs synapse-only", &["--role"], rest)?;
-    Ok((a.roles, a.strict, a.dry_run))
+/// Which roles a rewrite covers: the ones named, or every recorded one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Roles {
+    Named(Vec<String>),
+    All,
 }
 
-/// `specs both-channels --role R [--role R]... [--dry-run]` -> `(roles, dry_run)`.
-pub(crate) fn specs_both_channels(rest: &[String]) -> Result<(Vec<String>, bool), String> {
-    let a: SpecsRetire = parse("specs both-channels", &["--role"], rest)?;
-    Ok((a.roles, a.dry_run))
+/// Exactly one of `--role R...` and `--all`.
+fn roles_or_all(roles: Vec<String>, all: bool) -> Result<Roles, String> {
+    match (roles.is_empty(), all) {
+        (false, true) => Err("--all and --role cannot be given together".to_string()),
+        (true, false) => Err("give --role <name> (repeatable) or --all".to_string()),
+        (_, true) => Ok(Roles::All),
+        (false, false) => Ok(Roles::Named(roles)),
+    }
+}
+
+/// `specs synapse-only (--role R... | --all) [--strict] [--dry-run]` -> `(roles, strict, dry_run)`.
+pub(crate) fn specs_synapse_only(rest: &[String]) -> Result<(Roles, bool, bool), String> {
+    let a: SpecsSynapseOnly = parse("specs synapse-only", &["--role"], rest)?;
+    Ok((roles_or_all(a.roles, a.all)?, a.strict, a.dry_run))
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct SpecsBothChannels {
+    #[arg(long = "role", allow_hyphen_values = true)]
+    roles: Vec<String>,
+    #[arg(long, overrides_with = "all")]
+    all: bool,
+    #[arg(long, overrides_with = "dry_run")]
+    dry_run: bool,
+}
+
+/// `specs both-channels (--role R... | --all) [--dry-run]` -> `(roles, dry_run)`.
+pub(crate) fn specs_both_channels(rest: &[String]) -> Result<(Roles, bool), String> {
+    let a: SpecsBothChannels = parse("specs both-channels", &["--role"], rest)?;
+    Ok((roles_or_all(a.roles, a.all)?, a.dry_run))
 }
 
 #[derive(Parser, Debug)]
