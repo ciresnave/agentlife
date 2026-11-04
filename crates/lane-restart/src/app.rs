@@ -228,6 +228,7 @@ USAGE:
         with the reason. First and last lines say whether anything moved.
 
     lane-restart lane-new <role> <repo> [--model sonnet|haiku] [--apply --plan <hash>]
+    lane-restart lane-new-worktree <role> <repo> <worktree-path> [--model sonnet|haiku] [--apply --plan <hash>]
         PM only (docs/LANE-NEW.md). Dry run (default): validates the names, the disk and
         what exists (reading GitHub: repo, main, files), prints every step with its
         absolute paths, writes and runs nothing, and ends with `plan <hash>`.
@@ -410,6 +411,19 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                     ctx.errln(
                         "lane-restart specs: expected `specs import [--role <name>] [--dry-run] [--verbose]`, `specs retire --role <name>... [--dry-run]`, `specs synapse-only --role <name>... [--strict] [--dry-run]` or `specs both-channels --role <name>... [--dry-run]`",
                     );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "lane-new-worktree" {
+            return match cli::lane_new_worktree(rest) {
+                Ok((role, repo, worktree, model, apply, plan)) => {
+                    lane_new_cmd::run_worktree(ctx, role, repo, worktree, model, apply, plan)
+                }
+                Err(e) => {
+                    ctx.errln(&format!(
+                        "lane-restart lane-new-worktree: {e}; expected `lane-new-worktree <role> <repo> <worktree-path> [--model sonnet|haiku] [--apply --plan <hash>]`"
+                    ));
                     ExitCode::FAILURE
                 }
             };
