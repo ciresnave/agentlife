@@ -40,7 +40,6 @@ pub const MAX_SESSIONS_KEPT: usize = 20;
 pub const KNOWN_END_REASONS: &[&str] = &["clear", "resume", "logout", "prompt_input_exit", "other"];
 
 pub(crate) use lane_state::platform::names::SHELLS;
-const TERMINALS: &[&str] = &["windowsterminal", "openconsole", "conhost", "wt"];
 const HOSTS: &[&str] = &["lane-restart", "agentlife"];
 
 /// Everything the hook needs from the machine, so it can be tested without one.
@@ -115,7 +114,7 @@ fn norm_image(name: &str) -> String {
 pub fn classify_origin(ancestors: &[String]) -> Origin {
     match ancestors.iter().find(|a| !SHELLS.contains(&a.as_str())) {
         Some(a) if HOSTS.contains(&a.as_str()) => Origin::Host,
-        Some(a) if TERMINALS.contains(&a.as_str()) => Origin::Hand,
+        Some(a) if lane_state::platform::names::is_terminal_host(a) => Origin::Hand,
         _ => Origin::Other,
     }
 }
@@ -950,6 +949,24 @@ mod tests {
             Origin::Other
         );
         assert_eq!(classify_origin(&v(&[])), Origin::Other);
+        // P10: a hand launch on Linux (shell under an emulator) is Hand; a host launch is still Host.
+        assert_eq!(
+            classify_origin(&v(&["zsh", "gnome-terminal-server", "systemd"])),
+            Origin::Hand
+        );
+        assert_eq!(
+            classify_origin(&v(&["bash", "konsole", "systemd"])),
+            Origin::Hand
+        );
+        assert_eq!(
+            classify_origin(&v(&["lane-restart", "bash", "kitty"])),
+            Origin::Host
+        );
+        // An unlisted terminal is Other, never a wrong Hand.
+        assert_eq!(
+            classify_origin(&v(&["bash", "someterm", "systemd"])),
+            Origin::Other
+        );
         assert_eq!(norm_image("C:\\x\\WindowsTerminal.exe"), "windowsterminal");
     }
 

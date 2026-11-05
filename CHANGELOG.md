@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.39
+
+- **Linux port P10, hook origin: a `claude` started by hand under a Linux terminal is `Origin::Hand`, not `Other`.** `lane-state::platform::names` gains `TERMINAL_HOSTS` / `is_terminal_host` (the Windows names `hook.rs` kept privately, plus `gnome-terminal-server` and its 15-character truncation, `konsole`, `xterm`, `kitty`, `alacritty`, `wezterm-gui`, `tmux`, `sshd`); `hook::classify_origin` uses it. A host launch (`lane-restart`/`agentlife` as the first non-shell ancestor) is still `Host`, and a terminal not in the list is still `Other`, never a wrong `Hand`. Tests: the new names test and the extended `origin_is_classified_from_the_first_non_shell_ancestor` (Linux chains). ⚠️ The Linux names are the emulators' documented process names and are NOT measured on a real box (`PORT-LINUX-PLAN.md` section 8). **Not changed, on purpose:** `tab_close.rs` (`TERMINAL_SHELLS`/`TERMINAL_HOSTS`) stays Windows-only: it kills a shell, the Linux names are unmeasured, and emulator support was dropped by ruling (CireSnave 2026-10-14). ROADMAP row P6b corrected to built (it shipped in #86).
+
 ## 0.30.38
 
 - **Docs (PM [TASK] fleet-spec-tooling, slice 6): `docs/SYNAPSE-ROLE-ENV.md`, whether one user-level Synapse entry could serve every lane.** The adapter takes its role from `SYNAPSE_ROLE` (run with an empty temp home and a closed port: role and home resolved, failure only at "synapsed is not running"; control without the variable: usage, exit 2). It cannot derive its home from the role (`--home`, else `SYNAPSE_HOME` or one platform default), so the home must come from outside: `${LANE_ROLE}` inside a path in the entry's env, or lane-restart exporting `SYNAPSE_HOME` beside the `LANE_ROLE` it already sets. Not verified: that Claude Code expands `${LANE_ROLE}` in a user-scope entry (needs a session, which claims a role); the document gives the safe test. Lanes on the shared pilot home would need a different home from per-lane ones. No code changed.

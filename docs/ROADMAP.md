@@ -216,11 +216,11 @@ Built: P0, P1, P2 (0.14.27), P4 (0.14.28), P3' (0.14.29), P9 (0.14.31; **not ver
 | P3' | identity-mismatch diagnostic on Linux (the failing log issue #14 waits for) | proposed, awaiting the PM |
 | P5 | TERM, grace, KILL to the process group (`down`, `lane_stop`) | built |
 | P6a | the direct lane host (`setsid`), `DirectSpawner` | built (0.14.33) |
-| P6b | `lane-restart attach --watch`: read-only relay + snapshot (the only attach approved) | next |
+| P6b | `lane-restart attach --watch`: read-only relay + snapshot (the only attach approved) | built (#86; this row said "next" after it shipped) |
 | P6c | interactive attach | **open: not approved until a threat-model note says how a same-user agent is kept off the socket** |
 | P8 | autostart: `systemd --user` logon unit printed by `install-task` (built, unverified on a real systemd); unlock is a documented limit | built |
 | P9 | shutdown marker via `journalctl` / `last -x` | built; unverified on a real journal (owed: a capture from a real previous boot) |
-| P10 | hook origin and tab-close lists for Linux | after P2 (done) |
+| P10 | hook origin for Linux (built; tab-close lists stay Windows-only) | hook origin built |
 | **tmux viewer** | **a viewer over the direct host. CireSnave 2026-10-14, verbatim: "Direct process first with tmux support on our roadmap to build later." Not started; nothing depends on it** | **LATER** |
 | P12, P13 | `user-request` Linux `Protector` and FIDO2 approval channel (OverMind; the PM routes U1-U8) | upstream |
 

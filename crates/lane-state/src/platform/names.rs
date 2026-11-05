@@ -24,6 +24,30 @@ pub const SHELLS: &[&str] = &[
     "pwsh",
 ];
 
+/// The terminal hosts a hand-launched `claude` sits under, lowercase, no extension. Windows and POSIX
+/// together, like [`SHELLS`]; used to tell a hand launch (`Origin::Hand`) from a host launch.
+///
+/// ⚠️ The Linux entries are the emulators' documented process names and have NOT been measured on a
+/// real box (`docs/PORT-LINUX-PLAN.md` section 8). Linux truncates a process name to 15 characters,
+/// so `gnome-terminal-server` also appears as `gnome-terminal-`. A terminal missing here yields
+/// `Origin::Other`, never a wrong `Hand`: widening this list is one change.
+pub const TERMINAL_HOSTS: &[&str] = &[
+    "windowsterminal",
+    "openconsole",
+    "conhost",
+    "wt",
+    "gnome-terminal-server",
+    "gnome-terminal-",
+    "konsole",
+    "xterm",
+    "kitty",
+    "alacritty",
+    "wezterm-gui",
+    "tmux: server",
+    "tmux",
+    "sshd",
+];
+
 /// A process name reduced for comparison: the last path component, lowercase, without `.exe`.
 pub fn image_base(name: &str) -> String {
     let last = name
@@ -43,6 +67,12 @@ pub fn is_claude(name: &str) -> bool {
 pub fn is_shell(name: &str) -> bool {
     let b = image_base(name);
     SHELLS.contains(&b.as_str())
+}
+
+/// A terminal host from [`TERMINAL_HOSTS`].
+pub fn is_terminal_host(name: &str) -> bool {
+    let b = image_base(name);
+    TERMINAL_HOSTS.contains(&b.as_str())
 }
 
 /// This tool's own executable. A `lane-restart` command that starts another `lane-restart` command
@@ -66,6 +96,22 @@ mod tests {
     fn claude_is_claude_with_or_without_exe_and_nothing_else() {
         assert!(is_claude("claude") && is_claude("Claude.EXE") && is_claude("/opt/bin/claude"));
         assert!(!is_claude("claude-code") && !is_claude("node") && !is_claude("claudex"));
+    }
+
+    #[test]
+    fn terminal_hosts_cover_windows_and_linux_and_exclude_shells_and_claude() {
+        for s in [
+            "WindowsTerminal.exe",
+            "conhost.exe",
+            "/usr/libexec/gnome-terminal-server",
+            "konsole",
+            "kitty",
+        ] {
+            assert!(is_terminal_host(s), "{s}");
+        }
+        for s in ["bash", "pwsh", "claude", "node", "lane-restart", ""] {
+            assert!(!is_terminal_host(s), "{s}");
+        }
     }
 
     /// The bug this slice fixes: zsh, fish and dash were refused as ancestors.
