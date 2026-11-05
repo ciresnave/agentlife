@@ -26,7 +26,9 @@ function Q([string[]]$a) { $a | ForEach-Object { if ($_ -match '\s') { '"' + $_ 
 # --- the stand-in for GitHub -----------------------------------------------------------------------
 # Serves /app-manifests/<code>/conversions, /app, /app/installations, /app/installations/<id>/access_tokens and
 # DELETE /installation/token, verifying the app JWT's RS256 signature (so -Verify's signing is really checked).
-# mode.txt (read per request): ok | noperm | wrongkey | noinstall.
+# mode.txt (read per request): ok (one installation, 77 on the ThinkersJournal organization) | noperm | wrongkey | noinstall |
+# user (one installation, 88 on the user account ciresnave, administration+metadata) | userbad (88 without administration) |
+# multi (both installations).
 $fake = @'
 param([string]$Dir)
 $ErrorActionPreference = 'Stop'
@@ -53,26 +55,34 @@ while ($true) {
   Add-Content -LiteralPath (Join-Path $Dir 'requests.log') -Value "$m $p"
   $auth = [string]$c.Request.Headers['Authorization']
   $jwtOk = $false
+  $iss = 0
   if ($auth -like 'Bearer *.*.*') {
     $t = $auth.Substring(7).Split('.')
     $key = if ($mode -eq 'wrongkey') { $other } else { $rsa }
     $jwtOk = $key.VerifyData([Text.Encoding]::UTF8.GetBytes("$($t[0]).$($t[1])"), (B64 $t[2]), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    if ($jwtOk) { $iss = [int](([Text.Encoding]::UTF8.GetString((B64 $t[1])) | ConvertFrom-Json).iss) }
   }
   if ($m -eq 'POST' -and $p -match '^/app-manifests/([A-Za-z0-9]+)/conversions$') {
     if ($Matches[1] -eq 'GOODCODE12345') {
       Reply $c 201 @{ id = 4242; slug = 'fake-app'; name = 'Fake App'; html_url = "http://127.0.0.1:$port/apps/fake-app"; pem = $pem; client_secret = 'CLIENT-SECRET-MARKER'; webhook_secret = 'WEBHOOK-SECRET-MARKER' }
+    } elseif ($Matches[1] -eq 'USERCODE12345') {
+      Reply $c 201 @{ id = 4343; slug = 'fake-user-app'; name = 'Fake User App'; html_url = "http://127.0.0.1:$port/apps/fake-user-app"; pem = $pem; client_secret = 'CLIENT-SECRET-MARKER'; webhook_secret = 'WEBHOOK-SECRET-MARKER' }
     } else { Reply $c 404 @{ message = 'Not Found' } }
   }
-  elseif ($m -eq 'GET' -and $p -eq '/app') { if ($jwtOk) { Reply $c 200 @{ id = 4242; slug = 'fake-app' } } else { Reply $c 401 @{ message = 'bad jwt' } } }
+  elseif ($m -eq 'GET' -and $p -eq '/app') { if ($jwtOk) { Reply $c 200 @{ id = $iss; slug = $(if ($iss -eq 4343) { 'fake-user-app' } else { 'fake-app' }) } } else { Reply $c 401 @{ message = 'bad jwt' } } }
   elseif ($m -eq 'GET' -and $p -eq '/app/installations') {
     if (-not $jwtOk) { Reply $c 401 @{ message = 'bad jwt' } }
     elseif ($mode -eq 'noinstall') { Reply $c 200 @() }
+    elseif ($mode -in 'user', 'userbad') { Reply $c 200 @(, @{ id = 88; target_type = 'User'; account = @{ login = 'ciresnave' } }) }
+    elseif ($mode -eq 'multi') { Reply $c 200 @(@{ id = 77; target_type = 'Organization'; account = @{ login = 'ThinkersJournal' } }, @{ id = 88; target_type = 'User'; account = @{ login = 'ciresnave' } }) }
     else { Reply $c 200 @(, @{ id = 77; target_type = 'Organization'; account = @{ login = 'ThinkersJournal' } }) }
   }
-  elseif ($m -eq 'POST' -and $p -eq '/app/installations/77/access_tokens') {
+  elseif ($m -eq 'POST' -and $p -match '^/app/installations/(77|88)/access_tokens$') {
+    $instId = $Matches[1]
     if (-not $jwtOk) { Reply $c 401 @{ message = 'bad jwt' } }
     else {
-      $perms = if ($mode -eq 'noperm') { @{ metadata = 'read' } } else { @{ organization_self_hosted_runners = 'write'; metadata = 'read' } }
+      $perms = if ($instId -eq '88') { if ($mode -eq 'userbad') { @{ metadata = 'read' } } else { @{ administration = 'write'; metadata = 'read' } } }
+               elseif ($mode -eq 'noperm') { @{ metadata = 'read' } } else { @{ organization_self_hosted_runners = 'write'; metadata = 'read' } }
       Reply $c 201 @{ token = 'INSTALLATION-TOKEN-MARKER'; expires_at = '2026-10-22T20:00:00Z'; permissions = $perms }
     }
   }
@@ -129,7 +139,7 @@ try {
   $r = Run-Setup @('-GitHubWeb', 'http://evil.example:80', '-KeyDir', $keyDir)
   Check 'a web endpoint other than GitHub or loopback is refused' ($r.Code -ne 0) $r.Text
   $r = Run-Setup ($common + @('-Org', 'bad org!'))
-  Check 'a bad organization name is refused' ($r.Code -ne 0 -and $r.Text -like '*not a GitHub organization name*') $r.Text
+  Check 'a bad organization name is refused' ($r.Code -ne 0 -and $r.Text -like '*not a GitHub account name*') $r.Text
   $r = Run-Setup ($common + @('-Apply', '-Verify'))
   Check '-Apply with -Verify is refused' ($r.Code -ne 0) $r.Text
 
@@ -226,6 +236,79 @@ try {
   Set-Content -LiteralPath (Join-Path $fakeDir 'mode.txt') -Value 'ok'
   $r = Run-Setup @('-GitHubApi', $fakeUrl, '-KeyDir', (Join-Path $work 'nokeys'), '-Verify')
   Check '-Verify with no key says to run -Apply first' ($r.Code -ne 0 -and $r.Text -like '*no key*') $r.Text
+
+  # --- the User app (a personal account's repositories: an organization's private App cannot be installed there) -----------
+  $userCommon = $common + @('-Owner', 'ciresnave', '-OwnerType', 'User')
+  $r = Run-Setup $common
+  Check 'the organization dry run still posts to the organization page' ($r.Code -eq 0 -and $r.Text -like "*Posted to: $fakeUrl/organizations/ThinkersJournal/settings/apps/new?state=*") $r.Text
+  $r = Run-Setup ($common + @('-Org', 'ThinkersJournal'))
+  Check 'the old -Org name still works (alias of -Owner)' ($r.Code -eq 0 -and $r.Text -like '*Owner: ThinkersJournal (Organization)*') $r.Text
+  $r = Run-Setup $userCommon
+  Check 'a User dry run posts to the logged-in user page and says who to be logged in as' ($r.Code -eq 0 -and $r.Text -like "*Posted to: $fakeUrl/settings/apps/new?state=*" -and $r.Text -notlike '*organizations/*' -and $r.Text -like '*logged in to GitHub as ciresnave*') $r.Text
+  Check 'a User manifest asks administration write and metadata read, no organization permission, no events, the Personal name' ($r.Text -like '*"administration": "write"*' -and $r.Text -like '*"metadata": "read"*' -and $r.Text -notlike '*organization_self_hosted_runners*' -and $r.Text -like '*"name": "AntSpawn Runner Personal"*' -and $r.Text -like '*"url": "https://github.com/ciresnave"*' -and $r.Text -like '*"public": false*') $r.Text
+  $r = Run-Setup ($userCommon + '-RepoAdminFallback')
+  Check '-RepoAdminFallback is refused for a User app' ($r.Code -ne 0 -and $r.Text -like '*Organization app*') $r.Text
+  $r = Run-Setup ($common + @('-OwnerType', 'Robot'))
+  Check 'an unknown -OwnerType is refused' ($r.Code -ne 0) $r.Text
+
+  $orgKeyBefore = (Get-FileHash -LiteralPath $keyFile).Hash
+  $uOut = Join-Path $work 'userapply.out'
+  $uApply = Start-Process -FilePath $pwsh -ArgumentList (Q (@('-NoProfile', '-File', $setup) + $userCommon + @('-Apply', '-NoBrowser', '-TimeoutSeconds', '120'))) -RedirectStandardOutput $uOut -RedirectStandardError "$uOut.err" -PassThru -WindowStyle Hidden
+  $procs += $uApply
+  $uUrl = Wait-Line $uOut '^START_URL=(http://127\.0\.0\.1:\d+/start)$'
+  Check 'a User apply is allowed beside the organization key (a different app) and prints START_URL' ([bool]$uUrl) ((Get-Content -LiteralPath $uOut -Raw) + (Get-Content -LiteralPath "$uOut.err" -Raw))
+  $uBase = ([Uri]$uUrl).GetLeftPart([UriPartial]::Authority)
+  $uHtml = [System.Net.WebUtility]::HtmlDecode((Invoke-WebRequest -Uri $uUrl -SkipHttpErrorCheck -TimeoutSec 20).Content)
+  Check 'the User start page POSTs the manifest to /settings/apps/new with a state, administration write, no runner permission' ($uHtml.Contains("method=`"post`" action=`"$fakeUrl/settings/apps/new?state=") -and $uHtml.Contains('"administration":"write"') -and $uHtml.Contains('"metadata":"read"') -and -not $uHtml.Contains('organization_self_hosted_runners') -and -not $uHtml.Contains('hook_attributes') -and $uHtml.Contains('"default_events":[]')) $uHtml
+  $uState = [regex]::Match($uHtml, 'state=([0-9a-f]{64})').Groups[1].Value
+  Check 'the User state is 32 random bytes' ($uState.Length -eq 64)
+  $uBad = Invoke-WebRequest -Uri "$uBase/callback?code=USERCODE12345&state=$('0' * 64)" -SkipHttpErrorCheck
+  Check 'a User callback with the wrong state is refused' ($uBad.StatusCode -eq 400)
+  $uGood = Invoke-WebRequest -Uri "$uBase/callback?code=USERCODE12345&state=$uState" -SkipHttpErrorCheck
+  Check 'the User callback with the right state is accepted' ($uGood.StatusCode -eq 200)
+  $uApply.WaitForExit(60000) | Out-Null
+  $uText = (Get-Content -LiteralPath $uOut -Raw) + (Get-Content -LiteralPath "$uOut.err" -Raw)
+  Check 'User apply exits 0, names the owner for click 2 and gives the install URL and a -Slug verify line' ($uApply.HasExited -and $uApply.ExitCode -eq 0 -and $uText -like "*$fakeUrl/apps/fake-user-app/installations/new*" -and $uText -like '*install it on ciresnave*' -and $uText -like '*-Verify -Slug fake-user-app*') $uText
+  Check 'User apply output holds no key, no client secret, no webhook secret' (-not ($secretMarkers | Where-Object { $uText -like "*$_*" })) $uText
+  $uMetaFile = Join-Path $keyDir 'fake-user-app.json'
+  $uMeta = Get-Content -LiteralPath $uMetaFile -Raw | ConvertFrom-Json
+  Check 'the User key and metadata exist beside the organization key, which is untouched' ((Test-Path -LiteralPath (Join-Path $keyDir 'fake-user-app.key.dpapi')) -and ((Get-FileHash -LiteralPath $keyFile).Hash -eq $orgKeyBefore) -and (Test-Path -LiteralPath $metaFile)) ((Get-ChildItem -LiteralPath $keyDir | ForEach-Object Name) -join ', ')
+  Check 'the User metadata records owner, owner_type and the permissions, and has no org' ($uMeta.owner -eq 'ciresnave' -and $uMeta.owner_type -eq 'User' -and $uMeta.permissions.administration -eq 'write' -and -not $uMeta.PSObject.Properties['org']) ($uMeta | ConvertTo-Json)
+  $oMeta = Get-Content -LiteralPath $metaFile -Raw | ConvertFrom-Json
+  Check 'the organization metadata records owner, owner_type and keeps org' ($oMeta.owner -eq 'ThinkersJournal' -and $oMeta.owner_type -eq 'Organization' -and $oMeta.org -eq 'ThinkersJournal') ($oMeta | ConvertTo-Json)
+
+  $r = Run-Setup ($userCommon + @('-Apply', '-NoBrowser', '-TimeoutSeconds', '5'))
+  Check 'a second User -Apply is refused while the User key exists' ($r.Code -ne 0 -and $r.Text -like '*already exists*' -and $r.Text -like '*ciresnave (User)*' -and $r.Text -notlike '*START_URL*') $r.Text
+  $r = Run-Setup ($common + '-Verify')
+  Check '-Verify with two keys and no -Slug is refused' ($r.Code -ne 0 -and $r.Text -like '*pass -Slug*') $r.Text
+
+  # Owner and kind come from the metadata when -Verify is not told.
+  Set-Content -LiteralPath (Join-Path $fakeDir 'mode.txt') -Value 'user'
+  $r = Run-Setup ($common + @('-Verify', '-Slug', 'fake-user-app'))
+  $log = Get-Content -LiteralPath (Join-Path $fakeDir 'requests.log') -Raw
+  Check '-Verify of the User app passes, names the user installation, shows administration=write and prints no token' ($r.Code -eq 0 -and $r.Text -like '*verify ok*' -and $r.Text -like '*installation 88 on ciresnave (User)*' -and $r.Text -like '*administration=write*' -and -not ($secretMarkers | Where-Object { $r.Text -like "*$_*" })) $r.Text
+  $uMeta = Get-Content -LiteralPath $uMetaFile -Raw | ConvertFrom-Json
+  Check '-Verify recorded the User installation id and the list of every installation' ($uMeta.installation_id -eq 88 -and @($uMeta.installations).Count -eq 1 -and $uMeta.installations[0].id -eq 88 -and $uMeta.installations[0].account -eq 'ciresnave' -and $uMeta.installations[0].target_type -eq 'User') ($uMeta | ConvertTo-Json -Depth 5)
+
+  Set-Content -LiteralPath (Join-Path $fakeDir 'mode.txt') -Value 'userbad'
+  $r = Run-Setup ($common + @('-Verify', '-Slug', 'fake-user-app'))
+  Check '-Verify of the User app fails when administration is missing' ($r.Code -ne 0 -and $r.Text -like '*administration should be write*') $r.Text
+
+  Set-Content -LiteralPath (Join-Path $fakeDir 'mode.txt') -Value 'ok'
+  $r = Run-Setup ($common + @('-Verify', '-Slug', 'fake-user-app'))
+  Check '-Verify of the User app fails when it is installed only on the organization (known-bad control)' ($r.Code -ne 0 -and $r.Text -like '*no installation on ciresnave*') $r.Text
+
+  Set-Content -LiteralPath (Join-Path $fakeDir 'mode.txt') -Value 'multi'
+  $r = Run-Setup ($common + @('-Verify', '-Slug', 'fake-user-app'))
+  $uMeta = Get-Content -LiteralPath $uMetaFile -Raw | ConvertFrom-Json
+  Check '-Verify records EVERY installation id (77 and 88) and keeps installation_id the owner''s (88)' ($r.Code -eq 0 -and $uMeta.installation_id -eq 88 -and (@($uMeta.installations.id) -join ',') -eq '77,88') (($uMeta | ConvertTo-Json -Depth 5) + $r.Text)
+  $r = Run-Setup ($common + @('-Verify', '-Slug', 'fake-app'))
+  $oMeta = Get-Content -LiteralPath $metaFile -Raw | ConvertFrom-Json
+  Check '-Verify of the organization app with two installations records both and keeps installation_id 77' ($r.Code -eq 0 -and $oMeta.installation_id -eq 77 -and (@($oMeta.installations.id) -join ',') -eq '77,88') (($oMeta | ConvertTo-Json -Depth 5) + $r.Text)
+
+  Set-Content -LiteralPath (Join-Path $fakeDir 'mode.txt') -Value 'ok'
+  $r = Run-Setup ($common + @('-Verify', '-Slug', 'fake-app'))
+  Check '-Verify of the organization app by -Slug still passes with the organization requirement' ($r.Code -eq 0 -and $r.Text -like '*organization_self_hosted_runners=write*') $r.Text
 }
 finally {
   foreach ($p in $procs) { if ($p -and -not $p.HasExited) { try { $p.Kill($true) } catch { } } }

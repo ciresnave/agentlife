@@ -9,8 +9,8 @@
   DRY RUN BY DEFAULT: with no switch it prints the manifest it would send and changes nothing.
 
     -Apply   Starts a loopback listener, opens the browser on it, and waits. THE HUMAN CLICKS TWICE:
-               click 1: GitHub's "Create GitHub App for <org>" page (it shows the permissions to approve);
-               click 2: "Install" on the organization (printed at the end; this script cannot do it).
+               click 1: GitHub's "Create GitHub App for <owner>" page (it shows the permissions to approve);
+               click 2: "Install" on the owner account (printed at the end; this script cannot do it).
              On GitHub's redirect the script checks the one-time `state`, exchanges the code
              (POST /app-manifests/<code>/conversions, unauthenticated, the code is single use and lasts an hour),
              and stores the private key PROTECTED FOR THE CURRENT WINDOWS ACCOUNT (DPAPI user scope) in
@@ -25,19 +25,30 @@
   the key exists only as the DPAPI blob. If writing the blob fails after GitHub returned the key, it is lost:
   generate a new key on the app's settings page and rerun with -Replace.
 
-  Permissions requested (the page shows them; read them before click 1):
-    organization_self_hosted_runners: write   register and remove runners for the whole organization
-    metadata: read                            always present
-    -RepoAdminFallback adds `administration: write` (a repo-level fallback for ciresnave-owned repos that
-    have not moved to the organization yet; skip it once they have, roadmap C4).
-  The app is private ("only on this account"), has no webhook and subscribes to no events.
+  Two kinds of owner (-OwnerType). A GitHub App is private to the ONE account that owns it ("only on this account"),
+  so an App owned by an organization can never be installed on a personal account's repositories:
+    -OwnerType Organization (default; -Owner ThinkersJournal)   posts to /organizations/<owner>/settings/apps/new
+        organization_self_hosted_runners: write   register and remove runners for the whole organization
+        metadata: read                            always present
+        -RepoAdminFallback adds `administration: write` to THIS app. It does NOT reach personal-account repos
+        (that App cannot be installed there); for those use the User app below.
+    -OwnerType User (-Owner ciresnave -OwnerType User)          posts to /settings/apps/new (the logged-in account)
+        administration: write                     register and remove runners for the user's own repositories
+        metadata: read                            always present
+        Click 1 must be made logged in to GitHub AS that user (not as a bot account): GitHub creates the App under
+        whoever is logged in, and this script cannot check which account that is until -Verify.
+  Both apps are private, have no webhook and subscribe to no events. The two coexist in one -KeyDir (one key per slug);
+  with more than one key, -Verify needs -Slug.
 
   The honest limit: DPAPI user scope stops a copied disk and other accounts, not a process running as the
   watcher account (the same limit as the vault, docs/DESIGN.md). The key can mint tokens only for this app's
   installation, and installation tokens last one hour.
 
-.PARAMETER Org           Organization that owns the app. Default ThinkersJournal.
-.PARAMETER AppName       The app's name (unique across GitHub, at most 34 characters). Default "AntSpawn Runner".
+.PARAMETER Owner         Account that owns the app (alias -Org). Default ThinkersJournal.
+.PARAMETER OwnerType     Organization (default) or User: which page the manifest is posted to and which permissions it asks for.
+                         Nothing asks GitHub which kind -Owner is (a dry run makes no call), so say it: `-Owner ciresnave -OwnerType User`.
+.PARAMETER AppName       The app's name (unique across GitHub, at most 34 characters). Default "AntSpawn Runner" for an
+                         Organization owner, "AntSpawn Runner Personal" for a User owner (the first name is taken).
 .PARAMETER KeyDir        Where the DPAPI blob and the non-secret <slug>.json go. Default %LOCALAPPDATA%\antspawn\github-app.
 .PARAMETER RepoAdminFallback  Also request repository Administration: write.
 .PARAMETER GitHubWeb     Default https://github.com. Only that, or a loopback http address (tests).
@@ -49,8 +60,9 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Org = 'ThinkersJournal',
-  [string]$AppName = 'AntSpawn Runner',
+  [Alias('Org')][string]$Owner = 'ThinkersJournal',
+  [ValidateSet('Organization', 'User')][string]$OwnerType = 'Organization',
+  [string]$AppName,
   [string]$KeyDir = (Join-Path $env:LOCALAPPDATA 'antspawn\github-app'),
   [switch]$RepoAdminFallback,
   [string]$GitHubWeb = 'https://github.com',
@@ -65,7 +77,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if ($Apply -and $Verify) { throw '-Apply and -Verify are exclusive' }
-if ($Org -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw "-Org '$Org' is not a GitHub organization name" }
+if ($Owner -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$') { throw "-Owner '$Owner' is not a GitHub account name" }
+if ($RepoAdminFallback -and $OwnerType -eq 'User') { throw '-RepoAdminFallback is for an Organization app; a User app always asks for administration: write' }
+if (-not $AppName) { $AppName = if ($OwnerType -eq 'User') { 'AntSpawn Runner Personal' } else { 'AntSpawn Runner' } }
 if ($AppName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,33}$') { throw "-AppName must be 1-34 characters of letters, digits, space, '.', '_' or '-'" }
 if ($Slug -and $Slug -notmatch '^[a-z0-9][a-z0-9-]{0,63}$') { throw "-Slug '$Slug' is not an app slug" }
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 3600) { throw '-TimeoutSeconds must be 5..3600' }
@@ -85,12 +99,19 @@ $GitHubApi = Assert-Endpoint '-GitHubApi' $GitHubApi 'https://api.github.com'
 $me = "$env:USERDOMAIN\$env:USERNAME"
 $UserAgent = 'antspawn-github-app-setup'
 
+# What the manifest asks for, by owner kind. -Verify checks the Organization app against the same two entries
+# (the optional administration of -RepoAdminFallback is not required of it).
+function Get-Required { if ($OwnerType -eq 'User') { [ordered]@{ administration = 'write'; metadata = 'read' } } else { [ordered]@{ organization_self_hosted_runners = 'write'; metadata = 'read' } } }
+
+# Where the manifest is posted: the logged-in user's page, or the organization's.
+function Get-NewAppUrl { if ($OwnerType -eq 'User') { "$GitHubWeb/settings/apps/new" } else { "$GitHubWeb/organizations/$Owner/settings/apps/new" } }
+
 function New-Manifest([string]$redirect) {
-  $perms = [ordered]@{ organization_self_hosted_runners = 'write'; metadata = 'read' }
+  $perms = Get-Required
   if ($RepoAdminFallback) { $perms['administration'] = 'write' }
   return [ordered]@{
     name                     = $AppName
-    url                      = "https://github.com/$Org"
+    url                      = "https://github.com/$Owner"
     description              = 'Mints short-lived installation tokens so a watcher can register one-job (JIT) self-hosted runners. Created by scripts/github-app-setup.ps1 (agentlife).'
     redirect_url             = $redirect
     public                   = $false
@@ -103,6 +124,19 @@ function New-Manifest([string]$redirect) {
 
 function Get-KeyFiles { if (Test-Path -LiteralPath $KeyDir) { Get-ChildItem -LiteralPath $KeyDir -Filter '*.key.dpapi' -File } else { @() } }
 
+# The keys of an app for THIS owner and kind: a second -Apply would orphan one of these, while the other kind's app (or
+# another owner's) is a different app and may share the directory. A key whose metadata cannot be read counts as a match.
+function Get-OwnKeyFiles {
+  Get-KeyFiles | Where-Object {
+    try {
+      $m = Get-Content -LiteralPath (Join-Path $KeyDir (($_.Name -replace '\.key\.dpapi$', '') + '.json')) -Raw | ConvertFrom-Json
+      $o = if ($m.owner) { $m.owner } else { $m.org }
+      $t = if ($m.owner_type) { $m.owner_type } else { 'Organization' }
+      ($o -eq $Owner) -and ($t -eq $OwnerType)
+    } catch { $true }
+  }
+}
+
 # ---------------------------------------------------------------------------------------------- -Verify
 if ($Verify) {
   $keys = @(Get-KeyFiles)
@@ -113,6 +147,12 @@ if ($Verify) {
   $metaPath = Join-Path $KeyDir "$slug.json"
   $meta = Get-Content -LiteralPath $metaPath -Raw | ConvertFrom-Json
   $appId = [string]$meta.app_id
+  # Which owner and kind this key is for: an explicit switch wins, else what -Apply recorded (older files: `org`).
+  if (-not $PSBoundParameters.ContainsKey('Owner')) {
+    $recordedOwner = if ($meta.owner) { $meta.owner } else { $meta.org }
+    if ($recordedOwner) { $Owner = [string]$recordedOwner }
+  }
+  if (-not $PSBoundParameters.ContainsKey('OwnerType') -and $meta.owner_type) { $OwnerType = [string]$meta.owner_type }
 
   function ConvertTo-B64Url([byte[]]$bytes) { [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
   # The PEM lives only in this scope; it is turned into an RSA object and dropped at once.
@@ -132,10 +172,11 @@ if ($Verify) {
   # An empty JSON array can arrive as one empty object: flatten, and keep only real installations.
   $installs = @(Invoke-RestMethod -Method Get -Uri "$GitHubApi/app/installations" -Headers ($hdr + @{ Authorization = "Bearer $jwt" }) |
       ForEach-Object { $_ } | Where-Object { $_ -and $_.id })
-  if ($installs.Count -eq 0) { throw "app $($app.slug) is not installed anywhere: click 2 (Install on the organization) is still to do: $GitHubWeb/apps/$($app.slug)/installations/new" }
-  $required = [ordered]@{ organization_self_hosted_runners = 'write'; metadata = 'read' }
+  if ($installs.Count -eq 0) { throw "app $($app.slug) is not installed anywhere: click 2 (Install on $Owner) is still to do: $GitHubWeb/apps/$($app.slug)/installations/new" }
+  $required = Get-Required
   $problems = New-Object System.Collections.Generic.List[string]
-  $orgInstall = $null
+  $ownInstall = $null
+  $recorded = New-Object System.Collections.Generic.List[object]
   foreach ($i in $installs) {
     $login = $i.account.login
     $tok = Invoke-RestMethod -Method Post -Uri "$GitHubApi/app/installations/$($i.id)/access_tokens" -Headers ($hdr + @{ Authorization = "Bearer $jwt" })
@@ -145,8 +186,9 @@ if ($Verify) {
     # Revoke at once: a verify must not leave a live token behind. The token itself is never printed.
     Invoke-RestMethod -Method Delete -Uri "$GitHubApi/installation/token" -Headers ($hdr + @{ Authorization = "Bearer $($tok.token)" }) | Out-Null
     $tok = $null
-    if ($login -eq $Org) {
-      $orgInstall = $i.id
+    $recorded.Add([ordered]@{ id = $i.id; account = $login; target_type = $i.target_type })
+    if ($login -eq $Owner) {
+      $ownInstall = $i.id
       foreach ($k in $required.Keys) {
         $have = $granted.$k
         $okLevel = ($have -eq $required[$k]) -or ($required[$k] -eq 'read' -and $have -eq 'write')
@@ -155,11 +197,13 @@ if ($Verify) {
     }
   }
   $jwt = $null
-  if (-not $orgInstall) { $problems.Add("no installation on $Org") }
+  if (-not $ownInstall) { $problems.Add("no installation on $Owner") }
   if ($problems.Count -gt 0) { throw ("verify FAILED: " + ($problems -join '; ')) }
-  $meta | Add-Member -NotePropertyName installation_id -NotePropertyValue $orgInstall -Force
-  $meta | ConvertTo-Json | Set-Content -LiteralPath $metaPath -Encoding utf8
-  Write-Host "verify ok: app $($app.slug), installation $orgInstall on $Org has the permissions asked for; token revoked; installation_id recorded in $metaPath"
+  # installation_id stays the owner's (what the watcher reads); installations lists every one found.
+  $meta | Add-Member -NotePropertyName installation_id -NotePropertyValue $ownInstall -Force
+  $meta | Add-Member -MemberType NoteProperty -Name installations -Value ([object[]]$recorded.ToArray()) -Force
+  $meta | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $metaPath -Encoding utf8
+  Write-Host "verify ok: app $($app.slug), installation $ownInstall on $Owner has the permissions asked for; token revoked; recorded in ${metaPath}: installation_id $ownInstall, installations $(($recorded | ForEach-Object { "$($_.id) ($($_.account))" }) -join ', ')"
   return
 }
 
@@ -167,14 +211,16 @@ if ($Verify) {
 if (-not $Apply) {
   Write-Host 'DRY RUN (nothing is created or written). Pass -Apply to start the flow. The manifest would be:'
   (New-Manifest 'http://127.0.0.1:<port>/callback') | ConvertTo-Json -Depth 5
-  Write-Host "Posted to: $GitHubWeb/organizations/$Org/settings/apps/new?state=<one-time>"
+  Write-Host "Owner: $Owner ($OwnerType)"
+  Write-Host "Posted to: $(Get-NewAppUrl)?state=<one-time>"
+  if ($OwnerType -eq 'User') { Write-Host "Click 1 must be made logged in to GitHub as $Owner (the App is created under whoever is logged in)." }
   Write-Host "Key would be stored (DPAPI, account $me) in: $KeyDir"
   return
 }
 
 # ---------------------------------------------------------------------------------------------- -Apply
-if (-not $Replace -and @(Get-KeyFiles).Count -gt 0) {
-  throw "a key already exists in $KeyDir ($((Get-KeyFiles | Select-Object -First 1).Name)): creating another app would orphan it. Use -Replace to overwrite."
+if (-not $Replace -and @(Get-OwnKeyFiles).Count -gt 0) {
+  throw "a key already exists in $KeyDir ($((Get-OwnKeyFiles | Select-Object -First 1).Name)) for $Owner ($OwnerType): creating another app would orphan it. Use -Replace to overwrite."
 }
 New-Item -ItemType Directory -Force -Path $KeyDir | Out-Null
 icacls $KeyDir /inheritance:r /grant:r "${me}:(OI)(CI)F" | Out-Null
@@ -184,7 +230,7 @@ $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $probe.Start(); $port = $probe.LocalEndpoint.Port; $probe.Stop()
 $state = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
 $manifestJson = (New-Manifest "http://127.0.0.1:$port/callback") | ConvertTo-Json -Depth 5 -Compress
-$action = "$GitHubWeb/organizations/$Org/settings/apps/new?state=$state"
+$action = "$(Get-NewAppUrl)?state=$state"
 $page = @"
 <!doctype html><html><head><meta charset="utf-8"><title>Create the GitHub App</title></head><body>
 <p>Sending the app manifest to GitHub. If nothing happens, press the button.</p>
@@ -200,7 +246,7 @@ $listener.Start()
 $startUrl = "http://127.0.0.1:$port/start"
 Write-Host "START_URL=$startUrl"
 if (-not $NoBrowser) { Start-Process $startUrl }
-Write-Host "Waiting up to $TimeoutSeconds s. Click 1 is on GitHub's page (read the permissions it lists first)."
+Write-Host "Waiting up to $TimeoutSeconds s. Click 1 is on GitHub's page (read the permissions it lists first$(if ($OwnerType -eq 'User') { "; be logged in as $Owner" }))."
 
 function Send-Reply($ctx, [int]$status, [string]$text, [string]$type = 'text/plain; charset=utf-8') {
   $bytes = [Text.Encoding]::UTF8.GetBytes($text)
@@ -236,7 +282,7 @@ try {
         if (-not $stateOk) { Send-Reply $ctx 400 'state mismatch: ignored'; continue }
         if ([string]$q['code'] -notmatch '^[A-Za-z0-9]{8,64}$') { Send-Reply $ctx 400 'no usable code: ignored'; continue }
         $code = [string]$q['code']
-        Send-Reply $ctx 200 'Done. You can close this tab and go back to the terminal. Next: click 2, install the app on the organization.'
+        Send-Reply $ctx 200 'Done. You can close this tab and go back to the terminal. Next: click 2, install the app on the owner account.'
       }
       default { Send-Reply $ctx 404 'not found' }
     }
@@ -266,16 +312,18 @@ $info = [ordered]@{
   app_id       = $made.id
   slug         = $slug
   name         = $made.name
-  org          = $Org
+  owner        = $Owner
+  owner_type   = $OwnerType
   html_url     = $made.html_url
   created_utc  = [DateTime]::UtcNow.ToString('o')
   permissions  = (New-Manifest 'x').default_permissions
   key_file     = $keyPath
   protected_by = "DPAPI, user scope, account $me"
 }
+if ($OwnerType -eq 'Organization') { $info['org'] = $Owner }   # the name older files and readers use
 $info | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $KeyDir "$slug.json") -Encoding utf8
 $made = $null; $blob = $null
 
 Write-Host "created app '$slug' (id $($info.app_id)); private key stored protected for $me at $keyPath (not printed)."
-Write-Host "Click 2: install it on the organization: $GitHubWeb/apps/$slug/installations/new"
-Write-Host "Then prove it: pwsh -File scripts\github-app-setup.ps1 -Verify -Org $Org -KeyDir '$KeyDir'"
+Write-Host "Click 2: install it on $Owner (the Install page lists the repositories it may reach): $GitHubWeb/apps/$slug/installations/new"
+Write-Host "Then prove it: pwsh -File scripts\github-app-setup.ps1 -Verify -Slug $slug -KeyDir '$KeyDir'"

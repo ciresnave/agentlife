@@ -13,8 +13,48 @@ GitHub's *manifest flow*: the script serves a one-page form on `127.0.0.1`, the 
 listener with a single-use `code`, and the script exchanges it (`POST /app-manifests/<code>/conversions`) for the App id and
 its private key. The key is stored **protected for the current Windows account** (DPAPI user scope) and never printed.
 
-**CireSnave clicks twice:** (1) "Create GitHub App for ThinkersJournal" on GitHub's page (it lists the permissions: read them);
-(2) "Install" on the organization (the script prints the link at the end; it cannot do this click).
+**CireSnave clicks twice:** (1) "Create GitHub App for <owner>" on GitHub's page (it lists the permissions: read them);
+(2) "Install" on the owner account (the script prints the link at the end; it cannot do this click).
+
+## Two Apps: one per owner (`-Owner`, `-OwnerType`)
+
+**The existing App cannot install on a personal account.** `antspawn-runner` (id `5441608`) is owned by the `ThinkersJournal`
+organization and is private ("only on this account"); GitHub lets a private App be installed only on the account that owns it.
+So it reaches `ThinkersJournal` repositories and never `ciresnave/*` ones (baracuda, fuel, ...). This is GitHub's documented
+rule; this lane has not tried the install on a personal account, and the first `-Verify` of the second App is the measurement.
+Making the existing App public would install it anywhere but also lets anyone install it, and moves its key's blast radius to
+every installer's account: not done, and the organization App stays as it is, at least privilege.
+
+For the personal account there is a **second, user-owned App**, made by the same script:
+
+```powershell
+# dry run (no call to GitHub): prints the manifest and the page it would be posted to
+pwsh -File scripts\github-app-setup.ps1 -Owner ciresnave -OwnerType User
+# CireSnave, logged in to GitHub as ciresnave (NOT ciresnave-bot), at the watcher account's terminal:
+pwsh -File scripts\github-app-setup.ps1 -Owner ciresnave -OwnerType User -Apply
+pwsh -File scripts\github-app-setup.ps1 -Verify -Slug <slug the script prints>
+```
+
+| | Organization App (existing) | User App (new) |
+|---|---|---|
+| Owner | `ThinkersJournal` (`-Owner ThinkersJournal`, the default; old name `-Org` still works) | `ciresnave` (`-OwnerType User`) |
+| Page the manifest is posted to | `/organizations/<owner>/settings/apps/new` | `/settings/apps/new` (whoever is logged in) |
+| Permissions | Self-hosted runners (organization) **write**, Metadata read | Administration (repository) **write**, Metadata read |
+| Reaches | `ThinkersJournal` repositories | `ciresnave`'s own repositories, each one chosen on the Install page |
+| Default name | `AntSpawn Runner` (taken: `antspawn-runner`) | `AntSpawn Runner Personal` (slug `antspawn-runner-personal` if free: names are unique across GitHub, so GitHub's page may ask for another) |
+
+CireSnave's two clicks for the User App: **click 1** on the page GitHub opens, "Create GitHub App for ciresnave" (read the two
+permissions it lists); **click 2** on the Install page the script prints, choose "Only select repositories", tick the
+repositories that need a runner, "Install". GitHub creates the App under **whoever is logged in**, so he must be `ciresnave`;
+a browser logged in as `ciresnave-bot` would make a bot-owned App. The script cannot see which account is logged in before
+`-Verify`, which reports the installation's account.
+
+The two Apps share one `-KeyDir` (one `<slug>.key.dpapi` and `<slug>.json` each); `-Apply` refuses a second App for the same
+owner and kind, not one for another owner or kind. With two keys `-Verify` needs `-Slug`; without `-Owner`/`-OwnerType` it takes
+them from the App's own `<slug>.json` (`owner`, `owner_type`; older files have `org`). **Administration: write** on a repository
+is a broad permission (it includes changing settings and branch protection); it is what GitHub requires to register a
+repository-level runner, and the manifest asks for nothing else. A leaked key could mint tokens for exactly the repositories
+chosen on the Install page.
 
 ```powershell
 # as the WATCHER account (the one that will run the AntSpawn watcher), outside any sandbox
@@ -23,9 +63,14 @@ pwsh -File scripts\github-app-setup.ps1 -Apply          # the flow; opens the br
 pwsh -File scripts\github-app-setup.ps1 -Verify         # after click 2: proves key + install + permissions
 ```
 
-Permissions requested: organization **Self-hosted runners: write**, **Metadata: read**. `-RepoAdminFallback` adds repository
-**Administration: write** for `ciresnave`-owned repos that have not moved to the organization yet (roadmap C4); leave it off
-once they have. The App is private (installable only on this account), has no webhook, and subscribes to no events.
+Permissions requested by the Organization App: organization **Self-hosted runners: write**, **Metadata: read**. The Apps are
+private (installable only on their owner), have no webhook, and subscribe to no events.
+
+**Correction (2026-11-05): `-RepoAdminFallback` does not serve `ciresnave`-owned repositories.** This text used to say it was
+a fallback for repositories that had not moved to the organization yet. It only adds **Administration: write** to the
+*organization-owned* App, and that App cannot be installed on `ciresnave`'s account at all (above), so the flag cannot reach
+those repositories. It is useful only for repository-level runners on repositories that belong to the organization. For
+`ciresnave`-owned repositories use the User App, which always asks for Administration. The flag is refused with `-OwnerType User`.
 
 ## What it will and will not do
 
@@ -41,8 +86,11 @@ once they have. The App is private (installable only on this account), has no we
   `<slug>.json` (app id, slug, org, permissions, key path, and after `-Verify` the installation id: not secrets), in a directory
   with an owner-only ACL (`%LOCALAPPDATA%\antspawn\github-app` by default).
 - **`-Verify`** signs a JWT (RS256, 9 minutes), asks GitHub for the App and its installations, mints one installation token each,
-  checks the permissions on the organization's installation, **revokes the token**, and fails loudly if a permission is missing,
-  the signature is refused, or the App is not installed (and then says click 2 is still to do).
+  checks the permissions on the owner's installation (Organization: runners write + metadata read; User: administration write +
+  metadata read), **revokes the token**, and fails loudly if a permission is missing, the signature is refused, or the App is
+  not installed on its owner (and then says click 2 is still to do). It records **every** installation it finds in
+  `<slug>.json` as `installations` (`id`, `account`, `target_type`), and `installation_id` stays the owner's, which the
+  watcher reads.
 
 ## Honest limits
 
