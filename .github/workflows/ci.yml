@@ -51,6 +51,20 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
+  # Linux gpu-run (docs/LINUX-GPU-RUN-DESIGN.md slice 1). Native Linux: the unit suite on a temp dir, then the system test on the
+  # real default paths (tmpfs /run/lock, a second user, fs.protected_regular=2). The runner is throwaway, so root changes are fine.
+  gpu-run:
+    name: gpu-run.sh tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: bash -n
+        run: bash -n scripts/gpu-run.sh && bash -n scripts/gpu-run-test.sh && bash -n scripts/gpu-run-system-test.sh
+      - name: gpu-run-test.sh (temp dir, one user)
+        run: bash scripts/gpu-run-test.sh scripts/gpu-run.sh
+      - name: gpu-run-system-test.sh (real paths, second user, protected_regular=2)
+        run: sudo bash scripts/gpu-run-system-test.sh scripts/gpu-run.sh
+
   # Advisory (PM TASK 2026-10-24): NOT a required check and no rule is silenced here. The called workflow fixes the rule profile and the
   # CodeRipper version; this repository passes nothing (it is public, so the default GitHub-hosted runner is right).
   portfolio:
