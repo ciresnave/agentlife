@@ -16,7 +16,10 @@ if [ -n "${GPU_RUN_TIMEOUT_SEC:-}" ]; then TIMEOUT_SEC=$GPU_RUN_TIMEOUT_SEC    #
 else TIMEOUT_SEC=$(( ${GPU_RUN_TIMEOUT_MIN:-45} * 60 )); fi
 readonly LOCKFD=9 CURRENT="$STATE/current.json" LOG="$STATE/gpu-run.log"
 
-log() { printf '%s [%s v%s pid=%s] %s\n' "$(date -u +%FT%TZ)" "${PROJECT:-?}" "$GPU_RUN_LINUX_VERSION" "$$" "$*" >>"$LOG" 2>/dev/null || true; }
+# Files in the shared state dir are created group-writable (umask 002 in a subshell, so the CHILD keeps its umask):
+# a second user in the group must be able to append to the log and replace a stale current.json. Found by the CI
+# system test on a real second user: the log silently lost every line a user wrote after another user created it 0644.
+log() { ( umask 002; printf '%s [%s v%s pid=%s] %s\n' "$(date -u +%FT%TZ)" "${PROJECT:-?}" "$GPU_RUN_LINUX_VERSION" "$$" "$*" >>"$LOG" ) 2>/dev/null || true; }
 say() { printf 'gpu-run: %s\n' "$*" >&2; log "$*"; }
 json_str() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 json_get() { sed -n "s/.*\"$1\": *\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$CURRENT" 2>/dev/null | head -n 1; }
@@ -79,9 +82,12 @@ if [ -s "$CURRENT" ]; then
     say "RECLAIM: the previous wrapper was killed without cleanup (same boot). Previous: $(cat "$CURRENT")"
   fi
 fi
-printf '{"v":%s,"pid":%s,"project":"%s","cmd":"%s","start":"%s","boot_id":"%s"}\n' \
+# rm first: a stale current.json another user left 0644 cannot be opened for writing, but the (group-writable,
+# non-sticky) directory lets us replace it. We hold the lock, so nobody else is writing it.
+rm -f "$CURRENT"
+( umask 002; printf '{"v":%s,"pid":%s,"project":"%s","cmd":"%s","start":"%s","boot_id":"%s"}\n' \
   "$GPU_RUN_LINUX_VERSION" "$$" "$(json_str "$PROJECT")" "$(json_str "$CMDSTR")" "$(date -u +%FT%TZ)" \
-  "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)" >"$CURRENT"
+  "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)" >"$CURRENT" )
 log "START: $CMDSTR"
 
 # --- Run the child holding the lock; forward signals; clean up only on a normal end ----------

@@ -18,8 +18,10 @@ bound under a minute was not honoured. Each wait slice is now `min(60, time left
 ## Differences from the #189 design (all deliberate)
 
 1. **The lock file is empty; the metadata is `current.json` in the state dir.** #189 put both in one file. Bash cannot
-   open a file read-write without `O_CREAT`, and `O_CREAT` on another user's file in `/run/lock` is exactly what
-   `fs.protected_regular` denies. So the lock fd is a read-only open (enough for `flock`), and `current.json`
+   open a file read-write without `O_CREAT`, and `O_CREAT` on another user's file in `/run/lock` is what
+   `fs.protected_regular` denies. **Corrected 2026-11-05 from the native CI run: the kernel exempts a file owned by
+   the directory's owner, so the root-owned lock the tmpfiles line creates is NOT protected (measured, S1a); the
+   protection bites when a *user* created the file (S1b), the case the read-only open is for (S6).** So the lock fd is a read-only open (enough for `flock`), and `current.json`
    (group-writable `/var/lib/gpu-run`, not sticky) carries the record. Stale = `current.json` still present once we hold
    the lock; the holder is the only writer while it holds, so no race.
 2. **Fixed fd 9.** `exec {fd}<` was tried first; the child must inherit the lock, and a fixed number is the form whose
