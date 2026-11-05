@@ -43,8 +43,9 @@ has run a single GitHub job.
    "no org runner group now" (RUNNER-SETUP 8). These are different mechanisms (an ephemeral JIT runner in a group
    restricted to named repos, versus a shared persistent runner in a group), but it is the PM's to say whether the
    ruling covers the JIT group. It also leaves out `ciresnave/*` repos: an org group serves only `ThinkersJournal` repos. A repo-level
-   `generate-jitconfig` exists too and needs `administration: write` (the `-RepoAdminFallback` of `github-app-setup.ps1`);
-   not requested today.
+   `generate-jitconfig` exists too and needs `administration: write`. The organization App cannot reach `ciresnave/*`
+   (a private App installs only on its owner; `-RepoAdminFallback` does not change that): those repositories need a second,
+   user-owned App (`github-app-setup.ps1 -Owner ciresnave -OwnerType User`, `docs/GITHUB-APP.md`); not created yet.
 2. **Which AntSpawn launcher runs cpufish's AOCL job.** `account` (a pre-provisioned restricted account, ACL denying
    `C:\Projects`, wiped work dir, kill-on-close: certified 5/5 on this machine, host CPU and host files visible) or
    `windows-sandbox` (fresh VM per job; one VM at a time; mapped read-only folders). AOCL lives in
