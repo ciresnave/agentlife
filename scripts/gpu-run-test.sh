@@ -95,4 +95,14 @@ ok "T15 rc 130 (child died of SIGINT)" $rc 130
 ok "T15 prompt (child did not run out its 20 s)" "$([ $((SECONDS-t0)) -lt 10 ] && echo y || echo n)" y
 ok "T15 cleaned" "$([ -e "$GPU_RUN_STATE_DIR/current.json" ] && echo left || echo gone)" gone
 
+# T16 the wrapper adds no ignored signals to its child: the child's SigIgn mask equals the mask of the same
+# command run directly from this shell. Covers SIGQUIT (and INT) even where the environment already ignores
+# QUIT on entry (WSL does), which a kill-based test cannot separate. The old `"$@" &` child had INT and QUIT added.
+reset
+mask() { sh -c 'grep SigIgn /proc/$$/status'; }
+direct=$(mask)
+wrapped=$("$GR" -Project sm -- sh -c 'grep SigIgn /proc/$$/status' 2>/dev/null)
+ok "T16 control: the mask line was read" "$([ -n "$direct" ] && echo y || echo n)" y
+ok "T16 child's SigIgn equals a direct child's (INT and QUIT not added)" "$wrapped" "$direct"
+
 echo "pass=$pass fail=$fail"; [ "$fail" -eq 0 ]
