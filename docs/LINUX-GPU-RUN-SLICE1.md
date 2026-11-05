@@ -59,6 +59,7 @@ Group name `gpu` is a placeholder for the group the runner and the interactive u
 | 13 | an outside `flock -n` fails during a run and succeeds after | |
 | 14 | the child reads the wrapper's stdin | the same pipe into `cat` |
 | 15 | SIGINT to the wrapper kills the child, rc 130, `current.json` removed, well inside the child's 20 s | T12's SIGTERM path |
+| 16 | the child's `SigIgn` mask equals a direct child's (so neither INT nor QUIT is added) | the mask line was read; a mutant with the old `"$@" &` fails it (`0x6` vs `0`) |
 
 ## Follow-on (not started)
 
@@ -84,12 +85,12 @@ changes users and a sysctl; only `bash -n` and its root guard were run).
 | Claim | Checked | Result |
 |---|---|---|
 | Child of `"$@" &` gets `/dev/null` as stdin | WSL2 Ubuntu 24.04: child's `/proc/self/fd/0`; control: same child in the foreground | **real** (`/dev/null` vs a pipe) |
-| Child of `"$@" &` ignores SIGINT/SIGQUIT | `SigIgn` mask `0x6` vs `0x4`; `kill -INT` on an async `sleep` left it alive, a plain subshell child died | **real for SIGINT**; SIGQUIT is already ignored on entry in this environment, so it is the manual's word, not measured |
+| Child of `"$@" &` ignores SIGINT/SIGQUIT | `SigIgn` mask `0x6` vs `0x4`; `kill -INT` on an async `sleep` left it alive, a plain subshell child died | **real for SIGINT**. SIGQUIT first looked unmeasurable (WSL ignores it on entry); **measured 2026-11-05 by T16** (the child's whole `SigIgn` mask against a direct child's): the old `"$@" &` added `0x6` = INT and QUIT, the fixed script adds nothing |
 | Design item 7: forge takes slots | `git grep slot` in forge, build, cutlass-sys at baracuda 35060e3a (control: `fs2` found) | **wrong**, design corrected |
 
 Fix in `gpu-run.sh`: `( trap - INT QUIT; exec "$@" ) <&0 & child=$!`. `set -m` also works but gives the child its own
 process group (a tty read would stop it); `<&0` alone fixes only stdin. Tests T14 (stdin) and T15 (SIGINT to the wrapper)
-were **red against the old script** (T14 got empty stdin; T15 ran out its 20 s, rc 0 not 130), with controls (T14: the same
+were **red against the old script** (and T16, added the same day for SIGQUIT, against a mutant with the old line) (T14 got empty stdin; T15 ran out its 20 s, rc 0 not 130), with controls (T14: the same
 pipe into `cat`; T15: T12's SIGTERM path), and are green after: **27/27** on WSL2 Ubuntu 24.04. A wrapper that was itself
 started with `&` from a script has SIGINT ignored on entry, which bash cannot trap, so T15 starts it the same way the fix
 starts the child.
