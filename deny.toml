@@ -5,6 +5,13 @@ all-features = true
 
 [advisories]
 version = 2
+# PM ruling 2026-11-05: ignore ONE advisory, by id, not a path. `pin-utils` is unmaintained (not a
+# vulnerability); it arrives via synapse 6.0.0-rc.123 -> async-imap 0.12.0 and cannot be fixed here.
+# Owner: the synapse lane (ThinkersJournal/synapse#318).
+# Remove this entry when: a synapse release without async-imap 0.12.0 is the version we depend on.
+ignore = [
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained, transitive via synapse -> async-imap 0.12.0; owner synapse lane (synapse#318); remove once a synapse release drops async-imap 0.12.0" },
+]
 
 [licenses]
 version = 2
