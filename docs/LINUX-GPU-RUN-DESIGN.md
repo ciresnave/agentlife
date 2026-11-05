@@ -19,9 +19,10 @@ From the Windows scripts, these are the properties to keep:
    `GPU_RUN_TIMEOUT_MIN` (45) and `CUDA_BUILD_TIMEOUT_MIN` (60) keep their names and defaults.
 5. **The harness takes the lock, not the agent.** Same CLI: `gpu-run -Project <name> -- <cmd> <args...>`.
 6. **Nesting passes through** via `GPU_RUN_HELD` / `CUDA_BUILD_HELD`; child exit code becomes the wrapper's.
-7. **Protocol constants are shared by every participant** (slot name pattern, slot count N, threads K), and
-   `baracuda-forge` (Rust) participates in the slot namespace, so the protocol must be speakable from Rust and
-   shell, not only from PowerShell.
+7. **Protocol constants are shared by every participant that takes a slot** (slot name pattern, slot count N,
+   threads K): the wrappers. **`baracuda-forge` takes no slot** (corrected 2026-11-05, see below): it only honours
+   K, through `BARACUDA_FORGE_THREADS`, which `cuda-build` sets. The protocol must be speakable from bash and
+   PowerShell; Rust only if a participant that takes slots is ever written in Rust.
 
 ## Mechanism: `flock(2)` on files in a tmpfs, not a semaphore, not a pwsh port
 
@@ -35,8 +36,8 @@ From the Windows scripts, these are the properties to keep:
 Why `flock`:
 
 - **Atomic, released on any death** (SIGKILL, OOM kill, panic of the holder). Same guarantee as the mutex.
-- **Speakable from bash (`flock(1)`, util-linux) and Rust (`libc::flock` / `fd-lock`)**, so `baracuda-forge`
-  joins without a .NET runtime. Do **not** reuse `gpu-run.ps1` under `pwsh` on Linux: .NET's Unix named mutexes
+- **Speakable from bash (`flock(1)`, util-linux) and Rust (`libc::flock` / `fd-lock`)**, so a Rust participant
+  could join without a .NET runtime (none does today: forge takes no slots). Do **not** reuse `gpu-run.ps1` under `pwsh` on Linux: .NET's Unix named mutexes
   live in `/tmp/.dotnet/shm`, are not visible to non-.NET participants, and have their own per-user rules. They
   would give a second, disjoint lock, which is the "different name means no exclusion" trap.
 - **Not a POSIX/SysV semaphore for the counted slots.** The `cuda-build.ps1` header explains why a semaphore
@@ -106,7 +107,8 @@ RAM plus overcommit and cgroup limits, and the footprint of a flash-attention `p
 intermediate) still applies. So N and K are **per-OS protocol constants that must be re-measured on the Linux
 install**; start with N=2, K=4 as the conservative default and write down the measurement. They never run
 concurrently with the Windows ones (one OS is booted), so they do not need to match, but **all Linux
-participants (Fuel, baracuda, vulkane, forge) must agree with each other**, the same "most permissive
+participants that take a slot (Fuel, baracuda, vulkane) must agree with each other**; forge honours the K the
+wrapper sets, the same "most permissive
 participant sets the budget" rule. An optional second belt, not a replacement:
 `systemd-run --scope -p MemoryMax=...` around the build, so an overshoot kills the build, not the desktop.
 
@@ -148,13 +150,19 @@ owns the `/var/lib/gpu-run` directory and can open the lock files (tmpfiles mode
    non-`O_CREAT` open succeeds.
 4. A container without the bind mount really gets a private lock; with it, none.
 5. `boot_id` differs across a forced reset with `current.json` left behind.
-6. Rust `fd-lock`/`libc::flock` and `flock(1)` contend on the same file (forge must interoperate).
+6. Rust `fd-lock`/`libc::flock` and `flock(1)` contend on the same file (only needed if a Rust participant that
+   takes slots is ever added; forge uses `fs2::lock_exclusive` for its own dependency lock only).
 7. Re-measure the `ptxas` ceiling and pick N, K.
 
 ## Open questions for the Fuel lane
 
 - Is `bash` + util-linux acceptable as a dependency of the Linux wrappers, or should they be a small Rust
   binary (also usable from `baracuda-forge` and from Windows)?
-- Should forge's slot acquisition move into the shared Rust crate so there is one implementation per OS?
+- ~~Should forge's slot acquisition move into the shared Rust crate so there is one implementation per OS?~~
+  **Answered 2026-11-05: nothing to move.** Fuel's review said forge takes no slots; checked here: 0 hits for
+  `slot` in `baracuda-forge`, `baracuda-build` and `baracuda-cutlass-sys` at baracuda `origin/main` 35060e3a (the
+  same grep finds `fs2`, which forge uses in `dependency.rs` and cutlass-sys `build.rs` for their own locks).
+  Forge reads `BARACUDA_FORGE_THREADS` only (`parallel.rs`). A forge that ever admits itself must honour
+  `CUDA_BUILD_HELD` rather than take a second slot.
 - Does Fuel want the persistent crash record on Windows too (a `ProgramData` directory), so the
   attribution gap closes on both sides?

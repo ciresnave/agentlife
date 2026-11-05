@@ -1,2 +1,4 @@
 # The lane-new seed templates are embedded byte for byte (licence hashes are checked): no line-ending conversion.
 crates/lane-restart/templates/** -text
+# Shell scripts run on Linux: LF always, whatever core.autocrlf says here.
+*.sh text eol=lf
