@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.38
+
+- **Docs (PM [TASK] fleet-spec-tooling, slice 6): `docs/SYNAPSE-ROLE-ENV.md`, whether one user-level Synapse entry could serve every lane.** The adapter takes its role from `SYNAPSE_ROLE` (run with an empty temp home and a closed port: role and home resolved, failure only at "synapsed is not running"; control without the variable: usage, exit 2). It cannot derive its home from the role (`--home`, else `SYNAPSE_HOME` or one platform default), so the home must come from outside: `${LANE_ROLE}` inside a path in the entry's env, or lane-restart exporting `SYNAPSE_HOME` beside the `LANE_ROLE` it already sets. Not verified: that Claude Code expands `${LANE_ROLE}` in a user-scope entry (needs a session, which claims a role); the document gives the safe test. Lanes on the shared pilot home would need a different home from per-lane ones. No code changed.
+
 ## 0.30.37
 
 - **`lane-restart specs set (--role R... | --all) [--model] [--permission-mode] [--remote-control] [--add-arg]... [--remove-arg]... [--dry-run]` (PM [TASK] fleet-spec-tooling, slice 3).** Changes the recorded launch fields that `specs synapse-only` and `specs both-channels` do not own, across named roles or every recorded one. Writing is PM only; `--dry-run` writes nothing and any caller may run it. Refused, the role untouched: any model but an explicit `sonnet` or `haiku` (no Opus; CireSnave 2026-10-08), `bypassPermissions` (or any mode but default/acceptEdits/auto), a channel flag, `--model`/`--permission-mode` or `--dangerously-skip-permissions` as an argument, a removal of an argument the spec does not carry, and a result that `SpecFile::check` says would not launch. One backup per spec, `<role>.launch.json.pre-set`, written once and never overwritten. `write_atomic` signs a soft-stop spec and the command reads it back and refuses (naming the backup) if the stop kind no longer reads as it did. With `--all`, refused roles are skipped and named and the exit is 0 only if none was. Ledger kind `set`. New: `spec_set.rs`; tests use temp directories only.
