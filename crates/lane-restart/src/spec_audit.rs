@@ -70,6 +70,10 @@ pub struct AuditRow {
     /// The identity home the mcp file names; `None` when it names none.
     pub home: Option<String>,
     pub home_present: bool,
+    /// The home holds `account/account.key.pem`: the role runs from the ACCOUNT home, its short
+    /// certificate is re-made when the adapter loads the role (under 12 h left), and the daemon
+    /// checks a certificate only at claim. A role-only home (lane homes) has no such key.
+    pub account_key: bool,
     pub cert: Cert,
     /// `None`: the daemon could not be read, or does not know the role.
     pub presence: Option<Presence>,
@@ -83,11 +87,13 @@ pub struct AuditRow {
 pub enum Severity {
     Fail,
     Warn,
+    /// Worth reading, never a problem: does not count as a warning row and does not fail.
+    Info,
 }
 
 /// Everything wrong with one row.
 pub fn findings(row: &AuditRow, now: DateTime<Utc>) -> Vec<(Severity, String)> {
-    use Severity::{Fail, Warn};
+    use Severity::{Fail, Info, Warn};
     let mut f = Vec::new();
     match (&row.channels, &row.spec_error) {
         (Some(c), _) => {
@@ -114,7 +120,29 @@ pub fn findings(row: &AuditRow, now: DateTime<Utc>) -> Vec<(Severity, String)> {
     if row.mcp.is_ok() && !row.home_present {
         f.push((Fail, "identity home missing".to_string()));
     }
+    if row.account_key {
+        // Full home: cert.pem ages out while an already-claimed session stays online, and the
+        // next adapter load renews it, so its age is information, not a failure.
+        match &row.cert {
+            Cert::Expired(t) => f.push((
+                Info,
+                format!(
+                    "certificate expired {} (account home: renews on next start)",
+                    t.to_rfc3339()
+                ),
+            )),
+            Cert::Valid(t) if (*t - now).num_seconds() < NEAR_EXPIRY_SECS => f.push((
+                Info,
+                format!(
+                    "certificate expires {} (account home: renews on next start)",
+                    t.to_rfc3339()
+                ),
+            )),
+            _ => {}
+        }
+    }
     match &row.cert {
+        Cert::Expired(_) | Cert::Valid(_) if row.account_key => {}
         Cert::Missing if row.home_present => f.push((Fail, "no certificate".to_string())),
         Cert::Unreadable => f.push((Warn, "certificate shape not recognised".to_string())),
         Cert::Expired(t) => f.push((Fail, format!("certificate expired {}", t.to_rfc3339()))),
@@ -301,6 +329,9 @@ pub fn audit_role(dir: &Path, role: &str, presence: &PresenceMap, now: DateTime<
     let home_present = home_path
         .as_ref()
         .is_some_and(|h| h.join("roles").join(role).is_dir());
+    let account_key = home_path
+        .as_ref()
+        .is_some_and(|h| h.join("account").join("account.key.pem").is_file());
     let cert = match &home_path {
         Some(h) => cert_state(h, role, now),
         None => Cert::Missing,
@@ -315,6 +346,7 @@ pub fn audit_role(dir: &Path, role: &str, presence: &PresenceMap, now: DateTime<
         mcp,
         home,
         home_present,
+        account_key,
         cert,
         presence: presence.as_ref().ok().and_then(|m| m.get(role)).cloned(),
         unknown_to_daemon: presence.as_ref().is_ok_and(|m| !m.contains_key(role)),
@@ -438,7 +470,7 @@ pub fn render(rows: &[AuditRow], presence: &PresenceMap, now: DateTime<Utc>) -> 
         let f = findings(r, now);
         if f.iter().any(|(s, _)| *s == Severity::Fail) {
             fail_rows += 1;
-        } else if !f.is_empty() {
+        } else if f.iter().any(|(s, _)| *s == Severity::Warn) {
             warn_rows += 1;
         }
         let ch = r.channels.map_or("?".to_string(), |c| c.text());
