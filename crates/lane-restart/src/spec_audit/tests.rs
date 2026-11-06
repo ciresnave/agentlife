@@ -291,3 +291,71 @@ fn naming_roles_audits_only_those_and_the_common_home_is_the_most_named() {
     );
     assert_eq!(common_home(&[]), None);
 }
+
+fn account_key(home: &Path) {
+    let d = home.join("account");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("account.key.pem"), "k").unwrap();
+}
+
+fn cert_findings(rows: &[AuditRow], role: &str, now: DateTime<Utc>) -> Vec<(Severity, String)> {
+    sev(rows, role, now)
+        .into_iter()
+        .filter(|f| f.1.starts_with("certificate"))
+        .collect()
+}
+
+#[test]
+fn an_account_home_role_with_an_aged_certificate_is_info_and_a_role_only_home_still_fails() {
+    let (d, full, only) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
+    let now = Utc::now();
+    account_key(full.path());
+    let old = Some(now - chrono::Duration::hours(7));
+    let soon = Some(now + chrono::Duration::hours(2));
+    lane(d.path(), full.path(), "fullold", BOTH, old);
+    lane(d.path(), full.path(), "fullsoon", BOTH, soon);
+    lane(d.path(), only.path(), "onlyold", BOTH, old);
+    lane(d.path(), only.path(), "onlysoon", BOTH, soon);
+    // Online and offline make no difference to a full home: the key renews the certificate.
+    let online =
+        parse_presence(r#"{"global_id":"fullold@a","online":true,"pending":{"queued":0}}"#);
+    for pres in [online, none()] {
+        let rows = audit(d.path(), &[], &pres, now);
+        let f = cert_findings(&rows, "fullold", now);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].0, Severity::Info, "{f:?}");
+        assert!(f[0].1.contains("renews on next start"));
+        let s = cert_findings(&rows, "fullsoon", now);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].0, Severity::Info);
+        assert_eq!(cert_findings(&rows, "onlyold", now)[0].0, Severity::Fail);
+        assert_eq!(cert_findings(&rows, "onlysoon", now)[0].0, Severity::Warn);
+    }
+}
+
+#[test]
+fn an_info_finding_makes_neither_a_failing_nor_a_warning_row_and_a_missing_cert_still_fails() {
+    let (d, full) = (tempdir().unwrap(), tempdir().unwrap());
+    let now = Utc::now();
+    account_key(full.path());
+    lane(
+        d.path(),
+        full.path(),
+        "fullold",
+        BOTH,
+        Some(now - chrono::Duration::hours(7)),
+    );
+    lane(d.path(), full.path(), "nocert", BOTH, None);
+    std::fs::create_dir_all(full.path().join("roles").join("nocert")).unwrap();
+    let rows = audit(d.path(), &["fullold".to_string()], &none(), now);
+    let (text, ok) = render(&rows, &none(), now);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("AUDIT 1 role(s): 0 failing, 0 warning, 1 clean"),
+        "{text}"
+    );
+    let rows = audit(d.path(), &["nocert".to_string()], &none(), now);
+    assert!(sev(&rows, "nocert", now)
+        .iter()
+        .any(|f| f.0 == Severity::Fail && f.1 == "no certificate"));
+}
