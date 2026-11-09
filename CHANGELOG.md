@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.45
+
+- **`SessionEnd` logs how long each step took (issue #233, PM [TASK]).** The hook log line gains `[steps claude_pid N ms, start_time N ms, pointer N ms, registry_update N ms, journal N ms]` (`registry_scan` appears only when the pointer misses). Why: on CI a `SessionEnd` took 1534 ms against the documented 1500 ms budget with `+snapshot to 8 ms`, and that number is taken BEFORE `SessionEnd`'s work (it never snapshots), so it says nothing about where the time went; the next slow run now names the step. **No budget changed, no behaviour changed;** the existing `total N ms` parse is unaffected. **Tests:** a unit test (`timed_steps_are_reported_by_name_and_emptied_by_the_read`) and the existing SessionEnd end-to-end test now requires the log line to name `registry_update`. Version 0.30.45 is provisional (0.30.44 is #260; the PM allocates).
+
 ## 0.30.43
 
 - **`specs audit`: an account-home role's certificate age is INFO, not a failure (PM [TASK], Synapse lane's explanation).** agentlife, overmind, pm and synapse run from the account home and hold the account key; their certificates last 24 h and the adapter's `load_role` re-makes one with under 12 h left (every claim path calls it), while the daemon checks a certificate only at claim, so a session that claimed before expiry stays online with an aged `cert.pem`. The audit read only `cert.pem` and reported those healthy roles EXPIRED. A home holding `account/account.key.pem` now reports an expired or near-expiry certificate as a new `Info` finding ("renews on next start"): it fails nothing and counts as neither a failing nor a warning row. A role-only home (the lane homes) keeps failing when expired and warning near expiry; a missing certificate still fails everywhere. `Severity::Info` and `AuditRow.account_key` are new in the `--json` output; the daemon is not touched. Tests: full-home expired/near-expiry is Info online and offline, role-only still Fail/Warn, an Info row is clean.

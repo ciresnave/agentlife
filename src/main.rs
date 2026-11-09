@@ -146,8 +146,14 @@ fn run_hook(event: &str, reason: Option<&str>) -> ExitCode {
     );
     // Timing goes in the log so a slow hook is visible: `SessionEnd` has a 1.5 s budget, and a
     // hook that blows it fails silently.
+    let steps = hook::take_step_timings();
+    let steps = if steps.is_empty() {
+        String::new()
+    } else {
+        format!(" [steps {steps}]")
+    };
     let line = format!(
-        "{} [stdin {read_ms} ms, +snapshot to {snapshot_ms} ms, total {} ms]",
+        "{} [stdin {read_ms} ms, +snapshot to {snapshot_ms} ms, total {} ms]{steps}",
         outcome.log_line_for(
             event,
             chrono::Utc::now(),
