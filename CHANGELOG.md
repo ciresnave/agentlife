@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.44
+
+- **Tests only (issue #233): the `hook_e2e` stand-ins that must still be alive when `list` looks are held 300 s, not 30 s.** Two tests spawned a stand-in `claude` with `--fake-hold 30` and then ran several processes before asking `list` for `running`; a whole-file run under load took 119.8 s (idle about 16 s), so the stand-in had exited and `stopped` was the right answer to a question asked too late. Both stand-ins are killed by the test at its end, so a longer hold costs nothing. No `#[ignore]`, no retry. **Not fixed, still open in #233:** the second observation there (`session_end_stamps_the_reason...`, hook own time 4850 ms against the documented 1500 ms budget) is a different bound, the hook's contractual budget, which I did not widen; its cause is unverified. Version 0.30.44 is provisional (PM allocates).
+
 ## 0.30.43
 
 - **`specs audit`: an account-home role's certificate age is INFO, not a failure (PM [TASK], Synapse lane's explanation).** agentlife, overmind, pm and synapse run from the account home and hold the account key; their certificates last 24 h and the adapter's `load_role` re-makes one with under 12 h left (every claim path calls it), while the daemon checks a certificate only at claim, so a session that claimed before expiry stays online with an aged `cert.pem`. The audit read only `cert.pem` and reported those healthy roles EXPIRED. A home holding `account/account.key.pem` now reports an expired or near-expiry certificate as a new `Info` finding ("renews on next start"): it fails nothing and counts as neither a failing nor a warning row. A role-only home (the lane homes) keeps failing when expired and warning near expiry; a missing certificate still fails everywhere. `Severity::Info` and `AuditRow.account_key` are new in the `--json` output; the daemon is not touched. Tests: full-home expired/near-expiry is Info online and offline, role-only still Fail/Warn, an Info row is clean.
