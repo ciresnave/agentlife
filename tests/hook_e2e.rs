@@ -394,6 +394,18 @@ fn session_end_stamps_the_reason_inside_its_budget_and_deletes_nothing() {
         "the SessionEnd hook's own work took {own_ms} ms (budget 1500 ms):\n{}",
         rig.log()
     );
+    // The log line also names how long each step took, so a slow SessionEnd says which step (#233).
+    let end_line = rig
+        .log()
+        .lines()
+        .rev()
+        .find(|l| l.contains(" SessionEnd "))
+        .map(str::to_string)
+        .expect("a SessionEnd log line");
+    assert!(
+        end_line.contains("[steps ") && end_line.contains("registry_update "),
+        "the SessionEnd log line names its steps: {end_line}"
+    );
     let wall_ms = results[1].1;
     eprintln!("SessionEnd: own {own_ms} ms, wall {wall_ms} ms (includes OS process creation)");
     assert!(
