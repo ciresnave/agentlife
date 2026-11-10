@@ -75,6 +75,8 @@ directory ACL), as today.
 
 ## Slices
 
+**Slice 1 is built (0.30.47):** T1, T2, T4, T5 are `scripts/tests/gh-runner-setup-account.tests.ps1` (39 checks), the add-only default, `-RotateShared`, `-AddToGroup`/`-Because` and the derived `-Account` are in the script. Not built: `-RemoveAccount`, slice 2 and slice 3. Never run with `-Apply`.
+
 1. T1, T2, T4, T5 + add-only default + group flag (no ACL change). 2. Per-account root + T3. 3. The printed migration for
 the three live runners, run by CireSnave; then `-CheckAclsOnly`-style read-back of each runner directory.
 
