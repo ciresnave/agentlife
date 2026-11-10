@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.46
+
+- **Tests only (ROADMAP row 7): `a_hand_started_agent_started_again_after_its_process_died_is_one_agent` waits for the first stand-in to leave the process table before starting the second.** It was red once on Windows CI (run 41128992581 attempt 1, `sessions.len()` 1 where 2 was expected) and green on the rerun of the same SHA. `Child::wait` returns at the OS's exit report, but on a loaded shared runner the process table can list the pid a moment longer, so the second `SessionStart` could see the first as alive and treat it as the same session. New `Rig::run_until_gone` waits (50 ms polls, 60 s cap, a loud assertion at the cap), used for the first run only. **Cause is the roadmap's hypothesis, not instrumented here:** the flake was not reproduced, so the next red of this test is the evidence either way. No `#[ignore]`, no retry. Version 0.30.46 is provisional (#261 is 0.30.45; the PM allocates).
+
 ## 0.30.45
 
 - **`SessionEnd` logs how long each step took (issue #233, PM [TASK]).** The hook log line gains `[steps claude_pid N ms, start_time N ms, pointer N ms, registry_update N ms, journal N ms]` (`registry_scan` appears only when the pointer misses). Why: on CI a `SessionEnd` took 1534 ms against the documented 1500 ms budget with `+snapshot to 8 ms`, and that number is taken BEFORE `SessionEnd`'s work (it never snapshots), so it says nothing about where the time went; the next slow run now names the step. **No budget changed, no behaviour changed;** the existing `total N ms` parse is unaffected. **Tests:** a unit test (`timed_steps_are_reported_by_name_and_emptied_by_the_read`) and the existing SessionEnd end-to-end test now requires the log line to name `registry_update`. Version 0.30.45 is provisional (0.30.44 is #260; the PM allocates).
