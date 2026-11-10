@@ -259,7 +259,7 @@ fn a_session_start_through_the_real_chain_registers_the_agent_and_list_sees_it_a
     let start = rig.payload("start.json", "SessionStart", "sess-1", Some("startup"));
     let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
     let report = rig.dir.path().join("report.txt");
-    let mut child = rig.spawn(LANE_ARGS, &script, &report, 30, &[]);
+    let mut child = rig.spawn(LANE_ARGS, &script, &report, 300, &[]); // held 300 s, not 30: killed at the end; a loaded file ran 120 s (#233)
     let results = parse_report(&wait_for(&report));
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].2, 0, "the hook must exit 0");
@@ -1574,7 +1574,7 @@ fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_noth
         &["-n", "e2e-live", "--permission-mode", "auto"],
         &script2,
         &report2,
-        30,
+        300, // killed at the end; 30 s was outlived by a loaded run (#233)
         &[],
     );
     wait_for(&report2);
