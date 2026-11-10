@@ -39,7 +39,7 @@
 .PARAMETER RotateShared  Allow rotating the password of an EXISTING account that services already log on as (it is refused by default; never run on a live service).
 .PARAMETER AddToGroup    Add the account to ONE named local group (never Administrators or Remote Desktop Users); needs -Because.
 .PARAMETER Because       Why the group is needed (a workflow path); printed in the plan and cut into the account description.
-.PARAMETER Root          Install root, ASCII path. Default C:\gh-runner.
+.PARAMETER Root          Install root, ASCII path. Default C:\gh-runner-<account>: one root per account, so no runner account can write another runner's files. An existing root that already grants another account is REFUSED at -Apply (the shared C:\gh-runner of the three older runners must be passed explicitly for -Remove or -CheckAclsOnly).
 .PARAMETER Labels        Extra runner labels, added to the automatic self-hosted, Windows, X64. Default NONE: add gpu only for a repo whose jobs need the GPU, so a plain-Windows job cannot queue behind (or be mistaken for) a GPU one.
 .PARAMETER RunnerVersion Runner release to install. Pinned with its hash; change both together.
 .PARAMETER RunnerSha256  SHA256 of actions-runner-win-x64-<RunnerVersion>.zip, from the release notes.
@@ -56,7 +56,7 @@ param(
   [string[]]$Owners = @('ciresnave', 'ThinkersJournal'),
   [string[]]$Private = @(),
   [string]$Account,
-  [string]$Root = 'C:\gh-runner',
+  [string]$Root,
   [string[]]$Labels = @(),
   [string]$RunnerVersion = '2.338.0',
   [string]$RunnerSha256 = 'f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f',
@@ -96,6 +96,28 @@ function Assert-AccountReusable([string]$account, $dependents, [bool]$rotateShar
   }
 }
 # Groups are listed, never defaulted: one named local group, with the reason. Administrators and Remote Desktop Users stay refused.
+# The root ACL (slice 2, docs/RUNNER-ACCOUNTS.md T3). Both functions take the principal as an argument and are read out of this file
+# by scripts	ests\gh-runner-setup-account.tests.ps1, which runs them on real ACLs in a temp directory.
+# Principals with ANY allow entry on the root other than SYSTEM, Administrators and the one account: a shared root re-creates the hole
+# where each runner account can rewrite the binaries another service starts as a different account.
+function Get-RootForeignPrincipals([string]$root, [string]$principal) {
+  if (-not (Test-Path -LiteralPath $root)) { return @() }
+  $keep = New-Object System.Collections.Generic.HashSet[string]
+  foreach ($x in 'S-1-5-18', 'S-1-5-32-544') { [void]$keep.Add($x) }
+  try { [void]$keep.Add(([Security.Principal.NTAccount]$principal).Translate([Security.Principal.SecurityIdentifier]).Value) } catch { }
+  if ($PSVersionTable.PSEdition -eq 'Core') { $sec = [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]::new($root)) }
+  else { $sec = [System.IO.Directory]::GetAccessControl($root) }
+  $rules = $sec.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+  if ($null -eq $rules) { throw "could not read the ACL of $root (refusing rather than assuming it is clean)" }
+  foreach ($ace in $rules) {
+    if ($ace.AccessControlType -ne 'Allow' -or $keep.Contains($ace.IdentityReference.Value)) { continue }
+    try { $ace.IdentityReference.Translate([Security.Principal.NTAccount]).Value } catch { $ace.IdentityReference.Value }
+  }
+}
+function Set-RunnerRootAcl([string]$root, [string]$principal) {
+  icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "${principal}:(OI)(CI)M" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "icacls on $root exited $LASTEXITCODE" }
+}
 function Test-GroupRequest([string]$group, [string]$because) {
   if (-not $group -and -not $because) { return $null }
   if (-not $group) { throw '-Because needs -AddToGroup' }
@@ -114,6 +136,8 @@ if ($accountDefaulted) {
   $Account = Get-RunnerAccountName $Repo[0]
 }
 $groupPlan = Test-GroupRequest $AddToGroup $Because
+$rootDefaulted = -not $PSBoundParameters.ContainsKey('Root')
+if ($rootDefaulted) { $Root = "C:\gh-runner-$Account" }
 
 foreach ($g in $AlsoGrant) {
   if ($g -notmatch '^[A-Za-z0-9_. \\-]{1,60}$') { throw "-AlsoGrant '$g' is not a plain group or account name" }
@@ -245,7 +269,9 @@ if (-not $Apply) {
   Write-Host "Account       : $env:COMPUTERNAME\$Account (standard user; random 32-char password held in memory only)$(if ($accountDefaulted) { ' [default: ghr-<repo>, one account per runner]' })"
   Write-Host "  account plan: create | exists with 0 services: password rotated | exists with services: REFUSED unless -RotateShared"
   Write-Host "  group memberships: $(if ($groupPlan) { $groupPlan.Group + ' because ' + $groupPlan.Because } else { 'none' })"
-  Write-Host "Root          : $Root  (ACL: SYSTEM, Administrators, $Account)"
+  Write-Host "Root          : $Root  (ACL: SYSTEM, Administrators, ${Account}: its own tree only)$(if ($rootDefaulted) { ' [default: C:\gh-runner-<account>, one root per account]' })"
+  $foreign = @(Get-RootForeignPrincipals $Root "$env:COMPUTERNAME\$Account")
+  Write-Host "  root plan: $(if ($foreign.Count -gt 0) { 'REFUSED at -Apply, the root already grants ' + ($foreign -join ', ') } else { 'create or reuse; no other account has an entry' })"
   Write-Host "Runner        : v$RunnerVersion  SHA256 $RunnerSha256`n  $zipUrl"
   if ($aclFindings.Count -gt 0) { Write-Host "`nACL PREFLIGHT WOULD REFUSE -Apply:"; Show-AclFix $aclFindings; Write-Host "" }
   else { Write-Host "ACL preflight: clean (-Apply would proceed past it)" }
@@ -352,9 +378,10 @@ $rdp = @(Get-LocalGroupMember -Group 'Remote Desktop Users' -ErrorAction Silentl
 if ($rdp | Where-Object { $_ -ieq "$env:COMPUTERNAME\$Account" }) { throw "$Account may log on by Remote Desktop; refusing. Remove it and run again." }
 
 # 3. The root.
+$foreign = @(Get-RootForeignPrincipals $Root "${env:COMPUTERNAME}\${Account}")
+if ($foreign.Count -gt 0) { throw "root $Root already grants $($foreign -join ', '): REFUSED, nothing changed. One root per account (docs/RUNNER-ACCOUNTS.md); pass a different -Root." }
 New-Item -ItemType Directory -Force -Path $Root | Out-Null
-icacls $Root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "${env:COMPUTERNAME}\${Account}:(OI)(CI)M" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls on $Root exited $LASTEXITCODE" }
+Set-RunnerRootAcl $Root "${env:COMPUTERNAME}\${Account}"
 
 # 4. The download, verified before any extraction.
 if (-not (Test-Path -LiteralPath $zipPath)) {

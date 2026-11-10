@@ -75,6 +75,8 @@ directory ACL), as today.
 
 ## Slices
 
+**Slice 2 is built (0.30.48):** the default `-Root` is `C:\gh-runner-<account>`; `Get-RootForeignPrincipals` and `Set-RunnerRootAcl` (T3, on real ACLs in a temp directory, two built-in groups standing in for two accounts) refuse `-Apply` on a root that already grants any account besides SYSTEM, Administrators and this one, and the dry run prints a `root plan:` line. Not built: the printed migration of the three live runners (slice 3), `-RemoveAccount`. The shared `C:\gh-runner` must now be passed as `-Root` for `-Remove` or `-CheckAclsOnly`. Never run with `-Apply`.
+
 **Slice 1 is built (0.30.47):** T1, T2, T4, T5 are `scripts/tests/gh-runner-setup-account.tests.ps1` (39 checks), the add-only default, `-RotateShared`, `-AddToGroup`/`-Because` and the derived `-Account` are in the script. Not built: `-RemoveAccount`, slice 2 and slice 3. Never run with `-Apply`.
 
 1. T1, T2, T4, T5 + add-only default + group flag (no ACL change). 2. Per-account root + T3. 3. The printed migration for

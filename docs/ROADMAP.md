@@ -53,7 +53,7 @@ Versions are proposals; the PM allocates them. A row's "who" is the only thing t
    liveness read in the registry. Next step: read the liveness check the registry uses for "same name and launch
    directory" and whether the test waits for the first child to be gone; make the test wait on the death (as
    0.29.33 did for a timing bound), not retry it. An earlier flake in the same file: 0.29.33.
-8. **A runner account per runner, not the shared `gh-runner`: slice 1 built, 0.30.47 (derived `-Account`, add-only default with `-RotateShared`, `-AddToGroup`/`-Because`; slices 2 and 3 and `-RemoveAccount` not built)** (PM RULING 2026-10-30, `gh-runner-setup.ps1`; design
+8. **A runner account per runner, not the shared `gh-runner`: slices 1 and 2 built, 0.30.47 and 0.30.48 (derived `-Account`, add-only default with `-RotateShared`, `-AddToGroup`/`-Because`; slices 2 and 3 and `-RemoveAccount` not built)** (PM RULING 2026-10-30, `gh-runner-setup.ps1`; design
    `docs/RUNNER-ACCOUNTS.md`, tests first). Why: adding a runner to an existing account rotates that account's password
    and applies it to every service on it through `Win32_Service.Change`, which has never run on a real service (3 live);
    and measured 2026-10-30 `C:\gh-runner` grants `gh-runner` and `gh-runner-private` Modify on the whole tree, inherited
