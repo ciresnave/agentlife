@@ -99,7 +99,7 @@ try {
   Check 'a repo declared private defaults to a persistent runner' ($t -like '*Runner mode   : persistent*every -Repo is declared in -Private*') $t
   $t = Mode @{ Repo = @('ciresnave/x') }
   Check 'an undeclared repo (public) defaults to an ephemeral runner' ($t -like '*Runner mode   : ephemeral*not declared in -Private*') $t
-  $t = Mode @{ Repo = @('ciresnave/x', 'ciresnave/y'); Private = @('ciresnave/x') }
+  $t = Mode @{ Repo = @('ciresnave/x', 'ciresnave/y'); Private = @('ciresnave/x'); Account = 'ghr-t' }   # two repos need an explicit -Account
   Check 'a mix of private and undeclared stays ephemeral for the whole call' ($t -like '*Runner mode   : ephemeral*') $t
   $t = Mode @{ Repo = @('ciresnave/x'); Private = @('ciresnave/x'); Ephemeral = $true }
   Check 'an explicit -Ephemeral:$true wins over the private default' ($t -like '*Runner mode   : ephemeral*set by -Ephemeral*') $t
@@ -112,8 +112,9 @@ try {
   $text = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $d -AlsoGrant CodexSandboxUsers -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
   Check '-AlsoGrant puts the group in the fix as read-and-execute' ($text -like '*CodexSandboxUsers:(OI)(CI)RX*' -and $text -notlike '*CodexSandboxUsers:(OI)(CI)F*' -and $text -notlike '*CodexSandboxUsers:(OI)(CI)M*') $text
   Check '-AlsoGrant does not weaken the check' ($text -like '*ACL preflight FAILED*') $text
+  # -Account gh-runner, so that 'gh-runner' is refused as the account itself (the default account is now derived per repo).
   foreach ($bad in 'Users', 'BUILTIN\Users', 'Authenticated Users', 'Everyone', 'gh-runner') {
-    $t = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -AlsoGrant $bad -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
+    $t = & { try { & $setup -Repo ciresnave/x -Account gh-runner -ProtectedPaths $clean -AlsoGrant $bad -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
     Check "-AlsoGrant '$bad' is refused" ($t -like '*THREW:*-AlsoGrant*') $t
   }
   $t = & { try { & $setup -Repo ciresnave/x -ProtectedPaths $clean -AlsoGrant 'a;b' -CheckAclsOnly } catch { "THREW: " + $_.Exception.Message } } *>&1 | Out-String
@@ -140,8 +141,10 @@ try {
     }
   }
   Check 'positive control: at least one literal argument was length-checked' ($checked -ge 1) 'none checked'
-  $defaultAcct = ($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Account' }).DefaultValue.Value
-  Check 'default -Account fits the 20-character local name limit' ($defaultAcct.Length -le 20) $defaultAcct
+  # -Account no longer has a literal default: it is derived from the repo (gh-runner-setup-account.tests.ps1 T1 holds that name to 20).
+  $acctParam = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Account' }
+  Check 'positive control: the script still has an -Account parameter' ($null -ne $acctParam) 'missing'
+  Check '-Account has no literal default (it is derived per repo)' ($null -eq $acctParam.DefaultValue) "default: $($acctParam.DefaultValue)"
 
   # Spike run 1 (2026-10-17): every `shell: powershell` step died on the Restricted execution policy. The dry run must show the
   # .env step, and the script text must write the same variable it prints.

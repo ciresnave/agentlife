@@ -35,7 +35,10 @@
 .PARAMETER Repo          One or more owner/name repos to register the runner for. Required.
 .PARAMETER Owners        Account names whose repos may get a runner. Default ciresnave, ThinkersJournal.
 .PARAMETER Private       The -Repo entries that are PRIVATE (only these may use -Ephemeral:$false). -Apply verifies each with `gh api`.
-.PARAMETER Account       Local account name. Default gh-runner.
+.PARAMETER Account       Local account name. Default ghr-<repo> (cut to 20 characters with a stable hash suffix), with exactly one -Repo; required with more.
+.PARAMETER RotateShared  Allow rotating the password of an EXISTING account that services already log on as (it is refused by default; never run on a live service).
+.PARAMETER AddToGroup    Add the account to ONE named local group (never Administrators or Remote Desktop Users); needs -Because.
+.PARAMETER Because       Why the group is needed (a workflow path); printed in the plan and cut into the account description.
 .PARAMETER Root          Install root, ASCII path. Default C:\gh-runner.
 .PARAMETER Labels        Extra runner labels, added to the automatic self-hosted, Windows, X64. Default NONE: add gpu only for a repo whose jobs need the GPU, so a plain-Windows job cannot queue behind (or be mistaken for) a GPU one.
 .PARAMETER RunnerVersion Runner release to install. Pinned with its hash; change both together.
@@ -52,7 +55,7 @@ param(
   [Parameter(Mandatory)][string[]]$Repo,
   [string[]]$Owners = @('ciresnave', 'ThinkersJournal'),
   [string[]]$Private = @(),
-  [string]$Account = 'gh-runner',
+  [string]$Account,
   [string]$Root = 'C:\gh-runner',
   [string[]]$Labels = @(),
   [string]$RunnerVersion = '2.338.0',
@@ -62,9 +65,55 @@ param(
   [string[]]$AlsoGrant = @(),
   [switch]$CheckAclsOnly,
   [switch]$Apply,
-  [switch]$Remove
+  [switch]$Remove,
+  [switch]$RotateShared,
+  [string]$AddToGroup,
+  [string]$Because
 )
 $ErrorActionPreference = 'Stop'
+
+# One account per runner (docs/RUNNER-ACCOUNTS.md, PM ruling 2026-10-30). The three functions below are read out of this file
+# by scripts\tests\gh-runner-setup-account.tests.ps1, so they take everything as arguments and touch nothing.
+function Get-RunnerAccountName([string]$repo) {
+  if ($repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "Repo '$repo' is not owner/name" }
+  # ghr-<repo>, cut to the 20-character SAM limit. A cut name keeps 15 characters, a dash and a stable 4-hex suffix of the
+  # whole slug, so two long repo names that share a prefix cannot collide. '.' is not allowed in the account name here.
+  $base = 'ghr-' + (($repo.Split('/')[1]) -replace '[^A-Za-z0-9_-]', '-')
+  if ($base.Length -le 20) { return $base }
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($repo.ToLowerInvariant())) } finally { $sha.Dispose() }
+  $hex = ([BitConverter]::ToString($h[0..1]) -replace '-', '').ToLowerInvariant()
+  return $base.Substring(0, 15) + '-' + $hex
+}
+# Add-only by default: an existing account that a service already logs on as is REFUSED, because rotating its password means
+# pushing the new one into each service through Win32_Service.Change, which has never run on a live service. -RotateShared is
+# the explicit way back to that path. An existing account with no services has no dependent to break.
+function Assert-AccountReusable([string]$account, $dependents, [bool]$rotateShared) {
+  $deps = @($dependents | Where-Object { $null -ne $_ })   # @($null) has one element in PowerShell
+  $n = $deps.Count
+  if ($n -gt 0 -and -not $rotateShared) {
+    throw "account $account already has $n service(s) logging on as it ($(($deps | ForEach-Object Name) -join ', ')): REFUSED, nothing changed. Use a new -Account, or -RotateShared to rotate its password and push it into each service (never run on a live service)."
+  }
+}
+# Groups are listed, never defaulted: one named local group, with the reason. Administrators and Remote Desktop Users stay refused.
+function Test-GroupRequest([string]$group, [string]$because) {
+  if (-not $group -and -not $because) { return $null }
+  if (-not $group) { throw '-Because needs -AddToGroup' }
+  if (-not $because) { throw "-AddToGroup '$group' needs -Because <the workflow path that needs it>" }
+  if ($group -notmatch '^[A-Za-z0-9_. -]{1,60}$') { throw "-AddToGroup '$group' is not a plain local group name" }
+  if ($group -imatch '^(Administrators|Remote Desktop Users|Users|Everyone|Authenticated Users|Guests)$') { throw "-AddToGroup '$group' is refused: the runner account stays a standard user" }
+  if ($because -notmatch '^[A-Za-z0-9_./ -]{1,200}$') { throw '-Because must be plain text (a workflow path or a short reason)' }
+  # New-LocalUser/Set-LocalUser reject a description over 48 characters at run time only (the 2026-10-17 live run), so cut here.
+  $d = "runner; $group because $because"
+  [pscustomobject]@{ Group = $group; Because = $because; Description = $d.Substring(0, [Math]::Min(48, $d.Length)) }
+}
+
+$accountDefaulted = -not $PSBoundParameters.ContainsKey('Account')
+if ($accountDefaulted) {
+  if (@($Repo).Count -ne 1) { throw '-Account is required with more than one -Repo: one account per runner (docs/RUNNER-ACCOUNTS.md). Name the account for each, or run once per repo.' }
+  $Account = Get-RunnerAccountName $Repo[0]
+}
+$groupPlan = Test-GroupRequest $AddToGroup $Because
 
 foreach ($g in $AlsoGrant) {
   if ($g -notmatch '^[A-Za-z0-9_. \\-]{1,60}$') { throw "-AlsoGrant '$g' is not a plain group or account name" }
@@ -193,7 +242,9 @@ if (-not $Apply) {
   Write-Host "DRY RUN (nothing changed, no network). Pass -Apply from an elevated shell to do this.`n"
   Write-Host "Owners        : $($Owners -join ', ')   private (persistent allowed): $(if ($Private) { $Private -join ', ' } else { 'none: every -Repo is treated as public, so ephemeral' })"
   Write-Host "Runner mode   : $(if ($Ephemeral) { 'ephemeral (one job per registration)' } else { 'persistent (one registration, many jobs)' })$(if ($ephemeralDefaulted) { ' [default: ' + $(if ($Ephemeral) { 'a -Repo is not declared in -Private' } else { 'every -Repo is declared in -Private' }) + ']' } else { ' [set by -Ephemeral]' })"
-  Write-Host "Account       : $env:COMPUTERNAME\$Account (standard user; random 32-char password held in memory only)"
+  Write-Host "Account       : $env:COMPUTERNAME\$Account (standard user; random 32-char password held in memory only)$(if ($accountDefaulted) { ' [default: ghr-<repo>, one account per runner]' })"
+  Write-Host "  account plan: create | exists with 0 services: password rotated | exists with services: REFUSED unless -RotateShared"
+  Write-Host "  group memberships: $(if ($groupPlan) { $groupPlan.Group + ' because ' + $groupPlan.Because } else { 'none' })"
   Write-Host "Root          : $Root  (ACL: SYSTEM, Administrators, $Account)"
   Write-Host "Runner        : v$RunnerVersion  SHA256 $RunnerSha256`n  $zipUrl"
   if ($aclFindings.Count -gt 0) { Write-Host "`nACL PREFLIGHT WOULD REFUSE -Apply:"; Show-AclFix $aclFindings; Write-Host "" }
@@ -277,6 +328,7 @@ if ($existing) {
   # 2026-10-22: the ThinkersFoundation-site service would have failed at its next start). So the same run gives each of
   # them the new password through the service manager (CIM Change: the password is not on a command line).
   $dependents = Select-AccountServices (Get-CimInstance Win32_Service) $Account $env:COMPUTERNAME
+  Assert-AccountReusable $Account $dependents ([bool]$RotateShared)
   Set-LocalUser -Name $Account -Password $secure
   foreach ($d in $dependents) {
     $res = Invoke-CimMethod -InputObject $d -MethodName Change -Arguments @{ StartName = ".\$Account"; StartPassword = $password }
@@ -289,6 +341,11 @@ if ($existing) {
   Write-Host "account $Account created"
 }
 Add-LocalGroupMember -Group 'Users' -Member $Account -ErrorAction SilentlyContinue
+if ($groupPlan) {
+  Add-LocalGroupMember -Group $groupPlan.Group -Member $Account -ErrorAction Stop
+  Set-LocalUser -Name $Account -Description $groupPlan.Description
+  Write-Host "group: $Account added to '$($groupPlan.Group)' because $($groupPlan.Because)"
+}
 $admins = @(Get-LocalGroupMember -Group 'Administrators' | ForEach-Object { $_.Name })
 if ($admins | Where-Object { $_ -ieq "$env:COMPUTERNAME\$Account" }) { throw "$Account is in Administrators; refusing. Remove it and run again." }
 $rdp = @(Get-LocalGroupMember -Group 'Remote Desktop Users' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
