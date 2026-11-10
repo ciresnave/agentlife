@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.45
+
+- **`SessionEnd` logs how long each step took (issue #233, PM [TASK]).** The hook log line gains `[steps claude_pid N ms, start_time N ms, pointer N ms, registry_update N ms, journal N ms]` (`registry_scan` appears only when the pointer misses). Why: on CI a `SessionEnd` took 1534 ms against the documented 1500 ms budget with `+snapshot to 8 ms`, and that number is taken BEFORE `SessionEnd`'s work (it never snapshots), so it says nothing about where the time went; the next slow run now names the step. **No budget changed, no behaviour changed;** the existing `total N ms` parse is unaffected. **Tests:** a unit test (`timed_steps_are_reported_by_name_and_emptied_by_the_read`) and the existing SessionEnd end-to-end test now requires the log line to name `registry_update`. Version 0.30.45 is provisional (0.30.44 is #260; the PM allocates).
+
 ## 0.30.44
 
 - **Tests only (issue #233): the `hook_e2e` stand-ins that must still be alive when `list` looks are held 300 s, not 30 s.** Two tests spawned a stand-in `claude` with `--fake-hold 30` and then ran several processes before asking `list` for `running`; a whole-file run under load took 119.8 s (idle about 16 s), so the stand-in had exited and `stopped` was the right answer to a question asked too late. Both stand-ins are killed by the test at its end, so a longer hold costs nothing. No `#[ignore]`, no retry. **Not fixed, still open in #233:** the second observation there (`session_end_stamps_the_reason...`, hook own time 4850 ms against the documented 1500 ms budget) is a different bound, the hook's contractual budget, which I did not widen; its cause is unverified. Version 0.30.44 is provisional (PM allocates).

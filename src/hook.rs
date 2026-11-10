@@ -29,7 +29,8 @@ use lane_state::claude_proc::{
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// The most sessions kept per agent; older ones fall off the front. The journal keeps the full
@@ -381,21 +382,48 @@ fn session_start(ctx: &Ctx, input: &HookInput, source: Option<&str>) -> Result<O
     })
 }
 
+/// Wall time of each step `session_end` took, in order, for the hook log (issue #233: a SessionEnd
+/// took 1534 ms on CI with an 8 ms snapshot, and nothing said which step). Only the hook binary
+/// reads it; the cap keeps a test process that calls `session_end` many times bounded.
+static STEPS: Mutex<Vec<(&'static str, u128)>> = Mutex::new(Vec::new());
+
+fn timed<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
+    let began = Instant::now();
+    let out = f();
+    if let Ok(mut v) = STEPS.lock() {
+        if v.len() < 32 {
+            v.push((name, began.elapsed().as_millis()));
+        }
+    }
+    out
+}
+
+/// The steps `session_end` has timed so far as `name N ms, name N ms`, emptied by the call.
+pub fn take_step_timings() -> String {
+    let mut v = STEPS
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default();
+    v.shrink_to_fit();
+    v.iter()
+        .map(|(n, ms)| format!("{n} {ms} ms"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn session_end(ctx: &Ctx, input: &HookInput, reason: Option<&str>) -> Result<Outcome, String> {
-    let claude = match ctx.env.claude_pid() {
+    let claude = match timed("claude_pid", || ctx.env.claude_pid()) {
         Ok(p) => p,
         Err(e) => return Ok(Outcome::Skipped(format!("not under a claude process: {e}"))),
     };
-    let start = ctx.env.start_time(claude);
+    let start = timed("start_time", || ctx.env.start_time(claude));
     let reason = reason
         .filter(|r| KNOWN_END_REASONS.contains(r))
         .unwrap_or("other");
     // O(1) through the pointer when the start time is known; a scan only without one.
-    let id = match start.and_then(|s| ctx.procs.get(claude, s)) {
+    let id = match timed("pointer", || start.and_then(|s| ctx.procs.get(claude, s))) {
         Some(id) => Some(id),
-        None => ctx
-            .registry
-            .list()
+        None => timed("registry_scan", || ctx.registry.list())
             .map_err(|e| e.to_string())?
             .records
             .iter()
@@ -413,8 +441,8 @@ fn session_end(ctx: &Ctx, input: &HookInput, reason: Option<&str>) -> Result<Out
     };
     let now = ctx.env.now();
     let mut stamped = false;
-    ctx.registry
-        .update(&id, |r| {
+    timed("registry_update", || {
+        ctx.registry.update(&id, |r| {
             // Prefer the named session; else any still-open session of this process.
             let by_id = r
                 .sessions
@@ -431,17 +459,20 @@ fn session_end(ctx: &Ctx, input: &HookInput, reason: Option<&str>) -> Result<Out
                 stamped = true;
             }
         })
-        .map_err(|e| e.to_string())?;
+    })
+    .map_err(|e| e.to_string())?;
     if !stamped {
         return Ok(Outcome::Skipped(
             "the session was already ended or is unknown".into(),
         ));
     }
-    let _ = ctx.journal.append(
-        "session-ended",
-        Some(id.as_str()),
-        json!({"session_id": input.session_id, "pid": claude, "reason": reason}),
-    );
+    let _ = timed("journal", || {
+        ctx.journal.append(
+            "session-ended",
+            Some(id.as_str()),
+            json!({"session_id": input.session_id, "pid": claude, "reason": reason}),
+        )
+    });
     Ok(Outcome::Ended { agent_id: id })
 }
 
@@ -678,6 +709,21 @@ mod tests {
 
     fn t(min: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 7, 1, min, 0).unwrap()
+    }
+
+    #[test]
+    fn timed_steps_are_reported_by_name_and_emptied_by_the_read() {
+        // Other tests share the static, so look for this test's own two names, not an exact string.
+        let a = timed("probe_step_a", || 7);
+        let b = timed("probe_step_b", || a + 1);
+        assert_eq!(b, 8, "timed returns the closure's value untouched");
+        let text = take_step_timings();
+        let (ia, ib) = (text.find("probe_step_a "), text.find("probe_step_b "));
+        assert!(
+            matches!((ia, ib), (Some(x), Some(y)) if x < y),
+            "both steps named, in order: {text:?}"
+        );
+        assert!(text.contains(" ms"), "{text:?}");
     }
 
     struct FakeEnv {
