@@ -98,12 +98,14 @@ function Assert-AccountReusable([string]$account, $dependents, [bool]$rotateShar
 # Groups are listed, never defaulted: one named local group, with the reason. Administrators and Remote Desktop Users stay refused.
 # The root ACL (slice 2, docs/RUNNER-ACCOUNTS.md T3). Both functions take the principal as an argument and are read out of this file
 # by scripts	ests\gh-runner-setup-account.tests.ps1, which runs them on real ACLs in a temp directory.
-# Principals with ANY allow entry on the root other than SYSTEM, Administrators and the one account: a shared root re-creates the hole
+# Principals with ANY allow entry on the root other than SYSTEM, Administrators, the person running the script and the one account: a shared root re-creates the hole
 # where each runner account can rewrite the binaries another service starts as a different account.
 function Get-RootForeignPrincipals([string]$root, [string]$principal) {
   if (-not (Test-Path -LiteralPath $root)) { return @() }
   $keep = New-Object System.Collections.Generic.HashSet[string]
   foreach ($x in 'S-1-5-18', 'S-1-5-32-544') { [void]$keep.Add($x) }
+  # The person running this (an administrator by the time -Apply runs) is not a runner account; a CI runner's own user shows up on a fresh directory.
+  [void]$keep.Add([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
   try { [void]$keep.Add(([Security.Principal.NTAccount]$principal).Translate([Security.Principal.SecurityIdentifier]).Value) } catch { }
   if ($PSVersionTable.PSEdition -eq 'Core') { $sec = [System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.DirectoryInfo]::new($root)) }
   else { $sec = [System.IO.Directory]::GetAccessControl($root) }

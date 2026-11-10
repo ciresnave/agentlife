@@ -82,6 +82,9 @@ try {
   icacls $rootA /grant "${pb}:(OI)(CI)M" | Out-Null
   $shared = @(Get-RootForeignPrincipals $rootA $pa)
   Check 'T3 mutation: a second account granted on the same root is reported' ($shared.Count -eq 1 -and $shared[0] -like '*Replicator') ($shared -join ',')
+  # The person running the script is not a runner account: an entry for them (as CI's runneradmin gets on a fresh directory) is not foreign.
+  icacls $rootA /grant "${me}:(OI)(CI)F" | Out-Null
+  Check 'T3 an entry for the invoking user is not reported' (@(Get-RootForeignPrincipals $rootA $pa | Where-Object { $_ -like "*$env:USERNAME" }).Count -eq 0)
   Check 'T3 a root that does not exist has no foreign principal' (@(Get-RootForeignPrincipals (Join-Path $base 'nope') $pa).Count -eq 0)
 } finally {
   foreach ($d in $rootA, $rootB) { icacls $d /grant "${me}:(OI)(CI)F" 2>&1 | Out-Null }
