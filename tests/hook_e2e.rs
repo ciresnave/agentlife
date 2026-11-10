@@ -129,6 +129,33 @@ impl Rig {
         parse_report(&std::fs::read_to_string(&report).unwrap_or_default())
     }
 
+    /// Like `run`, then waits until the stand-in's process is no longer in the process table.
+    ///
+    /// `Child::wait` returns when the OS reports the exit, but on a loaded shared Windows runner the
+    /// process table can still list the pid for a moment after that. A test that means "the first
+    /// process is dead" and starts the next one right away races that, and the second hook then
+    /// sees the first as alive (ROADMAP row 7, run 41128992581 attempt 1). Wait on the death.
+    fn run_until_gone(
+        &self,
+        extra: &[&str],
+        script: &Path,
+        env: &[(&str, &str)],
+    ) -> Vec<(String, u128, i32)> {
+        let report = self.dir.path().join(format!("report-{}.txt", unique()));
+        let mut child = self.spawn(extra, script, &report, 0, env);
+        let pid = child.id();
+        child.wait().expect("wait for the stand-in");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while SysinfoTable.identity_of(pid).is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "pid {pid} still in the process table 60 s after its stand-in exited"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        parse_report(&std::fs::read_to_string(&report).unwrap_or_default())
+    }
+
     fn registry(&self) -> Registry {
         Registry::new(self.home.join("registry").join("agents"))
     }
@@ -496,12 +523,13 @@ fn a_hand_started_agent_started_again_after_its_process_died_is_one_agent() {
     let s1 = rig.payload("s1.json", "SessionStart", "sess-1", Some("startup"));
     let s2 = rig.payload("s2.json", "SessionStart", "sess-2", Some("startup"));
     let s3 = rig.payload("s3.json", "SessionStart", "sess-3", Some("startup"));
-    rig.run(
+    // The first process is gone (it exited without a SessionEnd, like a killed one), and the
+    // process table says so before the second one starts.
+    rig.run_until_gone(
         &["-n", "lane"],
         &rig.script("a.txt", &[("SessionStart", "-", &s1)]),
         &[],
     );
-    // The first process is gone (it exited without a SessionEnd, like a killed one).
     rig.run(
         &["-n", "lane"],
         &rig.script("b.txt", &[("SessionStart", "-", &s2)]),

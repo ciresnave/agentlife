@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.46
+
+- **Tests only (ROADMAP row 7): `a_hand_started_agent_started_again_after_its_process_died_is_one_agent` waits for the first stand-in to leave the process table before starting the second.** It was red once on Windows CI (run 41128992581 attempt 1, `sessions.len()` 1 where 2 was expected) and green on the rerun of the same SHA. `Child::wait` returns at the OS's exit report, but on a loaded shared runner the process table can list the pid a moment longer, so the second `SessionStart` could see the first as alive and treat it as the same session. New `Rig::run_until_gone` waits (50 ms polls, 60 s cap, a loud assertion at the cap), used for the first run only. **Cause is the roadmap's hypothesis, not instrumented here:** the flake was not reproduced, so the next red of this test is the evidence either way. No `#[ignore]`, no retry. Version 0.30.46 is provisional (#261 is 0.30.45; the PM allocates).
+
 ## 0.30.44
 
 - **Tests only (issue #233): the `hook_e2e` stand-ins that must still be alive when `list` looks are held 300 s, not 30 s.** Two tests spawned a stand-in `claude` with `--fake-hold 30` and then ran several processes before asking `list` for `running`; a whole-file run under load took 119.8 s (idle about 16 s), so the stand-in had exited and `stopped` was the right answer to a question asked too late. Both stand-ins are killed by the test at its end, so a longer hold costs nothing. No `#[ignore]`, no retry. **Not fixed, still open in #233:** the second observation there (`session_end_stamps_the_reason...`, hook own time 4850 ms against the documented 1500 ms budget) is a different bound, the hook's contractual budget, which I did not widen; its cause is unverified. Version 0.30.44 is provisional (PM allocates).
