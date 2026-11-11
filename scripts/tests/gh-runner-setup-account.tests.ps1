@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'gh-runner-setup.ps1'
 if (-not (Test-Path -LiteralPath $setup)) { throw "setup script not found: $setup" }
 $ast = [Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
-foreach ($name in 'Get-RunnerAccountName', 'Assert-AccountReusable', 'Test-GroupRequest', 'Get-RootForeignPrincipals', 'Set-RunnerRootAcl') {
+foreach ($name in 'Get-RunnerAccountName', 'Assert-AccountReusable', 'Test-GroupRequest', 'Get-RootForeignPrincipals', 'Set-RunnerRootAcl', 'Get-SharedRootRunners', 'New-RootMigrationPlan') {
   $fn = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
   if ($fn.Count -ne 1) { throw "expected exactly one $name in $setup, found $($fn.Count)" }
   . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -90,6 +90,46 @@ try {
   foreach ($d in $rootA, $rootB) { icacls $d /grant "${me}:(OI)(CI)F" 2>&1 | Out-Null }
   Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# T6 (slice 3): the printed migration of a shared root. Fake services decide who runs where; the plan is then EXECUTED on real ACLs in a
+# temp directory built the way the old script built it (every account Modify on the root, inherited into every runner directory).
+$svc = {
+  param($n, $dir, $start) [pscustomobject]@{ Name = $n; PathName = "`"$dir\bin\RunnerService.exe`""; StartName = $start }
+}
+$sharedRoot = Join-Path ([IO.Path]::GetTempPath()) ('ghr-t6-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$dA = Join-Path $sharedRoot 'owner-a'; $dB = Join-Path $sharedRoot 'owner-b'; $dOther = Join-Path ([IO.Path]::GetTempPath()) 'elsewhere'
+$fake = @((& $svc 'svc-a' $dA '.\Backup Operators'), (& $svc 'svc-b' $dB 'BUILTIN\Replicator'), (& $svc 'svc-x' $dOther '.\someone'))
+$bad = @($fake) + (& $svc 'svc-sys' (Join-Path $sharedRoot 'owner-c') 'LocalSystem')
+$runners = @(Get-SharedRootRunners $sharedRoot $fake)
+Check 'T6 two runner directories are found under the root' ($runners.Count -eq 2) ($runners | Out-String)
+Check 'T6 a service outside the root is not listed' (@($runners | Where-Object Service -eq 'svc-x').Count -eq 0)
+Check 'T6 each directory maps to its own account' (($runners | Where-Object Dir -eq $dA).Account -eq 'Backup Operators' -and ($runners | Where-Object Dir -eq $dB).Account -eq 'Replicator')
+Check 'T6 a service logging on as LocalSystem is refused, not guessed' ($null -ne (Throws { Get-SharedRootRunners $sharedRoot $bad }))
+$plan = @(New-RootMigrationPlan $sharedRoot 'BUILTIN' $runners $me)
+$dirCmds = @($plan | Where-Object { $_.Path -ne $sharedRoot })
+Check 'T6 no directory command grants an account on another account''s directory' (-not (@($dirCmds | Where-Object { ($_.Path -eq $dA -and ($_.Args -join ' ') -like '*Replicator*') -or ($_.Path -eq $dB -and ($_.Args -join ' ') -like '*Backup Operators*') }).Count))
+Check 'T6 directories come before the root commands' ($plan[0].Path -ne $sharedRoot -and $plan[1].Path -ne $sharedRoot -and $plan[$plan.Count - 1].Path -eq $sharedRoot)
+Check 'T6 the plan removes each runner account from the root' ((@($plan | Where-Object { $_.Path -eq $sharedRoot -and $_.Args[0] -eq '/remove' }).Count) -eq 2)
+Check 'T6 the plan itself runs nothing: the shared root does not exist yet' (-not (Test-Path -LiteralPath $sharedRoot))
+try {
+  New-Item -ItemType Directory -Force -Path $dA, $dB | Out-Null
+  icacls $sharedRoot /inheritance:r /grant:r "${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+  foreach ($p in 'BUILTIN\Backup Operators', 'BUILTIN\Replicator') { icacls $sharedRoot /grant "${p}:(OI)(CI)M" | Out-Null }
+  icacls $dA /reset /T | Out-Null; icacls $dB /reset /T | Out-Null
+  $before = ((icacls $dA) -join "`n")
+  Check 'T6 control: before, directory A lists BOTH accounts (the old shared-root hole)' ($before -like '*Backup Operators*' -and $before -like '*Replicator*') $before
+  foreach ($c in $plan) { & icacls $c.Path @($c.Args) | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls $($c.Path) $($c.Args -join ' ') exited $LASTEXITCODE" } }
+  $a = (icacls $dA) -join "`n"; $b = (icacls $dB) -join "`n"; $r = (icacls $sharedRoot) -join "`n"
+  Check 'T6 after, A lists only A' ($a -like '*Backup Operators*' -and $a -notlike '*Replicator*') $a
+  Check 'T6 after, B lists only B' ($b -like '*Replicator*' -and $b -notlike '*Backup Operators*') $b
+  Check 'T6 after, the root lists no runner account' ($r -notlike '*Backup Operators*' -and $r -notlike '*Replicator*') $r
+  Check 'T6 after, no foreign principal is left on either directory' (@(Get-RootForeignPrincipals $dA 'BUILTIN\Backup Operators').Count -eq 0 -and @(Get-RootForeignPrincipals $dB 'BUILTIN\Replicator').Count -eq 0)
+} finally {
+  foreach ($d in $dA, $dB, $sharedRoot) { icacls $d /grant "${me}:(OI)(CI)F" 2>&1 | Out-Null }
+  Remove-Item -LiteralPath $sharedRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+$mig = & { try { & $setup -Repo ciresnave/x -ProtectedPaths @() -PrintMigration } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String
+Check 'T6 -PrintMigration without -Root is refused' ($mig -like 'THREW:*needs -Root*') $mig
 
 # T4: groups are listed, never defaulted.
 Check 'T4 no group requested gives none' ($null -eq (Test-GroupRequest '' ''))
