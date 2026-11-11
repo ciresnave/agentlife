@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 <#
 .SYNOPSIS
-  Tests the one-account-per-runner changes of scripts\gh-runner-setup.ps1 (docs/RUNNER-ACCOUNTS.md, tests T1, T2, T4, T5):
+  Tests the one-account-per-runner changes of scripts\gh-runner-setup.ps1 (docs/RUNNER-ACCOUNTS.md, tests T1 to T5):
   the account name derived from the repo, the refusal to rotate an account that services already use, the listed-never-defaulted
   group flag, and a dry run that changes nothing. Fake service objects; no elevation, no account, no service touched.
   Exit 0 = all passed. Run by tests\runner_setup_account.rs on the Windows CI leg, or by hand:
@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'gh-runner-setup.ps1'
 if (-not (Test-Path -LiteralPath $setup)) { throw "setup script not found: $setup" }
 $ast = [Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
-foreach ($name in 'Get-RunnerAccountName', 'Assert-AccountReusable', 'Test-GroupRequest') {
+foreach ($name in 'Get-RunnerAccountName', 'Assert-AccountReusable', 'Test-GroupRequest', 'Get-RootForeignPrincipals', 'Set-RunnerRootAcl') {
   $fn = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
   if ($fn.Count -ne 1) { throw "expected exactly one $name in $setup, found $($fn.Count)" }
   . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -58,6 +58,39 @@ $noGuard = $text.Replace('Assert-AccountReusable $Account $dependents ([bool]$Ro
 Check 'T2 mutation: removing the guard call is caught' (-not (GuardFirst $noGuard))
 Check 'T2 control: both anchors exist exactly once' (([regex]::Matches($text, [regex]::Escape('Set-LocalUser -Name $Account -Password')).Count -eq 1) -and ([regex]::Matches($text, [regex]::Escape('Assert-AccountReusable $Account $dependents')).Count -eq 1))
 
+# T3: a root per account, on real ACLs in a temp directory. Two built-in groups stand in for two runner accounts (an account cannot be
+# made without elevation); the functions take the principal as text, so the stand-ins exercise the same code.
+$me = "$env:USERDOMAIN\$env:USERNAME"
+$pa = 'BUILTIN\Backup Operators'; $pb = 'BUILTIN\Replicator'
+$base = Join-Path ([IO.Path]::GetTempPath()) ('ghr-t3-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$rootA = Join-Path $base 'gh-runner-a'; $rootB = Join-Path $base 'gh-runner-b'
+New-Item -ItemType Directory -Force -Path $rootA, $rootB | Out-Null
+try {
+  Set-RunnerRootAcl $rootA $pa
+  Set-RunnerRootAcl $rootB $pb
+  $fa = @(Get-RootForeignPrincipals $rootA $pa); $fb = @(Get-RootForeignPrincipals $rootB $pb)
+  Check 'T3 root A grants no principal besides SYSTEM, Administrators and A' ($fa.Count -eq 0) ($fa -join ',')
+  Check 'T3 root B grants no principal besides SYSTEM, Administrators and B' ($fb.Count -eq 0) ($fb -join ',')
+  $crossAB = @(Get-RootForeignPrincipals $rootA $pb); $crossBA = @(Get-RootForeignPrincipals $rootB $pa)
+  Check 'T3 seen from B, root A holds a stranger (A)' ($crossAB.Count -eq 1 -and $crossAB[0] -like '*Backup Operators') ($crossAB -join ',')
+  Check 'T3 seen from A, root B holds a stranger (B)' ($crossBA.Count -eq 1 -and $crossBA[0] -like '*Replicator') ($crossBA -join ',')
+  $out = (icacls $rootA) -join "`n"
+  Check 'T3 control: icacls shows A on root A' ($out -like '*Backup Operators*') $out
+  Check 'T3 neither root lists the other runner' ($out -notlike '*Replicator*' -and ((icacls $rootB) -join "`n") -notlike '*Backup Operators*')
+  # Mutation: the shared-root grant the old script made (a second account added to the same root) is caught.
+  Set-RunnerRootAcl $rootA $pa
+  icacls $rootA /grant "${pb}:(OI)(CI)M" | Out-Null
+  $shared = @(Get-RootForeignPrincipals $rootA $pa)
+  Check 'T3 mutation: a second account granted on the same root is reported' ($shared.Count -eq 1 -and $shared[0] -like '*Replicator') ($shared -join ',')
+  # The person running the script is not a runner account: an entry for them (as CI's runneradmin gets on a fresh directory) is not foreign.
+  icacls $rootA /grant "${me}:(OI)(CI)F" | Out-Null
+  Check 'T3 an entry for the invoking user is not reported' (@(Get-RootForeignPrincipals $rootA $pa | Where-Object { $_ -like "*$env:USERNAME" }).Count -eq 0)
+  Check 'T3 a root that does not exist has no foreign principal' (@(Get-RootForeignPrincipals (Join-Path $base 'nope') $pa).Count -eq 0)
+} finally {
+  foreach ($d in $rootA, $rootB) { icacls $d /grant "${me}:(OI)(CI)F" 2>&1 | Out-Null }
+  Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # T4: groups are listed, never defaulted.
 Check 'T4 no group requested gives none' ($null -eq (Test-GroupRequest '' ''))
 $ok = Test-GroupRequest 'Hyper-V Administrators' '.github/workflows/machine-durability.yml'
@@ -82,6 +115,8 @@ Check 'T5 the plan says group memberships and why' ($dry -like '*group membershi
 $dry2 = & { try { & $setup -Repo ciresnave/zzt5probe -ProtectedPaths @() -Root $tmpRoot } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String
 Check 'T5 by default the plan says group memberships: none' ($dry2 -like '*group memberships: none*') $dry2
 Check 'T5 the plan says an account with services is refused' ($dry2 -like '*REFUSED unless -RotateShared*') $dry2
+Check 'T5 the default root is C:\gh-runner-<account>, not the shared C:\gh-runner' ((& { try { & $setup -Repo ciresnave/zzt5probe -ProtectedPaths @() } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String) -like '*C:\gh-runner-ghr-zzt5probe*own tree only*')
+Check 'T5 the plan says no other account has an entry on a fresh root' ($dry2 -like '*root plan: create or reuse*')
 Check 'T5 the dry run created no root directory' (-not (Test-Path -LiteralPath $tmpRoot))
 Check 'T5 the dry run created no account' (-not (UserExists $acct))
 $refused = & { try { & $setup -Repo ciresnave/zzt5probe -ProtectedPaths @() -Root $tmpRoot -AddToGroup Administrators -Because x } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String
