@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'gh-runner-setup.ps1'
 if (-not (Test-Path -LiteralPath $setup)) { throw "setup script not found: $setup" }
 $ast = [Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
-foreach ($name in 'Get-RunnerAccountName', 'Assert-AccountReusable', 'Test-GroupRequest', 'Get-RootForeignPrincipals', 'Set-RunnerRootAcl', 'Get-SharedRootRunners', 'New-RootMigrationPlan') {
+foreach ($name in 'Get-RunnerAccountName', 'Assert-AccountReusable', 'Test-GroupRequest', 'Get-RootForeignPrincipals', 'Set-RunnerRootAcl', 'Get-SharedRootRunners', 'New-RootMigrationPlan', 'Get-AccountRemovalPlan') {
   $fn = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
   if ($fn.Count -ne 1) { throw "expected exactly one $name in $setup, found $($fn.Count)" }
   . ([scriptblock]::Create($fn[0].Extent.Text))
@@ -165,6 +165,30 @@ $multi = & { try { & $setup -Repo ciresnave/a, ciresnave/b -ProtectedPaths @() -
 Check 'T5 two repos without -Account are refused (one account per runner)' ($multi -like 'THREW:*-Account is required*') $multi
 $multiOk = & { try { & $setup -Repo ciresnave/a, ciresnave/b -Account ghr-shared -ProtectedPaths @() -Root $tmpRoot } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String
 Check 'T5 control: two repos WITH an explicit -Account plan fine' ($multiOk -like '*DRY RUN*' -and $multiOk -notlike '*THREW*') $multiOk
+
+# T7: -RemoveAccount removes the account only when no other service logs on as it (fake service objects; nothing is removed here).
+function SvcAs([string]$n, [string]$who) { [pscustomobject]@{ Name = $n; StartName = $who } }
+$pc = 'BOX'
+$none = Get-AccountRemovalPlan 'ghr-x' @((SvcAs 'other' '.\ghr-y'), (SvcAs 'sys' 'LocalSystem')) $pc 'cires'
+Check 'T7 no service logs on as it: the account is removed' ($none.Remove -and $none.Dependents.Count -eq 0) ($none | Out-String)
+$one = Get-AccountRemovalPlan 'ghr-x' @((SvcAs 'svc-a' '.\ghr-x')) $pc 'cires'
+Check 'T7 control: one service logs on as it (.\ form): the account is kept and the service named' (-not $one.Remove -and $one.Reason -like '*svc-a*')
+$two = Get-AccountRemovalPlan 'ghr-x' @((SvcAs 'svc-a' 'BOX\ghr-x'), (SvcAs 'svc-b' '.\GHR-X')) $pc 'cires'
+Check 'T7 the BOXccount form and a different case both count' (-not $two.Remove -and $two.Dependents.Count -eq 2)
+Check 'T7 $null and an empty service list remove it' ((Get-AccountRemovalPlan 'ghr-x' $null $pc 'cires').Remove -and (Get-AccountRemovalPlan 'ghr-x' @() $pc 'cires').Remove)
+Check 'T7 a prefix of another account name is not a dependent' ((Get-AccountRemovalPlan 'ghr-x' @((SvcAs 'svc' '.\ghr-xy')) $pc 'cires').Remove)
+foreach ($bad in 'Administrator', 'Guest', 'DefaultAccount', 'WDAGUtilityAccount') {
+  Check "T7 built-in $bad is refused" ($null -ne (Throws { Get-AccountRemovalPlan $bad @() $pc 'cires' }))
+}
+Check 'T7 the account running the script is refused' ($null -ne (Throws { Get-AccountRemovalPlan 'cires' @() $pc 'cires' }))
+Check 'T7 -RemoveAccount without -Remove is refused' ((& { try { & $setup -Repo ciresnave/zzt7probe -RemoveAccount -ProtectedPaths @() } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String) -like 'THREW:*-RemoveAccount needs -Remove*')
+Check 'T7 -Remove -RemoveAccount of a built-in is refused in the dry run, before any runner is touched' ((& { try { & $setup -Repo ciresnave/zzt7probe -Account Guest -Remove -RemoveAccount -ProtectedPaths @() } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String) -like 'THREW:*built-in*')
+$dry7 = & { try { & $setup -Repo ciresnave/zzt7probe -Remove -RemoveAccount -ProtectedPaths @() } catch { 'THREW: ' + $_.Exception.Message } } *>&1 | Out-String
+Check 'T7 the -Remove -RemoveAccount dry run states the condition' ($dry7 -like '*DRY RUN*' -and $dry7 -like '*ONLY if no other service logs on as it*') $dry7
+Check 'T7 control: -Remove alone does not mention removing the account' ((& { & $setup -Repo ciresnave/zzt7probe -Remove -ProtectedPaths @() } *>&1 | Out-String) -notlike '*ONLY if no other service*')
+# Mutation: a plan that ignores the services would remove an account in use.
+$mut = (Get-Content -LiteralPath $setup -Raw).Contains('Remove     = ($deps.Count -eq 0)')
+Check 'T7 control: the removal condition exists exactly as the test assumes' $mut
 
 if ($failures.Count -gt 0) { Write-Host "`n$($failures.Count) FAILED: $($failures -join '; ')"; exit 1 }
 Write-Host "`nall passed"

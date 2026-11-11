@@ -49,7 +49,8 @@
 .PARAMETER CheckAclsOnly Read-only: run the ACL check, print the exact elevated fix commands for what it finds, and throw if anything is exposed. Nothing else happens.
 .PARAMETER PrintMigration Read-only: with -Root naming a SHARED root (e.g. C:\gh-runner), read which service runs from each runner directory under it and as which account, and PRINT the elevated icacls commands that give each account Modify on its own directory only and remove every runner account from the root. Nothing is run; CireSnave decides (it changes live services' access). -Repo is still required (any value).
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
-.PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account.
+.PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account (unless -RemoveAccount).
+.PARAMETER RemoveAccount With -Remove -Apply: after the runners are gone, also delete the local account, but only when no other service still logs on as it (re-read from the service manager) and it is not a built-in account or the person running the script. Otherwise the account is kept and the reason printed.
 #>
 [CmdletBinding()]
 param(
@@ -69,6 +70,7 @@ param(
   [switch]$Remove,
   [switch]$PrintMigration,
   [switch]$RotateShared,
+  [switch]$RemoveAccount,
   [string]$AddToGroup,
   [string]$Because
 )
@@ -95,6 +97,19 @@ function Assert-AccountReusable([string]$account, $dependents, [bool]$rotateShar
   $n = $deps.Count
   if ($n -gt 0 -and -not $rotateShared) {
     throw "account $account already has $n service(s) logging on as it ($(($deps | ForEach-Object Name) -join ', ')): REFUSED, nothing changed. Use a new -Account, or -RotateShared to rotate its password and push it into each service (never run on a live service)."
+  }
+}
+# -RemoveAccount (slice 4): after the service is gone, remove the account only when no other service logs on as it. Services are
+# passed in (re-read AFTER the removal), so the test feeds fake objects. Built-in accounts and the person running are never removed.
+function Get-AccountRemovalPlan([string]$account, $services, [string]$computer, [string]$currentUser) {
+  if ($account -imatch '^(Administrator|Guest|DefaultAccount|WDAGUtilityAccount|SYSTEM)$') { throw "-RemoveAccount: $account is a built-in account; REFUSED" }
+  if ($currentUser -and $account -ieq $currentUser) { throw "-RemoveAccount: $account is the account running this script; REFUSED" }
+  $deps = @($services | Where-Object { $null -ne $_ -and ($_.StartName -ieq ".\$account" -or $_.StartName -ieq "$computer\$account") })
+  $names = @($deps | ForEach-Object Name)
+  [pscustomobject]@{
+    Remove     = ($deps.Count -eq 0)
+    Dependents = $names
+    Reason     = $(if ($deps.Count -eq 0) { 'no service logs on as it' } else { "kept: $($deps.Count) service(s) still log on as it ($($names -join ', '))" })
   }
 }
 # Groups are listed, never defaulted: one named local group, with the reason. Administrators and Remote Desktop Users stay refused.
@@ -166,6 +181,8 @@ if ($accountDefaulted) {
   $Account = Get-RunnerAccountName $Repo[0]
 }
 $groupPlan = Test-GroupRequest $AddToGroup $Because
+if ($RemoveAccount -and -not $Remove) { throw '-RemoveAccount needs -Remove' }
+if ($RemoveAccount) { Get-AccountRemovalPlan $Account @() $env:COMPUTERNAME $env:USERNAME | Out-Null }   # refuse a built-in or current account BEFORE any runner is removed
 $rootDefaulted = -not $PSBoundParameters.ContainsKey('Root')
 if ($rootDefaulted) { $Root = "C:\gh-runner-$Account" }
 
@@ -322,7 +339,7 @@ if (-not $Apply) {
     Write-Host "`n[$r]"
     Write-Host "  extract  -> $dir (only after the hash matches)"
     Write-Host "  token    -> prompted (Read-Host -AsSecureString): PM fetches it now; not stored"
-    if ($Remove) { Write-Host "  $dir\config.cmd remove --token <removal token>" }
+    if ($Remove) { Write-Host "  $dir\config.cmd remove --token <removal token>"; if ($RemoveAccount) { Write-Host "  then account $env:COMPUTERNAME\$Account removed ONLY if no other service logs on as it (re-read after the remove)" } }
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
       Write-Host "     $labelFlag --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
@@ -376,6 +393,16 @@ if ($Remove) {
     if (Find-RunnerService $dir) { throw "a runner service under $dir still exists after remove" }
     if ($before -and (Get-Service -Name $before.Name -ErrorAction SilentlyContinue)) { throw "service $($before.Name) still exists after remove" }
     Write-Host "[$r] removed (read back: service absent). Directory $dir kept for you to delete."
+  }
+  if ($RemoveAccount) {
+    $plan = Get-AccountRemovalPlan $Account (Get-CimInstance Win32_Service) $env:COMPUTERNAME $env:USERNAME
+    if (-not (Get-LocalUser -Name $Account -ErrorAction SilentlyContinue)) { Write-Host "account ${Account}: already absent" }
+    elseif (-not $plan.Remove) { Write-Host "account ${Account}: $($plan.Reason)" }
+    else {
+      Remove-LocalUser -Name $Account
+      if (Get-LocalUser -Name $Account -ErrorAction SilentlyContinue) { throw "account $Account still exists after Remove-LocalUser" }
+      Write-Host "account ${Account}: removed (read back: absent); $($plan.Reason)"
+    }
   }
   return
 }
