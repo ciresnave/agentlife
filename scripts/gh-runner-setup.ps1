@@ -47,6 +47,7 @@
 .PARAMETER ProtectedPaths  Paths the runner account must NOT be able to write, directly or through a broad group: the lane tools that run as the owner WITH vault access. Default C:\Projects, C:\Projects\.claude-hooks, with-secret.exe, lane-restart.exe, C:\Projects\.lane-state. -Apply refuses to create the account while any is writable by Everyone, Authenticated Users, Users, Interactive or the account itself (board 224).
 .PARAMETER AlsoGrant     Groups or accounts to keep READ-AND-EXECUTE (never write) on the protected paths in the printed icacls fix, e.g. -AlsoGrant CodexSandboxUsers. Only changes the text printed; Everyone, Authenticated Users, Users and Interactive are refused (they are the hole).
 .PARAMETER CheckAclsOnly Read-only: run the ACL check, print the exact elevated fix commands for what it finds, and throw if anything is exposed. Nothing else happens.
+.PARAMETER PrintMigration Read-only: with -Root naming a SHARED root (e.g. C:\gh-runner), read which service runs from each runner directory under it and as which account, and PRINT the elevated icacls commands that give each account Modify on its own directory only and remove every runner account from the root. Nothing is run; CireSnave decides (it changes live services' access). -Repo is still required (any value).
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account.
 #>
@@ -66,6 +67,7 @@ param(
   [switch]$CheckAclsOnly,
   [switch]$Apply,
   [switch]$Remove,
+  [switch]$PrintMigration,
   [switch]$RotateShared,
   [string]$AddToGroup,
   [string]$Because
@@ -97,7 +99,7 @@ function Assert-AccountReusable([string]$account, $dependents, [bool]$rotateShar
 }
 # Groups are listed, never defaulted: one named local group, with the reason. Administrators and Remote Desktop Users stay refused.
 # The root ACL (slice 2, docs/RUNNER-ACCOUNTS.md T3). Both functions take the principal as an argument and are read out of this file
-# by scripts	ests\gh-runner-setup-account.tests.ps1, which runs them on real ACLs in a temp directory.
+# by scripts\tests\gh-runner-setup-account.tests.ps1, which runs them on real ACLs in a temp directory.
 # Principals with ANY allow entry on the root other than SYSTEM, Administrators, the person running the script and the one account: a shared root re-creates the hole
 # where each runner account can rewrite the binaries another service starts as a different account.
 function Get-RootForeignPrincipals([string]$root, [string]$principal) {
@@ -119,6 +121,32 @@ function Get-RootForeignPrincipals([string]$root, [string]$principal) {
 function Set-RunnerRootAcl([string]$root, [string]$principal) {
   icacls $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "${principal}:(OI)(CI)M" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "icacls on $root exited $LASTEXITCODE" }
+}
+# Slice 3 (docs/RUNNER-ACCOUNTS.md): the printed migration of a SHARED root. Both functions are pure (they read what they are handed and run
+# nothing) and are read out of this file by scripts\tests\gh-runner-setup-account.tests.ps1.
+# Which runner directory under $root is run by which local account. $services: objects with Name, PathName, StartName (null reads Win32_Service).
+function Get-SharedRootRunners([string]$root, $services = $null) {
+  if ($null -eq $services) { $services = Get-CimInstance Win32_Service -Filter "PathName LIKE '%RunnerService.exe%'" }
+  $prefix = ([IO.Path]::GetFullPath($root)).TrimEnd('\') + '\'
+  $byDir = [ordered]@{}
+  foreach ($s in @($services)) {
+    $exe = ($s.PathName -replace '^\s*"([^"]*)".*$', '$1').Trim()
+    if (-not $exe.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or $exe -notlike '*RunnerService.exe') { continue }
+    $dir = $prefix + $exe.Substring($prefix.Length).Split('\')[0]
+    $m = [regex]::Match([string]$s.StartName, '^(?:\.|[^\\]+)\\([A-Za-z0-9_ -]{1,20})$')
+    if (-not $m.Success) { throw "service $($s.Name) under $dir logs on as '$($s.StartName)', not a local account: not migrating it by script" }
+    if ($byDir.Contains($dir) -and $byDir[$dir].Account -ine $m.Groups[1].Value) { throw "$dir is run by two different accounts ($($byDir[$dir].Account), $($m.Groups[1].Value))" }
+    $byDir[$dir] = [pscustomobject]@{ Dir = $dir; Account = $m.Groups[1].Value; Service = $s.Name }
+  }
+  @($byDir.Values)
+}
+# The commands, in the order that is safe: each directory is detached from the root and granted to its own account first, then the runner
+# accounts are removed from the root, then the root is left to SYSTEM, Administrators and the person running it. Each is Path + Args for icacls.
+function New-RootMigrationPlan([string]$root, [string]$computer, $runners, [string]$keepUser) {
+  $base = @('/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F')
+  foreach ($r in @($runners)) { [pscustomobject]@{ Path = $r.Dir; Args = $base + @("${computer}\$($r.Account):(OI)(CI)M") } }
+  foreach ($a in @($runners | ForEach-Object Account | Sort-Object -Unique)) { [pscustomobject]@{ Path = $root; Args = @('/remove', "${computer}\$a") } }
+  [pscustomobject]@{ Path = $root; Args = $base + @("${keepUser}:(OI)(CI)F") }
 }
 function Test-GroupRequest([string]$group, [string]$because) {
   if (-not $group -and -not $because) { return $null }
@@ -255,6 +283,18 @@ function Show-AclFix {
   foreach ($t in $tops) { Write-Host ("  icacls `"{0}`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`" `"{1}:(OI)(CI)F`"{2}" -f $t, $me, $extra) }
   if ($AlsoGrant.Count -gt 0) { Write-Host ("  (keeping read-and-execute, no write, for: {0})" -f ($AlsoGrant -join ', ')) }
   Write-Host "Then read it back: re-run this script with -CheckAclsOnly; it must pass. A child with its OWN (non-inherited) entry needs the same icacls."
+}
+if ($PrintMigration) {
+  if (-not $PSBoundParameters.ContainsKey('Root')) { throw '-PrintMigration needs -Root <the shared root>, e.g. C:\gh-runner' }
+  $found = @(Get-SharedRootRunners $Root)
+  if ($found.Count -eq 0) { throw "no runner service lives under ${Root}: nothing to migrate" }
+  Write-Host "MIGRATION PLAN for the shared root $Root (read-only: nothing was run). Run these from an ELEVATED shell, in this order, then read it back."
+  Write-Host "Today these accounts can all write each other's runner files; afterwards each can write only its own directory and cannot list the root (a service still reaches its directory by full path)."
+  foreach ($r in $found) { Write-Host "  $($r.Dir): service $($r.Service) as $($r.Account)" }
+  Write-Host "Stop the affected services first (Stop-Service), run the commands, then Start-Service each: a running service holds files open. Explicit entries such as the runner's own GITHUB_ActionsRunner_* group are kept."
+  foreach ($c in @(New-RootMigrationPlan $Root $env:COMPUTERNAME $found "$env:USERDOMAIN\$env:USERNAME")) { Write-Host ("  icacls `"{0}`" {1}" -f $c.Path, (($c.Args | ForEach-Object { '"' + $_ + '"' }) -join ' ')) }
+  Write-Host "Read it back: icacls on each directory (only its own account has Modify), then -CheckAclsOnly, then confirm each service is Running as the same account."
+  return
 }
 $aclFindings = @()
 if (-not $Remove) { $aclFindings = @(Get-WriteExposure -Paths $ProtectedPaths -AccountName $Account) }
