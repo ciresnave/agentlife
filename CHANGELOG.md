@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.50
+
+- **`gh-runner-setup.ps1 -Remove -RemoveAccount`, slice 4 (ROADMAP row 8; `docs/RUNNER-ACCOUNTS.md` T7).** After the runners are removed and the service is read back as absent, the local account is deleted only when no other service still logs on as it (the service list is re-read after the removal; `.ccount`, `COMPUTERccount` and any case count). Built-in accounts and the person running the script are refused in the dry run, before any runner is touched; `-RemoveAccount` without `-Remove` is refused. An account still in use is kept and the services named. `Get-AccountRemovalPlan` is tested on fake service objects (15 checks); the real `Remove-LocalUser` needs elevation and was not run. Never run with `-Apply`.
+
 ## 0.30.49
 
 - **`gh-runner-setup.ps1 -PrintMigration`: the printed migration of a shared root, slice 3 (ROADMAP row 8; `docs/RUNNER-ACCOUNTS.md` T6).** With `-Root` naming a shared root it reads which service runs from each runner directory under it and as which account (a service that logs on as LocalSystem or a non-local account is refused, not guessed), then PRINTS the elevated `icacls` commands in the safe order: each directory detached from the root and granted to its own account, every runner account removed from the root, the root left to SYSTEM, Administrators and the invoker. Read-only, nothing is run. **T6** executes that plan on real ACLs in a temp directory built the way the old script built a root (both accounts Modify on the root, inherited): before, a directory lists both accounts (control); after, each lists only its own, the root lists neither, and no foreign principal is left. **Measured on the live machine (read-only, 2026-11-10):** `C:\gh-runner` is already in the planned end state and the other runners already live in their own roots, so nothing is left to migrate here today. Also fixes a stray tab in two comments of the script. **Not built:** `-RemoveAccount`. **Never run with `-Apply`.** Version 0.30.49 is provisional (the PM allocates).
