@@ -19,8 +19,9 @@ pub(super) fn run(
     model: String,
     apply: bool,
     plan: Option<String>,
+    no_start: bool,
 ) -> ExitCode {
-    run_target(ctx, role, repo, None, model, apply, plan)
+    run_target(ctx, role, repo, None, model, apply, plan, no_start)
 }
 
 /// `lane-new-worktree <role> <repo> <worktree-path>`: the same command over a git worktree of an
@@ -42,9 +43,11 @@ pub(super) fn run_worktree(
         model,
         apply,
         plan,
+        false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_target(
     ctx: &mut Ctx,
     role: String,
@@ -53,6 +56,7 @@ fn run_target(
     model: String,
     apply: bool,
     plan: Option<String>,
+    no_start: bool,
 ) -> ExitCode {
     let cmd = if worktree.is_some() {
         "lane-new-worktree"
@@ -96,6 +100,15 @@ fn run_target(
     // step, each read back (docs/LANE-NEW.md).
     let vcs = ctx.lane_new_vcs();
     let host = ctx.lane_new_host(&roots);
+    // `--no-start`: the same host with step 7 skipped (steps 0 to 6; the spec stays suspended).
+    let no_start_host = host.as_deref().map(crate::lane_new_host::NoStart);
+    let host: Option<&dyn crate::lane_new_host::Host> = if no_start {
+        no_start_host
+            .as_ref()
+            .map(|h| h as &dyn crate::lane_new_host::Host)
+    } else {
+        host.as_deref()
+    };
     // `--apply` goes through `run_apply`, which refuses unless `--plan` is the hash a dry run of exactly
     // these arguments printed: a typo'd role or repo cannot be applied without being planned first.
     let report = if let Some(wt) = worktree.as_deref() {
@@ -103,7 +116,7 @@ fn run_target(
             crate::lane_new::run_apply_worktree(
                 &roots,
                 vcs.as_deref(),
-                host.as_deref(),
+                host,
                 &role,
                 &repo,
                 wt,
@@ -115,7 +128,7 @@ fn run_target(
             crate::lane_new::run_full_worktree(
                 &roots,
                 vcs.as_deref(),
-                host.as_deref(),
+                host,
                 &role,
                 &repo,
                 wt,
@@ -128,7 +141,7 @@ fn run_target(
         crate::lane_new::run_apply(
             &roots,
             vcs.as_deref(),
-            host.as_deref(),
+            host,
             &role,
             &repo,
             &model,
@@ -139,7 +152,7 @@ fn run_target(
         crate::lane_new::run_full(
             &roots,
             vcs.as_deref(),
-            host.as_deref(),
+            host,
             &role,
             &repo,
             &model,

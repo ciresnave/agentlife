@@ -338,14 +338,16 @@ struct LaneNew {
     model: Option<String>,
     #[arg(long, overrides_with = "apply")]
     apply: bool,
+    #[arg(long, overrides_with = "no_start")]
+    no_start: bool,
     #[arg(long, allow_hyphen_values = true, overrides_with = "plan")]
     plan: Option<String>,
 }
 
-/// `(role, repo, model, apply, plan)` of a `lane-new` command line.
-pub type LaneNewArgs = (String, String, String, bool, Option<String>);
+/// `(role, repo, model, apply, plan, no_start)` of a `lane-new` command line.
+pub type LaneNewArgs = (String, String, String, bool, Option<String>, bool);
 
-/// `lane-new <role> <repo> [--model M] [--apply --plan H]`; the model defaults to `sonnet`.
+/// `lane-new <role> <repo> [--model M] [--no-start] [--apply --plan H]`; the model defaults to `sonnet`.
 pub(crate) fn lane_new(rest: &[String]) -> Result<LaneNewArgs, String> {
     let a: LaneNew = parse("lane-new", &["--model", "--plan"], rest)?;
     Ok((
@@ -354,6 +356,7 @@ pub(crate) fn lane_new(rest: &[String]) -> Result<LaneNewArgs, String> {
         a.model.unwrap_or_else(|| "sonnet".to_string()),
         a.apply,
         a.plan,
+        a.no_start,
     ))
 }
 
@@ -551,7 +554,7 @@ mod lane_new_tests {
 
     #[test]
     fn lane_new_takes_a_plan_hash_and_defaults_to_a_dry_run_without_one() {
-        let (role, repo, model, apply, plan) = lane_new(&args(&[
+        let (role, repo, model, apply, plan, _) = lane_new(&args(&[
             "rockfish",
             "rockfish",
             "--apply",
@@ -566,8 +569,10 @@ mod lane_new_tests {
         assert!(apply);
         assert_eq!(plan.as_deref(), Some("0123456789abcdef"));
         // control: no flags is a dry run with no plan
-        let (_, _, _, apply, plan) = lane_new(&args(&["rockfish", "rockfish"])).unwrap();
-        assert!(!apply && plan.is_none());
+        let (_, _, _, apply, plan, no_start) = lane_new(&args(&["rockfish", "rockfish"])).unwrap();
+        assert!(!apply && plan.is_none() && !no_start);
+        let (.., no_start) = lane_new(&args(&["rockfish", "rockfish", "--no-start"])).unwrap();
+        assert!(no_start);
     }
 
     #[test]

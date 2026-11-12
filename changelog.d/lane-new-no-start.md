@@ -1,0 +1,3 @@
+kind: `lane-new --no-start`
+---
+`lane-restart lane-new <role> <repo> --no-start` runs steps 0 to 6 (repo, seed, MCP config, launch spec, soak list, Synapse identity) and skips step 7: the spec stays `suspended` and step 8 prints the `lane-restart start` command for the PM. The flag changes the plan hash, so a dry run with it cannot be applied without it, nor the reverse (a lane meant to wait cannot be started by a mistyped apply). Verified by a fake-host test that asserts `start` is never called, the spec is `suspended`, both cross-applications run nothing, and the control without the flag starts the lane.
