@@ -19,8 +19,9 @@ use std::time::{Duration, Instant};
 const AGENTLIFE: &str = env!("CARGO_BIN_EXE_agentlife");
 
 fn example_path() -> PathBuf {
-    let exe = std::env::current_exe().expect("test exe path");
-    let debug = exe.parent().and_then(Path::parent).expect("target dir");
+    // The examples sit next to the built binary (target/<profile>/examples). The test executable is NOT a safe anchor:
+    // Rust 1.100's build layout puts it under target/<profile>/build/<pkg>/<hash>/out, two levels from the wrong place.
+    let debug = Path::new(AGENTLIFE).parent().expect("target dir");
     let name = if cfg!(windows) {
         "fake_claude.exe"
     } else {
