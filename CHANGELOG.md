@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.55 — tests: Rust 1.100 (`ExitCode` must_use; example path under the new build layout)
+
+Rust 1.100.0 (released 2026-11-09; CI picked it up 2026-11-12 19:28Z, replacing 1.99.1) broke two things in the tests, the second hidden behind the first. (1) `std::process::ExitCode` is now `#[must_use]`, so `clippy --all-targets -D warnings` failed on `crates/lane-restart/src/app/host_cmd/tests.rs:94`; the test now writes `let _ = run_with(...)`. (2) Cargo 1.100's build layout puts test executables under `target/<profile>/build/<pkg>/<hash>/out/`, and `tests/hook_e2e.rs` and `tests/launch_e2e.rs` found the `fake_claude`/`fake_host`/`fake_conhost` examples as `<test exe>/../../examples`, which is no longer `target/<profile>/examples`: 29 tests (24 + 5) failed with "the fake_claude example is not built". They now anchor on `CARGO_BIN_EXE_agentlife` (the built binary, which stays in `target/<profile>`) and take its sibling `examples`. Verified with cargo 1.100.0: `cargo test --workspace` failed those 29 before and the whole workspace passes after; clippy `--all-targets` and the Linux-target clippy are clean.
+
 ## 0.30.54 — `agentlife launcher` runs from a role-only Synapse home (PM FINDING 2026-11-12)
 
 `launcher_service::account_of` fell over in a home made by `synapse id provision` (role keys and certificate, no account key): `Keystore::open` needs the account key, so `agentlife launcher --init-store` and `--once` both stopped with "no account". It now falls back to `<home>/account/name` when the keystore will not open, as the Synapse adapter does; an account home still answers from its keystore, and a home with no account, an empty name file, or a name that would break a `role@account` address (`@`, whitespace, a path separator, a control character) is still refused. Tests: the name-file read, and the two refusals. Not run: against the live daemon (the PM's step 4 repeats on the installed build). Not breaking.
