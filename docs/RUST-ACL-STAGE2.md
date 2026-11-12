@@ -66,4 +66,5 @@ Children inherit, so one command covers the tree (a child with its OWN entry wou
 
 * Whether `credentials.toml` holds a crates.io token (not read): if it does, rotate it after stage 1, because it has been readable by every account.
 * `dtolnay/rust-toolchain` anywhere else: it writes the toolchain, which this stage forbids to a runner account. The mlmf lane already dropped it (mlmf#243); the A1 rows' workflows were checked only for `cargo`/`rust-toolchain`/`rustup` lines, not read job by job.
+* **Known, unmeasured:** a job that `cargo install`s a tool and then runs it by name now installs it into `<cargo-home>\bin`, which is not on the runner's PATH (only `C:\rust\.cargo\bin` is), so that step fails with "not recognized" after A1. Watch the first run of each workflow; the fix is a `.env` PATH line with `<cargo-home>\bin`, or the workflow calling the tool by full path. Nothing measured this: no job has run under a private `CARGO_HOME` yet.
 * The AntSpawn launcher accounts (above) and any future runner: `gh-runner-setup.ps1` (#273) sets `CARGO_HOME` for every runner it installs from then on.
