@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.54 — `agentlife launcher` runs from a role-only Synapse home (PM FINDING 2026-11-12)
+
+`launcher_service::account_of` fell over in a home made by `synapse id provision` (role keys and certificate, no account key): `Keystore::open` needs the account key, so `agentlife launcher --init-store` and `--once` both stopped with "no account". It now falls back to `<home>/account/name` when the keystore will not open, as the Synapse adapter does; an account home still answers from its keystore, and a home with no account, an empty name file, or a name that would break a `role@account` address (`@`, whitespace, a path separator, a control character) is still refused. Tests: the name-file read, and the two refusals. Not run: against the live daemon (the PM's step 4 repeats on the installed build). Not breaking.
+
 ## 0.30.53 — CI: portfolio workflow repinned to coderipper 33cc3b7
 
 - **The `portfolio` caller job is repinned to coderipper 33cc3b7 (coderipper#307), which installs CodeRipper 0.43.49** (was 4bcf55e, 0.43.41). Advisory check, not required; no rule is silenced.

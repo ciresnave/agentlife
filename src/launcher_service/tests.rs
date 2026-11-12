@@ -704,3 +704,40 @@ fn the_sender_allowlist_flag_is_read_from_stats_and_anything_else_is_not_a_yes()
     );
     assert_eq!(parse_senders_set(&json!(null)), None);
 }
+
+#[test]
+fn a_role_only_home_gives_its_account_from_the_name_file() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("account")).unwrap();
+    std::fs::write(
+        home.path().join("account").join("name"),
+        "acct
+",
+    )
+    .unwrap();
+    assert_eq!(account_of(home.path()).as_deref(), Ok("acct"));
+}
+
+#[test]
+fn a_home_with_no_account_at_all_is_still_refused() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(account_of(home.path()).is_err());
+    std::fs::create_dir_all(home.path().join("account")).unwrap();
+    std::fs::write(
+        home.path().join("account").join("name"),
+        "  
+",
+    )
+    .unwrap();
+    assert!(
+        account_of(home.path()).is_err(),
+        "an empty name is no account"
+    );
+    for bad in ["a@b", "a b", "a/b", r"a\b", "a\tb"] {
+        std::fs::write(home.path().join("account").join("name"), bad).unwrap();
+        assert!(
+            account_of(home.path()).is_err(),
+            "{bad:?} is not an account name"
+        );
+    }
+}
