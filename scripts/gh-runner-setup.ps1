@@ -50,6 +50,7 @@
 .PARAMETER PrintMigration Read-only: with -Root naming a SHARED root (e.g. C:\gh-runner), read which service runs from each runner directory under it and as which account, and PRINT the elevated icacls commands that give each account Modify on its own directory only and remove every runner account from the root. Nothing is run; CireSnave decides (it changes live services' access). -Repo is still required (any value).
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account (unless -RemoveAccount).
+.PARAMETER Rearm         With -Apply: re-arm an EPHEMERAL runner that has taken its job (one job, then it unregisters itself and its service stops). One elevated run, ONE registration token, same account, same labels: for each -Repo it stops and deletes the runner's service, deletes the runner directory, then does the normal -Apply (rotate the account password, extract, register, read back). It does NOT use `config.cmd remove` (that needs a different, removal token and has not been measured against a runner that already unregistered itself); `--replace` covers a registration that is still on GitHub. Refuses when the directory is outside -Root, holds no runner, or its service logs on as another account. Needs the account to exist already with no other service (the normal -Apply refuses otherwise).
 .PARAMETER RemoveAccount With -Remove -Apply: after the runners are gone, also delete the local account, but only when no other service still logs on as it (re-read from the service manager) and it is not a built-in account or the person running the script. Otherwise the account is kept and the reason printed.
 #>
 [CmdletBinding()]
@@ -68,6 +69,7 @@ param(
   [switch]$CheckAclsOnly,
   [switch]$Apply,
   [switch]$Remove,
+  [switch]$Rearm,
   [switch]$PrintMigration,
   [switch]$RotateShared,
   [switch]$RemoveAccount,
@@ -182,6 +184,7 @@ if ($accountDefaulted) {
 }
 $groupPlan = Test-GroupRequest $AddToGroup $Because
 if ($RemoveAccount -and -not $Remove) { throw '-RemoveAccount needs -Remove' }
+if ($Rearm -and ($Remove -or $RemoveAccount -or $PrintMigration -or $CheckAclsOnly)) { throw '-Rearm is its own mode: not with -Remove, -RemoveAccount, -PrintMigration or -CheckAclsOnly' }
 if ($RemoveAccount) { Get-AccountRemovalPlan $Account @() $env:COMPUTERNAME $env:USERNAME | Out-Null }   # refuse a built-in or current account BEFORE any runner is removed
 $rootDefaulted = -not $PSBoundParameters.ContainsKey('Root')
 if ($rootDefaulted) { $Root = "C:\gh-runner-$Account" }
@@ -243,6 +246,24 @@ function Find-RunnerService([string]$dir, $services = $null) {
   })
   if ($hit.Count -gt 1) { throw "more than one runner service lives under ${dir}: $(($hit | ForEach-Object Name) -join ', ')" }
   if ($hit.Count -eq 1) { $hit[0] } else { $null }
+}
+
+# -Rearm (PM 2026-11-12, CireSnave board 425 mode A). Pure: reads what it is handed, runs nothing; read out of this file by
+# scripts\tests\gh-runner-setup-rearm.tests.ps1. $services: objects with Name, PathName, StartName (Find-RunnerService reads CIM when null).
+# Returns what the teardown would delete, or throws: the directory must be a direct child of $root, hold config.cmd (a runner), and any
+# service running from it must log on as $account (never delete another account's service).
+function Get-RearmPlan([string]$root, [string]$dir, [string]$account, [string]$computer, $services = $null) {
+  $rootFull = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+  $dirFull = [IO.Path]::GetFullPath($dir).TrimEnd('\')
+  if (-not $dirFull.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase) -or $dirFull.Substring($rootFull.Length).Contains('\') -or $dirFull.Length -le $rootFull.Length) {
+    throw "-Rearm: $dir is not a direct child of the root $root; refusing to delete it"
+  }
+  if (-not (Test-Path -LiteralPath "$dirFull\config.cmd")) { throw "-Rearm: no runner at $dirFull (no config.cmd): nothing to re-arm; use a plain -Apply" }
+  $svc = Find-RunnerService $dirFull $services
+  if ($svc -and $svc.StartName -ine ".\$account" -and $svc.StartName -ine "$computer\$account") {
+    throw "-Rearm: the service $($svc.Name) under $dirFull logs on as '$($svc.StartName)', not $account; refusing to delete it"
+  }
+  [pscustomobject]@{ Dir = $dirFull; Service = $(if ($svc) { $svc.Name } else { $null }) }
 }
 
 # ACL preflight (board 224). A local account that can replace with-secret.exe or lane-restart.exe gets code run as
@@ -339,6 +360,11 @@ if (-not $Apply) {
     Write-Host "`n[$r]"
     Write-Host "  extract  -> $dir (only after the hash matches)"
     Write-Host "  token    -> prompted (Read-Host -AsSecureString): PM fetches it now; not stored"
+    if ($Rearm) {
+      $rp = $null
+      try { $rp = Get-RearmPlan $Root $dir $Account $env:COMPUTERNAME } catch { Write-Host "  -Rearm WOULD REFUSE: $($_.Exception.Message)" }
+      if ($rp) { Write-Host "  re-arm   -> $(if ($rp.Service) { 'stop and delete service ' + $rp.Service } else { 'no service under the directory' }), delete $($rp.Dir), then the registration below (ONE registration token; no removal token, no config.cmd remove)" }
+    }
     if ($Remove) { Write-Host "  $dir\config.cmd remove --token <removal token>"; if ($RemoveAccount) { Write-Host "  then account $env:COMPUTERNAME\$Account removed ONLY if no other service logs on as it (re-read after the remove)" } }
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
@@ -412,6 +438,26 @@ foreach ($r in $Repo) {
   $isPrivate = (gh api "repos/$r" --jq .private 2>&1 | Out-String).Trim()
   if ($isPrivate -ne 'true' -and $isPrivate -ne 'false') { throw "cannot read visibility of $r from gh api: $isPrivate" }
   if (($Private -contains $r) -and $isPrivate -ne 'true') { throw "$r is declared -Private but GitHub says it is public" }
+}
+
+# 1c. -Rearm: tear down each runner that has taken its job, with no removal token. Every plan is made (and so refused) BEFORE any
+# service or directory is touched; each deletion is read back. Then the normal flow below runs unchanged.
+if ($Rearm) {
+  $plans = @(foreach ($r in $Repo) { Get-RearmPlan $Root (Join-Path $Root (Slug $r)) $Account $env:COMPUTERNAME })
+  foreach ($pl in $plans) {
+    if ($pl.Service) {
+      Stop-Service -Name $pl.Service -Force -ErrorAction SilentlyContinue
+      sc.exe delete $pl.Service | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "sc.exe delete $($pl.Service) exited $LASTEXITCODE" }
+      $gone = $false
+      foreach ($i in 1..20) { if (-not (Get-Service -Name $pl.Service -ErrorAction SilentlyContinue)) { $gone = $true; break }; Start-Sleep -Milliseconds 500 }
+      if (-not $gone) { throw "service $($pl.Service) is still registered 10 s after sc.exe delete (marked for deletion with a handle open?): close what holds it and run again" }
+      Write-Host "re-arm: service $($pl.Service) deleted (read back: absent)"
+    }
+    Remove-Item -LiteralPath $pl.Dir -Recurse -Force
+    if (Test-Path -LiteralPath $pl.Dir) { throw "$($pl.Dir) still exists after Remove-Item" }
+    Write-Host "re-arm: $($pl.Dir) deleted (read back: absent)"
+  }
 }
 
 # 2. The account.
