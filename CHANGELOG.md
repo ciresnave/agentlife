@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.51
+
+- **CI: the portfolio workflow is repinned to coderipper 4bcf55e (coderipper#303), which installs CodeRipper 0.43.41** (was b45eb41, CodeRipper 0.10.0). Advisory check, not required; no rule is silenced. Version 0.30.51 is provisional (the PM allocates).
+
 ## 0.30.50
 
 - **`gh-runner-setup.ps1 -Remove -RemoveAccount`, slice 4 (ROADMAP row 8; `docs/RUNNER-ACCOUNTS.md` T7).** After the runners are removed and the service is read back as absent, the local account is deleted only when no other service still logs on as it (the service list is re-read after the removal; `.ccount`, `COMPUTERccount` and any case count). Built-in accounts and the person running the script are refused in the dry run, before any runner is touched; `-RemoveAccount` without `-Remove` is refused. An account still in use is kept and the services named. `Get-AccountRemovalPlan` is tested on fake service objects (15 checks); the real `Remove-LocalUser` needs elevation and was not run. Never run with `-Apply`.
