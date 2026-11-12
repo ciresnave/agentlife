@@ -452,7 +452,9 @@ pub fn account_of(home: &Path) -> Result<String, String> {
 fn account_from_name_file(home: &Path) -> Option<String> {
     let text = std::fs::read_to_string(home.join("account").join("name")).ok()?;
     let name = text.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    // Nothing that would break a `role@account` address: empty, `@`, whitespace, a path separator or a control character.
+    let bad = |c: char| c == '@' || c == '/' || c == '\\' || c.is_whitespace() || c.is_control();
+    (!name.is_empty() && !name.contains(bad)).then(|| name.to_string())
 }
 
 /// `role` as the daemon addresses it: `role@account` (an address that already has an `@` is kept).

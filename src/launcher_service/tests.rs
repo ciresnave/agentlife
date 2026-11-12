@@ -733,4 +733,11 @@ fn a_home_with_no_account_at_all_is_still_refused() {
         account_of(home.path()).is_err(),
         "an empty name is no account"
     );
+    for bad in ["a@b", "a b", "a/b", r"a\b", "a\tb"] {
+        std::fs::write(home.path().join("account").join("name"), bad).unwrap();
+        assert!(
+            account_of(home.path()).is_err(),
+            "{bad:?} is not an account name"
+        );
+    }
 }
