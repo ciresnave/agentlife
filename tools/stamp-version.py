@@ -14,6 +14,9 @@ script, which
  3. turns the fragments into one entry above the newest CHANGELOG entry (heading style copied from the file);
  4. deletes the fragments it used.
 
+An optional `tools/stamp-current.txt` (one line: a Cargo.toml path) names the manifest whose version is "current" when the
+repo has crates on independent versions; only crates at that version are stamped.
+
 Extra files that pin the version as `=X.Y.Z` (README install lines) are listed one path per line in
 `tools/stamp-extra.txt` (optional). Standard library only. Line endings of each file are kept. Files are enumerated with
 `git ls-files`, never a disk walk.
@@ -73,6 +76,14 @@ def workspace_version(text):
 
 
 def current_version(root):
+    pin = os.path.join(root, "tools", "stamp-current.txt")
+    if os.path.exists(pin):
+        rel = read(pin)[0].strip().splitlines()[0].strip()
+        text, _ = read(os.path.join(root, rel))
+        v = package_version(text) or workspace_version(text)
+        if not v or v == "workspace":
+            die(f"tools/stamp-current.txt names {rel}, which has no literal version")
+        return v
     top, _ = read(os.path.join(root, "Cargo.toml"))
     wv = workspace_version(top)
     if wv:
@@ -122,6 +133,12 @@ def version_changes(root, old, new):
         t = re.sub(
             r'(?m)^(\s*[\w.-]+\s*=\s*\{[^}\n]*path\s*=\s*"[^"]+"[^}\n]*version\s*=\s*"=?)' + q + '"',
             lambda m: m.group(1) + new + '"',
+            t,
+        )
+        # version before path: `x = { version = "old", path = ".." }`
+        t = re.sub(
+            r'(?m)^(\s*[\w.-]+\s*=\s*\{[^}\n]*version\s*=\s*"=?)' + q + r'("[^}\n]*path\s*=)',
+            lambda m: m.group(1) + new + m.group(2),
             t,
         )
         if t != orig:
