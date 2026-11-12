@@ -1,0 +1,3 @@
+kind: tests: bind the unused `ExitCode` in `host_cmd` (Rust 1.100)
+---
+Rust 1.100.0 (released 2026-11-09; CI picked it up 2026-11-12 19:28Z, replacing 1.99.1) makes `std::process::ExitCode` `#[must_use]`, so `cargo clippy --all-targets -D warnings` failed on `crates/lane-restart/src/app/host_cmd/tests.rs:94` (`run_with(...)` whose result the test does not read) and every open PR's ubuntu build went red, including a docs-only one. The test now writes `let _ = run_with(...)`. Verified with rustc 1.100.0: workspace `--all-targets` clippy and the Linux-target clippy of `lane-restart` are clean; before the change the same command failed on that one line.
