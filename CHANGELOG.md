@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.55 — `lane-new --no-start`
+
+`lane-restart lane-new <role> <repo> --no-start` runs steps 0 to 6 (repo, seed, MCP config, launch spec, soak list, Synapse identity) and skips step 7: the spec stays `suspended` and step 8 prints the `lane-restart start` command for the PM. The flag changes the plan hash, so a dry run with it cannot be applied without it, nor the reverse (a lane meant to wait cannot be started by a mistyped apply). Verified by a fake-host test that asserts `start` is never called, the spec is `suspended`, both cross-applications run nothing, and the control without the flag starts the lane.
+
 ## 0.30.54 — `agentlife launcher` runs from a role-only Synapse home (PM FINDING 2026-11-12)
 
 `launcher_service::account_of` fell over in a home made by `synapse id provision` (role keys and certificate, no account key): `Keystore::open` needs the account key, so `agentlife launcher --init-store` and `--once` both stopped with "no account". It now falls back to `<home>/account/name` when the keystore will not open, as the Synapse adapter does; an account home still answers from its keystore, and a home with no account, an empty name file, or a name that would break a `role@account` address (`@`, whitespace, a path separator, a control character) is still refused. Tests: the name-file read, and the two refusals. Not run: against the live daemon (the PM's step 4 repeats on the installed build). Not breaking.
