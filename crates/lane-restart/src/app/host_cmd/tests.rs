@@ -91,7 +91,7 @@ fn the_boot_record_is_written_first_into_the_state_dir_with_the_hosts_own_argume
     let d = tempfile::tempdir().unwrap();
     let asked: Asked = Rc::default();
     let mut c = ctx(d.path(), &asked, || outcome(Some(0)));
-    run_with(
+    let _ = run_with(
         &mut c,
         args(&["host", "--role", "alpha", "--", "claude", "--x"]),
     );
