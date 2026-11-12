@@ -1,0 +1,3 @@
+kind: `agentlife launcher` runs from a role-only Synapse home (PM FINDING 2026-11-12)
+---
+`launcher_service::account_of` fell over in a home made by `synapse id provision` (role keys and certificate, no account key): `Keystore::open` needs the account key, so `agentlife launcher --init-store` and `--once` both stopped with "no account". It now falls back to `<home>/account/name` when the keystore will not open, as the Synapse adapter does; an account home still answers from its keystore, and a home with no account, or an empty name file, is still refused. Tests: the name-file read, and the two refusals. Not run: against the live daemon (the PM's step 4 repeats on the installed build). Not breaking.

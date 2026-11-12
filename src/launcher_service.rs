@@ -437,11 +437,22 @@ impl Mechanism for LaneRestartMechanism {
     }
 }
 
-/// The account of the Synapse home (`<home>/account`), read without starting a daemon.
+/// The account of the Synapse home, read without starting a daemon. An account home answers from its
+/// keystore. A role-only home (`synapse id provision`: role keys and certificate, NOT the account key)
+/// has only `<home>/account/name`, so that is read when the keystore will not open, as the adapter does.
 pub fn account_of(home: &Path) -> Result<String, String> {
-    synapse::keystore::Keystore::open(home)
-        .map(|k| k.account().account)
-        .map_err(|e| format!("cannot read the Synapse account in {}: {e}", home.display()))
+    match synapse::keystore::Keystore::open(home) {
+        Ok(k) => Ok(k.account().account),
+        Err(e) => account_from_name_file(home)
+            .ok_or_else(|| format!("cannot read the Synapse account in {}: {e}", home.display())),
+    }
+}
+
+/// `<home>/account/name`, trimmed; `None` if absent, unreadable or empty.
+fn account_from_name_file(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("account").join("name")).ok()?;
+    let name = text.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// `role` as the daemon addresses it: `role@account` (an address that already has an `@` is kept).
