@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.52 — CI: one changelog fragment per PR
+
+- **Changelog fragments and a stamp script (PM order of CireSnave 2026-11-12).** `tools/stamp-version.py`, `tools/check-fragment.py`, the `changelog-fragment` workflow and `changelog.d/README.md` are adopted from the portfolio kit: a PR carries one `changelog.d/<topic>.md` fragment and no version edit; the PM stamps the version at merge. This PR carries a fragment itself so it does not collide with open version bumps. Verified with a throwaway fragment and `stamp-version.py 99.99.99 --dry-run`.
+
 ## 0.30.51
 
 - **CI: the portfolio workflow is repinned to coderipper 4bcf55e (coderipper#303), which installs CodeRipper 0.43.41** (was b45eb41, CodeRipper 0.10.0). Advisory check, not required; no rule is silenced. Version 0.30.51 is provisional (the PM allocates).
