@@ -127,6 +127,8 @@ pub enum Status {
     Fail,
     /// Not part of this build (a later slice).
     Later,
+    /// Left out on purpose by a flag (`--no-start`); nothing was done and nothing is owed.
+    Skipped,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,7 @@ impl Report {
                 Status::Would => "would",
                 Status::Fail => "FAIL",
                 Status::Later => "later",
+                Status::Skipped => "skipped",
             };
             s.push_str(&format!(
                 "  step {} {:<22} {:<7} {}\n",
@@ -238,12 +241,22 @@ pub fn run_apply(
     let Some(given) = plan else {
         return refuse("--apply needs --plan <hash>, printed at the end of a dry run of the same role, repo and model".to_string());
     };
-    match plan_hash(roots, role, repo, model) {
+    match plan_hash(roots, role, repo, model).map(|h| plan_id(host, h)) {
         Ok(want) if want == given => run_full(roots, vcs, host, role, repo, model, true, now),
         Ok(_) => refuse(format!(
             "--plan {given} is not the plan for role {role:?}, repo {repo:?}, model {model:?}: dry-run these exact arguments again and use the hash it prints"
         )),
         Err(e) => refuse(format!("cannot plan these arguments: {e}")),
+    }
+}
+
+/// The hash a dry run prints and `--apply` must repeat: `base` as is, or for `--no-start` re-hashed with that
+/// word, so the two modes never share a plan.
+fn plan_id(host: Option<&dyn Host>, base: String) -> String {
+    if host.is_some_and(|h| h.no_start()) {
+        remote::sha256_hex(format!("{base}\nno-start").as_bytes())[..16].to_string()
+    } else {
+        base
     }
 }
 
@@ -467,6 +480,12 @@ fn step_start(
     apply: bool,
 ) -> Result<(Status, String), String> {
     let cmd = format!("lane-restart start --role {role} --model {model} --reason lane-new");
+    if host.no_start() {
+        return Ok((
+            Status::Skipped,
+            format!("--no-start: the spec stays suspended; the PM starts it with `{cmd}`"),
+        ));
+    }
     if !apply {
         return Ok((Status::Would, cmd));
     }
@@ -625,7 +644,7 @@ pub fn run_apply_worktree(
     let Some(given) = plan else {
         return refuse("--apply needs --plan <hash>, printed at the end of a dry run of the same role, repo, worktree and model".to_string());
     };
-    if plan_hash_worktree(roots, role, repo, worktree, model) == given {
+    if plan_id(host, plan_hash_worktree(roots, role, repo, worktree, model)) == given {
         run_full_worktree(roots, vcs, host, role, repo, worktree, model, true, now)
     } else {
         refuse(format!(
@@ -1152,7 +1171,8 @@ fn run_inner(
         report.plan = match worktree {
             Some(wt) => Some(plan_hash_worktree(roots, role, repo, wt, model)),
             None => plan_hash(roots, role, repo, model).ok(),
-        };
+        }
+        .map(|h| plan_id(host, h));
     }
     report
 }
