@@ -254,6 +254,9 @@ function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoH
     # A MACHINE RUSTC_WRAPPER (sccache under one user's profile) is unreadable by the runner account: every cargo step died with
     # "could not execute process sccache" (mlmf run 43457440425, 2026-11-13). Empty here overrides the machine value for the service.
     $lines.Add('RUSTC_WRAPPER=')
+    # The machine cargo config puts build.build-dir under C:\cb, which a restricted account may not write: use the runner's own tree.
+    # UNMEASURED (2026-11-13): an old cargo may ignore this variable.
+    $lines.Add("CARGO_BUILD_BUILD_DIR=$(Split-Path -Parent $cargoHome)\cb")
   }
   @($lines)
 }
