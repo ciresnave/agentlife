@@ -51,6 +51,8 @@
 .PARAMETER Apply         Actually do it. Without it, nothing is changed.
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account (unless -RemoveAccount).
 .PARAMETER Rearm         With -Apply: re-arm an EPHEMERAL runner that has taken its job (one job, then it unregisters itself and its service stops). One elevated run, ONE registration token, same account, same labels: for each -Repo it stops and deletes the runner's service, deletes the runner directory, then does the normal -Apply (rotate the account password, extract, register, read back). It does NOT use `config.cmd remove` (that needs a different, removal token and has not been measured against a runner that already unregistered itself); `--replace` covers a registration that is still on GitHub. Refuses when the directory is outside -Root, holds no runner, or its service logs on as another account. Needs the account to exist already with no other service (the normal -Apply refuses otherwise).
+.PARAMETER GitRoot       Git for Windows root. Its bin and usr\bin go FIRST on the runner's PATH (in <runner dir>\.env), ahead of System32: on this box `bash` otherwise resolves to the WSL launcher (C:\Windows\System32\bash.exe) and every `shell: bash` step fails with "Windows Subsystem for Linux has no installed distribution" (mlmf first job, 2026-11-12). Default C:\Program Files\Git.
+.PARAMETER RustRoot      The machine-wide Rust install (default C:\rust: .cargo\bin holds the rustup shims, .rustup the toolchains). The runner's .env gets PATH (shims), RUSTUP_HOME (shared toolchains) and CARGO_HOME = <Root>\cargo-home (the account's OWN registry cache, so a job cannot write into the shared C:\.cargo). Pass '' to leave Rust out.
 .PARAMETER RemoveAccount With -Remove -Apply: after the runners are gone, also delete the local account, but only when no other service still logs on as it (re-read from the service manager) and it is not a built-in account or the person running the script. Otherwise the account is kept and the reason printed.
 #>
 [CmdletBinding()]
@@ -70,6 +72,8 @@ param(
   [switch]$Apply,
   [switch]$Remove,
   [switch]$Rearm,
+  [string]$GitRoot = 'C:\Program Files\Git',
+  [string]$RustRoot = 'C:\rust',
   [switch]$PrintMigration,
   [switch]$RotateShared,
   [switch]$RemoveAccount,
@@ -228,10 +232,47 @@ if (-not $Ephemeral) {
   if ($pub) { throw "-Ephemeral:`$false is refused for public repo(s): $($pub -join ', ')" }
 }
 $ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
+# The lines of <runner dir>\.env (pure: reads only its arguments; read out of this file by scripts\tests\gh-runner-setup-env.tests.ps1).
+# PATH: Git's bin and usr\bin, then the Rust shims, then the machine PATH minus any repeat; RUSTUP_HOME shared, CARGO_HOME the account's own.
+function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoHome, [string]$machinePath) {
+  foreach ($v in $gitRoot, $rustRoot, $cargoHome) {
+    if ($v -and ($v -notmatch '^[A-Za-z]:\\[\x20-\x7E]*$' -or $v -match '[;%"=]')) { throw "'$v' must be an absolute ASCII path with no ; % `" or =" }
+  }
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add('PSExecutionPolicyPreference=Bypass')
+  $front = New-Object System.Collections.Generic.List[string]
+  if ($gitRoot) { $front.Add("$gitRoot\bin"); $front.Add("$gitRoot\usr\bin") }
+  if ($rustRoot) { $front.Add("$rustRoot\.cargo\bin") }
+  if ($front.Count -gt 0) {
+    $seen = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($front) + @($machinePath -split ';')) { $d = $d.Trim().TrimEnd('\'); if ($d -and $seen.Add($d)) { $parts.Add($d) } }
+    $lines.Add('PATH=' + ($parts -join ';'))
+  }
+  if ($rustRoot) { $lines.Add("RUSTUP_HOME=$rustRoot\.rustup"); $lines.Add("CARGO_HOME=$cargoHome") }
+  @($lines)
+}
+# What the probe printed, judged (pure). The probe runs AS the runner account with the .env's variables and prints one line per fact.
+# Returns the failures (empty = good): bash must be Git's, must run, and cargo and rustc must run.
+function Test-ProbeOutput([string]$text, [string]$gitRoot, [bool]$rust) {
+  $f = New-Object System.Collections.Generic.List[string]
+  $lines = @($text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  $get = { param($k) @($lines | Where-Object { $_ -like "$k=*" } | ForEach-Object { $_.Substring($k.Length + 1) }) | Select-Object -First 1 }
+  $bashPath = & $get 'bash-path'
+  if (-not $bashPath) { $f.Add('bash was not found on the account''s PATH') }
+  elseif ($gitRoot -and -not $bashPath.StartsWith($gitRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { $f.Add("bash resolves to $bashPath, not Git's ($gitRoot): the WSL launcher is still first") }
+  if (([string](& $get 'bash-run')) -ne 'ok') { $f.Add("bash -c ""echo ok"" printed '$(& $get 'bash-run')', not ok") }
+  if ($rust) {
+    if (([string](& $get 'cargo')) -notmatch '^cargo \d+\.\d+\.\d+') { $f.Add("cargo --version printed '$(& $get 'cargo')'") }
+    if (([string](& $get 'rustc')) -notmatch '^rustc \d+\.\d+\.\d+') { $f.Add("rustc --version printed '$(& $get 'rustc')'") }
+  }
+  @($f)
+}
 # Written to <runner dir>\.env, which the runner loads for every job. Windows PowerShell's execution policy is Restricted on this
 # box, and the runner dot-sources a temp .ps1 for each `shell: powershell` step (spike run 1, 2026-10-17). The env var is process
 # scope: it touches this runner's jobs only, no machine or registry-hive setting. Not a security boundary (a job runs any command).
-$runnerEnv = @('PSExecutionPolicyPreference=Bypass')
+$cargoHome = if ($RustRoot) { Join-Path $Root 'cargo-home' } else { '' }
+$runnerEnv = @(Get-RunnerEnvLines $GitRoot $RustRoot $cargoHome ([Environment]::GetEnvironmentVariable('Path', 'Machine')))
 function Slug([string]$r) { $r -replace '/', '-' }
 # The runner TRUNCATES long service names ('...TUF-LAPTOP-ThinkersJ-9595'), so a name built from the repo cannot be trusted
 # (live run 2026-10-22: read-back threw 'not found' for a service that was running). The service is found by the runner
@@ -369,8 +410,10 @@ if (-not $Apply) {
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
       Write-Host "     $labelFlag --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
-      Write-Host "  .env     -> $dir\.env: $($runnerEnv -join '; ') (before config.cmd, so the service starts with it)"
-      Write-Host "  read back: service ... StartName = .\$Account, State = Running; .env holds the policy line"
+      Write-Host "  .env     -> $dir\.env (before config.cmd, so the service starts with it):"
+      foreach ($l in $runnerEnv) { Write-Host "     $(if ($l.Length -gt 150) { $l.Substring(0, 150) + ' ...' } else { $l })" }
+      Write-Host "  probe    -> after the service read-back, AS $Account (Start-Process -Credential, Secondary Logon): bash path, bash -c `"echo ok`"$(if ($RustRoot) { ', cargo --version, rustc --version' }) with those .env values; any failure stops the run"
+      Write-Host "  read back: service ... StartName = .\$Account, State = Running; every .env line present"
     }
   }
   return
@@ -527,8 +570,34 @@ foreach ($r in $Repo) {
   $svc = Find-RunnerService $dir
   if (-not $svc) { throw "no runner service found under $dir after configure" }
   if ($svc.StartName -ine ".\$Account") { throw "service runs as '$($svc.StartName)', expected .\$Account" }
-  if ((Get-Content -LiteralPath "$dir\.env") -notcontains $runnerEnv[0]) { throw "$dir\.env does not hold $($runnerEnv[0])" }
-  Write-Host "[$r] service $($svc.Name) as $($svc.StartName), state $($svc.State); .env: $($runnerEnv -join '; ')"
+  $envBack = @(Get-Content -LiteralPath "$dir\.env")
+  foreach ($l in $runnerEnv) { if ($envBack -notcontains $l) { throw "$dir\.env does not hold the line: $l" } }
+  Write-Host "[$r] service $($svc.Name) as $($svc.StartName), state $($svc.State); .env holds $($runnerEnv.Count) line(s) ($(($runnerEnv | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', '))"
+  # 7. The probe: what the first job would hit, run now AS the account with the .env's values, so a bad PATH or an unreadable toolchain
+  # fails here, loudly, instead of in a queued job (mlmf 2026-11-12). Output goes to a file the account can write (its root).
+  if ($GitRoot) { foreach ($x in "$GitRoot\bin\bash.exe") { if (-not (Test-Path -LiteralPath $x)) { throw "probe: $x does not exist" } } }
+  if ($RustRoot) { New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null }
+  $probeOut = Join-Path $Root 'probe-out.txt'; $probeErr = Join-Path $Root 'probe-err.txt'; $probePs1 = Join-Path $Root 'probe.ps1'
+  $probeLines = @('$ErrorActionPreference = ''Continue''')
+  foreach ($l in $runnerEnv) { $kv = $l -split '=', 2; $probeLines += "`$env:$($kv[0]) = '$($kv[1] -replace "'", "''")'" }
+  $probeLines += @(
+    '$w = (where.exe bash 2>$null | Select-Object -First 1); "bash-path=$w"',
+    '"bash-run=" + (& bash -c "echo ok" 2>&1 | Select-Object -First 1)')
+  if ($RustRoot) { $probeLines += @('"cargo=" + (& cargo --version 2>&1 | Select-Object -First 1)', '"rustc=" + (& rustc --version 2>&1 | Select-Object -First 1)') }
+  Set-Content -LiteralPath $probePs1 -Value $probeLines -Encoding Ascii
+  Remove-Item -LiteralPath $probeOut, $probeErr -ErrorAction SilentlyContinue
+  Set-Service -Name seclogon -StartupType Manual -ErrorAction SilentlyContinue; Start-Service -Name seclogon -ErrorAction SilentlyContinue
+  $cred = New-Object System.Management.Automation.PSCredential(".\$Account", $secure)
+  $pr = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Credential $cred -LoadUserProfile -WorkingDirectory $Root -Wait -PassThru -WindowStyle Hidden `
+    -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$probePs1`"") -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+  $probeText = if (Test-Path -LiteralPath $probeOut) { Get-Content -LiteralPath $probeOut -Raw } else { '' }
+  $probeFail = @(Test-ProbeOutput $probeText $GitRoot ([bool]$RustRoot))
+  Remove-Item -LiteralPath $probePs1 -ErrorAction SilentlyContinue
+  if ($probeFail.Count -gt 0) {
+    $err = if (Test-Path -LiteralPath $probeErr) { (Get-Content -LiteralPath $probeErr -Raw) } else { '' }
+    throw "PROBE FAILED for ${r} as ${Account} (probe exit $($pr.ExitCode)): $($probeFail -join '; '). Probe output: $probeText $err The runner is registered but a job on it would fail the same way."
+  }
+  Write-Host "[$r] probe as ${Account} OK: $(($probeText -split "`r?`n" | Where-Object { $_.Trim() }) -join ' | ')"
 }
 $password = $null; $secure = $null
 Write-Host "`nNext: gh api repos/<owner>/<repo>/actions/runners  (labels must read self-hosted, Windows, X64, gpu), then run the spike (docs/RUNNER-SETUP.md section 5)."
