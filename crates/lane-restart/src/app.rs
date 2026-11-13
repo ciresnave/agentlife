@@ -483,12 +483,12 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
         }
         if first == "lane-new" {
             return match cli::lane_new(rest) {
-                Ok((role, repo, model, apply, plan)) => {
-                    lane_new_cmd::run(ctx, role, repo, model, apply, plan)
+                Ok((role, repo, model, apply, plan, no_start)) => {
+                    lane_new_cmd::run(ctx, role, repo, model, apply, plan, no_start)
                 }
                 Err(e) => {
                     ctx.errln(&format!(
-                        "lane-restart lane-new: {e}; expected `lane-new <role> <repo> [--model sonnet|haiku] [--apply --plan <hash>]`"
+                        "lane-restart lane-new: {e}; expected `lane-new <role> <repo> [--model sonnet|haiku] [--no-start] [--apply --plan <hash>]`"
                     ));
                     ExitCode::FAILURE
                 }
