@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.62 — docs: `docs/SUPERVISION-DESIGN.md`, the design note for one common supervision layer
+
+Added `docs/SUPERVISION-DESIGN.md` (PM TASK 2026-11-13, CireSnave's standing direction of 2026-10-31): the core/adapter split read off `docs/SUPERVISION-INPUTS.md`, the `[LIFECYCLE]` event contract over Synapse (spec and ledger are the record; events are at-least-once notifications of a state already read back), per-agent-kind adapters (Claude Code, OverMind, Ollama, Lightbulb/Fuel, remote, the last four marked UNVERIFIED where unread), what `lane-restart`, AntSpawn and AgentLife each keep, a four-slice migration that never breaks `lane-restart`, and nine numbered decisions for CireSnave, each with a recommendation. Design only: no code, no behaviour change. Verified: every cited fact traced to the inputs note; links and section numbers checked by reading.
+
 ## 0.30.61 — gh-runner-setup.ps1: ephemeral registration works (separate config.cmd arguments); runner .env blanks RUSTC_WRAPPER
 
 The first live `-Rearm -Apply` failed: config.cmd refused "Unrecognized command-line input arguments ... 'replace --ephemeral'", because the call built `--replace$ephFlag` with a leading-space flag and PowerShell passed ONE argument. The same call serves plain `-Apply`, so every ephemeral registration failed. The argument list is now built by `Get-ConfigArgs`, one element per argument. Verified by `scripts/tests/gh-runner-setup-ephemeral.tests.ps1` (the array, and a stub config.cmd that echoes each argument it receives). The runner `.env` now also sets `RUSTC_WRAPPER=` (empty): a machine-level sccache wrapper under one user's profile is unreadable by the runner account and failed every cargo step of mlmf's first job (run 43457440425). `gh-runner-setup-env.tests.ps1` asserts the empty line. It also sets `CARGO_BUILD_BUILD_DIR=<runner dir>\cb` so a job never depends on the machine config's `C:\cb` build-dir; UNMEASURED (an old cargo may ignore the variable), the PM measures it after the re-arm.
