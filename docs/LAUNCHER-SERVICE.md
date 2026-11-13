@@ -188,7 +188,8 @@ ignored until that line is removed from `scripts/synapsed-task.ps1`'s generated 
 parameter) and the daemon is restarted once. `/v1/waiting` and
 `/v1/launch-result` need no grant for the launcher role (measured: 4 posts accepted with none). The launcher task is
 registered by `agentlife install-task --register` (a third task, `agentlife-launcher`: logon trigger, `launcher`, restarted
-every minute on failure, a second instance ignored); `--remove` deletes it.
+every minute on failure, a second instance ignored); `--remove` deletes it. `--only launcher` registers or removes just that task (the default is all three, including the two
+restore tasks, which a person must decide on separately).
 
 ## Caps, ledger line, memory floor and `restore.lock` (0.15.13)
 

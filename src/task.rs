@@ -46,6 +46,27 @@ impl Trigger {
         }
     }
 
+    /// Every task, in the order `install-task` handles them.
+    pub const ALL: [Trigger; 3] = [Trigger::Logon, Trigger::SessionUnlock, Trigger::Launcher];
+
+    /// The short name `install-task --only` takes: `logon`, `unlock` or `launcher`.
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Trigger::Logon => "logon",
+            Trigger::SessionUnlock => "unlock",
+            Trigger::Launcher => "launcher",
+        }
+    }
+
+    pub fn from_short_name(name: &str) -> Option<Trigger> {
+        Trigger::ALL.into_iter().find(|t| t.short_name() == name)
+    }
+
+    /// The tasks an `install-task` run touches: just `only` when given, else all three (the default).
+    pub fn selected(only: Option<Trigger>) -> Vec<Trigger> {
+        only.map_or_else(|| Trigger::ALL.to_vec(), |t| vec![t])
+    }
+
     fn description(self) -> &'static str {
         match self {
             Trigger::Logon => {
@@ -391,6 +412,20 @@ mod tests {
         // the two restore tasks are not restarted
         assert!(!task_xml(Trigger::Logon, "u", "a").contains("RestartOnFailure"));
         assert_eq!(Trigger::Launcher.task_name(), "agentlife-launcher");
+    }
+
+    #[test]
+    fn only_selects_one_task_and_the_default_is_all_three() {
+        assert_eq!(Trigger::selected(None), Trigger::ALL.to_vec());
+        assert_eq!(
+            Trigger::selected(Trigger::from_short_name("launcher")),
+            [Trigger::Launcher]
+        );
+        assert_eq!(Trigger::from_short_name("logon"), Some(Trigger::Logon));
+        assert_eq!(Trigger::from_short_name("restore"), None);
+        // the restore tasks are never part of a launcher-only run
+        assert!(!Trigger::selected(Some(Trigger::Launcher)).contains(&Trigger::Logon));
+        assert!(!Trigger::selected(Some(Trigger::Launcher)).contains(&Trigger::SessionUnlock));
     }
 
     #[test]

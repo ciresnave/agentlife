@@ -92,7 +92,8 @@ fn main() -> ExitCode {
             register,
             remove,
             exe,
-        }) => run_install_task(register, remove, exe),
+            only,
+        }) => run_install_task(register, remove, exe, only),
         Ok(Command::Doctor { exe }) => run_doctor(exe),
         Ok(Command::Launcher { init_store, once }) => run_launcher(init_store, once),
         Ok(Command::Worktrees { json, root, repos }) => run_worktrees(json, root, repos),
@@ -977,9 +978,14 @@ fn run_doctor(exe: Option<String>) -> ExitCode {
     }
 }
 
-fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCode {
+fn run_install_task(
+    register: bool,
+    remove: bool,
+    exe: Option<String>,
+    only: Option<task::Trigger>,
+) -> ExitCode {
     if !cfg!(windows) {
-        return run_install_task_systemd(register, remove, exe);
+        return run_install_task_systemd(register, remove, exe, only);
     }
     let exe = match exe {
         Some(e) => e,
@@ -1000,11 +1006,7 @@ fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCo
         }
     };
     let mut failed = false;
-    for t in [
-        task::Trigger::Logon,
-        task::Trigger::SessionUnlock,
-        task::Trigger::Launcher,
-    ] {
+    for t in task::Trigger::selected(only) {
         if remove {
             failed |= !run_schtasks(&task::delete_args(t));
             continue;
@@ -1049,7 +1051,12 @@ fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCo
 /// unit and the commands to install it. It never writes into the user's systemd directory or runs
 /// `systemctl`: registering a unit that starts a restore at logon is a person's act (CireSnave
 /// approves, the PM operates), and this path has not been run against a real systemd.
-fn run_install_task_systemd(register: bool, remove: bool, exe: Option<String>) -> ExitCode {
+fn run_install_task_systemd(
+    register: bool,
+    remove: bool,
+    exe: Option<String>,
+    only: Option<task::Trigger>,
+) -> ExitCode {
     if register || remove {
         eprintln!(
             "agentlife install-task: --register/--remove exist only on Windows. On Linux this prints              the systemd --user unit and the commands; install it by hand."
@@ -1066,11 +1073,7 @@ fn run_install_task_systemd(register: bool, remove: bool, exe: Option<String>) -
             }
         },
     };
-    for t in [
-        task::Trigger::Logon,
-        task::Trigger::SessionUnlock,
-        task::Trigger::Launcher,
-    ] {
+    for t in task::Trigger::selected(only) {
         match task::systemd_unit(t, &exe) {
             Some(unit) => {
                 let name = task::systemd_unit_name(t);

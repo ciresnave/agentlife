@@ -66,6 +66,8 @@ pub enum Command {
         register: bool,
         remove: bool,
         exe: Option<String>,
+        /// `--only <logon|unlock|launcher>`: touch just that task (default: all three).
+        only: Option<crate::task::Trigger>,
     },
     /// `agentlife import-lane-state`: seed the registry from `.lane-state`; dry run unless `write`.
     ImportLaneState {
@@ -202,7 +204,7 @@ USAGE:
 
     agentlife restore --from-logon
     agentlife pending --prompt
-    agentlife install-task [--register | --remove] [--exe <path>]
+    agentlife install-task [--register | --remove] [--only <logon|unlock|launcher>] [--exe <path>]
         The three per-user Task Scheduler tasks (\"run only when the user is logged on\"): `agentlife-launcher`
         runs `agentlife launcher` from logon and is restarted every minute if it fails; at logon,
         `restore --from-logon` first waits (up to network_wait_secs, default 120) for the network, the
@@ -211,6 +213,8 @@ USAGE:
         `install-task` only PRINTS both tasks' XML and the schtasks commands; a person runs it with
         --register to create them (replacing same-named tasks) or --remove to delete them. A logon
         restore freezes its plan and asks a person first; nothing starts without that approval.
+        --only <logon|unlock|launcher> limits --register, --remove and the printout to that one task (default:
+        all three), so the launcher can be registered without the two restore tasks.
 
     agentlife import-lane-state [--write] [--json] [--since 48h] [--park a,b]
         Seeds the registry from OverMind's .lane-state/<role>.json files (read only) so the first
@@ -436,13 +440,21 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             Ok(Command::Worktrees { json, root, repos })
         }
         "install-task" => {
-            let (mut register, mut remove, mut exe) = (false, false, None);
+            let (mut register, mut remove, mut exe, mut only) = (false, false, None, None);
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--register" => register = true,
                     "--remove" => remove = true,
                     "--exe" => exe = Some(it.next().ok_or("--exe needs a path")?.clone()),
+                    "--only" => {
+                        let v = it.next().ok_or("--only needs logon, unlock or launcher")?;
+                        only = Some(crate::task::Trigger::from_short_name(v).ok_or_else(|| {
+                            format!(
+                                "install-task: --only takes logon, unlock or launcher, not {v:?}"
+                            )
+                        })?);
+                    }
                     other => return Err(format!("unknown argument to install-task: {other:?}")),
                 }
             }
@@ -453,6 +465,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
                 register,
                 remove,
                 exe,
+                only,
             })
         }
         "pending" => {
@@ -796,7 +809,8 @@ mod tests {
             Ok(Command::InstallTask {
                 register: false,
                 remove: false,
-                exe: None
+                exe: None,
+                only: None
             })
         );
         assert_eq!(
@@ -804,9 +818,21 @@ mod tests {
             Ok(Command::InstallTask {
                 register: true,
                 remove: false,
-                exe: Some("C:/a/agentlife.exe".into())
+                exe: Some("C:/a/agentlife.exe".into()),
+                only: None
             })
         );
+        assert_eq!(
+            p(&["install-task", "--register", "--only", "launcher"]),
+            Ok(Command::InstallTask {
+                register: true,
+                remove: false,
+                exe: None,
+                only: Some(crate::task::Trigger::Launcher)
+            })
+        );
+        assert!(p(&["install-task", "--only", "restore"]).is_err());
+        assert!(p(&["install-task", "--only"]).is_err());
         assert!(p(&["install-task", "--register", "--remove"]).is_err());
         assert!(p(&["install-task", "--exe"]).is_err());
         assert!(p(&["install-task", "--now"]).is_err());
