@@ -17,11 +17,15 @@ use std::time::Duration;
 
 pub const LOGON_TASK: &str = "agentlife-logon";
 pub const UNLOCK_TASK: &str = "agentlife-unlock";
+pub const LAUNCHER_TASK: &str = "agentlife-launcher";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Logon,
     SessionUnlock,
+    /// The always-on launch-on-message service (`agentlife launcher`, docs/LAUNCHER-SERVICE.md).
+    /// Starts at logon like `Logon`, but is restarted when it fails and is never a lane session.
+    Launcher,
 }
 
 impl Trigger {
@@ -29,6 +33,7 @@ impl Trigger {
         match self {
             Trigger::Logon => LOGON_TASK,
             Trigger::SessionUnlock => UNLOCK_TASK,
+            Trigger::Launcher => LAUNCHER_TASK,
         }
     }
 
@@ -37,7 +42,29 @@ impl Trigger {
         match self {
             Trigger::Logon => "restore --from-logon",
             Trigger::SessionUnlock => "pending --prompt",
+            Trigger::Launcher => "launcher",
         }
+    }
+
+    /// Every task, in the order `install-task` handles them.
+    pub const ALL: [Trigger; 3] = [Trigger::Logon, Trigger::SessionUnlock, Trigger::Launcher];
+
+    /// The short name `install-task --only` takes: `logon`, `unlock` or `launcher`.
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Trigger::Logon => "logon",
+            Trigger::SessionUnlock => "unlock",
+            Trigger::Launcher => "launcher",
+        }
+    }
+
+    pub fn from_short_name(name: &str) -> Option<Trigger> {
+        Trigger::ALL.into_iter().find(|t| t.short_name() == name)
+    }
+
+    /// The tasks an `install-task` run touches: just `only` when given, else all three (the default).
+    pub fn selected(only: Option<Trigger>) -> Vec<Trigger> {
+        only.map_or_else(|| Trigger::ALL.to_vec(), |t| vec![t])
     }
 
     fn description(self) -> &'static str {
@@ -47,6 +74,9 @@ impl Trigger {
             }
             Trigger::SessionUnlock => {
                 "agentlife: ask about restores that are waiting for an answer"
+            }
+            Trigger::Launcher => {
+                "agentlife: start a soft-stopped lane when mail waits for it (launch-on-message)"
             }
         }
     }
@@ -75,12 +105,20 @@ pub fn xml_escape(s: &str) -> String {
 pub fn task_xml(trigger: Trigger, user: &str, exe: &str) -> String {
     let user = xml_escape(user);
     let trigger_xml = match trigger {
-        Trigger::Logon => format!(
+        Trigger::Logon | Trigger::Launcher => format!(
             "    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{user}</UserId>\n    </LogonTrigger>\n"
         ),
         Trigger::SessionUnlock => format!(
             "    <SessionStateChangeTrigger>\n      <Enabled>true</Enabled>\n      <StateChange>SessionUnlock</StateChange>\n      <UserId>{user}</UserId>\n    </SessionStateChangeTrigger>\n"
         ),
+    };
+    // The launcher is a service: restarted every minute when it fails (Task Scheduler allows at most
+    // 999 attempts); a second instance is ignored. The two restore tasks run once, never restarted.
+    let restart = match trigger {
+        Trigger::Launcher => {
+            "    <RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>999</Count>\n    </RestartOnFailure>\n"
+        }
+        _ => "",
     };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
@@ -92,7 +130,7 @@ pub fn task_xml(trigger: Trigger, user: &str, exe: &str) -> String {
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n{restart}\
     <Enabled>true</Enabled>\n\
   </Settings>\n\
   <Actions Context=\"Author\">\n    <Exec>\n      <Command>{exe}</Command>\n      <Arguments>{args}</Arguments>\n    </Exec>\n  </Actions>\n\
@@ -147,6 +185,24 @@ WantedBy=default.target
             args = trigger.arguments(),
         )),
         Trigger::SessionUnlock => None,
+        Trigger::Launcher => Some(format!(
+            "[Unit]
+Description={desc}
+Documentation=file:docs/LAUNCHER-SERVICE.md
+
+[Service]
+Type=simple
+ExecStart={exe} {args}
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target
+",
+            desc = trigger.description(),
+            exe = systemd_word(exe),
+            args = trigger.arguments(),
+        )),
     }
 }
 
@@ -342,6 +398,34 @@ mod tests {
             "unlock must never start a restore"
         );
         assert!(!x.contains("<LogonTrigger>"));
+    }
+
+    #[test]
+    fn launcher_xml_runs_launcher_at_logon_and_restarts_on_failure() {
+        let x = task_xml(Trigger::Launcher, "PC\\cires", "agentlife.exe");
+        assert!(x.contains("<LogonTrigger>"));
+        assert!(x.contains("<Arguments>launcher</Arguments>"));
+        assert!(x.contains("<Interval>PT1M</Interval>"));
+        assert!(x.contains("<Count>999</Count>"));
+        assert!(x.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(!x.contains("restore"), "the launcher task never restores");
+        // the two restore tasks are not restarted
+        assert!(!task_xml(Trigger::Logon, "u", "a").contains("RestartOnFailure"));
+        assert_eq!(Trigger::Launcher.task_name(), "agentlife-launcher");
+    }
+
+    #[test]
+    fn only_selects_one_task_and_the_default_is_all_three() {
+        assert_eq!(Trigger::selected(None), Trigger::ALL.to_vec());
+        assert_eq!(
+            Trigger::selected(Trigger::from_short_name("launcher")),
+            [Trigger::Launcher]
+        );
+        assert_eq!(Trigger::from_short_name("logon"), Some(Trigger::Logon));
+        assert_eq!(Trigger::from_short_name("restore"), None);
+        // the restore tasks are never part of a launcher-only run
+        assert!(!Trigger::selected(Some(Trigger::Launcher)).contains(&Trigger::Logon));
+        assert!(!Trigger::selected(Some(Trigger::Launcher)).contains(&Trigger::SessionUnlock));
     }
 
     #[test]
