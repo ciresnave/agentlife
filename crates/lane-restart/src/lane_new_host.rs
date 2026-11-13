@@ -77,6 +77,32 @@ pub trait Host {
     fn start(&self, role: &str, model: &str) -> Result<i32, String>;
     /// Is `pid` a live `claude` process right now?
     fn claude_alive(&self, pid: u32) -> bool;
+    /// `--no-start`: steps 0 to 6 only; the spec stays `suspended` and step 7 is skipped. Only [`NoStart`] says yes.
+    fn no_start(&self) -> bool {
+        false
+    }
+}
+
+/// `lane-new --no-start`: the same host, except that step 7 (start) is skipped and the plan hash differs, so a
+/// dry run with the flag cannot be applied without it (or the reverse).
+pub struct NoStart<'a>(pub &'a dyn Host);
+
+impl Host for NoStart<'_> {
+    fn disk_floor(&self, state_dir: &Path) -> Result<(), String> {
+        self.0.disk_floor(state_dir)
+    }
+    fn provision(&self, roles_file: &Path) -> Result<ProvisionCounts, String> {
+        self.0.provision(roles_file)
+    }
+    fn start(&self, _role: &str, _model: &str) -> Result<i32, String> {
+        Err("--no-start: refusing to start the lane".to_string())
+    }
+    fn claude_alive(&self, pid: u32) -> bool {
+        self.0.claude_alive(pid)
+    }
+    fn no_start(&self) -> bool {
+        true
+    }
 }
 
 /// The real thing. Constructed only by `run_lane_new_cmd`, never by a test.
@@ -454,6 +480,74 @@ mod run_tests {
 
     fn apply_with(r: &Roots, h: &FakeHost, role: &str, repo: &str, plan: Option<&str>) -> Report {
         crate::lane_new::run_apply(r, None, Some(h), role, repo, "sonnet", plan, Utc::now())
+    }
+
+    #[test]
+    fn no_start_runs_steps_0_to_6_leaves_the_spec_suspended_and_has_its_own_plan_hash() {
+        let d = tempfile::tempdir().unwrap();
+        let r = world(&d);
+        let h = FakeHost::new(Lie::Honest, &r);
+        let ns = NoStart(&h);
+        let run_ns = |apply: bool, plan: Option<&str>| {
+            if apply {
+                crate::lane_new::run_apply(
+                    &r,
+                    None,
+                    Some(&ns),
+                    "zetafish",
+                    "zetafish",
+                    "sonnet",
+                    plan,
+                    Utc::now(),
+                )
+            } else {
+                run_full(
+                    &r,
+                    None,
+                    Some(&ns),
+                    "zetafish",
+                    "zetafish",
+                    "sonnet",
+                    false,
+                    Utc::now(),
+                )
+            }
+        };
+        let plain = go(&r, &FakeHost::new(Lie::Honest, &r), false)
+            .plan
+            .expect("plain plan");
+        let dry = run_ns(false, None);
+        let hash = dry.plan.clone().expect("no-start plan");
+        assert_ne!(hash, plain, "the two modes must not share a plan");
+        assert_eq!(row(&dry, 7).0, Status::Skipped, "{}", dry.render(false));
+        assert!(
+            dry.render(false).contains("skipped"),
+            "{}",
+            dry.render(false)
+        );
+        h.calls.borrow_mut().clear(); // the dry run read the disk; what follows must run nothing
+                                      // the plain hash cannot apply a no-start run, and the no-start hash cannot apply a plain run
+        let wrong = run_ns(true, Some(&plain));
+        assert!(wrong.failed(), "{}", wrong.render(true));
+        assert!(h.calls().is_empty(), "{:?}", h.calls());
+        let wrong = apply_with(&r, &h, "zetafish", "zetafish", Some(&hash));
+        assert!(wrong.failed(), "{}", wrong.render(true));
+        assert!(h.calls().is_empty(), "{:?}", h.calls());
+        // the honest apply: identity made, start never called, spec suspended
+        let rep = run_ns(true, Some(&hash));
+        assert!(!rep.failed(), "{}", rep.render(true));
+        assert_eq!(row(&rep, 6).0, Status::Ok);
+        assert_eq!(row(&rep, 7).0, Status::Skipped);
+        assert_eq!(h.calls(), vec!["disk", "provision"]);
+        let have = spec::read(&r.state_dir, "zetafish").unwrap();
+        assert_eq!(have.state, SpecState::Suspended);
+        // control: without the flag the same run starts the lane (the spec goes running)
+        let d2 = tempfile::tempdir().unwrap();
+        let r2 = world(&d2);
+        let h2 = FakeHost::new(Lie::Honest, &r2);
+        let rep = go(&r2, &h2, true);
+        assert_eq!(row(&rep, 7).0, Status::Ok, "{}", rep.render(true));
+        assert!(h2.calls().contains(&"start".to_string()));
     }
 
     #[test]
