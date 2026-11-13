@@ -68,6 +68,9 @@ Rules the core enforces on every adapter, each from a failure already paid for (
   adapter keeps its startup-window approvals, and `awaiting_input` is a first-class launch result (failure 5).
 - **No adapter may declare idle without an assertion from the agent.** "Never asserted" is not idle (PM ruling
   2026-10-14, Inputs 1.2). An adapter with no `activity` reports `None`, and the idle verdict is then `unknown`, not true.
+  **Ruled 2026-11-13 (board 435, question 3):** an agent with no external idle detection is *told to set its own idle from
+  inside*, by a tool call; the assertion is still the agent's. What the supervisor may derive is only **how long** the idle
+  has lasted (section 8a); it never derives idle itself.
 
 ## 3. What each part keeps
 
@@ -170,7 +173,14 @@ Inputs section 4 are the contract other repos read. So:
 Each slice is one PR with one changelog fragment; the PM allocates the number. Nothing in slices 1 to 3 asks CireSnave for
 anything beyond the answers in section 8.
 
-## 8. Decisions needed (for CireSnave), each with a recommendation
+## 8. Decisions: RULED by CireSnave on board 435 (2026-11-13)
+
+Source: the PM's relay of the ruling, archived verbatim on board item 435. Nine questions; where a ruling is only a letter
+or a short word it is recorded as the PM relayed it. The original question text and my recommendation stay under each
+number, so the reasoning is still readable. **Ruled: 1 a; 2 (not changed by the ruling, my recommendation stands); 3
+CHANGED (below); 4 heartbeat-with-lease in the contract, no remote adapter; 5 no second lifecycle project; 6 keep the
+state directory and file names; 7 tasks are not full agents; 8 Ollama server is the second kind; 9 PM-only gate in the core.**
+Question 3 is the one that changed what I proposed; 8a is its consequence.
 
 1. **Where does the Claude Code adapter live: a separate repository "AgentLife-ClaudeCode", or a crate inside the
    AgentLife repository?** Your 2026-10-31 words picture a separate project brought in as a module. A separate repository
@@ -182,7 +192,7 @@ anything beyond the answers in section 8.
    subscriber?** Synapse now has rooms, which deliver only to members who are online (section 4). **Recommendation:
    the core sends one message per configured subscriber, so an offline subscriber's copy waits in its own mailbox; a
    room is a later convenience, not the contract; the PM is the only default subscriber.**
-3. **For an agent that has no hooks, is "idle" ever true?** OverMind says its parent can derive idle as time since the last
+3. **(RULED, CHANGED; see 8a) For an agent that has no hooks, is "idle" ever true?** OverMind says its parent can derive idle as time since the last
    event. **Recommendation: never derived; an adapter that cannot assert idle reports `unknown`, and the fleet's
    idle-gated actions (restart, stop) treat `unknown` as not idle. A kind may declare an idle rule (for example "no event
    for N minutes") only with your approval of that kind's rule.**
@@ -209,6 +219,44 @@ anything beyond the answers in section 8.
 9. **Who may start and stop a non-Claude agent?** Today starting any lane is PM-only (the launcher service and `lane-new`
    are the exceptions), and "never Opus" is a Claude-model rule. **Recommendation: the caller-identity gate stays in the core
    and stays PM-only for every kind; model rules stay inside the Claude Code adapter.**
+
+## 8a. The idle-stop rule (ruling 3, and the queued idle-stop task)
+
+CireSnave, verbatim (board 435, relayed by the PM 2026-11-13): an agent with no external idle detection must be told to set
+its own idle from inside (a tool call), and time-since-last-event or similar checks decide whether idle is long enough to
+soft-stop: *"A lane that is contacted every minute or two and returns to idle after each response should not be soft-stopped
+as it will be started and soft-stopped every minute."* Also CireSnave 2026-11-13: lanes with no work waiting that are idle
+get soft-stopped automatically and wake again on mail (wake-on-message, `docs/LAUNCHER-SERVICE.md`).
+
+**Proposal (nothing switches on until he rules on the numbers below).** A lane is a soft-stop candidate only when ALL hold:
+
+1. **It asserted idle itself**: a self-idle tool call from inside the agent (Claude Code: the existing hooks plus a tool
+   the lane calls at the end of a task), never derived from silence. No assertion, or an assertion older than its last
+   event, means not idle (`unknown` is not idle).
+2. **Quiet for long enough (anti-flap).** Time since the later of (its last event, the last mail it received) is at least
+   **N** minutes. This is the only derived quantity, and it can only *delay* a stop, never cause one.
+3. **No open PR of its own, no ready ROADMAP row, no WAIT due within M minutes, HANDOFF written** (the lane's own
+   `assert-idle` already refuses otherwise).
+4. **Not excluded:** never the PM, never Unpopped, Fuel or the tier-0 lanes (CireSnave 2026-10-28: those always move),
+   never a lane mid-task.
+5. **Anti-flap memory.** A lane that woke on mail within the last **W** hours and has been woken **K** or more times in
+   that window is not stopped again until a longer quiet time **N2** has passed, so a lane contacted every minute or two is
+   left running.
+
+The action is the existing soft stop (`lane-restart stop --self` path, `stop_kind: soft`), registry intent untouched, so
+wake-on-mail applies. **Dry-run first**: a report of who WOULD stop, for a day, written to the ledger, before any stop.
+
+**Numbered questions for CireSnave (each with my recommendation, UNMEASURED: no wake or flap data exists yet):**
+
+1. **N, the minimum quiet time before a soft stop.** Recommendation: 30 minutes (a lane answering PM mail within a few
+   minutes never reaches it; a restart costs minutes and tokens, so too short is the expensive error).
+2. **N2 and the flap guard (W, K).** Recommendation: W = 3 hours, K = 3 wakes, N2 = 2 hours.
+3. **M, how far ahead a due WAIT blocks a stop.** Recommendation: 60 minutes (a lane restart plus re-arming is quicker).
+4. **Exclusion list beyond the PM, Unpopped, Fuel and tier-0.** Recommendation: none yet; add by name on request.
+5. **Dry-run length.** Recommendation: one day, then the PM reads the would-stop list before the switch is turned on.
+
+Open dependency: the self-idle tool call does not exist; building it is a slice of its own after the wake test passes and
+`lazy_enabled` is on.
 
 ## 9. Not measured, said once
 
