@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.63 — docs: `SUPERVISION-DESIGN.md` records what Synapse already offers for the event contract
+
+Section 4 and question 2 of `docs/SUPERVISION-DESIGN.md` now state what was read at synapse `origin/main` on 2026-11-13 instead of deferring to the Synapse lane: rooms exist but deliver only to online members, the daemon path has no per-sender send rule, and a new `[LIFECYCLE]` tag must be added to `MESSAGE-FORMATS.md` and the daemon's lint key table. The recommendation for question 2 changes from "until Synapse offers fan-out" to "one message per subscriber; rooms later". Docs only.
+
 ## 0.30.62 — docs: `docs/SUPERVISION-DESIGN.md`, the design note for one common supervision layer
 
 Added `docs/SUPERVISION-DESIGN.md` (PM TASK 2026-11-13, CireSnave's standing direction of 2026-10-31): the core/adapter split read off `docs/SUPERVISION-INPUTS.md`, the `[LIFECYCLE]` event contract over Synapse (spec and ledger are the record; events are at-least-once notifications of a state already read back), per-agent-kind adapters (Claude Code, OverMind, Ollama, Lightbulb/Fuel, remote, the last four marked UNVERIFIED where unread), what `lane-restart`, AntSpawn and AgentLife each keep, a four-slice migration that never breaks `lane-restart`, and nine numbered decisions for CireSnave, each with a recommendation. Design only: no code, no behaviour change. Verified: every cited fact traced to the inputs note; links and section numbers checked by reading.
