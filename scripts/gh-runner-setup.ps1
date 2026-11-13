@@ -249,7 +249,15 @@ function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoH
     foreach ($d in @($front) + @($machinePath -split ';')) { $d = $d.Trim().TrimEnd('\'); if ($d -and $seen.Add($d)) { $parts.Add($d) } }
     $lines.Add('PATH=' + ($parts -join ';'))
   }
-  if ($rustRoot) { $lines.Add("RUSTUP_HOME=$rustRoot\.rustup"); $lines.Add("CARGO_HOME=$cargoHome") }
+  if ($rustRoot) {
+    $lines.Add("RUSTUP_HOME=$rustRoot\.rustup"); $lines.Add("CARGO_HOME=$cargoHome")
+    # A MACHINE RUSTC_WRAPPER (sccache under one user's profile) is unreadable by the runner account: every cargo step died with
+    # "could not execute process sccache" (mlmf run 43457440425, 2026-11-13). Empty here overrides the machine value for the service.
+    $lines.Add('RUSTC_WRAPPER=')
+    # The machine cargo config puts build.build-dir under C:\cb, which a restricted account may not write: use the runner's own tree.
+    # UNMEASURED (2026-11-13): an old cargo may ignore this variable.
+    $lines.Add("CARGO_BUILD_BUILD_DIR=$(Split-Path -Parent $cargoHome)\cb")
+  }
   @($lines)
 }
 # What the probe printed, judged (pure). The probe runs AS the runner account with the .env's variables and prints one line per fact.
@@ -274,6 +282,13 @@ function Test-ProbeOutput([string]$text, [string]$gitRoot, [bool]$rust) {
 $cargoHome = if ($RustRoot) { Join-Path $Root 'cargo-home' } else { '' }
 $runnerEnv = @(Get-RunnerEnvLines $GitRoot $RustRoot $cargoHome ([Environment]::GetEnvironmentVariable('Path', 'Machine')))
 function Slug([string]$r) { $r -replace '/', '-' }
+# The config.cmd argument list, ONE ELEMENT PER ARGUMENT. Never fold a flag into a string ("--replace$flag"): PowerShell then hands
+# config.cmd the single argument "--replace --ephemeral", which it refuses (live -Rearm -Apply, 2026-11-13).
+function Get-ConfigArgs([string]$repo, [string]$token, [string]$name, $labelArgs, [bool]$ephemeral, [string]$account, [string]$password) {
+  $a = @('--unattended', '--url', "https://github.com/$repo", '--token', $token, '--name', $name) + @($labelArgs) + @('--work', '_work', '--replace')
+  if ($ephemeral) { $a += '--ephemeral' }
+  $a + @('--runasservice', '--windowslogonaccount', ".\$account", '--windowslogonpassword', $password)
+}
 # The runner TRUNCATES long service names ('...TUF-LAPTOP-ThinkersJ-9595'), so a name built from the repo cannot be trusted
 # (live run 2026-10-22: read-back threw 'not found' for a service that was running). The service is found by the runner
 # directory its executable lives in. `$services` is for the test (objects with Name and PathName); null reads Win32_Service.
@@ -561,8 +576,8 @@ foreach ($r in $Repo) {
   [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dir)
   Set-Content -LiteralPath "$dir\.env" -Value $runnerEnv -Encoding Ascii
   $tok = [Net.NetworkCredential]::new('', (Read-Host "Registration token for $r (not stored)" -AsSecureString)).Password
-  & "$dir\config.cmd" --unattended --url "https://github.com/$r" --token $tok --name "$($env:COMPUTERNAME)-$(Slug $r)" `
-   @labelArgs --work _work --replace$ephFlag --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
+  $cfgArgs = Get-ConfigArgs $r $tok "$($env:COMPUTERNAME)-$(Slug $r)" $labelArgs $Ephemeral $Account $password
+  & "$dir\config.cmd" @cfgArgs
   $rc = $LASTEXITCODE
   $tok = $null
   if ($rc -ne 0) { throw "config.cmd exited $rc for $r" }

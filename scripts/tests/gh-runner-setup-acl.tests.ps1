@@ -151,8 +151,8 @@ try {
   $dry = & { & $setup -Repo ciresnave/x -ProtectedPaths $clean } *>&1 | Out-String
   Check 'dry run shows the runner .env with the execution-policy variable' ($dry -like '*.env*PSExecutionPolicyPreference=Bypass*') $dry
   $src = Get-Content -LiteralPath $setup -Raw
-  Check 'the .env is written with Set-Content before config.cmd runs' (($src.IndexOf('Set-Content -LiteralPath "$dir\.env"')) -ge 0 -and ($src.IndexOf('Set-Content -LiteralPath "$dir\.env"')) -lt ($src.IndexOf('& "$dir\config.cmd" --unattended'))) 'order'
-  Check 'positive control: the control string finds config.cmd' ($src.IndexOf('& "$dir\config.cmd" --unattended') -ge 0) 'not found'
+  Check 'the .env is written with Set-Content before config.cmd runs' (($src.IndexOf('Set-Content -LiteralPath "$dir\.env"')) -ge 0 -and ($src.IndexOf('Set-Content -LiteralPath "$dir\.env"')) -lt ($src.IndexOf('& "$dir\config.cmd" @cfgArgs'))) 'order'
+  Check 'positive control: the control string finds config.cmd' ($src.IndexOf('& "$dir\config.cmd" @cfgArgs') -ge 0) 'not found'
 
   # The standard MSVC step in RUNNER-SETUP section 2d must be byte-identical to the probe's step (normalised line endings).
   $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
