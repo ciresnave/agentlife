@@ -34,8 +34,9 @@ Check 'Git precedes System32 (the WSL bash.exe lives there)' ([array]::IndexOf($
 Check 'a machine PATH entry that repeats is kept once (ignoring case and a trailing backslash)' (@($parts | Where-Object { $_ -ieq 'C:\Program Files\Git\bin' }).Count -eq 1 -and @($parts | Where-Object { $_ -eq 'C:\Python' }).Count -eq 1)
 Check 'RUSTUP_HOME is the shared toolchain dir and CARGO_HOME the account''s own' ($map['RUSTUP_HOME'] -eq "$rust\.rustup" -and $map['CARGO_HOME'] -eq $cargo)
 Check 'CARGO_HOME is not the shared one' ($map['CARGO_HOME'] -notlike "$rust*")
+Check 'RUSTC_WRAPPER is set EMPTY so a machine-level wrapper cannot leak in' (($lines -contains 'RUSTC_WRAPPER=') -and $map.ContainsKey('RUSTC_WRAPPER') -and $map['RUSTC_WRAPPER'] -eq '')
 $noRust = Get-RunnerEnvLines $git '' '' $machine
-Check 'an empty RustRoot leaves Rust out but keeps Git first' (-not (($noRust -join "`n") -match 'CARGO_HOME|RUSTUP_HOME|\.cargo') -and ($noRust | Where-Object { $_ -like 'PATH=C:\Program Files\Git\bin;*' }))
+Check 'an empty RustRoot leaves Rust out but keeps Git first' (-not (($noRust -join "`n") -match 'CARGO_HOME|RUSTC_WRAPPER|RUSTUP_HOME|\.cargo') -and ($noRust | Where-Object { $_ -like 'PATH=C:\Program Files\Git\bin;*' }))
 $none = Get-RunnerEnvLines '' '' '' $machine
 Check 'neither Git nor Rust: only the policy line, PATH untouched' ($none.Count -eq 1)
 Check 'a ; in a path is refused' ((Throws { Get-RunnerEnvLines 'C:\a;b' $rust $cargo $machine }) -match 'must be an absolute')

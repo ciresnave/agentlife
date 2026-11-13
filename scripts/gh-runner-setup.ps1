@@ -249,7 +249,12 @@ function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoH
     foreach ($d in @($front) + @($machinePath -split ';')) { $d = $d.Trim().TrimEnd('\'); if ($d -and $seen.Add($d)) { $parts.Add($d) } }
     $lines.Add('PATH=' + ($parts -join ';'))
   }
-  if ($rustRoot) { $lines.Add("RUSTUP_HOME=$rustRoot\.rustup"); $lines.Add("CARGO_HOME=$cargoHome") }
+  if ($rustRoot) {
+    $lines.Add("RUSTUP_HOME=$rustRoot\.rustup"); $lines.Add("CARGO_HOME=$cargoHome")
+    # A MACHINE RUSTC_WRAPPER (sccache under one user's profile) is unreadable by the runner account: every cargo step died with
+    # "could not execute process sccache" (mlmf run 43457440425, 2026-11-13). Empty here overrides the machine value for the service.
+    $lines.Add('RUSTC_WRAPPER=')
+  }
   @($lines)
 }
 # What the probe printed, judged (pure). The probe runs AS the runner account with the .env's variables and prints one line per fact.
