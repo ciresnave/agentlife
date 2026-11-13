@@ -8,7 +8,8 @@
 use std::process::Command;
 
 #[test]
-fn the_runner_env_puts_git_bash_before_the_wsl_launcher_and_gives_jobs_rust_and_the_probe_judges_it() {
+fn the_runner_env_puts_git_bash_before_the_wsl_launcher_and_gives_jobs_rust_and_the_probe_judges_it(
+) {
     let script = concat!(
         env!("CARGO_MANIFEST_DIR"),
         r"\scripts\tests\gh-runner-setup-env.tests.ps1"
