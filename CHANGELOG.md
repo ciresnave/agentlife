@@ -2,6 +2,15 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.64 — SUPERVISION-DESIGN.md records the board 435 rulings and the idle-stop rule
+
+Docs only. Section 8 is now marked ruled (CireSnave, board 435, 2026-11-13); question 3 changed, so the idle bullet in
+section 2 is amended and new section 8a rewrites the idle-stop rule: idle is self-asserted by a tool call from inside the
+agent, and only the duration is derived (a minimum quiet time and a flap guard, so a lane contacted every minute or two is
+not stopped and restarted). The numbers N, N2, W, K, M are proposals, UNMEASURED, put as numbered questions. No code.
+
+— lane: agentlife
+
 ## 0.30.63 — docs: `SUPERVISION-DESIGN.md` records what Synapse already offers for the event contract
 
 Section 4 and question 2 of `docs/SUPERVISION-DESIGN.md` now state what was read at synapse `origin/main` on 2026-11-13 instead of deferring to the Synapse lane: rooms exist but deliver only to online members, the daemon path has no per-sender send rule, and a new `[LIFECYCLE]` tag must be added to `MESSAGE-FORMATS.md` and the daemon's lint key table. The recommendation for question 2 changes from "until Synapse offers fan-out" to "one message per subscriber; rooms later". Docs only.
