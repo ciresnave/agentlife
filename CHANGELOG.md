@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.56 — `lane-new --no-start`
+
+`lane-restart lane-new <role> <repo> --no-start` runs steps 0 to 6 (repo, seed, MCP config, launch spec, soak list, Synapse identity) and skips step 7: the spec stays `suspended` and step 8 prints the `lane-restart start` command for the PM. The flag changes the plan hash, so a dry run with it cannot be applied without it, nor the reverse (a lane meant to wait cannot be started by a mistyped apply). Verified by a fake-host test that asserts `start` is never called, the spec is `suspended`, both cross-applications run nothing, and the control without the flag starts the lane.
+
 ## 0.30.55 — tests: Rust 1.100 (`ExitCode` must_use; example path under the new build layout)
 
 Rust 1.100.0 (released 2026-11-09; CI picked it up 2026-11-12 19:28Z, replacing 1.99.1) broke two things in the tests, the second hidden behind the first. (1) `std::process::ExitCode` is now `#[must_use]`, so `clippy --all-targets -D warnings` failed on `crates/lane-restart/src/app/host_cmd/tests.rs:94`; the test now writes `let _ = run_with(...)`. (2) Cargo 1.100's build layout puts test executables under `target/<profile>/build/<pkg>/<hash>/out/`, and `tests/hook_e2e.rs` and `tests/launch_e2e.rs` found the `fake_claude`/`fake_host`/`fake_conhost` examples as `<test exe>/../../examples`, which is no longer `target/<profile>/examples`: 29 tests (24 + 5) failed with "the fake_claude example is not built". They now anchor on `CARGO_BIN_EXE_agentlife` (the built binary, which stays in `target/<profile>`) and take its sibling `examples`. Verified with cargo 1.100.0: `cargo test --workspace` failed those 29 before and the whole workspace passes after; clippy `--all-targets` and the Linux-target clippy are clean.
