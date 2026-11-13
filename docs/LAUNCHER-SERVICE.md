@@ -180,7 +180,12 @@ sageant, surfaceant, thinkersfoundation) `refused: unknown-role`, `called: false
 **Who can wake a lane (daemon side).** Synapse raises a launch signal only for mail from roles in the daemon's
 `SYNAPSE_LAUNCH_SENDERS` (pilot value `pm@ciresnave`); mail from any other lane never wakes a role (Synapse lane, code and
 `tests/launch.rs` 13/13, relayed by the PM 2026-11-13). Widening it is a daemon setting, `launch.senders` in
-`<home>/synapsed.toml` (reloaded every 5 s, no restart), and is CireSnave's decision. `/v1/waiting` and
+`<home>/synapsed.toml` (reloaded every 5 s, no restart), and is CireSnave's decision. The exact TOML (Synapse lane,
+`crates/synapsed/src/settings.rs:82`): `[launch]` then `senders = ["pm@ciresnave", "synapse", "agentlife"]`; each entry is
+`role` (this account) or `role@account`; **no wildcard**, every lane is listed; an empty list means nobody. **The
+environment wins over the file**: the pilot task cmd sets `SYNAPSE_LAUNCH_SENDERS=pm@ciresnave`, so a toml edit is
+ignored until that line is removed from `scripts/synapsed-task.ps1`'s generated cmd (it is written from the `-LaunchSenders`
+parameter) and the daemon is restarted once. `/v1/waiting` and
 `/v1/launch-result` need no grant for the launcher role (measured: 4 posts accepted with none). The launcher task is
 registered by `agentlife install-task --register` (a third task, `agentlife-launcher`: logon trigger, `launcher`, restarted
 every minute on failure, a second instance ignored); `--remove` deletes it.
