@@ -1000,7 +1000,11 @@ fn run_install_task(register: bool, remove: bool, exe: Option<String>) -> ExitCo
         }
     };
     let mut failed = false;
-    for t in [task::Trigger::Logon, task::Trigger::SessionUnlock] {
+    for t in [
+        task::Trigger::Logon,
+        task::Trigger::SessionUnlock,
+        task::Trigger::Launcher,
+    ] {
         if remove {
             failed |= !run_schtasks(&task::delete_args(t));
             continue;
@@ -1062,7 +1066,11 @@ fn run_install_task_systemd(register: bool, remove: bool, exe: Option<String>) -
             }
         },
     };
-    for t in [task::Trigger::Logon, task::Trigger::SessionUnlock] {
+    for t in [
+        task::Trigger::Logon,
+        task::Trigger::SessionUnlock,
+        task::Trigger::Launcher,
+    ] {
         match task::systemd_unit(t, &exe) {
             Some(unit) => {
                 let name = task::systemd_unit_name(t);

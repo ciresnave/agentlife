@@ -17,11 +17,15 @@ use std::time::Duration;
 
 pub const LOGON_TASK: &str = "agentlife-logon";
 pub const UNLOCK_TASK: &str = "agentlife-unlock";
+pub const LAUNCHER_TASK: &str = "agentlife-launcher";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Logon,
     SessionUnlock,
+    /// The always-on launch-on-message service (`agentlife launcher`, docs/LAUNCHER-SERVICE.md).
+    /// Starts at logon like `Logon`, but is restarted when it fails and is never a lane session.
+    Launcher,
 }
 
 impl Trigger {
@@ -29,6 +33,7 @@ impl Trigger {
         match self {
             Trigger::Logon => LOGON_TASK,
             Trigger::SessionUnlock => UNLOCK_TASK,
+            Trigger::Launcher => LAUNCHER_TASK,
         }
     }
 
@@ -37,6 +42,7 @@ impl Trigger {
         match self {
             Trigger::Logon => "restore --from-logon",
             Trigger::SessionUnlock => "pending --prompt",
+            Trigger::Launcher => "launcher",
         }
     }
 
@@ -47,6 +53,9 @@ impl Trigger {
             }
             Trigger::SessionUnlock => {
                 "agentlife: ask about restores that are waiting for an answer"
+            }
+            Trigger::Launcher => {
+                "agentlife: start a soft-stopped lane when mail waits for it (launch-on-message)"
             }
         }
     }
@@ -75,12 +84,20 @@ pub fn xml_escape(s: &str) -> String {
 pub fn task_xml(trigger: Trigger, user: &str, exe: &str) -> String {
     let user = xml_escape(user);
     let trigger_xml = match trigger {
-        Trigger::Logon => format!(
+        Trigger::Logon | Trigger::Launcher => format!(
             "    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{user}</UserId>\n    </LogonTrigger>\n"
         ),
         Trigger::SessionUnlock => format!(
             "    <SessionStateChangeTrigger>\n      <Enabled>true</Enabled>\n      <StateChange>SessionUnlock</StateChange>\n      <UserId>{user}</UserId>\n    </SessionStateChangeTrigger>\n"
         ),
+    };
+    // The launcher is a service: restarted every minute when it fails (Task Scheduler allows at most
+    // 999 attempts); a second instance is ignored. The two restore tasks run once, never restarted.
+    let restart = match trigger {
+        Trigger::Launcher => {
+            "    <RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>999</Count>\n    </RestartOnFailure>\n"
+        }
+        _ => "",
     };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
@@ -92,7 +109,7 @@ pub fn task_xml(trigger: Trigger, user: &str, exe: &str) -> String {
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n{restart}\
     <Enabled>true</Enabled>\n\
   </Settings>\n\
   <Actions Context=\"Author\">\n    <Exec>\n      <Command>{exe}</Command>\n      <Arguments>{args}</Arguments>\n    </Exec>\n  </Actions>\n\
@@ -147,6 +164,24 @@ WantedBy=default.target
             args = trigger.arguments(),
         )),
         Trigger::SessionUnlock => None,
+        Trigger::Launcher => Some(format!(
+            "[Unit]
+Description={desc}
+Documentation=file:docs/LAUNCHER-SERVICE.md
+
+[Service]
+Type=simple
+ExecStart={exe} {args}
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target
+",
+            desc = trigger.description(),
+            exe = systemd_word(exe),
+            args = trigger.arguments(),
+        )),
     }
 }
 
@@ -342,6 +377,20 @@ mod tests {
             "unlock must never start a restore"
         );
         assert!(!x.contains("<LogonTrigger>"));
+    }
+
+    #[test]
+    fn launcher_xml_runs_launcher_at_logon_and_restarts_on_failure() {
+        let x = task_xml(Trigger::Launcher, "PC\\cires", "agentlife.exe");
+        assert!(x.contains("<LogonTrigger>"));
+        assert!(x.contains("<Arguments>launcher</Arguments>"));
+        assert!(x.contains("<Interval>PT1M</Interval>"));
+        assert!(x.contains("<Count>999</Count>"));
+        assert!(x.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(!x.contains("restore"), "the launcher task never restores");
+        // the two restore tasks are not restarted
+        assert!(!task_xml(Trigger::Logon, "u", "a").contains("RestartOnFailure"));
+        assert_eq!(Trigger::Launcher.task_name(), "agentlife-launcher");
     }
 
     #[test]

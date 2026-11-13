@@ -203,7 +203,8 @@ USAGE:
     agentlife restore --from-logon
     agentlife pending --prompt
     agentlife install-task [--register | --remove] [--exe <path>]
-        The two per-user Task Scheduler tasks (\"run only when the user is logged on\"): at logon,
+        The three per-user Task Scheduler tasks (\"run only when the user is logged on\"): `agentlife-launcher`
+        runs `agentlife launcher` from logon and is restarted every minute if it fails; at logon,
         `restore --from-logon` first waits (up to network_wait_secs, default 120) for the network, the
         claude-peers broker and the lane-restart host program, then does what `restore` does; on
         session unlock, `pending --prompt` asks about a restore that is waiting, if there is one.

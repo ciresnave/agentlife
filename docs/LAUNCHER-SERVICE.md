@@ -162,6 +162,29 @@ mark. A lane can never turn a hard stop into a soft one or start a hard-stopped 
 `running` spec without a mark. The spec, not the registry, is read: `agentlife stop --soft` leaves registry
 intent `Closed{exited}` and writes `soft` here. A launch clears `stop_kind`.
 
+## The wake switch, the standing consent and the sender allowlist (2026-11-13)
+
+**Consent.** CireSnave, 2026-11-13, verbatim: *"Soft-stopped lanes that receive messages should auto-start to process
+those messages."* (and ruling 436 A: the soft-stopped lanes with old mail may start when the wake switch is on). Rule:
+a spec `suspended`/`stopping` with `stop_kind: soft`, and registry intent `wanted`, `lazy` or none, **is launchable when
+mail waits**; a `closed{parked|exited}` intent that no soft stop overrides, and any hard or unclassified stop, stay
+refused. This is `RegistryDirectory::lane` and `granted` in `src/launcher_service.rs`; the table above already said so,
+what changed is that it is now the standing grant, not only board 216.
+
+**The switch.** The wake path is on only when `~/.overmind/lane-restart.json` has `lazy_enabled: true` (ships off, and
+absent means off). Off, a registry-less soft-stopped lane is `refused: unknown-role` and a registry one `refused:
+no-grant`; nothing starts. It is global: it covers every soft-stopped lane that has mail.
+Measured 2026-11-13, switch off, `origin/main` bacbc03 / installed 0.30.53: `launcher` answered 4 real signals (cpufish,
+sageant, surfaceant, thinkersfoundation) `refused: unknown-role`, `called: false`, nothing started.
+
+**Who can wake a lane (daemon side).** Synapse raises a launch signal only for mail from roles in the daemon's
+`SYNAPSE_LAUNCH_SENDERS` (pilot value `pm@ciresnave`); mail from any other lane never wakes a role (Synapse lane, code and
+`tests/launch.rs` 13/13, relayed by the PM 2026-11-13). Widening it is a daemon setting, `launch.senders` in
+`<home>/synapsed.toml` (reloaded every 5 s, no restart), and is CireSnave's decision. `/v1/waiting` and
+`/v1/launch-result` need no grant for the launcher role (measured: 4 posts accepted with none). The launcher task is
+registered by `agentlife install-task --register` (a third task, `agentlife-launcher`: logon trigger, `launcher`, restarted
+every minute on failure, a second instance ignored); `--remove` deletes it.
+
 ## Caps, ledger line, memory floor and `restore.lock` (0.15.13)
 
 For a launcher caller, `lane-restart start` applies these after every spec refusal and before anything
