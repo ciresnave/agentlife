@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.59 — docs: `RUST-ACL-STAGE2.md`, the plan to tighten `C:\rust`
+
+A plan, nothing run (board 429): which Rust runner accounts write under `C:\rust\.cargo` today because the machine `CARGO_HOME` is inherited, the per-runner private `CARGO_HOME` step (manual `.env` edit and service restart for a registered runner, `-Rearm` for one that has taken its job), then the `icacls /save` backup, the tightened ACL, the read-backs (with a deny control) and the restore line. Read from the service registry, the ACLs and each repo's workflows on 2026-11-12; unmeasured items are marked in the text.
+
 ## 0.30.56 — `lane-new --no-start`
 
 `lane-restart lane-new <role> <repo> --no-start` runs steps 0 to 6 (repo, seed, MCP config, launch spec, soak list, Synapse identity) and skips step 7: the spec stays `suspended` and step 8 prints the `lane-restart start` command for the PM. The flag changes the plan hash, so a dry run with it cannot be applied without it, nor the reverse (a lane meant to wait cannot be started by a mistyped apply). Verified by a fake-host test that asserts `start` is never called, the spec is `suspended`, both cross-applications run nothing, and the control without the flag starts the lane.
