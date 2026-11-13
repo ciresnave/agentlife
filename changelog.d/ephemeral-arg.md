@@ -1,0 +1,3 @@
+kind: gh-runner-setup.ps1: ephemeral registration passes --replace and --ephemeral as separate config.cmd arguments
+---
+The first live `-Rearm -Apply` failed: config.cmd refused "Unrecognized command-line input arguments ... 'replace --ephemeral'", because the call built `--replace$ephFlag` with a leading-space flag and PowerShell passed ONE argument. The same call serves plain `-Apply`, so every ephemeral registration failed. The argument list is now built by `Get-ConfigArgs`, one element per argument. Verified by `scripts/tests/gh-runner-setup-ephemeral.tests.ps1` (the array, and a stub config.cmd that echoes each argument it receives).

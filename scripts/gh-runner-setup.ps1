@@ -274,6 +274,13 @@ function Test-ProbeOutput([string]$text, [string]$gitRoot, [bool]$rust) {
 $cargoHome = if ($RustRoot) { Join-Path $Root 'cargo-home' } else { '' }
 $runnerEnv = @(Get-RunnerEnvLines $GitRoot $RustRoot $cargoHome ([Environment]::GetEnvironmentVariable('Path', 'Machine')))
 function Slug([string]$r) { $r -replace '/', '-' }
+# The config.cmd argument list, ONE ELEMENT PER ARGUMENT. Never fold a flag into a string ("--replace$flag"): PowerShell then hands
+# config.cmd the single argument "--replace --ephemeral", which it refuses (live -Rearm -Apply, 2026-11-13).
+function Get-ConfigArgs([string]$repo, [string]$token, [string]$name, $labelArgs, [bool]$ephemeral, [string]$account, [string]$password) {
+  $a = @('--unattended', '--url', "https://github.com/$repo", '--token', $token, '--name', $name) + @($labelArgs) + @('--work', '_work', '--replace')
+  if ($ephemeral) { $a += '--ephemeral' }
+  $a + @('--runasservice', '--windowslogonaccount', ".\$account", '--windowslogonpassword', $password)
+}
 # The runner TRUNCATES long service names ('...TUF-LAPTOP-ThinkersJ-9595'), so a name built from the repo cannot be trusted
 # (live run 2026-10-22: read-back threw 'not found' for a service that was running). The service is found by the runner
 # directory its executable lives in. `$services` is for the test (objects with Name and PathName); null reads Win32_Service.
@@ -561,8 +568,8 @@ foreach ($r in $Repo) {
   [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dir)
   Set-Content -LiteralPath "$dir\.env" -Value $runnerEnv -Encoding Ascii
   $tok = [Net.NetworkCredential]::new('', (Read-Host "Registration token for $r (not stored)" -AsSecureString)).Password
-  & "$dir\config.cmd" --unattended --url "https://github.com/$r" --token $tok --name "$($env:COMPUTERNAME)-$(Slug $r)" `
-   @labelArgs --work _work --replace$ephFlag --runasservice --windowslogonaccount ".\$Account" --windowslogonpassword $password
+  $cfgArgs = Get-ConfigArgs $r $tok "$($env:COMPUTERNAME)-$(Slug $r)" $labelArgs $Ephemeral $Account $password
+  & "$dir\config.cmd" @cfgArgs
   $rc = $LASTEXITCODE
   $tok = $null
   if ($rc -ne 0) { throw "config.cmd exited $rc for $r" }
