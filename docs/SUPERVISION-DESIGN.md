@@ -107,8 +107,13 @@ Consequences:
   `launch-failed`, `awaiting-input`, ...); `stop` is the `StopKind` when the new state is `suspended`.
 - A second tag for the one signal that is not a transition, **`[ACTIVITY]`**, is NOT proposed: activity changes per tool
   call and Synapse is not a metrics bus. Activity stays a read (`status --json`), by design.
-- Who receives: a configured list of subscriber roles in the core's config (the PM by default). Whether Synapse has
-  fan-out is for the Synapse lane to say (question 2); if it has none, the core sends one message per subscriber.
+- Who receives: a configured list of subscriber roles in the core's config (the PM by default), one message each.
+  Read at synapse `origin/main` 2026-11-13 (`docs/ROOMS_DESIGN.md`, `crates/synapsed/src/format_lint.rs`): Synapse has
+  **rooms** (fan-out to the mailboxes of joined members who are *online*), so an offline subscriber would miss a room
+  copy; that is acceptable only because the spec and ledger are the record (point 1). Its daemon path has no
+  per-sender "may send to" rule, and one daemon serves one account. A `[LIFECYCLE]` header is checked only by a soft
+  lint keyed on a per-tag key table, so the tag must be added to `MESSAGE-FORMATS.md` and that table, or every event
+  carries a lint warning. Not read: the room code itself, only its design note.
 - Security: an incoming `[LIFECYCLE]` from a role is untrusted data (the rule for every peer message). Nothing acts on it
   but a person or the PM reading it; the launcher still decides to start by its own rules and the spec, never by an event.
 - The message_id is `lifecycle-<role>-<seq>`, so a resend is a duplicate, not a second copy.
@@ -174,9 +179,9 @@ anything beyond the answers in section 8.
    now, one version number; move the Claude Code adapter to its own repository only when a second adapter is real and
    someone outside this repo needs the core without it.**
 2. **Does Synapse have to deliver one lifecycle message to several subscribers, or does the core send one message per
-   subscriber?** This is for the Synapse lane to answer; it changes how the subscriber list is stored. **Recommendation:
-   the core sends one message per configured subscriber until Synapse offers fan-out, and the PM is the only default
-   subscriber.**
+   subscriber?** Synapse now has rooms, which deliver only to members who are online (section 4). **Recommendation:
+   the core sends one message per configured subscriber, so an offline subscriber's copy waits in its own mailbox; a
+   room is a later convenience, not the contract; the PM is the only default subscriber.**
 3. **For an agent that has no hooks, is "idle" ever true?** OverMind says its parent can derive idle as time since the last
    event. **Recommendation: never derived; an adapter that cannot assert idle reports `unknown`, and the fleet's
    idle-gated actions (restart, stop) treat `unknown` as not idle. A kind may declare an idle rule (for example "no event
