@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.57 — `gh-runner-setup.ps1 -Rearm`
+
+`-Rearm -Apply` re-arms an ephemeral runner that has taken its one job: one elevated run and ONE registration token, same account and labels. Per `-Repo` it stops and deletes the runner's service (read back absent), deletes the runner directory (read back absent), then does the normal `-Apply` (rotate the account password, extract the hash-checked release, register, read the service back). It never calls `config.cmd remove`, so it does not depend on how that behaves for a runner that already unregistered itself (not measured). `Get-RearmPlan` refuses a directory that is not a direct child of the account's root, holds no `config.cmd`, or whose service logs on as another account, before anything is touched. The dry run prints the plan. Verified by `gh-runner-setup-rearm.tests.ps1` (11 checks on real temp directories and fake services; deleting the direct-child guard turns the grandchild check red). NOT measured: a live `-Rearm` (service delete and directory removal against a real runner), which needs an elevated run.
+
 ## 0.30.59 — docs: `RUST-ACL-STAGE2.md`, the plan to tighten `C:\rust`
 
 A plan, nothing run (board 429): which Rust runner accounts write under `C:\rust\.cargo` today because the machine `CARGO_HOME` is inherited, the per-runner private `CARGO_HOME` step (manual `.env` edit and service restart for a registered runner, `-Rearm` for one that has taken its job), then the `icacls /save` backup, the tightened ACL, the read-backs (with a deny control) and the restore line. Read from the service registry, the ACLs and each repo's workflows on 2026-11-12; unmeasured items are marked in the text.
