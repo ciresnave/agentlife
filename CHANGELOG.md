@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.69 — lane-restart: `idle_stop::verdict`, the pure dry-run rule for the idle soft stop
+
+`crates/lane-restart/src/idle_stop.rs` decides, from inputs a caller gathers, whether a lane WOULD be soft-stopped (SUPERVISION-DESIGN 8a) and lists every reason it stays up. It reads and stops nothing, and the five numbers (N, N2, W, K, M) have no default: they await CireSnave's ruling on board 437. The self-idle assertion is the existing `assert-idle`, which any later busy hook clears, so `LaneState::is_idle` is the "asserted and quiet since" test; no new tool call was needed. Six unit tests: a never-asserted lane is never stopped, mail resets the quiet clock, K wakes need N2, a WAIT due inside M blocks, all seven reasons are reported together.
+
 ## 0.30.68 — the identity many-rounds test reports what held a pid when a killed child is not NotRunning
 
 Test only, no behaviour change. `identity::tests::a_killed_child_is_never_a_different_exe_over_many_real_rounds` failed once on a
