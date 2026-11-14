@@ -36,6 +36,16 @@ Check 'RUSTUP_HOME is the shared toolchain dir and CARGO_HOME the account''s own
 Check 'CARGO_HOME is not the shared one' ($map['CARGO_HOME'] -notlike "$rust*")
 Check 'CARGO_BUILD_BUILD_DIR is <runner dir>\cb, inside the account''s own tree and not C:\cb' ($map['CARGO_BUILD_BUILD_DIR'] -eq 'C:\gh-runner-ghr-x\cb')  $map['CARGO_BUILD_BUILD_DIR']
 Check 'RUSTC_WRAPPER is set EMPTY so a machine-level wrapper cannot leak in' (($lines -contains 'RUSTC_WRAPPER=') -and $map.ContainsKey('RUSTC_WRAPPER') -and $map['RUSTC_WRAPPER'] -eq '')
+$rd = 'C:\gh-runner-ghr-x\ciresnave-y'
+$cl = Get-RunnerEnvLines $git $rust "$rd\cargo-home" $machine $rd
+$cm = @{}; foreach ($l in $cl) { $kv = $l -split '=', 2; $cm[$kv[0]] = $kv[1] }
+Check 'with a runner dir, the job-completed hook is set to the copy inside it' ($cm['ACTIONS_RUNNER_HOOK_JOB_COMPLETED'] -eq "$rd\job-completed-cleanup.ps1") $cm['ACTIONS_RUNNER_HOOK_JOB_COMPLETED']
+Check 'CARGO_HOME, CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR all sit inside the runner dir the hook cleans' (($cm['CARGO_HOME'], $cm['CARGO_TARGET_DIR'], $cm['CARGO_BUILD_BUILD_DIR'] | Where-Object { $_ -like "$rd\*" }).Count -eq 3) "$($cm['CARGO_HOME']) | $($cm['CARGO_TARGET_DIR']) | $($cm['CARGO_BUILD_BUILD_DIR'])"
+Check 'every cargo dir the .env names is one the hook deletes (cargo-home, cargo-target, cb)' (((($cm['CARGO_HOME'], $cm['CARGO_TARGET_DIR'], $cm['CARGO_BUILD_BUILD_DIR']) | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -eq 'cargo-home,cargo-target,cb')
+$hookText = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'runner-job-cleanup-hook.ps1') -Raw
+Check 'the hook script names exactly those three dirs' ($hookText -match "'cargo-target', 'cargo-home', 'cb'")
+Check 'without a runner dir (the old four-argument call) no hook or target line is added' (-not $map.ContainsKey('ACTIONS_RUNNER_HOOK_JOB_COMPLETED') -and -not $map.ContainsKey('CARGO_TARGET_DIR'))
+Check 'a relative runner dir is refused' ((Throws { Get-RunnerEnvLines $git $rust $cargo $machine 'runner' }) -match 'must be an absolute')
 $noRust = Get-RunnerEnvLines $git '' '' $machine
 Check 'an empty RustRoot leaves Rust out but keeps Git first' (-not (($noRust -join "`n") -match 'CARGO_HOME|CARGO_BUILD_BUILD_DIR|RUSTC_WRAPPER|RUSTUP_HOME|\.cargo') -and ($noRust | Where-Object { $_ -like 'PATH=C:\Program Files\Git\bin;*' }))
 $none = Get-RunnerEnvLines '' '' '' $machine
