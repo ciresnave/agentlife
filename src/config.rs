@@ -49,6 +49,7 @@ pub const KEYS: &[&str] = &[
     "max_wakes_per_minute",
     "synapse_addr",
     "synapse_account",
+    "synapse_home",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -190,6 +191,9 @@ pub struct Config {
     pub max_wakes_per_minute: u32,
     pub synapse_addr: LoopbackAddr,
     pub synapse_account: String,
+    /// The Synapse home (keystore, daemon address file) the launcher uses; empty = `SYNAPSE_HOME`, else the
+    /// platform default. A scheduled task has no `SYNAPSE_HOME`, so the service needs this key.
+    pub synapse_home: String,
 }
 
 impl Default for Config {
@@ -227,6 +231,7 @@ impl Default for Config {
             max_wakes_per_minute: 10,
             synapse_addr: LoopbackAddr::trusted(SocketAddr::from(([127, 0, 0, 1], 7920))),
             synapse_account: "ciresnave".to_string(),
+            synapse_home: String::new(),
         }
     }
 }
@@ -298,6 +303,7 @@ pub struct Layer {
     pub max_wakes_per_minute: Option<u32>,
     pub synapse_addr: Option<LoopbackAddr>,
     pub synapse_account: Option<String>,
+    pub synapse_home: Option<String>,
 }
 
 fn parse<T: FromStr>(key: &str, value: &str) -> Result<T, ConfigError>
@@ -364,6 +370,7 @@ impl Layer {
             "progress_timeout_secs" => self.progress_timeout_secs = Some(parse(key, value)?),
             "spawn_gap_ms" => self.spawn_gap_ms = Some(parse(key, value)?),
             "synapse_account" => self.synapse_account = Some(value.trim().to_string()),
+            "synapse_home" => self.synapse_home = Some(value.trim().to_string()),
             other => return Err(ConfigError::UnknownKey(other.to_string())),
         }
         Ok(())
@@ -676,6 +683,7 @@ impl Config {
             )?,
             synapse_addr: field!(synapse_addr),
             synapse_account,
+            synapse_home: field!(synapse_home),
         })
     }
 
@@ -892,7 +900,7 @@ mod tests {
             "stop_after_failed_batches": 3, "progress_timeout_secs": 7, "spawn_gap_ms": 250,
             "wake_poll_secs": 5, "max_wakes_per_agent_per_hour": 2,
             "max_wakes_per_minute": 4, "synapse_addr": "127.0.0.1:9000",
-            "synapse_account": "someone"
+            "synapse_account": "someone", "synapse_home": "D:/syn"
         }"#;
         let from_file = file(json);
         let text: &[(&str, &str)] = &[
@@ -928,6 +936,7 @@ mod tests {
             ("max_wakes_per_minute", "4"),
             ("synapse_addr", "127.0.0.1:9000"),
             ("synapse_account", "someone"),
+            ("synapse_home", "D:/syn"),
         ];
         assert_eq!(text.len(), KEYS.len(), "the table must cover every key");
         let mut from_text = Layer::default();
