@@ -95,7 +95,11 @@ fn main() -> ExitCode {
             only,
         }) => run_install_task(register, remove, exe, only),
         Ok(Command::Doctor { exe }) => run_doctor(exe),
-        Ok(Command::Launcher { init_store, once }) => run_launcher(init_store, once),
+        Ok(Command::Launcher {
+            init_store,
+            once,
+            clear,
+        }) => run_launcher(init_store, once, clear),
         Ok(Command::Worktrees { json, root, repos }) => run_worktrees(json, root, repos),
         Err(e) => {
             eprintln!("agentlife: {e}\n\n{}", cli::USAGE);
@@ -718,9 +722,47 @@ fn run_worktrees(json: bool, root: Option<String>, repos: Vec<String>) -> ExitCo
     ExitCode::SUCCESS
 }
 
+/// `agentlife launcher --clear <role>...`: POST /v1/launch-clear for each role as the launcher
+/// role (the Synapse credential is the trust root), print the result, exit 0 only if all cleared.
+fn run_launcher_clear(roles: &[String]) -> ExitCode {
+    use agentlife::launcher_service as svc;
+    use launcher::service::Source;
+    let home = match synapse::keystore::default_home() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("agentlife launcher: no Synapse home (set SYNAPSE_HOME): {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source = match svc::SynapseSource::connect(&home) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("agentlife launcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut failed = false;
+    for role in roles {
+        match source.clear(role) {
+            Ok(()) => {
+                println!("cleared {role}: Synapse re-raises its launch signal on the next poll")
+            }
+            Err(e) => {
+                eprintln!("agentlife launcher: clear {role} failed: {e:?}");
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// `agentlife launcher`: see `agentlife::launcher_service`. Exit 3 when another instance holds the
 /// lock, 1 on any other refusal to start.
-fn run_launcher(init_store: bool, once: bool) -> ExitCode {
+fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
     use agentlife::launcher_service as svc;
     use launcher::{service, Engine, FileStore};
     use std::time::Duration;
@@ -729,6 +771,9 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
         Ok(a) => a,
         Err(c) => return c,
     };
+    if !clear.is_empty() {
+        return run_launcher_clear(&clear);
+    }
     let state_dir = state_dir_of(&app.cfg);
     // `lane-restart start` looks for the caller record in ITS state directory (the platform one),
     // whatever `lane_state_dir` the config names, so the record goes there.
@@ -825,7 +870,8 @@ fn run_launcher(init_store: bool, once: bool) -> ExitCode {
     let mut holding = false;
     let mut failures = 0u32;
     log(&format!(
-        "started, notifier-only, role {}",
+        "started, wake path {} (lazy_enabled, from the flag, AGENTLIFE_LAZY_ENABLED or <home>/config.json), role {}",
+        if app.cfg.lazy_enabled { "ON" } else { "OFF: refuses every launch" },
         lane_restart::start::LAUNCHER_ROLE
     ));
 

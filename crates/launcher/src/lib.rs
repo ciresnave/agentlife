@@ -96,6 +96,10 @@ pub trait Mechanism {
 pub enum Lane {
     /// Not a known lane: a sender-chosen string is never a launch.
     Unknown,
+    /// The registry could not be read just now (for example while a freshly started lane's hook writes
+    /// it). Says nothing about the role: the refusal is conditional and the service re-checks it, so a
+    /// momentary read failure never becomes a terminal `unknown-role`.
+    Unavailable,
     /// Registry intent `closed`, or a `suspended`/`stopping` spec: stopped on purpose.
     ClosedOnPurpose,
     Launchable,
@@ -392,6 +396,9 @@ impl<'a> Engine<'a> {
         // Rule 3 (with the intent rule from the design: a stop on purpose is terminal).
         match self.dir.lane(&sig.role) {
             Lane::Unknown => return self.refuse(row, "unknown-role", Status::Answered, sig),
+            Lane::Unavailable => {
+                return self.refuse(row, "registry-unreadable", Status::Transient, sig)
+            }
             Lane::ClosedOnPurpose => {
                 return self.refuse(row, "closed-on-purpose", Status::Answered, sig)
             }
@@ -674,6 +681,7 @@ impl<'a> Engine<'a> {
                                 && self.spawns_last_hour(now, None) < RATE_OVERALL
                         }
                         "no-grant" => self.dir.granted(&role),
+                        "registry-unreadable" => self.dir.lane(&role) != Lane::Unavailable,
                         "no-claim" => self
                             .data
                             .roles

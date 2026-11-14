@@ -81,6 +81,8 @@ pub enum Command {
     Launcher {
         init_store: bool,
         once: bool,
+        /// `--clear <role>` (repeatable): tell Synapse to re-raise that role's refused launch signal, then exit.
+        clear: Vec<String>,
     },
     /// `agentlife doctor`: read-only check of the installed host and hook binary (R16, R17).
     Doctor {
@@ -185,14 +187,17 @@ USAGE:
         stale. Repos are the --repo paths, else the children of --root (default C:/Projects on Windows,
         ~/Projects elsewhere) with a .git directory. Needs git and gh. Read-only.
 
-    agentlife launcher [--init-store] [--once]
+    agentlife launcher [--init-store] [--once] [--clear <role>]...
         The launch-on-message service, NOTIFIER-ONLY build (docs/LAUNCHER-SERVICE.md). Long-polls
         Synapse as role agentlife-launcher (which Synapse must list in SYNAPSE_LAUNCHER_ROLES),
         decides each signal by the policy rules, and answers it. It never starts a lane: with no
         standing grant (M5 unbuilt) every launchable signal is answered refused: no-grant. One
         instance only (an OS lock on <state>/launcher.lock). The store
         <state>/launcher-store.json is never created on its own: --init-store creates it once.
-        --once runs a single cycle without holding the poll, then exits.
+        --once runs a single cycle without holding the poll, then exits. --clear <role> (repeatable) asks
+        Synapse to re-raise that role's refused launch signal (POST /v1/launch-clear as the launcher role),
+        prints the epoch it answers, and exits; it never starts anything and needs no instance lock. Clear a
+        role only after the policy that refused it changed: while the policy still refuses, it loops.
 
     agentlife doctor [--exe <path>]
         Read-only. Reports the installed lane-restart host (the configured host_program, resolved as a
@@ -398,15 +403,27 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             })
         }
         "launcher" => {
-            let (mut init_store, mut once) = (false, false);
-            for a in rest.iter() {
+            let (mut init_store, mut once, mut clear) = (false, false, Vec::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
                 match a.as_str() {
                     "--init-store" => init_store = true,
                     "--once" => once = true,
+                    "--clear" => {
+                        let r = it.next().ok_or("--clear needs a role")?;
+                        if r.starts_with('-') {
+                            return Err(format!("launcher: --clear needs a role, not {r:?}"));
+                        }
+                        clear.push(r.clone());
+                    }
                     other => return Err(format!("unknown argument to launcher: {other:?}")),
                 }
             }
-            Ok(Command::Launcher { init_store, once })
+            Ok(Command::Launcher {
+                init_store,
+                once,
+                clear,
+            })
         }
         "doctor" => {
             let mut exe = None;
@@ -857,16 +874,28 @@ mod tests {
             p(&["launcher"]),
             Ok(Command::Launcher {
                 init_store: false,
-                once: false
+                once: false,
+                clear: vec![]
             })
         );
         assert_eq!(
             p(&["launcher", "--init-store", "--once"]),
             Ok(Command::Launcher {
                 init_store: true,
-                once: true
+                once: true,
+                clear: vec![]
             })
         );
+        assert_eq!(
+            p(&["launcher", "--clear", "capant", "--clear", "sageant"]),
+            Ok(Command::Launcher {
+                init_store: false,
+                once: false,
+                clear: vec!["capant".into(), "sageant".into()]
+            })
+        );
+        assert!(p(&["launcher", "--clear"]).is_err());
+        assert!(p(&["launcher", "--clear", "--once"]).is_err());
         assert!(p(&["launcher", "--model", "opus"]).is_err());
         assert!(p(&["launcher", "start"]).is_err());
         assert_eq!(
