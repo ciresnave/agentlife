@@ -1,3 +1,0 @@
-kind: SUPERVISION-DESIGN 8a rewritten for CireSnave's board 437 ruling (idle is a state, N and M learned, only the PM excluded)
----
-Idle is now a state (judged externally or asserted by the agent) and quiet time only a further check that can delay a stop; N and M are measured and adapted per lane with the first guesses (30 min, 60 min) as initial values; the only exclusion is the PM; the dry-run day stays; a stopped lane is noticed through the ledger. `idle_stop.rs` comments follow. Docs and comments only; the adaptation, gatherer and ledger writer are not built and every number is UNMEASURED.
