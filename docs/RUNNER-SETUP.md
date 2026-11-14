@@ -213,6 +213,22 @@ checks `cl.exe` afterwards. The same text is the probe's step in `docs/spike/run
 Measured in spike run 2 (section 5a): from session 0 as `gh-runner` the step found Visual Studio 2026 (incomplete / reboot pending,
 so via the `-all` fallback, with its warning) and `cl.exe` 14.51.36231 resolved; the CUDA kernel then built and ran.
 
+## 2e. Cleanup after EVERY job (CireSnave 2026-11-14, verbatim: *"If runners of all types don't clean up after each run, they need to. Make it so."*)
+
+- **Before (2026-11-14, file bytes, as the lane account):** `humboldt` 81.2 GB (`cargo-target` 71.3), `humboldt-2` 96.2 GB (`cargo-target` 92.3),
+  `baracuda-gpu` 0.74 GB, `C:\gh-runner` 1.14 GB. `C:\gh-runner-*`, `C:\ghr-*` and every profile under `C:\Users` are unreadable to the lane
+  account (access denied): `scripts/runner-measure.ps1`, run elevated, reports them and says whether `ghr-baracuda.TUF-LAPTOP.00x` are unused.
+- **The hook:** `scripts/runner-job-cleanup-hook.ps1`, set as `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` in the runner's `.env`, empties `_work` (workspaces,
+  `_actions`, `_tool`), `_work\_temp`, `cargo-target`, `cargo-home`, `cb`, `npm-cache` and `playwright-browsers` inside its own runner dir after every
+  job. It keeps the runner (`bin`, `externals`, `.env`, `.runner`, `.credentials`, `_diag`) and refuses a folder without `config.cmd`.
+  Every build dir lives in that folder (`CARGO_TARGET_DIR`, `CARGO_HOME`, `CARGO_BUILD_BUILD_DIR`), so nothing a job builds lands outside what is cleaned.
+  Builds are cold; `sccache` (`C:\sccache`, 50 GiB cap) carries the compile cost (PM 2026-11-14).
+- **Script-made runners:** `gh-runner-setup.ps1 -Apply` copies the hook and writes those lines; `-Rearm` deletes the runner dir and extracts a fresh one,
+  so a re-arm never reuses a dirty folder.
+- **The three owner-run runners** (`C:\actions-runners\baracuda-gpu|humboldt|humboldt-2`): `scripts/runner-cleanup-apply.ps1` (dry run; `-Apply`).
+  The first cleanup of the existing 164 GB happens after the next job, or by running `<dir>\job-completed-cleanup.ps1` once on an idle runner.
+- **Not cleaned:** the shared toolchains (`C:\rust\.rustup`) and `<dir>\.rustup` / `<dir>\.cargo` on the owner-run runners (toolchains, not job output; 0.6 GB each).
+
 ## 3. The runner binary
 
 Pinned in the script, from the official release notes (`actions/runner` v2.338.0, read 2026-10-16):
