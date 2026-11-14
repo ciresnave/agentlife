@@ -4,6 +4,7 @@
   Puts the job-completed cleanup hook on the live, owner-run runners (C:\actions-runners\<name>, started by run.cmd or
   start-runner.cmd, not services). Dry run unless -Apply.
 .DESCRIPTION
+  Also deletes the leftover self-update copies bin.<x.y.z> and externals.<x.y.z> (never plain bin or externals).
   Per runner dir (must hold config.cmd): copies scripts\runner-job-cleanup-hook.ps1 to <dir>\job-completed-cleanup.ps1, and sets
   two lines in <dir>\.env: ACTIONS_RUNNER_HOOK_JOB_COMPLETED=<dir>\job-completed-cleanup.ps1 and CARGO_TARGET_DIR=<dir>\cargo-target
   (so everything a job builds lands inside the folder the hook empties). The .env is created when absent. Idempotent: a line that is
@@ -54,6 +55,12 @@ function Get-ListenerState([string]$dir, $procs) {
   }
 }
 
+# Pure: the leftover self-update copies in a runner dir, e.g. bin.2.338.0 and externals.2.338.0 (the live ones are plain `bin` and
+# `externals`). Only these two prefixes with a dotted version suffix; nothing else is ever named.
+function Get-OldRunnerCopies([string[]]$names) {
+  @($names | Where-Object { $_ -match '^(bin|externals)\.\d+\.\d+\.\d+$' })
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced by the tests: functions only
 
 $hookSrc = Join-Path $PSScriptRoot 'runner-job-cleanup-hook.ps1'
@@ -73,7 +80,7 @@ foreach ($d in $Dir) {
   $old = if (Test-Path -LiteralPath $envPath) { [IO.File]::ReadAllText($envPath) } else { '' }
   $new = Update-EnvText $old $pairs
   $changed = ($new -ne $old)
-  Write-Host ("  hook file : {0}" -f $(if ((Test-Path -LiteralPath "$d\job-completed-cleanup.ps1") -and ((Get-FileHash $hookSrc).Hash -eq (Get-FileHash "$d\job-completed-cleanup.ps1").Hash)) { 'already current' } else { 'to be copied' }))
+  Write-Host ("  hook file : {0}" -f $(if ((Test-Path -LiteralPath "$d\job-completed-cleanup.ps1") -and ([IO.File]::ReadAllText($hookSrc) -ceq [IO.File]::ReadAllText("$d\job-completed-cleanup.ps1"))) { 'already current' } else { 'to be copied' }))
   Write-Host ("  .env      : {0} (keys set: {1}; the file is never printed)" -f $(if ($changed) { if ($old -eq '') { 'to be created' } else { 'to be updated' } } else { 'already right' }), ($pairs.Keys -join ', '))
   if ($Apply) {
     Copy-Item -LiteralPath $hookSrc -Destination "$d\job-completed-cleanup.ps1" -Force
@@ -81,6 +88,11 @@ foreach ($d in $Dir) {
     $back = [IO.File]::ReadAllText($envPath)
     foreach ($k in $pairs.Keys) { if ($back -notmatch ('(?m)^' + [regex]::Escape($k) + '=' + [regex]::Escape($pairs[$k]) + '\r?$')) { throw "$envPath does not hold $k after the write" } }
     Write-Host "  written and read back."
+  }
+  $old = @(Get-OldRunnerCopies @(Get-ChildItem -LiteralPath $d -Force -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }))
+  if ($old.Count -gt 0) {
+    Write-Host ("  old copies: {0} ({1})" -f $(if ($Apply) { 'deleting' } else { 'would delete' }), ($old -join ', '))
+    if ($Apply) { foreach ($n in $old) { & cmd.exe /c rd /s /q "`"$d\$n`"" | Out-Null; if (Test-Path -LiteralPath "$d\$n") { Write-Host "    could not delete $n" } } }
   }
   $ls = @(Get-ListenerState $d $procs)
   if ($ls.Count -eq 0) { Write-Host "  listener  : none of this dir visible to this account (not running, or another user's): start it normally; it will read the new .env" ; continue }

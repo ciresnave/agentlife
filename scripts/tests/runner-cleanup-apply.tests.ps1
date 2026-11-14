@@ -25,6 +25,8 @@ $t = Update-EnvText "CARGO_TARGET_DIR=D:\a${crlf}X=1${crlf}CARGO_TARGET_DIR=D:\b
 Check 'a duplicated key is collapsed to one' (@($t -split "`r`n" | Where-Object { $_ -like 'CARGO_TARGET_DIR=*' }).Count -eq 1)
 Check 'other lines are untouched and in order' ((Update-EnvText "# c${crlf}A=1${crlf}B=2${crlf}" $p).StartsWith("# c${crlf}A=1${crlf}B=2${crlf}"))
 
+$old = Get-OldRunnerCopies @('bin', 'bin.2.338.0', 'externals', 'externals.2.338.2', '_work', 'bin.zip', 'bin.2.338', 'xbin.1.2.3', 'cargo-target')
+Check 'only bin.<x.y.z> and externals.<x.y.z> are old copies; the live bin and externals are not' (($old -join ',') -eq 'bin.2.338.0,externals.2.338.2') ($old -join ',')
 $procs = @(
   [pscustomobject]@{ Name = 'Runner.Listener'; Id = 10; Path = 'C:\actions-runners\h\bin\Runner.Listener.exe'; ParentId = 1 },
   [pscustomobject]@{ Name = 'Runner.Worker'; Id = 11; Path = 'C:\actions-runners\h\bin\Runner.Worker.exe'; ParentId = 10 },
@@ -51,6 +53,11 @@ try {
   Check 'a second apply leaves the .env byte-identical' ((Get-Content "$r\.env" -Raw) -eq $before)
   $nr = "$root\notrunner"; New-Item -ItemType Directory -Force -Path $nr | Out-Null
   $o2 = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $applyPs1 -Dir $nr -Apply -NoRestart 2>&1 | Out-String
+  New-Item -ItemType Directory -Force -Path "$r\bin.9.9.9", "$r\externals.9.9.9", "$r\bin", "$r\externals" | Out-Null
+  $dry2 = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $applyPs1 -Dir $r 2>&1 | Out-String
+  Check 'a dry run names the old copies and deletes none' ($dry2 -match 'would delete' -and (Test-Path "$r\bin.9.9.9"))
+  & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $applyPs1 -Dir $r -Apply -NoRestart 2>&1 | Out-Null
+  Check 'apply deletes the old copies and keeps the live bin and externals' (-not (Test-Path "$r\bin.9.9.9") -and -not (Test-Path "$r\externals.9.9.9") -and (Test-Path "$r\bin") -and (Test-Path "$r\externals"))
   Check 'a dir with no config.cmd is skipped and nothing is created in it' ($o2 -match 'SKIPPED' -and -not (Test-Path "$nr\.env"))
 } finally { if (Test-Path $root) { & cmd.exe /c rd /s /q "`"$root`"" | Out-Null } }
 if ($failures.Count -gt 0) { Write-Host "`n$($failures.Count) FAILED: $($failures -join ', ')"; exit 1 }
