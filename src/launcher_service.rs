@@ -244,7 +244,7 @@ pub struct RegistryDirectory<'a> {
     pub table: &'a dyn ProcessTable,
     /// The config's `lazy_enabled` (ships off). Off, a soft stop is a stop like any other here and
     /// rule 7 grants nothing, exactly as before the implied grant (board 216) was read.
-    pub wake_enabled: bool,
+    pub wake_enabled: std::cell::Cell<bool>,
 }
 
 /// What a lane's launch spec says to the launcher, by the predicate `lane-restart start` applies
@@ -313,7 +313,7 @@ impl Directory for RegistryDirectory<'_> {
             // the wake path off, leaves it unknown, as before (pinned by a test: an unsigned soft
             // stop, a hard stop and a corrupt file all read `unknown-role` here).
             return match self.spec_verdict(role) {
-                SpecVerdict::Startable { .. } if self.wake_enabled => Lane::Launchable,
+                SpecVerdict::Startable { .. } if self.wake_enabled.get() => Lane::Launchable,
                 _ => Lane::Unknown,
             };
         };
@@ -322,7 +322,9 @@ impl Directory for RegistryDirectory<'_> {
             SpecVerdict::Blocked => Lane::ClosedOnPurpose,
             // `agentlife stop --soft` leaves registry intent `Closed{exited}` and writes `soft`
             // in the spec, which is the authority (`start.rs`); only with the wake path on.
-            SpecVerdict::Startable { soft_stop: true } if self.wake_enabled => Lane::Launchable,
+            SpecVerdict::Startable { soft_stop: true } if self.wake_enabled.get() => {
+                Lane::Launchable
+            }
             SpecVerdict::Startable { soft_stop: true } => Lane::ClosedOnPurpose,
             _ if closed => Lane::ClosedOnPurpose,
             _ => Lane::Launchable,
@@ -334,7 +336,7 @@ impl Directory for RegistryDirectory<'_> {
     /// an unusable spec and no spec are not. Nothing is granted while `lazy_enabled` is off. There
     /// is no M5 store behind this (docs/M5-WAKE-DESIGN.md).
     fn granted(&self, role: &str) -> bool {
-        self.wake_enabled
+        self.wake_enabled.get()
             && matches!(self.spec_verdict(role), SpecVerdict::Startable { .. })
             // The grant never exceeds the lane rule: a closed registry intent that no soft stop
             // overrides is not granted even though a spec says `running`.
@@ -346,6 +348,23 @@ impl Directory for RegistryDirectory<'_> {
             recs.iter()
                 .any(|r| liveness(r, self.table).0 == Liveness::Running)
         })
+    }
+}
+
+/// The real mechanism behind the wake switch, which the service re-reads every cycle: while the switch
+/// is off a start answers `wake-off` and nothing is spawned, even if a decision slipped through.
+pub struct SwitchedMechanism<'a> {
+    pub inner: LaneRestartMechanism,
+    pub wake: &'a std::cell::Cell<bool>,
+}
+
+impl Mechanism for SwitchedMechanism<'_> {
+    fn start(&self, role: &str, model: &str, signal_id: &str) -> MechResult {
+        if self.wake.get() {
+            self.inner.start(role, model, signal_id)
+        } else {
+            MechResult::Failed("wake-off".into())
+        }
     }
 }
 

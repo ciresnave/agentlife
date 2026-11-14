@@ -208,13 +208,15 @@ What went wrong first, in the order it was found (each cost a cycle; the fixes a
 
 1. **`lazy_enabled` is read from `<home>/config.json` (or `AGENTLIFE_LAZY_ENABLED`), not from `~/.overmind/lane-restart.json`.** The
    switch was first set in the wrong file; the launcher kept refusing as `unknown-role` until `C:/Projects/.agentlife/config.json` held
-   `{"lazy_enabled": true}` and the launcher was restarted (it reads the switch once, at start; killing the process is needed, `schtasks
-   /end` does not stop the orphaned exe behind the wrapper). The start line now prints wake ON/OFF.
+   `{"lazy_enabled": true}` and the launcher was restarted (until the Fix B release it read the switch once, at start; killing the process was
+   needed, `schtasks /end` does not stop the orphaned exe behind the wrapper). From then on it re-reads the switch every cycle, logs a
+   change, and an unreadable config reads as OFF; the start line prints wake ON/OFF.
 2. **A dry run with the switch off consumes the signals.** The daemon keeps a refused launch signal terminal; its id is the role plus the
    enqueue time of the OLDEST queued message, so new mail behind it raises nothing. It re-raises only when that oldest mail is acked, the
    role claims, or the launcher calls `POST /v1/launch-clear` (`agentlife launcher --clear <role>`). Clear only after the policy changed.
-3. **The task needs `SYNAPSE_HOME`.** A scheduled task has no environment; the registered `--exe` is a wrapper `.cmd` that sets
-   `SYNAPSE_HOME`/`SYNAPSE_ADDR` (a `synapse_home` config key would remove it).
+3. **The task needs the Synapse home.** A scheduled task has no environment; the first registration used a wrapper `.cmd` that set
+   `SYNAPSE_HOME`/`SYNAPSE_ADDR`. Since the Fix B release the config key `synapse_home` (`<home>/config.json`, else `SYNAPSE_HOME`, else the
+   platform default) does it, so the bare exe works.
 4. **The lane-restart sibling must exist** next to the launcher exe (`LaneRestartMechanism::sibling`): it was not installed with `agentlife`.
 5. **Unsigned soft stops are not wakeable.** sageant, surfaceant and thinkersfoundation have soft stops written before stops were signed
    (`tool_version` 0.29.0, no `stop_mac`); `spec::read` reads such a stop as unclassified and every launcher refuses it, by design. It is
@@ -223,6 +225,11 @@ What went wrong first, in the order it was found (each cost a cycle; the fixes a
 6. **The launcher role needs `see` grants** for `/v1/list` to show it who is online (it has none in the pilot `access.json`), or its
    `launch-stalled ... started-never-claimed` alarm fires about 4 minutes after every successful wake (seen for capant and cpufish).
    UNVERIFIED: the launcher's own `/v1/list` was not read. Alarms go over claude-peers while `notify_transport` is the default broker.
+   **Grants the launcher role still lacks (CireSnave, account holder; the PM's role cannot grant):** `see` on `agent:capant@ciresnave`,
+   `agent:cpufish@ciresnave`, `agent:sageant@ciresnave`, `agent:surfaceant@ciresnave` and `agent:thinkersfoundation@ciresnave` (and any
+   lane it may wake), as `synapse access grant --role <account holder> --to agentlife-launcher@ciresnave --action see --object
+   agent:<role>@ciresnave` (repeat `--object`); and `send` on `agent:pm@ciresnave` before `notify_transport` is set to `synapse`
+   (the Synapse alarm sends as the launcher to the PM, and is refused without it). Until then the stalled alarm is known noise.
 
 ## Caps, ledger line, memory floor and `restore.lock` (0.15.13)
 

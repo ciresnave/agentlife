@@ -335,6 +335,7 @@ the `user-request` crate with `bound_hash`: all as written. Revision 3 adds exac
 | `max_wakes_per_minute` | 10 | global storm limit |
 | `synapse_addr` | `127.0.0.1:7920` | from Synapse's own default (M5 spec Q1) |
 | `synapse_account` | `ciresnave` | the account part of `role@account` |
+| `synapse_home` | empty | the Synapse home the launcher uses; empty = `SYNAPSE_HOME`, else the platform default. A scheduled task has no `SYNAPSE_HOME` |
 
 Same precedence as revision 2 §5 (flag > env > file > default); unknown keys refuse the file.
 
