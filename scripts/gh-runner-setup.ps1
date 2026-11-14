@@ -52,7 +52,7 @@
 .PARAMETER Remove        With -Apply: unregister and remove the runners for -Repo (asks for a removal token) and leave the account (unless -RemoveAccount).
 .PARAMETER Rearm         With -Apply: re-arm an EPHEMERAL runner that has taken its job (one job, then it unregisters itself and its service stops). One elevated run, ONE registration token, same account, same labels: for each -Repo it stops and deletes the runner's service, deletes the runner directory, then does the normal -Apply (rotate the account password, extract, register, read back). It does NOT use `config.cmd remove` (that needs a different, removal token and has not been measured against a runner that already unregistered itself); `--replace` covers a registration that is still on GitHub. Refuses when the directory is outside -Root, holds no runner, or its service logs on as another account. Needs the account to exist already with no other service (the normal -Apply refuses otherwise).
 .PARAMETER GitRoot       Git for Windows root. Its bin and usr\bin go FIRST on the runner's PATH (in <runner dir>\.env), ahead of System32: on this box `bash` otherwise resolves to the WSL launcher (C:\Windows\System32\bash.exe) and every `shell: bash` step fails with "Windows Subsystem for Linux has no installed distribution" (mlmf first job, 2026-11-12). Default C:\Program Files\Git.
-.PARAMETER RustRoot      The machine-wide Rust install (default C:\rust: .cargo\bin holds the rustup shims, .rustup the toolchains). The runner's .env gets PATH (shims), RUSTUP_HOME (shared toolchains) and CARGO_HOME = <Root>\cargo-home (the account's OWN registry cache, so a job cannot write into the shared C:\.cargo). Pass '' to leave Rust out.
+.PARAMETER RustRoot      The machine-wide Rust install (default C:\rust: .cargo\bin holds the rustup shims, .rustup the toolchains). The runner's .env gets PATH (shims), RUSTUP_HOME (shared toolchains) and CARGO_HOME = <runner dir>\cargo-home (the runner's OWN registry cache, so a job cannot write into the shared C:\.cargo), with CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR inside the runner dir too, and ACTIONS_RUNNER_HOOK_JOB_COMPLETED naming the cleanup hook that empties them after every job. Pass '' to leave Rust out.
 .PARAMETER RemoveAccount With -Remove -Apply: after the runners are gone, also delete the local account, but only when no other service still logs on as it (re-read from the service manager) and it is not a built-in account or the person running the script. Otherwise the account is kept and the reason printed.
 #>
 [CmdletBinding()]
@@ -234,8 +234,8 @@ if (-not $Ephemeral) {
 $ephFlag = if ($Ephemeral) { ' --ephemeral' } else { '' }
 # The lines of <runner dir>\.env (pure: reads only its arguments; read out of this file by scripts\tests\gh-runner-setup-env.tests.ps1).
 # PATH: Git's bin and usr\bin, then the Rust shims, then the machine PATH minus any repeat; RUSTUP_HOME shared, CARGO_HOME the account's own.
-function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoHome, [string]$machinePath) {
-  foreach ($v in $gitRoot, $rustRoot, $cargoHome) {
+function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoHome, [string]$machinePath, [string]$runnerDir = '') {
+  foreach ($v in $gitRoot, $rustRoot, $cargoHome, $runnerDir) {
     if ($v -and ($v -notmatch '^[A-Za-z]:\\[\x20-\x7E]*$' -or $v -match '[;%"=]')) { throw "'$v' must be an absolute ASCII path with no ; % `" or =" }
   }
   $lines = New-Object System.Collections.Generic.List[string]
@@ -257,7 +257,12 @@ function Get-RunnerEnvLines([string]$gitRoot, [string]$rustRoot, [string]$cargoH
     # The machine cargo config puts build.build-dir under C:\cb, which a restricted account may not write: use the runner's own tree.
     # UNMEASURED (2026-11-13): an old cargo may ignore this variable.
     $lines.Add("CARGO_BUILD_BUILD_DIR=$(Split-Path -Parent $cargoHome)\cb")
+    # Nothing a job builds may land outside the folder the job-completed hook cleans (CireSnave 2026-11-14): the target dir too.
+    if ($runnerDir) { $lines.Add("CARGO_TARGET_DIR=$runnerDir\cargo-target") }
   }
+  # The job-completed hook (scripts\runner-job-cleanup-hook.ps1, copied to <runner dir>\job-completed-cleanup.ps1): deletes the job's workspace,
+  # _temp and cargo/npm/playwright dirs after EVERY job, so no job or re-arm starts on a dirty folder.
+  if ($runnerDir) { $lines.Add("ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$runnerDir\job-completed-cleanup.ps1") }
   @($lines)
 }
 # What the probe printed, judged (pure). The probe runs AS the runner account with the .env's variables and prints one line per fact.
@@ -279,8 +284,12 @@ function Test-ProbeOutput([string]$text, [string]$gitRoot, [bool]$rust) {
 # Written to <runner dir>\.env, which the runner loads for every job. Windows PowerShell's execution policy is Restricted on this
 # box, and the runner dot-sources a temp .ps1 for each `shell: powershell` step (spike run 1, 2026-10-17). The env var is process
 # scope: it touches this runner's jobs only, no machine or registry-hive setting. Not a security boundary (a job runs any command).
-$cargoHome = if ($RustRoot) { Join-Path $Root 'cargo-home' } else { '' }
-$runnerEnv = @(Get-RunnerEnvLines $GitRoot $RustRoot $cargoHome ([Environment]::GetEnvironmentVariable('Path', 'Machine')))
+# One set of lines PER runner dir: CARGO_HOME, CARGO_TARGET_DIR, CARGO_BUILD_BUILD_DIR and the hook all sit INSIDE the runner dir the hook cleans.
+function Get-EnvFor([string]$dir) {
+  $ch = if ($RustRoot) { Join-Path $dir 'cargo-home' } else { '' }
+  @(Get-RunnerEnvLines $GitRoot $RustRoot $ch ([Environment]::GetEnvironmentVariable('Path', 'Machine')) $dir)
+}
+$cleanupHook = Join-Path $PSScriptRoot 'runner-job-cleanup-hook.ps1'
 function Slug([string]$r) { $r -replace '/', '-' }
 # The config.cmd argument list, ONE ELEMENT PER ARGUMENT. Never fold a flag into a string ("--replace$flag"): PowerShell then hands
 # config.cmd the single argument "--replace --ephemeral", which it refuses (live -Rearm -Apply, 2026-11-13).
@@ -413,6 +422,7 @@ if (-not $Apply) {
   else { Write-Host "ACL preflight: clean (-Apply would proceed past it)" }
   foreach ($r in $Repo) {
     $dir = Join-Path $Root (Slug $r)
+    $runnerEnv = Get-EnvFor $dir
     Write-Host "`n[$r]"
     Write-Host "  extract  -> $dir (only after the hash matches)"
     Write-Host "  token    -> prompted (Read-Host -AsSecureString): PM fetches it now; not stored"
@@ -425,6 +435,7 @@ if (-not $Apply) {
     else {
       Write-Host "  $dir\config.cmd --unattended --url https://github.com/$r --token <token> --name $($env:COMPUTERNAME)-$(Slug $r) ``"
       Write-Host "     $labelFlag --work _work --replace$ephFlag --runasservice --windowslogonaccount .\$Account --windowslogonpassword <generated>"
+      Write-Host "  hook     -> $dir\job-completed-cleanup.ps1 (copy of scripts\runner-job-cleanup-hook.ps1): after EVERY job deletes _work contents, _temp, cargo-target, cargo-home, cb, npm-cache, playwright-browsers"
       Write-Host "  .env     -> $dir\.env (before config.cmd, so the service starts with it):"
       foreach ($l in $runnerEnv) { Write-Host "     $(if ($l.Length -gt 150) { $l.Substring(0, 150) + ' ...' } else { $l })" }
       Write-Host "  probe    -> after the service read-back, AS $Account (Start-Process -Credential, Secondary Logon): bash path, bash -c `"echo ok`"$(if ($RustRoot) { ', cargo --version, rustc --version' }) with those .env values; any failure stops the run"
@@ -572,9 +583,12 @@ Write-Host "SHA256 verified: $got"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 foreach ($r in $Repo) {
   $dir = Join-Path $Root (Slug $r)
+  $runnerEnv = Get-EnvFor $dir; $cargoHome = Join-Path $dir 'cargo-home'
   if (Test-Path -LiteralPath "$dir\config.cmd") { throw "$dir already holds a runner; run with -Remove first" }
   [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $dir)
   Set-Content -LiteralPath "$dir\.env" -Value $runnerEnv -Encoding Ascii
+  if (-not (Test-Path -LiteralPath $cleanupHook)) { throw "the job-completed hook $cleanupHook is missing" }
+  Copy-Item -LiteralPath $cleanupHook -Destination "$dir\job-completed-cleanup.ps1" -Force
   $tok = [Net.NetworkCredential]::new('', (Read-Host "Registration token for $r (not stored)" -AsSecureString)).Password
   $cfgArgs = Get-ConfigArgs $r $tok "$($env:COMPUTERNAME)-$(Slug $r)" $labelArgs $Ephemeral $Account $password
   & "$dir\config.cmd" @cfgArgs
@@ -587,6 +601,7 @@ foreach ($r in $Repo) {
   if ($svc.StartName -ine ".\$Account") { throw "service runs as '$($svc.StartName)', expected .\$Account" }
   $envBack = @(Get-Content -LiteralPath "$dir\.env")
   foreach ($l in $runnerEnv) { if ($envBack -notcontains $l) { throw "$dir\.env does not hold the line: $l" } }
+  if (-not (Test-Path -LiteralPath "$dir\job-completed-cleanup.ps1")) { throw "$dir\job-completed-cleanup.ps1 is missing after the copy" }
   Write-Host "[$r] service $($svc.Name) as $($svc.StartName), state $($svc.State); .env holds $($runnerEnv.Count) line(s) ($(($runnerEnv | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', '))"
   # 7. The probe: what the first job would hit, run now AS the account with the .env's values, so a bad PATH or an unreadable toolchain
   # fails here, loudly, instead of in a queued job (mlmf 2026-11-12). Output goes to a file the account can write (its root).
