@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.70 — runners clean up after every job: job-completed hook, apply and measure scripts
+
+CireSnave 2026-11-14: runners of every type must clean up after each run. `scripts/runner-job-cleanup-hook.ps1` is a `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` hook that empties `_work`, `_temp`, `cargo-target`, `cargo-home`, `cb`, `npm-cache` and `playwright-browsers` inside the runner dir it sits in (it refuses a folder without `config.cmd`; a junction is removed as a link). `gh-runner-setup.ps1` copies it into each runner dir and puts the hook path, `CARGO_TARGET_DIR`, `CARGO_HOME` and `CARGO_BUILD_BUILD_DIR` in that runner's `.env`, all INSIDE the runner dir (CARGO_HOME moved from `<Root>\cargo-home`; a re-arm already deletes and re-extracts the dir). `scripts/runner-cleanup-apply.ps1` does the same for the three owner-run runners (idempotent `.env` edit, never printed, only idle listeners restarted) (it also deletes the leftover `bin.<x.y.z>`/`externals.<x.y.z>` self-update copies, about 0.7 GB per runner) and `scripts/runner-measure.ps1` is the elevated read-only size report. Verified by `tests/runner_cleanup_hook.rs` (real process) and the extended env tests; the setup script's other test files still pass. UNMEASURED: a live job through the hook, the elevated measure run, the apply run on the live runners.
+
 ## 0.30.69 — lane-restart: `idle_stop::verdict`, the pure dry-run rule for the idle soft stop
 
 `crates/lane-restart/src/idle_stop.rs` decides, from inputs a caller gathers, whether a lane WOULD be soft-stopped (SUPERVISION-DESIGN 8a) and lists every reason it stays up. It reads and stops nothing, and the five numbers (N, N2, W, K, M) have no default: they await CireSnave's ruling on board 437. The self-idle assertion is the existing `assert-idle`, which any later busy hook clears, so `LaneState::is_idle` is the "asserted and quiet since" test; no new tool call was needed. Six unit tests: a never-asserted lane is never stopped, mail resets the quiet clock, K wakes need N2, a WAIT due inside M blocks, all seven reasons are reported together.
