@@ -70,7 +70,7 @@ Rules the core enforces on every adapter, each from a failure already paid for (
   2026-10-14, Inputs 1.2). An adapter with no `activity` reports `None`, and the idle verdict is then `unknown`, not true.
   **Ruled 2026-11-13 (board 435, question 3):** an agent with no external idle detection is *told to set its own idle from
   inside*, by a tool call; the assertion is still the agent's. What the supervisor may derive is only **how long** the idle
-  has lasted (section 8a); it never derives idle itself.
+  has lasted (section 8a, where quiet time is only a further check and is itself learned); it never derives idle itself.
 
 ## 3. What each part keeps
 
@@ -220,43 +220,80 @@ Question 3 is the one that changed what I proposed; 8a is its consequence.
    are the exceptions), and "never Opus" is a Claude-model rule. **Recommendation: the caller-identity gate stays in the core
    and stays PM-only for every kind; model rules stay inside the Claude Code adapter.**
 
-## 8a. The idle-stop rule (ruling 3, and the queued idle-stop task)
+## 8a. The idle-stop rule (ruling 3, and board 437)
 
 CireSnave, verbatim (board 435, relayed by the PM 2026-11-13): an agent with no external idle detection must be told to set
-its own idle from inside (a tool call), and time-since-last-event or similar checks decide whether idle is long enough to
-soft-stop: *"A lane that is contacted every minute or two and returns to idle after each response should not be soft-stopped
-as it will be started and soft-stopped every minute."* Also CireSnave 2026-11-13: lanes with no work waiting that are idle
-get soft-stopped automatically and wake again on mail (wake-on-message, `docs/LAUNCHER-SERVICE.md`).
+its own idle from inside (a tool call): *"A lane that is contacted every minute or two and returns to idle after each response
+should not be soft-stopped as it will be started and soft-stopped every minute."* Also 2026-11-13: lanes with no work waiting
+that are idle get soft-stopped automatically and wake again on mail (wake-on-message, `docs/LAUNCHER-SERVICE.md`).
 
-**Proposal (nothing switches on until he rules on the numbers below).** A lane is a soft-stop candidate only when ALL hold:
+CireSnave, verbatim (board 437, 2026-11-14, relayed by the PM): *"We should learn the best duration for how long a lane must
+be quiet before it is soft-stopped to prevent stop-start bouncing.  However, soft stopping must not happen unless the lane is
+idle.  Idle and quiet are not the same things.  A lane that is doing nothing more than waiting is idle.  If we can judge that
+externally, great.  If we can't judge that externally, then marking a lane idle must be done by the agent running in that lane
+as only it knows when it is doing nothing more than waiting for things.  As for how far out a wait must be to not prevent a
+soft-stop, that too should be learned to prevent stop-start bouncing.  As for exclusions, I would say no lane except the PM
+is excluded.  The other lanes you listed as excluded (Unpopped, Fuel, and tier-0) will never be idle unless you are not keeping
+up with your job of keeping them fed work and working through submitted PRs.  If you aren't keeping up, that is a separate
+issue that requires fixes that have nothing to do with whether a lane gets soft-stopped.  If any of our high-priority lanes
+will necessarily have to wait for something long enough that soft-stopping them is beneficial, they should be soft-stopped
+like any other.  However, you should notice they are not running and address the underlying cause."*
 
-1. **It asserted idle itself**: a self-idle tool call from inside the agent (Claude Code: the existing hooks plus a tool
-   the lane calls at the end of a task), never derived from silence. No assertion, or an assertion older than its last
-   event, means not idle (`unknown` is not idle).
-2. **Quiet for long enough (anti-flap).** Time since the later of (its last event, the last mail it received) is at least
-   **N** minutes. This is the only derived quantity, and it can only *delay* a stop, never cause one.
-3. **No open PR of its own, no ready ROADMAP row, no WAIT due within M minutes, HANDOFF written** (the lane's own
-   `assert-idle` already refuses otherwise).
-4. **Not excluded:** never the PM, never Unpopped, Fuel or the tier-0 lanes (CireSnave 2026-10-28: those always move),
-   never a lane mid-task.
-5. **Anti-flap memory.** A lane that woke on mail within the last **W** hours and has been woken **K** or more times in
-   that window is not stopped again until a longer quiet time **N2** has passed, so a lane contacted every minute or two is
-   left running.
+**What changed from my first proposal (PR #280), and why.**
 
-The action is the existing soft stop (`lane-restart stop --self` path, `stop_kind: soft`), registry intent untouched, so
-wake-on-mail applies. **Dry-run first**: a report of who WOULD stop, for a day, written to the ledger, before any stop.
+| | First proposal | Ruled |
+|---|---|---|
+| Idle vs quiet | idle asserted, plus a quiet time N | **Two different things.** Idle is a *state* (doing nothing more than waiting). Quiet time is only a further check that can delay a stop |
+| N (quiet time) | fixed, 30 min, to be ruled | **Measured and adapted.** 30 min is only the first guess |
+| M (how far ahead a WAIT blocks) | fixed, 60 min | **Measured and adapted.** 60 min is only the first guess |
+| N2, W, K (flap guard) | fixed 2 h, 3 h, 3 wakes | The same mechanism, now also a learned quantity (below) |
+| Exclusions | PM, Unpopped, Fuel, tier-0 | **The PM only.** No other lane is excluded |
+| Dry-run day | one day | **Kept** |
 
-**Numbered questions for CireSnave (each with my recommendation, UNMEASURED: no wake or flap data exists yet):**
+**The rule.** A lane is a soft-stop candidate only when ALL hold:
 
-1. **N, the minimum quiet time before a soft stop.** Recommendation: 30 minutes (a lane answering PM mail within a few
-   minutes never reaches it; a restart costs minutes and tokens, so too short is the expensive error).
-2. **N2 and the flap guard (W, K).** Recommendation: W = 3 hours, K = 3 wakes, N2 = 2 hours.
-3. **M, how far ahead a due WAIT blocks a stop.** Recommendation: 60 minutes (a lane restart plus re-arming is quicker).
-4. **Exclusion list beyond the PM, Unpopped, Fuel and tier-0.** Recommendation: none yet; add by name on request.
-5. **Dry-run length.** Recommendation: one day, then the PM reads the would-stop list before the switch is turned on.
+1. **It is idle**, meaning it is doing nothing more than waiting. Judged externally where the adapter can (no turn in
+   flight, no subagent, no tool call running: `LaneState::is_idle` for Claude Code), and otherwise **asserted by the agent
+   itself** (the existing `lane-restart assert-idle`, which any later busy hook clears; for an agent with no hooks, a tool
+   call it makes). Never derived from silence: no assertion, or one older than the lane's last event, means not idle
+   (`unknown` is not idle). *Idle is a state, not a duration.*
+2. **Quiet long enough (anti-flap).** Time since the later of its last event and the last mail it received is at least the
+   current **N**. This can only *delay* a stop, never cause one.
+3. **No open PR of its own, no ready ROADMAP row, HANDOFF written, and no WAIT due within the current M.** A lane waiting
+   on a WAIT further out than M is idle and may stop; one waiting on a nearer WAIT is not stopped.
+4. **Not the PM.** There is no other exclusion. A lane that is never idle (Unpopped, Fuel, tier-0) is never stopped by
+   this rule because condition 1 fails; if one of them ever is idle and stopped, that is a signal to look at whether it is
+   being fed work, not a reason to exclude it. **A stopped high-priority lane must be noticed** (below).
+5. **Flap guard.** A lane woken by mail K or more times within W is not stopped again until the longer N2 has passed.
 
-Open dependency: the self-idle tool call does not exist; building it is a slice of its own after the wake test passes and
-`lazy_enabled` is on.
+The action is the existing soft stop (`stop_kind: soft`, registry intent untouched), so wake-on-mail applies.
+
+**Learning N and M (what is recorded, and how they move).** Every soft stop and every wake writes one ledger line:
+`role, idle_since, quiet_at_stop, next_wait_in, stopped_at, woken_at, woken_by, idle_stopped_for`. A **bounce** is a wake
+within `B` of a stop (first guess B = 10 min). Per lane, over a rolling window:
+- N **rises** (x1.5, capped at 4 h) when its bounce count exceeds a small threshold, and **falls** (x0.8, floored at 10 min)
+  after a run of stops with no bounce, so a lane that is really quiet is stopped sooner. N is per lane, not global:
+  one chatty lane must not lengthen every other lane's N.
+- M is learned the same way from WAITs: a stop whose lane was woken by its own WAIT within the stop's lifetime counts as a
+  bounce for M, so M rises; a long run of waits that outlast their stops lets it fall.
+- The first guesses (N = 30 min, M = 60 min, N2 = 2 h, W = 3 h, K = 3, B = 10 min) are **initial values only, UNMEASURED**:
+  no wake or flap data exists yet (`launch_wait` N = 2). The adaptation constants above are mine and are also guesses.
+- Adaptation changes only the per-lane numbers in a state file next to the ledger; the rule's shape never changes.
+
+**Noticing a stopped lane.** The stop ledger line is also the notice: a lane the rule stopped is listed in the PM's status
+(`stopped by idle-stop since <time>, <reason>`), so a high-priority lane that is stopping often is visible as such. What to
+do about it (feed it, or accept the stop) is the PM's, not this rule's.
+
+**Dry-run first, one day.** The rule runs and writes `WOULD STOP role (idle since, quiet, next wait)` to the ledger for a
+day; the PM reads the list before any stop is enabled. `idle_stop::verdict` (PR #286) is the pure core of conditions 1 to 5;
+the exclusion input is set only for the PM. Not built: the gatherer of mail time, wake count, open PR and WAITs, the ledger
+writer, and the adaptation.
+
+**Questions left for CireSnave: none that block.** The numbers he asked to be learned are learned. One for the PM to
+decide when it matters: whether a lane's N may ever fall below the first guess's floor of 10 min (my guess, UNMEASURED).
+
+Open dependency: for an agent with no hooks, the self-idle tool call does not exist yet; for Claude Code lanes
+`assert-idle` already is it (see `idle_stop.rs`).
 
 ## 9. Not measured, said once
 
