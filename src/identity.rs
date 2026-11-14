@@ -531,7 +531,13 @@ mod tests {
     /// after exit the OS still lists the process, and `sysinfo` reads its image as the EMPTY path
     /// (`get_exe` ignores the failure of `GetModuleFileNameExW`), which is not "a different exe"
     /// and not "gone".
-    fn verdicts_for_killed_children(rounds: usize) -> Vec<Match> {
+    ///
+    /// Each verdict comes with a `detail` that is empty for `NotRunning` and, for anything else, says what the
+    /// recorded identity was, what held the pid at that moment, and what held it 50 ms and 500 ms later:
+    /// a live holder that stays (a recycled pid) reads differently from a dead process the OS still lists
+    /// for a moment. One CI failure ("1 of 320 ... [Same]", 2026-11-14, #283) could not be reproduced in
+    /// 7520 local rounds (issue #284), so the next one must explain itself.
+    fn verdicts_for_killed_children(rounds: usize) -> Vec<(Match, String)> {
         (0..rounds)
             .map(|_| {
                 let mut child = long_running_child();
@@ -552,7 +558,20 @@ mod tests {
                 let expected = expected.expect("the child's image became ping/sleep");
                 child.kill().unwrap();
                 child.wait().unwrap();
-                check(&SysinfoTable, &expected)
+                let verdict = check(&SysinfoTable, &expected);
+                let detail = if verdict == Match::NotRunning {
+                    String::new()
+                } else {
+                    let now = SysinfoTable.identity_of(pid);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let later = SysinfoTable.identity_of(pid);
+                    std::thread::sleep(std::time::Duration::from_millis(450));
+                    let much_later = SysinfoTable.identity_of(pid);
+                    format!(
+                        "{verdict:?}: recorded {expected:?}; now {now:?}; +50ms {later:?}; +500ms {much_later:?}"
+                    )
+                };
+                (verdict, detail)
             })
             .collect()
     }
@@ -566,13 +585,14 @@ mod tests {
         let handles: Vec<_> = (0..threads)
             .map(|_| std::thread::spawn(move || verdicts_for_killed_children(per_thread)))
             .collect();
-        let verdicts: Vec<Match> = handles
+        let verdicts: Vec<(Match, String)> = handles
             .into_iter()
             .flat_map(|h| h.join().expect("a round panicked"))
             .collect();
-        let bad: Vec<&Match> = verdicts
+        let bad: Vec<&String> = verdicts
             .iter()
-            .filter(|v| **v != Match::NotRunning)
+            .filter(|(v, _)| *v != Match::NotRunning)
+            .map(|(_, detail)| detail)
             .collect();
         assert!(
             bad.is_empty(),
