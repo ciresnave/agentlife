@@ -161,7 +161,7 @@ fn the_launcher_rule_reads_registry_intent_and_spec_state_together() {
         registry: &reg,
         lane_state_dir: state.path(),
         table: &table,
-        wake_enabled: false,
+        wake_enabled: std::cell::Cell::new(false),
     };
     assert_eq!(dir.lane("wanted"), Lane::Launchable);
     assert_eq!(
@@ -191,7 +191,7 @@ fn an_unreadable_registry_launches_nothing() {
         registry: &reg,
         lane_state_dir: state.path(),
         table: &table,
-        wake_enabled: false,
+        wake_enabled: std::cell::Cell::new(false),
     };
     assert_ne!(dir.lane("wanted"), Lane::Launchable);
 }
@@ -337,7 +337,7 @@ fn dir_over<'a>(reg: &'a Registry, state: &'a Path, table: &'a Nothing) -> Regis
         registry: reg,
         lane_state_dir: state,
         table,
-        wake_enabled: false,
+        wake_enabled: std::cell::Cell::new(false),
     }
 }
 
@@ -560,8 +560,8 @@ fn with_the_wake_path_on_a_soft_stop_and_a_crash_are_granted_and_nothing_else_is
     let reg = Registry::new(reg_dir.path());
     grant_fixture(&reg, state.path());
     let table = Nothing;
-    let mut dir = dir_over(&reg, state.path(), &table);
-    dir.wake_enabled = true;
+    let dir = dir_over(&reg, state.path(), &table);
+    dir.wake_enabled.set(true);
     // (role, granted, lane)
     for (role, granted, lane) in [
         ("soft", true, Lane::Launchable),
@@ -598,8 +598,8 @@ fn a_spec_alone_makes_a_registry_less_lane_known_only_with_the_wake_path_on() {
     std::fs::write(state.path().join("corrupt.launch.json"), "{ not json").unwrap();
     let table = Nothing;
     let off = dir_over(&reg, state.path(), &table);
-    let mut on = dir_over(&reg, state.path(), &table);
-    on.wake_enabled = true;
+    let on = dir_over(&reg, state.path(), &table);
+    on.wake_enabled.set(true);
     for (role, with_wake) in [
         ("soft", Lane::Launchable),
         ("crashed", Lane::Launchable),
@@ -624,8 +624,8 @@ fn a_hand_made_soft_stop_is_not_granted_and_a_signed_one_is() {
     let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let reg = Registry::new(reg_dir.path());
     let table = Nothing;
-    let mut dir = dir_over(&reg, state.path(), &table);
-    dir.wake_enabled = true;
+    let dir = dir_over(&reg, state.path(), &table);
+    dir.wake_enabled.set(true);
     // a real soft stop (signed by `write_atomic`) and a hard stop edited to read `soft`
     for role in ["signed", "forged"] {
         reg.create(&record(role, Intent::Wanted)).unwrap();
@@ -660,8 +660,8 @@ fn rule_seven_and_lane_restart_start_read_one_predicate() {
     let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let reg = Registry::new(reg_dir.path());
     let table = Nothing;
-    let mut dir = dir_over(&reg, state.path(), &table);
-    dir.wake_enabled = true;
+    let dir = dir_over(&reg, state.path(), &table);
+    dir.wake_enabled.set(true);
     let mut n = 0;
     for st in [
         SpecState::Running,
@@ -740,4 +740,50 @@ fn a_home_with_no_account_at_all_is_still_refused() {
             "{bad:?} is not an account name"
         );
     }
+}
+
+// The wake switch is re-read every cycle: turning it off again refuses a soft-stopped lane at once, and the
+// switched mechanism spawns nothing while it is off (a missing `lane-restart` shows when it is on).
+#[test]
+fn the_wake_switch_can_be_turned_off_again_and_the_switched_mechanism_obeys_it() {
+    use launcher::{MechResult, Mechanism};
+    let (reg_dir, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let reg = Registry::new(reg_dir.path());
+    spec_in_kind(
+        state.path(),
+        "soft",
+        SpecState::Suspended,
+        Some(StopKind::Soft),
+    );
+    let table = Nothing;
+    let dir = dir_over(&reg, state.path(), &table);
+    assert_eq!(dir.lane("soft"), Lane::Unknown, "off at the start");
+    dir.wake_enabled.set(true);
+    assert_eq!(dir.lane("soft"), Lane::Launchable, "on");
+    assert!(dir.granted("soft"));
+    dir.wake_enabled.set(false);
+    assert_eq!(
+        dir.lane("soft"),
+        Lane::Unknown,
+        "off again, no restart needed"
+    );
+    assert!(!dir.granted("soft"));
+
+    let mech = SwitchedMechanism {
+        inner: LaneRestartMechanism {
+            exe: state.path().join("no-such-lane-restart.exe"),
+            timeout: std::time::Duration::from_secs(1),
+        },
+        wake: &dir.wake_enabled,
+    };
+    assert_eq!(
+        mech.start("soft", "sonnet", "soft:1"),
+        MechResult::Failed("wake-off".into())
+    );
+    dir.wake_enabled.set(true);
+    assert_eq!(
+        mech.start("soft", "sonnet", "soft:1"),
+        MechResult::Failed("spawn-failed".into()),
+        "on: it tried the (missing) lane-restart"
+    );
 }

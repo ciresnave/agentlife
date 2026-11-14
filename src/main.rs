@@ -722,17 +722,29 @@ fn run_worktrees(json: bool, root: Option<String>, repos: Vec<String>) -> ExitCo
     ExitCode::SUCCESS
 }
 
+/// The Synapse home the launcher uses: the `synapse_home` config key, else `SYNAPSE_HOME`, else the
+/// platform default. A scheduled task has no `SYNAPSE_HOME`, hence the key.
+fn synapse_home_of(cfg: &Config) -> Result<std::path::PathBuf, String> {
+    if !cfg.synapse_home.is_empty() {
+        return Ok(std::path::PathBuf::from(&cfg.synapse_home));
+    }
+    synapse::keystore::default_home().map_err(|e| {
+        format!("no Synapse home (set synapse_home in <home>/config.json or SYNAPSE_HOME): {e}")
+    })
+}
+
 /// `agentlife launcher --clear <role>...`: POST /v1/launch-clear for each role as the launcher
 /// role (the Synapse credential is the trust root), print the result, exit 0 only if all cleared.
 fn run_launcher_clear(roles: &[String]) -> ExitCode {
     use agentlife::launcher_service as svc;
     use launcher::service::Source;
-    let home = match synapse::keystore::default_home() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("agentlife launcher: no Synapse home (set SYNAPSE_HOME): {e}");
+    let home = match app("launcher").map(|a| synapse_home_of(&a.cfg)) {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
+            eprintln!("agentlife launcher: {e}");
             return ExitCode::FAILURE;
         }
+        Err(code) => return code,
     };
     let source = match svc::SynapseSource::connect(&home) {
         Ok(s) => s,
@@ -817,20 +829,29 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         registry: &app.registry,
         lane_state_dir: &state_dir,
         table: &table,
-        wake_enabled: app.cfg.lazy_enabled,
+        wake_enabled: std::cell::Cell::new(app.cfg.lazy_enabled),
     };
+    // The wake switch is re-read every cycle (below), so the real mechanism is always built; while the
+    // switch is off it refuses to start anything. If `lane-restart` cannot be located the service
+    // still runs as a notifier, and refuses to start only if the switch is on.
     let real_mech;
-    let mech: &dyn launcher::Mechanism = if app.cfg.lazy_enabled {
+    let switched;
+    let mech: &dyn launcher::Mechanism = {
         let wait = std::time::Duration::from_secs((svc::LAUNCH_WAIT_SECS - 10).max(1) as u64);
         match svc::LaneRestartMechanism::sibling(wait) {
             Ok(m) => {
                 real_mech = m;
-                &real_mech
+                switched = svc::SwitchedMechanism {
+                    inner: real_mech,
+                    wake: &dir.wake_enabled,
+                };
+                &switched
             }
-            Err(e) => return fail(format!("cannot locate lane-restart: {e}")),
+            Err(e) if app.cfg.lazy_enabled => {
+                return fail(format!("cannot locate lane-restart: {e}"))
+            }
+            Err(_) => &svc::NoMechanism,
         }
-    } else {
-        &svc::NoMechanism
     };
     let mut engine = match Engine::open(&store, mech, &dir, init_store) {
         Ok(e) => e,
@@ -849,9 +870,9 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         Err(e) => return fail(format!("cannot resolve in-flight requests: {e}")),
     }
 
-    let home = match synapse::keystore::default_home() {
+    let home = match synapse_home_of(&app.cfg) {
         Ok(h) => h,
-        Err(e) => return fail(format!("no Synapse home (set SYNAPSE_HOME): {e}")),
+        Err(e) => return fail(e),
     };
     let source = match svc::SynapseSource::connect(&home) {
         Ok(s) => s,
@@ -871,11 +892,32 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
     let mut failures = 0u32;
     log(&format!(
         "started, wake path {} (lazy_enabled, from the flag, AGENTLIFE_LAZY_ENABLED or <home>/config.json), role {}",
-        if app.cfg.lazy_enabled { "ON" } else { "OFF: refuses every launch" },
+        if dir.wake_enabled.get() { "ON" } else { "OFF: refuses every launch" },
         lane_restart::start::LAUNCHER_ROLE
     ));
 
     let exit = loop {
+        // The wake switch is re-read every cycle, so turning it on or off needs no restart. A config that
+        // cannot be read reads as OFF (fail closed), and a change is logged.
+        let want = match Home::from_env()
+            .map_err(|e| e.to_string())
+            .and_then(|h| Config::load(&h, Layer::default()).map_err(|e| e.to_string()))
+        {
+            Ok(c) => c.lazy_enabled,
+            Err(e) => {
+                if dir.wake_enabled.get() {
+                    log(&format!("config unreadable, wake path OFF: {e}"));
+                }
+                false
+            }
+        };
+        if want != dir.wake_enabled.get() {
+            dir.wake_enabled.set(want);
+            log(&format!(
+                "wake path now {} (lazy_enabled re-read from the flag, AGENTLIFE_LAZY_ENABLED or <home>/config.json)",
+                if want { "ON" } else { "OFF: refuses every launch" }
+            ));
+        }
         // The caller record exists only while a valid session is held.
         if !holding {
             match source.session_ok() {
