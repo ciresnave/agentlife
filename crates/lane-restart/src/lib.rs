@@ -31,6 +31,7 @@ pub mod handlers;
 pub mod handoff_lint;
 pub mod host;
 pub mod host_boot;
+pub mod idle_stop;
 pub mod install;
 pub mod lane_new;
 pub mod lane_new_host;
