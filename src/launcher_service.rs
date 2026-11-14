@@ -299,8 +299,10 @@ impl RegistryDirectory<'_> {
 impl Directory for RegistryDirectory<'_> {
     fn lane(&self, role: &str) -> Lane {
         let Some(recs) = self.records(role) else {
-            // An unreadable registry launches nothing.
-            return Lane::Unknown;
+            // An unreadable registry launches nothing, but it is not a verdict on the role: the
+            // refusal is conditional and re-checked (a terminal `unknown-role` here once left three
+            // soft-stopped lanes unwakeable after a registry write raced the read).
+            return Lane::Unavailable;
         };
         // The role's intent is its CURRENT record's: the registry keeps one record per agent, so a
         // parked old agent and a wanted newer one can share a role, and the old row must not
@@ -308,7 +310,8 @@ impl Directory for RegistryDirectory<'_> {
         let Some(current) = recs.iter().max_by_key(|r| r.first_seen) else {
             // A registry-less lane is known by its spec alone, and only with the wake path on: a
             // spec the launcher may start from makes it launchable. A blocked or absent spec, or
-            // the wake path off, leaves it unknown, as before.
+            // the wake path off, leaves it unknown, as before (pinned by a test: an unsigned soft
+            // stop, a hard stop and a corrupt file all read `unknown-role` here).
             return match self.spec_verdict(role) {
                 SpecVerdict::Startable { .. } if self.wake_enabled => Lane::Launchable,
                 _ => Lane::Unknown,

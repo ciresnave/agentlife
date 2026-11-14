@@ -37,6 +37,7 @@ struct Dir {
     closed: BTreeSet<String>,
     grant: Cell<bool>,
     running: Cell<bool>,
+    unavailable: Cell<bool>,
 }
 
 impl Dir {
@@ -46,13 +47,16 @@ impl Dir {
             closed: BTreeSet::new(),
             grant: Cell::new(true),
             running: Cell::new(false),
+            unavailable: Cell::new(false),
         }
     }
 }
 
 impl Directory for Dir {
     fn lane(&self, role: &str) -> Lane {
-        if self.unknown.contains(role) {
+        if self.unavailable.get() {
+            Lane::Unavailable
+        } else if self.unknown.contains(role) {
             Lane::Unknown
         } else if self.closed.contains(role) {
             Lane::ClosedOnPurpose
@@ -701,4 +705,31 @@ fn with_no_grant_the_reason_is_still_no_grant_whatever_the_allowlist_says() {
         let r = e.handle(&sig("fuel", id, 1), 1000);
         assert_eq!(got(&r), res(Outcome::Refused, "no-grant"), "{confirmed}");
     }
+}
+
+// A registry that cannot be read for a moment is not a verdict on the role: the refusal is conditional
+// (`registry-unreadable`), never the terminal `unknown-role`, and the service clears it itself once the
+// registry reads again, so Synapse re-raises the signal.
+#[test]
+fn an_unreadable_registry_is_a_conditional_refusal_that_clears_itself() {
+    let (io, m, d) = (Mem::new(), started(), Dir::new());
+    let mut e = open(&io, &m, &d);
+    d.unavailable.set(true);
+    let r = e.handle(&sig("fuel", 1, 1), 100);
+    assert_eq!(r.outcome, Outcome::Refused);
+    assert_eq!(r.reason, "registry-unreadable");
+    assert!(m.calls.borrow().is_empty(), "nothing was started");
+    assert!(
+        e.recheck(110).unwrap().is_empty(),
+        "still unreadable: not cleared yet"
+    );
+    d.unavailable.set(false);
+    assert_eq!(e.recheck(130).unwrap(), vec!["fuel".to_string()]);
+    // control: a role the registry really does not know stays a terminal refusal, never re-checked
+    let mut d2 = Dir::new();
+    d2.unknown.insert("ghost".into());
+    let (io2, m2) = (Mem::new(), started());
+    let mut e2 = open(&io2, &m2, &d2);
+    assert_eq!(e2.handle(&sig("ghost", 1, 1), 100).reason, "unknown-role");
+    assert!(e2.recheck(200).unwrap().is_empty());
 }
