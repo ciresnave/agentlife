@@ -18,3 +18,19 @@ Tests: `crates/gpu-run` unit tests (arguments, lines, timestamps) and `scripts/g
 (bash: exit code, log, lockfile, mutual exclusion, nesting, killed-holder reclaim). UNMEASURED: the
 interleave with the ps1 (`scripts/gpu-run-native-test.sh <exe> <gpu-run.ps1>`), which needs a PowerShell
 that can start; the harness prints SKIPPED, not a pass, when it cannot. The fuel/baracuda copies are untouched.
+
+## Install path (PM 2026-11-15)
+
+Runners are separate accounts, so the exe lives in one machine-wide directory, like `C:\sccache`:
+
+    cargo install --path crates/gpu-run --root C:\gpu-run --locked
+    # -> C:\gpu-run\bin\gpu-run.exe ; callers: C:\gpu-run\bin\gpu-run.exe -Project fuel -- <cmd>
+
+Re-run it after each change to `crates/gpu-run` (cargo install replaces the exe). Not installed yet: the
+install is a machine change, done after this merges and CireSnave/the PM say so.
+
+## Log timestamps: UTC here, local offset in the ps1
+
+`gpu-run.log` lines from this exe read `2026-11-15T13:09:00.1234567Z` (UTC); the ps1 writes
+`2026-11-15T06:09:00.1234567-07:00` (local, the same instant). Mixed logs are still in time order
+when read by instant, not by text.
