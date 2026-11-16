@@ -1,0 +1,17 @@
+[package]
+name = "gpu-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Native gpu-run: the Global\\gpu-run mutex wrapper of baracuda/fuel scripts/gpu-run.ps1 (v3) as an exe, so GPU jobs start without PowerShell (and without its AMSI wait)."
+
+[[bin]]
+name = "gpu-run"
+path = "src/main.rs"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Memory"] }
