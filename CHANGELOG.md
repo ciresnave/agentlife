@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.72 — Added: native Windows `gpu-run` exe (no PowerShell)
+
+Added `gpu-run`, a native Windows exe (crates/gpu-run) of baracuda/fuel `scripts/gpu-run.ps1` v3: the same `Global\gpu-run` mutex and ACL, the same `%TEMP%\gpu-run.lock` and `gpu-run.log` lines, `GPU_RUN_HELD` nesting, abandoned and stale-lock reclaim, so GPU jobs start without PowerShell. Measured: 0.09 s to start while `powershell -NoProfile -Command 1` hangs over 60 s on the Defender-frozen host. A bash harness (`scripts/gpu-run-native-test.sh`) tests it; the interleave with the ps1 is skipped when PowerShell cannot start. The fuel/baracuda copies are untouched.
+
 ## 0.30.71 — SUPERVISION-DESIGN 8a rewritten for CireSnave's board 437 ruling (idle is a state, N and M learned, only the PM excluded)
 
 Idle is now a state (judged externally or asserted by the agent) and quiet time only a further check that can delay a stop; N and M are measured and adapted per lane with the first guesses (30 min, 60 min) as initial values; the only exclusion is the PM; the dry-run day stays; a stopped lane is noticed through the ledger. `idle_stop.rs` comments follow. Docs and comments only; the adaptation, gatherer and ledger writer are not built and every number is UNMEASURED.
