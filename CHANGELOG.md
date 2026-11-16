@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.73 — Fixed: gpu-run bash harness no longer races the holder start
+
+`scripts/gpu-run-native-test.sh` waited a fixed 1 s for the first holder to take the lock; on a loaded host the exe took longer to start, so the "B waited / WAIT logged" check failed 1 run in 3 against the installed release exe (measured 2026-11-15). It now polls for the lockfile (up to 10 s). 5 runs in a row pass after the change; the exe itself is unchanged.
+
 ## 0.30.72 — Added: native Windows `gpu-run` exe (no PowerShell)
 
 Added `gpu-run`, a native Windows exe (crates/gpu-run) of baracuda/fuel `scripts/gpu-run.ps1` v3: the same `Global\gpu-run` mutex and ACL, the same `%TEMP%\gpu-run.lock` and `gpu-run.log` lines, `GPU_RUN_HELD` nesting, abandoned and stale-lock reclaim, so GPU jobs start without PowerShell. Measured: 0.09 s to start while `powershell -NoProfile -Command 1` hangs over 60 s on the Defender-frozen host. A bash harness (`scripts/gpu-run-native-test.sh`) tests it; the interleave with the ps1 is skipped when PowerShell cannot start. The fuel/baracuda copies are untouched.
