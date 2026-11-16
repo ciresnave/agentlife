@@ -32,7 +32,8 @@ check "lockfile removed after a clean exit" "[ ! -e '$LOCK' ]"
 : > "$LOG"
 a0=$(now)
 "$EXE" -Project A -- cmd /c "ping -n 5 127.0.0.1 >nul" & pa=$!
-sleep 1
+# wait until A really holds the lock (its start took 0.5-1 s on a loaded box; a fixed sleep raced)
+for _ in $(seq 1 100); do [ -s "$LOCK" ] && break; sleep 0.1; done
 lockjson=$(cat "$LOCK" 2>/dev/null)
 check "lockfile while held has the ps1 keys" "echo '$lockjson' | grep -Eq '^\{\"v\":1,\"sv\":3,\"pid\":[0-9]+,\"project\":\"A\",\"cmd\":\".*\",\"start\":\".*\"\}\$'"
 b0=$(now)
@@ -52,7 +53,7 @@ check "log has 'nested gpu-run' pass-through" "grep -q 'nested gpu-run' '$LOG'"
 # 4. stale lock: kill the holder hard, the next run reclaims loudly
 : > "$LOG"
 "$EXE" -Project victim -- cmd /c "ping -n 30 127.0.0.1 >nul" & pv=$!
-sleep 1
+for _ in $(seq 1 100); do [ -s "$LOCK" ] && break; sleep 0.1; done
 holder=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$LOCK")
 taskkill /F /T /PID "$holder" >/dev/null 2>&1
 kill $pv 2>/dev/null
