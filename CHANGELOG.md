@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.74 — Changed: portfolio checks run CodeRipper 0.47.5
+
+CI pins the shared portfolio workflow at coderipper c72a6e0 (coderipper#356), which installs CodeRipper 0.47.5 (was 33cc3b7, 0.43.49). `tools/migrate-rule-ids.py --dry-run` from that SHA reports nothing to migrate: this repo names no renamed rule. The Portfolio job of this PR is the evidence for new findings.
+
 ## 0.30.73 — Fixed: gpu-run bash harness no longer races the holder start
 
 `scripts/gpu-run-native-test.sh` waited a fixed 1 s for the first holder to take the lock; on a loaded host the exe took longer to start, so the "B waited / WAIT logged" check failed 1 run in 3 against the installed release exe (measured 2026-11-15). It now polls for the lockfile (up to 10 s). 5 runs in a row pass after the change; the exe itself is unchanged.
