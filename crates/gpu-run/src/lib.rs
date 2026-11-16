@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Pure parts of the native `gpu-run`: argument parsing, the log line, the lockfile JSON, the
 //! stale-pid read and the timestamp. The protocol is the one in baracuda/fuel
 //! `scripts/gpu-run.ps1` v3: mutex `Global\gpu-run`, metadata lockfile `%TEMP%\gpu-run.lock`,

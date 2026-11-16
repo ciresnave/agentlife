@@ -65,10 +65,19 @@ impl fmt::Display for LockError {
 impl std::error::Error for LockError {}
 
 /// A held lock. Dropping it releases it.
-#[derive(Debug)]
 pub struct FileLock {
     path: PathBuf,
     token: String,
+}
+
+impl std::fmt::Debug for FileLock {
+    /// The token is the lock's secret; it is never printed (portfolio rule SEC-012).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileLock")
+            .field("path", &self.path)
+            .field("token", &format_args!("<redacted>"))
+            .finish()
+    }
 }
 
 /// This process's start time (Unix seconds), read once; `None` when the process table cannot be
@@ -227,6 +236,24 @@ mod tests {
     fn the_production_constants_let_a_waiter_reclaim_before_giving_up() {
         // The OverMind bug: timeout 2 s < stale 5 s meant nobody could ever reclaim in time.
         assert!(DEFAULT_ACQUIRE_TIMEOUT > DEFAULT_STALE_AFTER);
+    }
+
+    #[test]
+    fn debug_output_never_carries_the_token() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("dbg.lock");
+        let l = FileLock::acquire(&p, Duration::from_secs(1), Duration::from_secs(5)).unwrap();
+        let shown = format!("{l:?}");
+        // The messages name no value: a failure must not print the token it is about.
+        assert!(
+            !shown.contains(&l.token),
+            "Debug output of FileLock contains the token"
+        );
+        assert!(
+            shown.contains("<redacted>"),
+            "the token field must say it is redacted"
+        );
+        assert!(shown.contains("dbg.lock"), "the path is still shown");
     }
 
     #[test]

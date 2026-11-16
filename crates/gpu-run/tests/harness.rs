@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Runs scripts/gpu-run-native-test.sh (the bash harness) against the built exe. Windows only; it
 //! takes the machine-wide `Global\gpu-run` mutex, so it must not run beside a real GPU job.
 #![cfg(windows)]
