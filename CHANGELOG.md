@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.71 — SUPERVISION-DESIGN 8a rewritten for CireSnave's board 437 ruling (idle is a state, N and M learned, only the PM excluded)
+
+Idle is now a state (judged externally or asserted by the agent) and quiet time only a further check that can delay a stop; N and M are measured and adapted per lane with the first guesses (30 min, 60 min) as initial values; the only exclusion is the PM; the dry-run day stays; a stopped lane is noticed through the ledger. `idle_stop.rs` comments follow. Docs and comments only; the adaptation, gatherer and ledger writer are not built and every number is UNMEASURED.
+
 ## 0.30.70 — runners clean up after every job: job-completed hook, apply and measure scripts
 
 CireSnave 2026-11-14: runners of every type must clean up after each run. `scripts/runner-job-cleanup-hook.ps1` is a `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` hook that empties `_work`, `_temp`, `cargo-target`, `cargo-home`, `cb`, `npm-cache` and `playwright-browsers` inside the runner dir it sits in (it refuses a folder without `config.cmd`; a junction is removed as a link). `gh-runner-setup.ps1` copies it into each runner dir and puts the hook path, `CARGO_TARGET_DIR`, `CARGO_HOME` and `CARGO_BUILD_BUILD_DIR` in that runner's `.env`, all INSIDE the runner dir (CARGO_HOME moved from `<Root>\cargo-home`; a re-arm already deletes and re-extracts the dir). `scripts/runner-cleanup-apply.ps1` does the same for the three owner-run runners (idempotent `.env` edit, never printed, only idle listeners restarted) (it also deletes the leftover `bin.<x.y.z>`/`externals.<x.y.z>` self-update copies, about 0.7 GB per runner) and `scripts/runner-measure.ps1` is the elevated read-only size report. Verified by `tests/runner_cleanup_hook.rs` (real process) and the extended env tests; the setup script's other test files still pass. UNMEASURED: a live job through the hook, the elevated measure run, the apply run on the live runners.
