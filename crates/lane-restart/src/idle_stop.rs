@@ -3,8 +3,8 @@
 //! The idle-stop verdict (SUPERVISION-DESIGN.md section 8a): would this lane be soft-stopped now?
 //!
 //! Pure and dry-run only. It reads nothing and stops nothing; a caller gathers the [`Inputs`] and
-//! reports the [`Verdict`]. The numbers are [`Params`], which have NO default here: CireSnave has
-//! not ruled on N, N2, W, K and M (board 437), so a caller must name them and nothing switches on.
+//! reports the [`Verdict`]. The numbers are [`Params`], which have NO default here: N and M are learned
+//! per lane (board 437), so a caller passes the current values and nothing switches on.
 //!
 //! The self-idle assertion is the existing `lane-restart assert-idle` (`no_background_shells =
 //! Some(true)`); any later busy hook clears it, so [`LaneState::is_idle`] already means "the lane
@@ -42,7 +42,7 @@ pub struct Inputs<'a> {
     /// The soonest WAIT wake time in its HANDOFF.
     pub next_wait_due: Option<DateTime<Utc>>,
     pub handoff_written: bool,
-    /// The PM, Unpopped, Fuel and the tier-0 lanes, plus anything added by name.
+    /// The PM only (CireSnave, board 437, 2026-11-14: no other lane is excluded).
     pub excluded: bool,
 }
 
