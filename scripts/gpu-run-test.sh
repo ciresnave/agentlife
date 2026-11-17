@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
 # Tests for gpu-run.sh. No root needed: GPU_RUN_LOCK / GPU_RUN_STATE_DIR point into a temp dir.
 # Usage: gpu-run-test.sh /path/to/gpu-run.sh
 set -u

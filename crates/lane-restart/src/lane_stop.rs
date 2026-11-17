@@ -391,13 +391,14 @@ mod tests {
         s
     }
 
-    fn write_handoff(cwd: &Path, secs_after_start: i64) -> DateTime<Utc> {
+    /// Writes `cwd/HANDOFF.md` with its mtime `secs_after_start` after the state's start. Every
+    /// caller used to discard the returned time (CodeRipper ERR-012), so it returns nothing.
+    fn write_handoff(cwd: &Path, secs_after_start: i64) {
         let p = cwd.join("HANDOFF.md");
         std::fs::write(&p, "state\n").unwrap();
         let when = Utc.timestamp_opt(1_000 + secs_after_start, 0).unwrap();
         let f = std::fs::File::options().write(true).open(&p).unwrap();
         f.set_modified(when.into()).unwrap();
-        when
     }
 
     fn plan_for(state: LaneState, self_stop: bool) -> Result<StopPlan, StopRefusal> {

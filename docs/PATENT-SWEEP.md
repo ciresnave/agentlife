@@ -1,4 +1,4 @@
-# Patent sweep: agentlife 0.29.60 @ ae50a09
+# Patent sweep: agentlife 0.29.60 @ ae50a09 (addendum for 0.30, 2026-11-16, no new search)
 
 Date: 2026-10-31; Run by: agentlife lane, Claude Sonnet 5.5; Method: AI-assisted web search of patents.google.com results and claim reading with `tools/patent-claims.py`. **A due-diligence read, NOT legal advice and NOT a freedom-to-operate opinion.** It is **thin**: one search per idea, the first page of results each, claims read for seven patents. Nothing here says the project is clear of any patent; it says what was looked at, and what was not.
 
@@ -71,3 +71,16 @@ None *as read*. That is a statement about seven patents and about claim text, no
 - **AI-assisted reading.** Read by a model; a person who knows the claims should confirm any "outside as read".
 - **Prior-art papers are not part of this**, and the evidence index CodeRipper's `patent-index-match` uses (a dependency-level check) is a different thing from this sweep.
 - Before a first publish of any crate from this repository: repeat with the databases above, read the UNREAD list, and have the project manager check the version line this file names against the manifest.
+
+## Addendum for 0.30 (2026-11-16): what changed since 0.29.60, and what was NOT searched
+
+**No search was run for this addendum.** The sweep above is dated 2026-10-31 and read at 0.29.60; the manifest is now at 0.30.x. This section says what is new, which of the eight ideas above it falls under, and what a new sweep should query. It is not a clearance of anything.
+
+| New in 0.30 (CHANGELOG) | Relates to | Searched? |
+|---|---|---|
+| Launcher service hardening: `lazy_enabled` re-read each cycle, `launcher --clear`, `install-task` registers the launcher task (0.30.54-0.30.67) | idea 7 (wake-on-message launcher) | covered by query 7 only as before; nothing new searched |
+| `idle_stop::verdict`, the dry-run rule for an idle soft stop, with per-lane learned quiet time and wake-ahead (0.30.69, SUPERVISION-DESIGN 8a) | ideas 5 and 6 (agent asserts idle; soft/hard stop) | NOT searched: "learned idle threshold" is a new claim shape |
+| Per-job runner cleanup hook and apply/measure scripts (0.30.70) | none of the eight (CI runner housekeeping) | NOT searched; mechanism is the GitHub runner's own `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` |
+| Native `gpu-run` exe: a named-mutex wrapper with a lockfile and log (0.30.72) | none of the eight | NOT searched; the protocol is a port of the baracuda/fuel `gpu-run.ps1`, itself a named mutex around a command |
+
+For the next sweep: one query each for the idle-threshold learning (query shape like 5 and 7: `patent software agent idle threshold learned per agent soft stop restart on message`) and for GPU job serialization by a named mutex; repeat the UNREAD list above; and re-check the manifest version against this file's first line (CodeRipper rule WSP-013).

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
 # Tests the native gpu-run.exe (crates/gpu-run) in a bash harness, no PowerShell involved:
 #   exit code, log + lockfile lines, mutual exclusion, nesting, stale-lock reclaim.
 # Then, only if PowerShell answers within 20 s, interleaves it with a gpu-run.ps1 given as $2

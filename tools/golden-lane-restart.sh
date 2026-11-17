@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
 # thin-main golden-output check (PM ruling 2026-11-01: each PR of the series keeps behaviour identical).
 # Usage: tools/golden-lane-restart.sh <lane-restart built from main> <lane-restart built from the branch>
 # Runs hermetic invocations (own temp dir each, no lane state) against both and diffs stdout, stderr
