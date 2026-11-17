@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.77 — ci: deny.toml ignores RUSTSEC-2026-0543 (chrono) until 2026-12-17
+
+PM ruling 2026-11-17 (pm-platform): chrono 0.4.45 is unmaintained (RUSTSEC-2026-0543, "No safe upgrade is available!"), so `cargo deny check advisories` failed. `deny.toml` ignores that one id with a reason and an expiry of 2026-12-17; ROADMAP row O10 tracks the move to jiff or time. After the change `cargo deny check` is clean (output in the PR body).
+
 ## 0.30.76 — docs: root ROADMAP.md
 
 Docs only: a short root `ROADMAP.md` (PM TASK, pm-platform 2026-11-16: absent on the default branch). Done rows D1-D6 each name their proof; the lane-restart idle_stop (6) and lane_new (56) tests were run at d4c7323 and pass. Open rows O1-O9 carry state and owner. `docs/ROADMAP.md` keeps the history.
