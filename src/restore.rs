@@ -763,10 +763,19 @@ pub fn write_report(home: &Home, report: &Report) -> std::io::Result<PathBuf> {
 
 /// One restore at a time. The file names its owner by pid and process start time; a second run is
 /// told who holds it, and a lock whose owner is gone is reclaimed.
-#[derive(Debug)]
 pub struct RestoreLock {
     path: PathBuf,
     token: String,
+}
+
+impl std::fmt::Debug for RestoreLock {
+    /// The token is the lock's secret; it is never printed (portfolio rule SEC-012).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestoreLock")
+            .field("path", &self.path)
+            .field("token", &format_args!("<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1827,6 +1836,16 @@ mod tests {
         };
         let both_alive = Alive(HashMap::from([(500, 50), (600, 60)]));
         let first = RestoreLock::acquire(&home, &me, &both_alive).unwrap();
+        // Debug must not print the token (no value in the failure message either).
+        let shown = format!("{first:?}");
+        assert!(
+            !shown.contains(&first.token),
+            "Debug output of RestoreLock contains the token"
+        );
+        assert!(
+            shown.contains("<redacted>"),
+            "the token field must say it is redacted"
+        );
         // A second run is told who holds it.
         assert_eq!(
             RestoreLock::acquire(&home, &other, &both_alive).unwrap_err(),

@@ -201,10 +201,19 @@ pub enum RestoreLockError {
 
 /// `<home>/restore.lock`, held while a launcher start runs. Same file and same body
 /// (`<pid> <start secs>`) as `agentlife`'s `RestoreLock`, so each sees the other's.
-#[derive(Debug)]
 pub struct RestoreLockGuard {
     path: PathBuf,
     token: String,
+}
+
+impl std::fmt::Debug for RestoreLockGuard {
+    /// The token is the lock's secret; it is never printed (portfolio rule SEC-012).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestoreLockGuard")
+            .field("path", &self.path)
+            .field("token", &format_args!("<redacted>"))
+            .finish()
+    }
 }
 
 impl RestoreLockGuard {
@@ -478,6 +487,16 @@ mod tests {
         let g = RestoreLockGuard::acquire(d.path(), &f).unwrap();
         let body = std::fs::read_to_string(d.path().join("restore.lock")).unwrap();
         assert_eq!(body, format!("{} 4242", std::process::id()));
+        // Debug must not print the token (no value in the failure message either).
+        let shown = format!("{g:?}");
+        assert!(
+            !shown.contains(&g.token),
+            "Debug output of RestoreLockGuard contains the token"
+        );
+        assert!(
+            shown.contains("<redacted>"),
+            "the token field must say it is redacted"
+        );
         drop(g);
         assert!(!d.path().join("restore.lock").exists());
     }

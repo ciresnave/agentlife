@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use super::*;
 use crate::lane_new_host::ProvisionCounts;
 use crate::spec_synapse::{DEV_CHANNELS, PEERS};

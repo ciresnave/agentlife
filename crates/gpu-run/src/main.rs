@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `gpu-run -Project <name> -- <cmd> <args...>`: baracuda/fuel `scripts/gpu-run.ps1` (v3) as a native
 //! exe. Same mutex (`Global\gpu-run`, same ACL), same lockfile and log, same nesting variables, so it
 //! interleaves with the PowerShell copies. Windows only.
