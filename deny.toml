@@ -10,6 +10,10 @@ version = 2
 # Owner: the synapse lane (ThinkersJournal/synapse#318).
 # Remove this entry when: a synapse release without async-imap 0.12.0 is the version we depend on.
 ignore = [
+    # PM ruling 2026-11-17 (pm-platform): chrono is unmaintained, all versions affected, "No safe upgrade is available!"
+    # (RUSTSEC-2026-0543; alternatives jiff or time). 0.4.45 reaches us directly and via synapse. Ignored by id, with an
+    # expiry; ROADMAP row O10 moves us off it. EXPIRES 2026-12-17: remove this entry, or renew it with a new ruling.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no safe upgrade; PM ruling 2026-11-17; expires 2026-12-17; move to jiff or time (ROADMAP O10)" },
     { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained, transitive via synapse -> async-imap 0.12.0; owner synapse lane (synapse#318); remove once a synapse release drops async-imap 0.12.0" },
 ]
 
