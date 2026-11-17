@@ -29,3 +29,4 @@ Versions are allocated by the PM at gate time. "Who" is the only thing that can 
 | O7 | Elevated `runner-measure` result and the `ghr-baracuda.TUF-LAPTOP.00x` profile question | wait on a UAC approval; no profile is deleted | CireSnave |
 | O8 | Portfolio 0.47.5 style findings GOV-010 (28) and TYP-007 (25) | left for later by the PM | lane |
 | O9 | Issues #228 and #284 (close review 2026-12-02, act on a second sample), #14 (declined; reopen on a Linux failure log with `proc_start_ticks` stable while `btime` moved) | decided | weekly sweep |
+| O10 | Move off `chrono` (RUSTSEC-2026-0543, unmaintained, all versions) to `jiff` or `time`; it is ours directly (agentlife, lane-restart, lane-state) and via synapse, auto-discovery, user-request | `deny.toml` ignore expires 2026-12-17 (PM ruling 2026-11-17); done when `cargo deny check advisories` passes with the ignore removed | lane; the synapse-side uses wait on those releases |
