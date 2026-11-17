@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.76 — docs: root ROADMAP.md
+
+Docs only: a short root `ROADMAP.md` (PM TASK, pm-platform 2026-11-16: absent on the default branch). Done rows D1-D6 each name their proof; the lane-restart idle_stop (6) and lane_new (56) tests were run at d4c7323 and pass. Open rows O1-O9 carry state and owner. `docs/ROADMAP.md` keeps the history.
+
 ## 0.30.75 — Fixed: lock Debug output redacts the token; SPDX headers; patent-sweep addendum for 0.30
 
 CodeRipper 0.47.5 findings on this repo, fixed: SEC-012 (`FileLock`, `RestoreLock`, `RestoreLockGuard` derived `Debug` printed their `token`; they now print `<redacted>`, with a red-first test each that names no value in its failure message), SUP-016 (SPDX header on the six `.rs` and three shell files that lacked one (the two gpu-run scripts and tools/golden-lane-restart.sh), including `crates/gpu-run`), WSP-013 (docs/PATENT-SWEEP.md names 0.30 in its first line and carries an addendum saying what is new since 0.29.60 and that NO new search was run), ERR-012 (the `write_handoff` helper in lane_stop.rs tests returned a time every caller discarded; it returns nothing). GOV-010 and TYP-007 (style) are left for later.
