@@ -1,3 +1,0 @@
-kind: security: lettre 0.11.24 (RUSTSEC-2026-0560 to -0565)
----
-Hotfix (PM TASK 2026-11-18): `cargo update -p lettre` takes lettre 0.11.23 to 0.11.24 (and email-encoding 0.4.2 to 0.4.3), fixing the STARTTLS response injection (RUSTSEC-2026-0560), the missing dot-stuffing SMTP command injection (-0561), the EHLO-reply DoS panic and the rest of -0562 to -0565. Lock-only. agentlife sends no mail with lettre itself: it arrives through `synapse` 6.0.0-rc.123 feature `email` (via `native-base`), which agentlife and synapsed-client enable. `cargo audit` on the old lock exits 1 listing 0560-0565; on the new lock it exits 0. `cargo deny check` is clean.
