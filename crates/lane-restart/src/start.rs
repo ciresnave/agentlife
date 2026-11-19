@@ -18,7 +18,9 @@
 
 use crate::duplicate::{self, DuplicateRefusal};
 use crate::facts::SystemFacts;
-use crate::launch::{launch_and_wait_with, prepare_launch, LaunchSpec, LivenessTiming, SpawnFn};
+use crate::launch::{
+    launch_and_wait_with, prepare_launch_for, LaunchSpec, LivenessTiming, SpawnFn,
+};
 use crate::permission_mode::PermissionMode;
 use crate::relaunch::{valid_identifier, RelaunchError, RelaunchOutcome, StateReader};
 use crate::spec::{
@@ -423,6 +425,9 @@ pub struct StartPlan {
     pub spec: SpecFile,
     /// What `heal_synapse` added to the recorded launch arguments, when it did.
     pub healed: Option<String>,
+    /// The mail-waiting signal id when the LAUNCHER started this lane: the first prompt then tells the
+    /// lane to fetch its inbox first. `None` for a person or a restart (the generic prompt).
+    pub wake_signal: Option<String>,
 }
 
 /// Every check, in the order of 14.5; nothing is spawned or written.
@@ -496,7 +501,13 @@ pub fn plan_start(
         crate::spec_channels::Heal::NotNeeded => None,
     };
     let launch = effective.launch_spec();
-    let prepared = prepare_launch(&launch, &effective.model, None).map_err(StartRefusal::Launch)?;
+    let wake_signal = if launcher {
+        req.signal_id.map(str::to_string)
+    } else {
+        None
+    };
+    let prepared = prepare_launch_for(&launch, &effective.model, None, wake_signal.as_deref())
+        .map_err(StartRefusal::Launch)?;
     let previous_session = state::load(dir, req.role).ok().map(|s| s.session_id);
     Ok(StartPlan {
         model: effective.model.clone(),
@@ -507,6 +518,7 @@ pub fn plan_start(
         launch,
         spec: effective,
         healed,
+        wake_signal,
     })
 }
 
@@ -563,6 +575,7 @@ pub fn execute_start(
         timing,
         &plan.model,
         None,
+        plan.wake_signal.as_deref(),
         spawn,
         sleep,
         on_awaiting,
@@ -804,6 +817,48 @@ mod tests {
             !matches!(e, Err(StartRefusal::NoSignal) | Err(StartRefusal::NotPm(_))),
             "{e:?}"
         );
+    }
+
+    /// PM ruling 2026-11-19: a lane the launcher starts because mail arrived is told so, and to fetch
+    /// its inbox FIRST; a lane started by a person or a restart keeps the generic prompt.
+    #[test]
+    fn a_launcher_start_carries_the_mail_prompt_and_a_pm_start_the_generic_one() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        set_kind(d.path(), "baracuda", Some("soft"));
+        let mut r = req("baracuda");
+        r.signal_id = Some("baracuda:2026-11-19T15:48:49.123Z");
+        let p = plan_start(
+            d.path(),
+            &r,
+            Ok("launcher:agentlife-launcher".to_string()),
+            &facts,
+        )
+        .unwrap();
+        let prompt = p.argv[1].clone();
+        assert!(
+            prompt.starts_with("You were started because mail arrived for you"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("baracuda:2026-11-19T15:48:49.123Z"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Fetch your inbox FIRST"), "{prompt}");
+        assert!(
+            prompt.contains("read baracuda HANDOFF") && prompt.contains("arm every WAIT"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains(';'), "wt.exe would split on it: {prompt}");
+        assert_eq!(
+            p.wake_signal.as_deref(),
+            Some("baracuda:2026-11-19T15:48:49.123Z")
+        );
+        // control: the PM starting the same lane, even with a signal id, gets the generic prompt
+        let pm = plan_start(d.path(), &r, Ok("pm".to_string()), &facts).unwrap();
+        assert_eq!(pm.argv[1], crate::launch::startup_prompt("baracuda"));
+        assert_eq!(pm.wake_signal, None);
+        assert_ne!(prompt, pm.argv[1]);
     }
 
     fn set_kind(dir: &Path, role: &str, kind: Option<&str>) {
