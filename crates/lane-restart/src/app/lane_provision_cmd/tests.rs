@@ -19,6 +19,12 @@ impl Host for NoHost {
     fn disk_floor(&self, _: &Path) -> Result<(), String> {
         Ok(())
     }
+    fn role_epoch(&self, _: &str) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
+    fn claim(&self, _: &str) -> Result<(), String> {
+        Err("a dry run must not claim".to_string())
+    }
     fn provision(&self, _: &Path) -> Result<ProvisionCounts, String> {
         Err("a dry run must not provision".to_string())
     }

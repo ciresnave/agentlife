@@ -84,6 +84,14 @@ impl Host for FakeHost {
             other: 0,
         })
     }
+    fn role_epoch(&self, role: &str) -> Result<Option<u64>, String> {
+        let claimed = self.calls.borrow().contains(&format!("claim {role}"));
+        Ok(claimed.then_some(1))
+    }
+    fn claim(&self, role: &str) -> Result<(), String> {
+        self.calls.borrow_mut().push(format!("claim {role}"));
+        Ok(())
+    }
     fn start(&self, _: &str, _: &str) -> Result<i32, String> {
         self.calls.borrow_mut().push("START".into());
         Ok(0)
@@ -162,7 +170,11 @@ fn apply_writes_the_config_provisions_once_brings_the_spec_to_the_full_form_and_
     for n in [3, 6, 4] {
         assert_eq!(status(&rep, n), Status::Ok, "step {n}");
     }
-    assert_eq!(host.calls(), vec!["provision bitman"], "never START");
+    assert_eq!(
+        host.calls(),
+        vec!["provision bitman", "claim bitman"],
+        "never START"
+    );
     // the config is the standard one, read back
     let t = std::fs::read_to_string(r.state_dir.join("bitman.mcp.json")).unwrap();
     assert_eq!(
@@ -197,8 +209,8 @@ fn rerunning_converges_every_step_is_already_and_nothing_is_provisioned_again() 
     }
     assert_eq!(
         host.calls(),
-        vec!["provision bitman"],
-        "provisioned once in all"
+        vec!["provision bitman", "claim bitman"],
+        "provisioned once and claimed once in all"
     );
 }
 
@@ -261,8 +273,9 @@ fn a_conflicting_mcp_json_is_not_overwritten_and_a_working_own_setup_is_kept() {
     assert_eq!(status(&rep, 3), Status::Already);
     assert_eq!(status(&rep, 6), Status::Already);
     assert_eq!(status(&rep, 4), Status::Ok);
-    assert!(
-        host.calls().is_empty(),
-        "the lane's own identity is not re-provisioned"
+    assert_eq!(
+        host.calls(),
+        vec!["claim kiss"],
+        "the lane's own identity is not re-provisioned; only its role is made known"
     );
 }

@@ -222,6 +222,22 @@ pub fn run(
         }
     }
 
+    // --- step 6b: the daemon must know the role (a never-claimed role cannot queue or wake) ----------
+    if let Some(h) = host {
+        match crate::lane_new::step_claim(h, role, apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 6,
+                name: "synapse claim",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 6, "synapse claim", e);
+                return done(rows, apply);
+            }
+        }
+    }
+
     // --- step 4: launch arguments to the full push-channel form ---------------------------------
     // A dry run cannot ask `rewrite_roles` while the config it needs is still to be written.
     if !apply && !mcp_path.exists() {
