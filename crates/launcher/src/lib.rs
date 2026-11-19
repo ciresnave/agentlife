@@ -68,6 +68,25 @@ pub struct LaunchResult {
     pub reason: String,
 }
 
+/// `role=<r> outcome=<started|already-running|refused:<why>|failed:<why>>`: one result as the service log
+/// prints it. A reason is appended only to the two outcomes that carry one.
+pub fn result_text(r: &LaunchResult) -> String {
+    let why = |name: &str| {
+        if r.reason.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}:{}", r.reason)
+        }
+    };
+    let outcome = match r.outcome {
+        Outcome::Started => "started".to_string(),
+        Outcome::AlreadyRunning => "already-running".to_string(),
+        Outcome::Refused => why("refused"),
+        Outcome::Failed => why("failed"),
+    };
+    format!("role={} outcome={outcome}", r.role)
+}
+
 /// What the mechanism (start one lane by role) reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MechResult {
