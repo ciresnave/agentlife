@@ -69,7 +69,8 @@ pub struct LaunchResult {
 }
 
 /// `role=<r> outcome=<started|already-running|refused:<why>|failed:<why>>`: one result as the service log
-/// prints it. A reason is appended only to the two outcomes that carry one.
+/// prints it. A reason is appended only to the outcomes that carry one (`awaiting-dialog` on a start
+/// too); the role is escaped.
 pub fn result_text(r: &LaunchResult) -> String {
     let why = |name: &str| {
         if r.reason.is_empty() {
@@ -79,12 +80,15 @@ pub fn result_text(r: &LaunchResult) -> String {
         }
     };
     let outcome = match r.outcome {
+        // `awaiting-dialog` is a start that still needs a person at the startup dialog: say so.
+        Outcome::Started if r.reason == "awaiting-dialog" => why("started"),
         Outcome::Started => "started".to_string(),
         Outcome::AlreadyRunning => "already-running".to_string(),
         Outcome::Refused => why("refused"),
         Outcome::Failed => why("failed"),
     };
-    format!("role={} outcome={outcome}", r.role)
+    // The role comes from a signal and is untrusted: a newline in it would add a forged line to the log.
+    format!("role={} outcome={outcome}", r.role.escape_debug())
 }
 
 /// What the mechanism (start one lane by role) reports.

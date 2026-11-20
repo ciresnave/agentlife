@@ -73,6 +73,22 @@ pub struct Report {
     pub notes: Vec<String>,
 }
 
+impl Report {
+    /// The `cycle:` lines the service log prints for this cycle: the counts, then one line per posted
+    /// result naming the lane and its outcome. Empty when the cycle decided, posted and cleared nothing.
+    pub fn log_lines(&self) -> Vec<String> {
+        if self.decided + self.posted + self.cleared == 0 {
+            return Vec::new();
+        }
+        let mut lines = vec![format!(
+            "cycle: decided={} posted={} cleared={}",
+            self.decided, self.posted, self.cleared
+        )];
+        lines.extend(self.results.iter().map(|r| format!("cycle: {r}")));
+        lines
+    }
+}
+
 fn unposted_row_exists(engine: &Engine<'_>, s: &Signal) -> bool {
     engine.data().requests.iter().any(|r| {
         r.signal_id == s.signal_id

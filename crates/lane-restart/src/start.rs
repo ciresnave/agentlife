@@ -1616,6 +1616,65 @@ mod tests {
     }
 
     #[test]
+    fn a_launcher_start_spawns_the_mail_prompt_and_a_pm_start_the_generic_one() {
+        let spawned = |caller: Result<String, CallerError>| {
+            let (d, facts) = world();
+            write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+            set_kind(d.path(), "baracuda", Some("soft"));
+            let mut r = req("baracuda");
+            r.signal_id = Some("baracuda:2026-11-19T15:48:49.123Z");
+            let plan = plan_start(d.path(), &r, caller, &facts).unwrap();
+            let l = log();
+            let f = RecordingFacts::new(&l);
+            let reader = ScriptedReader::new(
+                &l,
+                vec![Some(state_at(
+                    "baracuda",
+                    "new-session",
+                    "UserPromptSubmit",
+                ))],
+            );
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let sink = seen.clone();
+            execute_start(
+                &plan,
+                &f,
+                &reader,
+                &DirSpecStore {
+                    dir: d.path().to_path_buf(),
+                },
+                &LivenessTiming::default(),
+                &move |_, argv| {
+                    sink.borrow_mut().push(format!("{argv:?}"));
+                    Ok(())
+                },
+                &mut |_| {},
+                &mut || {},
+            )
+            .unwrap();
+            let v = seen.borrow().clone();
+            assert_eq!(v.len(), 1, "{v:?}");
+            v[0].clone()
+        };
+        // what is SPAWNED, not only what was planned, carries the mail prompt
+        let launcher = spawned(Ok("launcher:agentlife-launcher".to_string()));
+        assert!(
+            launcher.contains("You were started because mail arrived for you"),
+            "{launcher}"
+        );
+        assert!(
+            launcher.contains("baracuda:2026-11-19T15:48:49.123Z"),
+            "{launcher}"
+        );
+        // control: the PM starting the same lane spawns the generic prompt
+        let pm = spawned(Ok("pm".to_string()));
+        assert!(
+            !pm.contains("You were started because mail arrived"),
+            "{pm}"
+        );
+    }
+
+    #[test]
     fn a_spawn_failure_leaves_the_spec_as_it_was() {
         let (d, facts) = world();
         write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);

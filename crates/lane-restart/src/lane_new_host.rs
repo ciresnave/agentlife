@@ -93,6 +93,12 @@ pub trait Host {
     fn claim(&self, _role: &str) -> Result<(), String> {
         Err("this host cannot claim a role".to_string())
     }
+    /// [`Host::claim`] from a named Synapse home: a lane with its own setup keeps its identity somewhere
+    /// other than `lane_homes/<role>`, and a claim from the wrong home claims the wrong identity. `None`
+    /// is the lane-home default. A host that does not know homes ignores it.
+    fn claim_from(&self, role: &str, _home: Option<&Path>) -> Result<(), String> {
+        self.claim(role)
+    }
 }
 
 /// The epoch of `role` in `synapse list` output (one JSON object per line, `global_id` `role@account`).
@@ -100,18 +106,38 @@ pub trait Host {
 /// read (an empty answer from a daemon that did not reply is not "the role is absent").
 pub fn epoch_from_list(out: &str, role: &str) -> Result<Option<u64>, String> {
     let mut parsed = 0usize;
-    let mut found = None;
+    let mut found: Option<u64> = None;
+    let mut accounts: Vec<String> = Vec::new();
     for line in out.lines().map(str::trim).filter(|l| l.starts_with('{')) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(id) = v.get("global_id").and_then(|g| g.as_str()) else {
-            continue;
-        };
+        // A row that cannot be read might be the very role asked about: failing here is the safe answer,
+        // because "absent" leads to a claim, and a claim takes a role over from its holder.
+        let v = serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|e| format!("a roster row does not parse ({e}): {line:?}"))?;
+        let id = v
+            .get("global_id")
+            .and_then(|g| g.as_str())
+            .ok_or_else(|| format!("a roster row has no global_id: {line:?}"))?;
         parsed += 1;
-        if id.split('@').next() == Some(role) {
-            found = v.get("epoch").and_then(|e| e.as_u64()).filter(|e| *e >= 1);
+        let (short, account) = id.split_once('@').unwrap_or((id, ""));
+        if short == role {
+            // Epoch 0 is a role the roster lists but nobody has claimed: not known. A missing or
+            // non-numeric epoch is a row that cannot be read, and that must not read as "absent".
+            let epoch = v
+                .get("epoch")
+                .and_then(|e| e.as_u64())
+                .ok_or_else(|| format!("the roster lists {id} with no usable epoch: {line:?}"))?;
+            if !accounts.iter().any(|a| a == account) {
+                accounts.push(account.to_string());
+            }
+            found = Some(epoch).filter(|e| *e >= 1);
         }
+    }
+    if accounts.len() > 1 {
+        return Err(format!(
+            "the roster lists {role} under {} accounts ({}); not claiming into an ambiguity",
+            accounts.len(),
+            accounts.join(", ")
+        ));
     }
     if parsed == 0 {
         Err("the roster answer held no role lines".to_string())
@@ -140,30 +166,36 @@ pub fn retry_claim(
     Err(format!("no claim after {tries} tries: {last}"))
 }
 
-/// Runs `cmd` to the end or kills it after `limit`; `Ok(stdout)` only on exit 0.
+/// Runs `cmd` to the end or kills it after `limit`; `Ok(stdout)` only on exit 0. Both pipes are drained
+/// on their own threads while the child runs, so a long answer cannot fill a pipe and stall the child.
 fn run_limited(
     mut cmd: std::process::Command,
     limit: std::time::Duration,
 ) -> Result<String, String> {
     use std::io::Read;
+    fn drain<R: Read + Send + 'static>(s: Option<R>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut s) = s {
+                let _ = s.read_to_end(&mut bytes);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    }
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run synapse: {e}"))?;
+    let out_t = drain(child.stdout.take());
+    let err_t = drain(child.stderr.take());
     let start = std::time::Instant::now();
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) => {
-                let mut out = String::new();
-                let mut err = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut out);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut err);
-                }
+                let out = out_t.join().unwrap_or_default();
+                let err = err_t.join().unwrap_or_default();
                 return if status.success() {
                     Ok(out)
                 } else {
@@ -217,6 +249,9 @@ impl Host for NoStart<'_> {
     }
     fn claim(&self, role: &str) -> Result<(), String> {
         self.0.claim(role)
+    }
+    fn claim_from(&self, role: &str, home: Option<&Path>) -> Result<(), String> {
+        self.0.claim_from(role, home)
     }
 }
 
@@ -304,23 +339,34 @@ impl Host for RealHost {
         crate::facts::SysinfoFacts::new(self.claude_config.clone()).is_alive_claude_process(pid)
     }
 
-    /// `synapse list` through the pilot home as the calling lane (`LANE_ROLE`, else the PM, the only caller
-    /// of the lane-making commands). A role the caller cannot `see` is also absent from it, which is why the
-    /// PM (who sees every lane) is the one that runs this.
+    /// `synapse list` through the pilot home as the PM, the only caller of the lane-making commands and
+    /// the role that sees every lane. The inherited `LANE_ROLE` is NOT trusted: a value that cannot see the
+    /// target would list it as absent, and an absent role gets claimed (taken over).
     fn role_epoch(&self, role: &str) -> Result<Option<u64>, String> {
-        let me = std::env::var("LANE_ROLE").unwrap_or_else(|_| "pm".to_string());
         let mut c = std::process::Command::new("synapse");
-        c.args(["list", "--role", &me])
+        c.args(["list", "--role", "pm"])
             .env("SYNAPSE_HOME", &self.pilot_home);
         let out = run_limited(c, std::time::Duration::from_secs(60))?;
         epoch_from_list(&out, role)
     }
 
     fn claim(&self, role: &str) -> Result<(), String> {
-        let home = self.lane_homes.join(role);
+        self.claim_from(role, None)
+    }
+
+    fn claim_from(&self, role: &str, home: Option<&Path>) -> Result<(), String> {
+        let home = home.map_or_else(|| self.lane_homes.join(role), Path::to_path_buf);
+        let mut tried = 0u32;
         retry_claim(
             4,
             &mut || {
+                // A claim that timed out may still have been accepted, and another provisioner may have
+                // claimed meanwhile: before every retry read the roster, and stop if the role is known now,
+                // because claiming again would take it over from its holder.
+                if tried > 0 && matches!(self.role_epoch(role), Ok(Some(_))) {
+                    return Ok(());
+                }
+                tried += 1;
                 let mut c = std::process::Command::new("synapse");
                 c.args(["claim", "--role", role]).env("SYNAPSE_HOME", &home);
                 run_limited(c, std::time::Duration::from_secs(60)).map(|_| ())
@@ -369,6 +415,81 @@ pub fn host_log_since(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn a_claim_for_a_lane_with_its_own_setup_goes_out_from_that_home() {
+        use std::cell::RefCell;
+        struct Rec(RefCell<Vec<Option<PathBuf>>>);
+        impl Host for Rec {
+            fn disk_floor(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+            fn provision(&self, _: &Path) -> Result<ProvisionCounts, String> {
+                Err("unused".into())
+            }
+            fn start(&self, _: &str, _: &str) -> Result<i32, String> {
+                Err("unused".into())
+            }
+            fn claude_alive(&self, _: u32) -> bool {
+                false
+            }
+            fn role_epoch(&self, _: &str) -> Result<Option<u64>, String> {
+                Ok(if self.0.borrow().is_empty() {
+                    None
+                } else {
+                    Some(1)
+                })
+            }
+            fn claim_from(&self, _: &str, home: Option<&Path>) -> Result<(), String> {
+                self.0.borrow_mut().push(home.map(Path::to_path_buf));
+                Ok(())
+            }
+        }
+        let h = Rec(RefCell::new(Vec::new()));
+        let own = Path::new("C:/own/synapse-home");
+        crate::lane_new::step_claim_from(&h, "kiss", Some(own), true).unwrap();
+        assert_eq!(*h.0.borrow(), vec![Some(own.to_path_buf())]);
+    }
+
+    #[test]
+    fn a_roster_that_cannot_be_read_whole_never_reads_as_the_role_being_absent() {
+        let good = r#"{"global_id":"easyants@ciresnave","epoch":3}"#;
+        // control: the same roster without the target is a clean absence
+        assert_eq!(epoch_from_list(good, "kiss"), Ok(None));
+        // a truncated row beside a valid one
+        let torn = format!(
+            "{good}
+{{\"global_id\":\"kiss@cires"
+        );
+        assert!(epoch_from_list(&torn, "kiss").is_err());
+        // the target listed with a missing, zero or malformed epoch
+        for bad in [
+            r#"{"global_id":"kiss@ciresnave"}"#,
+            r#"{"global_id":"kiss@ciresnave","epoch":"7"}"#,
+        ] {
+            let text = format!(
+                "{good}
+{bad}"
+            );
+            assert!(epoch_from_list(&text, "kiss").is_err(), "{bad}");
+        }
+        // the same short name under two accounts is an ambiguity, not an answer
+        let two = format!(
+            "{good}
+{}
+{}",
+            r#"{"global_id":"kiss@ciresnave","epoch":7}"#,
+            r#"{"global_id":"kiss@other","epoch":2}"#
+        );
+        assert!(epoch_from_list(&two, "kiss").is_err());
+        // control: one well-formed row for the target reads as its epoch
+        let one = format!(
+            "{good}
+{}",
+            r#"{"global_id":"kiss@ciresnave","epoch":7}"#
+        );
+        assert_eq!(epoch_from_list(&one, "kiss"), Ok(Some(7)));
+    }
 
     #[test]
     fn the_counts_line_is_parsed_whole_or_refused() {

@@ -480,6 +480,16 @@ pub(crate) fn step_claim(
     role: &str,
     apply: bool,
 ) -> Result<(Status, String), String> {
+    step_claim_from(host, role, None, apply)
+}
+
+/// [`step_claim`] from a named Synapse home (a lane with its own setup); `None` is the lane-home default.
+pub(crate) fn step_claim_from(
+    host: &dyn Host,
+    role: &str,
+    home: Option<&Path>,
+    apply: bool,
+) -> Result<(Status, String), String> {
     if let Some(n) = host.role_epoch(role)? {
         return Ok((
             Status::Already,
@@ -492,7 +502,7 @@ pub(crate) fn step_claim(
             format!("synapse claim --role {role} from its lane home, retried with back-off"),
         ));
     }
-    host.claim(role)?;
+    host.claim_from(role, home)?;
     match host.role_epoch(role)? {
         Some(n) => Ok((
             Status::Ok,
