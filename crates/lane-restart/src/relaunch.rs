@@ -703,10 +703,20 @@ fn set_lane_role(cmd: &mut std::process::Command, role: &str) {
 fn launch_commands(
     spec: &LaunchSpec,
     argv: &HostedArgv,
+    window: crate::window_start::WindowStart,
 ) -> (std::process::Command, std::process::Command) {
     let hosted_argv = argv.hosted();
     let mut wt = std::process::Command::new("wt.exe");
-    wt.args(["-w", "new", "-d", argv.cwd()]);
+    wt.args(["-w", "new"]);
+    if window == crate::window_start::WindowStart::Minimized {
+        // A fixed title, which is how the window is found again to be minimized (`window_start`).
+        wt.args([
+            "--title",
+            crate::window_start::window_title(spec.role.as_str()).as_str(),
+            "--suppressApplicationTitle",
+        ]);
+    }
+    wt.args(["-d", argv.cwd()]);
     wt.args(hosted_argv);
     strip_session_identity_env(&mut wt);
     set_lane_role(&mut wt, spec.role.as_str());
@@ -783,7 +793,8 @@ pub fn spawn_launch(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), Relaunch
     if !cfg!(windows) {
         return spawn_direct(spec, argv);
     }
-    let (mut wt, mut conhost) = launch_commands(spec, argv);
+    let window = crate::window_start::WindowStart::from_env();
+    let (mut wt, mut conhost) = launch_commands(spec, argv, window);
     let dir = crate::state_dir();
     match wt.spawn() {
         Ok(mut child) => {
@@ -805,6 +816,16 @@ pub fn spawn_launch(spec: &LaunchSpec, argv: &HostedArgv) -> Result<(), Relaunch
                 &mut std::thread::sleep,
             );
             append_spawn_log(&dir, spec.role.as_str(), &format!("wt.exe {how}"));
+            // Minimized start: see `window_start` (the window shows for about a second first). Never
+            // a reason to fail the launch: the lane runs either way, and what happened is logged.
+            #[cfg(windows)]
+            if window == crate::window_start::WindowStart::Minimized {
+                let out = crate::window_start::minimize_window(
+                    &crate::window_start::window_title(spec.role.as_str()),
+                    crate::window_start::MINIMIZE_LIMIT,
+                );
+                append_spawn_log(&dir, spec.role.as_str(), &out.describe());
+            }
             return Ok(());
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1524,7 +1545,7 @@ mod tests {
         };
         // An explicit set overrides whatever the spawner's own environment carries.
         let argv = HostedArgv::new(&spec.cwd, spec.role.as_str(), strs(&["claude"])).unwrap();
-        let (wt, conhost) = launch_commands(&spec, &argv);
+        let (wt, conhost) = launch_commands(&spec, &argv, crate::window_start::WindowStart::Normal);
         for (what, cmd) in [("wt", &wt), ("conhost", &conhost)] {
             let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
             assert_eq!(
@@ -1533,6 +1554,42 @@ mod tests {
                 "{what} must set LANE_ROLE to the launched role"
             );
         }
+    }
+
+    #[test]
+    fn a_minimized_launch_titles_the_window_and_a_normal_one_does_not() {
+        use crate::window_start::WindowStart;
+        let spec = LaunchSpec {
+            wsl: None,
+            role: Role::new("kiss").unwrap(),
+            cwd: "C:/Projects/kiss".to_string(),
+            ..LaunchSpec::try_from(&state_with_role("testlane")).unwrap()
+        };
+        let argv = HostedArgv::new(&spec.cwd, spec.role.as_str(), strs(&["claude"])).unwrap();
+        let args = |w| {
+            let (wt, _) = launch_commands(&spec, &argv, w);
+            wt.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let min = args(WindowStart::Minimized);
+        assert_eq!(
+            &min[..5],
+            [
+                "-w",
+                "new",
+                "--title",
+                "lane-kiss",
+                "--suppressApplicationTitle"
+            ]
+        );
+        // the cwd and the hosted command still follow, unchanged
+        assert_eq!(&min[5..7], ["-d", "C:/Projects/kiss"]);
+        // control: the normal start is the old command line, with no title
+        let normal = args(WindowStart::Normal);
+        assert_eq!(&normal[..4], ["-w", "new", "-d", "C:/Projects/kiss"]);
+        assert!(!normal.iter().any(|a| a == "--title"));
+        assert_eq!(min[5..], normal[2..]);
     }
 
     // -- host_wrapped_argv --------------------------------------------- //
@@ -2461,7 +2518,7 @@ mod tests {
             strs(&["wsl.exe", "--exec", "/w", "--", "claude"]),
         )
         .unwrap();
-        let (wt, conhost) = launch_commands(&spec, &argv);
+        let (wt, conhost) = launch_commands(&spec, &argv, crate::window_start::WindowStart::Normal);
         let wt_args: Vec<_> = wt.get_args().collect();
         let d = wt_args.iter().position(|a| *a == "-d").expect("wt -d");
         assert_eq!(wt_args[d + 1], "C:/Projects");
