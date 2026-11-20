@@ -63,11 +63,30 @@ pub struct Report {
     pub decided: usize,
     pub posted: usize,
     pub cleared: usize,
+    /// Each result posted this cycle as `role=<r> outcome=<started|already-running|refused:<why>|failed:<why>>`
+    /// (the lane and what became of it; `decided=1 posted=1` alone named neither, kiss 2026-11-19).
+    pub results: Vec<String>,
     /// Alarm texts raised this cycle, and whether each reached anyone.
     pub alarms: Vec<(String, bool)>,
     pub session_lost: bool,
     /// Short notes for the service log: transport trouble, store trouble.
     pub notes: Vec<String>,
+}
+
+impl Report {
+    /// The `cycle:` lines the service log prints for this cycle: the counts, then one line per posted
+    /// result naming the lane and its outcome. Empty when the cycle decided, posted and cleared nothing.
+    pub fn log_lines(&self) -> Vec<String> {
+        if self.decided + self.posted + self.cleared == 0 {
+            return Vec::new();
+        }
+        let mut lines = vec![format!(
+            "cycle: decided={} posted={} cleared={}",
+            self.decided, self.posted, self.cleared
+        )];
+        lines.extend(self.results.iter().map(|r| format!("cycle: {r}")));
+        lines
+    }
 }
 
 fn unposted_row_exists(engine: &Engine<'_>, s: &Signal) -> bool {
@@ -130,7 +149,10 @@ pub fn cycle(
     for r in engine.outbox() {
         match src.post(&r) {
             Ok(()) | Err(SourceError::Stale) => match engine.mark_posted(&r) {
-                Ok(()) => rep.posted += 1,
+                Ok(()) => {
+                    rep.posted += 1;
+                    rep.results.push(crate::result_text(&r));
+                }
                 Err(e) => rep.notes.push(format!("store: {e}")),
             },
             Err(SourceError::Unauthorized(w)) => {
@@ -327,6 +349,13 @@ mod tests {
         let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
         let rep = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
         assert_eq!((rep.decided, rep.posted), (1, 1));
+        // the log names the lane and what became of it, not only the counts
+        assert_eq!(rep.results.len(), 1, "{:?}", rep.results);
+        assert!(
+            rep.results[0].starts_with("role=fuel outcome=refused:"),
+            "{:?}",
+            rep.results
+        );
         let posted = r.src.posted.borrow();
         assert_eq!(posted.len(), 1);
         assert_eq!(posted[0].epoch, "ep-A");

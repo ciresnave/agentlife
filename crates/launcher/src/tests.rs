@@ -733,3 +733,75 @@ fn an_unreadable_registry_is_a_conditional_refusal_that_clears_itself() {
     assert_eq!(e2.handle(&sig("ghost", 1, 1), 100).reason, "unknown-role");
     assert!(e2.recheck(200).unwrap().is_empty());
 }
+
+#[test]
+fn a_result_is_logged_as_the_lane_and_its_outcome() {
+    let r = |outcome, reason: &str| LaunchResult {
+        signal_id: "kiss:2026-11-19T15:48:49Z".into(),
+        epoch: "e".into(),
+        attempt: 1,
+        role: "kiss".into(),
+        outcome,
+        reason: reason.into(),
+    };
+    assert_eq!(
+        result_text(&r(Outcome::Started, "")),
+        "role=kiss outcome=started"
+    );
+    assert_eq!(
+        result_text(&r(Outcome::AlreadyRunning, "")),
+        "role=kiss outcome=already-running"
+    );
+    assert_eq!(
+        result_text(&r(Outcome::Refused, "no-grant")),
+        "role=kiss outcome=refused:no-grant"
+    );
+    assert_eq!(
+        result_text(&r(Outcome::Failed, "timeout")),
+        "role=kiss outcome=failed:timeout"
+    );
+    // a refusal with no reason is still named as one, not as a bare word that reads like a start
+    assert_eq!(
+        result_text(&r(Outcome::Refused, "")),
+        "role=kiss outcome=refused"
+    );
+    // a start that waits at the startup dialog is not logged as a plain start
+    assert_eq!(
+        result_text(&r(Outcome::Started, "awaiting-dialog")),
+        "role=kiss outcome=started:awaiting-dialog"
+    );
+}
+
+#[test]
+fn an_untrusted_role_cannot_add_a_line_to_the_log() {
+    let hostile = LaunchResult {
+        signal_id: "x".into(),
+        epoch: "e".into(),
+        attempt: 1,
+        role: "kiss\ncycle: decided=9 posted=9 cleared=9".into(),
+        outcome: Outcome::Refused,
+        reason: "unknown-role".into(),
+    };
+    let text = result_text(&hostile);
+    assert!(!text.contains('\n'), "{text:?}");
+    assert!(text.starts_with("role=kiss\\n"), "{text:?}");
+}
+
+#[test]
+fn the_cycle_log_names_each_result_and_is_silent_when_nothing_happened() {
+    let rep = crate::service::Report {
+        decided: 1,
+        posted: 1,
+        results: vec!["role=kiss outcome=started".to_string()],
+        ..Default::default()
+    };
+    assert_eq!(
+        rep.log_lines(),
+        vec![
+            "cycle: decided=1 posted=1 cleared=0".to_string(),
+            "cycle: role=kiss outcome=started".to_string()
+        ]
+    );
+    // control: an idle cycle prints nothing
+    assert!(crate::service::Report::default().log_lines().is_empty());
+}

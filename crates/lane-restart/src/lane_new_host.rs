@@ -81,6 +81,147 @@ pub trait Host {
     fn no_start(&self) -> bool {
         false
     }
+    /// The role's epoch in the daemon's roster: `Some(n)` (n >= 1) when the daemon knows the role, `None`
+    /// when the roster does not list it (never claimed). `Err` if the roster could not be read at all, which
+    /// is not the same as "unknown role": a slow daemon must not read as an empty one.
+    fn role_epoch(&self, _role: &str) -> Result<Option<u64>, String> {
+        Err("this host cannot read the daemon's roster".to_string())
+    }
+    /// One `synapse claim --role R` from the lane's own home, retried with back-off when the daemon does not
+    /// answer in time. Only ever called for a role `role_epoch` found absent: a claim takes a role over
+    /// from whoever holds it, so it is never used on a known one.
+    fn claim(&self, _role: &str) -> Result<(), String> {
+        Err("this host cannot claim a role".to_string())
+    }
+    /// [`Host::claim`] from a named Synapse home: a lane with its own setup keeps its identity somewhere
+    /// other than `lane_homes/<role>`, and a claim from the wrong home claims the wrong identity. `None`
+    /// is the lane-home default. A host that does not know homes ignores it.
+    fn claim_from(&self, role: &str, _home: Option<&Path>) -> Result<(), String> {
+        self.claim(role)
+    }
+}
+
+/// The epoch of `role` in `synapse list` output (one JSON object per line, `global_id` `role@account`).
+/// `Ok(None)`: the output was read and the role is not in it. `Err`: no line parsed at all, so nothing was
+/// read (an empty answer from a daemon that did not reply is not "the role is absent").
+pub fn epoch_from_list(out: &str, role: &str) -> Result<Option<u64>, String> {
+    let mut parsed = 0usize;
+    let mut found: Option<u64> = None;
+    let mut accounts: Vec<String> = Vec::new();
+    for line in out.lines().map(str::trim).filter(|l| l.starts_with('{')) {
+        // A row that cannot be read might be the very role asked about: failing here is the safe answer,
+        // because "absent" leads to a claim, and a claim takes a role over from its holder.
+        let v = serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|e| format!("a roster row does not parse ({e}): {line:?}"))?;
+        let id = v
+            .get("global_id")
+            .and_then(|g| g.as_str())
+            .ok_or_else(|| format!("a roster row has no global_id: {line:?}"))?;
+        parsed += 1;
+        let (short, account) = id.split_once('@').unwrap_or((id, ""));
+        if short == role {
+            // Epoch 0 is a role the roster lists but nobody has claimed: not known. A missing or
+            // non-numeric epoch is a row that cannot be read, and that must not read as "absent".
+            let epoch = v
+                .get("epoch")
+                .and_then(|e| e.as_u64())
+                .ok_or_else(|| format!("the roster lists {id} with no usable epoch: {line:?}"))?;
+            if !accounts.iter().any(|a| a == account) {
+                accounts.push(account.to_string());
+            }
+            found = Some(epoch).filter(|e| *e >= 1);
+        }
+    }
+    if accounts.len() > 1 {
+        return Err(format!(
+            "the roster lists {role} under {} accounts ({}); not claiming into an ambiguity",
+            accounts.len(),
+            accounts.join(", ")
+        ));
+    }
+    if parsed == 0 {
+        Err("the roster answer held no role lines".to_string())
+    } else {
+        Ok(found)
+    }
+}
+
+/// Runs `attempt` up to `tries` times, calling `pause(n)` (n = 1, 2, ...) between failures. The last error
+/// is returned with the count, so "the daemon is slow" is told as that and not as a refusal.
+pub fn retry_claim(
+    tries: u32,
+    attempt: &mut dyn FnMut() -> Result<(), String>,
+    pause: &mut dyn FnMut(u32),
+) -> Result<(), String> {
+    let mut last = String::new();
+    for n in 1..=tries {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+        if n < tries {
+            pause(n);
+        }
+    }
+    Err(format!("no claim after {tries} tries: {last}"))
+}
+
+/// Runs `cmd` to the end or kills it after `limit`; `Ok(stdout)` only on exit 0. Both pipes are drained
+/// on their own threads while the child runs, so a long answer cannot fill a pipe and stall the child.
+fn run_limited(
+    mut cmd: std::process::Command,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read;
+    fn drain<R: Read + Send + 'static>(s: Option<R>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut s) = s {
+                let _ = s.read_to_end(&mut bytes);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run synapse: {e}"))?;
+    let out_t = drain(child.stdout.take());
+    let err_t = drain(child.stderr.take());
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => {
+                let out = out_t.join().unwrap_or_default();
+                let err = err_t.join().unwrap_or_default();
+                return if status.success() {
+                    Ok(out)
+                } else {
+                    let last = err
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("");
+                    Err(format!(
+                        "synapse exited {:?}: {}",
+                        status.code(),
+                        last.trim()
+                    ))
+                };
+            }
+            None if start.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "synapse did not answer within {} s",
+                    limit.as_secs()
+                ));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
 }
 
 /// `lane-new --no-start`: the same host, except that step 7 (start) is skipped and the plan hash differs, so a
@@ -102,6 +243,15 @@ impl Host for NoStart<'_> {
     }
     fn no_start(&self) -> bool {
         true
+    }
+    fn role_epoch(&self, role: &str) -> Result<Option<u64>, String> {
+        self.0.role_epoch(role)
+    }
+    fn claim(&self, role: &str) -> Result<(), String> {
+        self.0.claim(role)
+    }
+    fn claim_from(&self, role: &str, home: Option<&Path>) -> Result<(), String> {
+        self.0.claim_from(role, home)
     }
 }
 
@@ -188,6 +338,43 @@ impl Host for RealHost {
         use crate::facts::SystemFacts;
         crate::facts::SysinfoFacts::new(self.claude_config.clone()).is_alive_claude_process(pid)
     }
+
+    /// `synapse list` through the pilot home as the PM, the only caller of the lane-making commands and
+    /// the role that sees every lane. The inherited `LANE_ROLE` is NOT trusted: a value that cannot see the
+    /// target would list it as absent, and an absent role gets claimed (taken over).
+    fn role_epoch(&self, role: &str) -> Result<Option<u64>, String> {
+        let mut c = std::process::Command::new("synapse");
+        c.args(["list", "--role", "pm"])
+            .env("SYNAPSE_HOME", &self.pilot_home);
+        let out = run_limited(c, std::time::Duration::from_secs(60))?;
+        epoch_from_list(&out, role)
+    }
+
+    fn claim(&self, role: &str) -> Result<(), String> {
+        self.claim_from(role, None)
+    }
+
+    fn claim_from(&self, role: &str, home: Option<&Path>) -> Result<(), String> {
+        let home = home.map_or_else(|| self.lane_homes.join(role), Path::to_path_buf);
+        let mut tried = 0u32;
+        retry_claim(
+            4,
+            &mut || {
+                // A claim that timed out may still have been accepted, and another provisioner may have
+                // claimed meanwhile: before every retry read the roster, and stop if the role is known now,
+                // because claiming again would take it over from its holder.
+                if tried > 0 && matches!(self.role_epoch(role), Ok(Some(_))) {
+                    return Ok(());
+                }
+                tried += 1;
+                let mut c = std::process::Command::new("synapse");
+                c.args(["claim", "--role", role]).env("SYNAPSE_HOME", &home);
+                run_limited(c, std::time::Duration::from_secs(60)).map(|_| ())
+            },
+            // 5 s, 10 s, 20 s: a daemon busy rewriting a large access.json answers late, not never.
+            &mut |n| std::thread::sleep(std::time::Duration::from_secs(5 << (n - 1))),
+        )
+    }
 }
 
 /// The newest non-empty `host-<role>-<pid>.log` in `state_dir` written at or after `since`, as an absolute
@@ -227,6 +414,82 @@ pub fn host_log_since(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn a_claim_for_a_lane_with_its_own_setup_goes_out_from_that_home() {
+        use std::cell::RefCell;
+        struct Rec(RefCell<Vec<Option<PathBuf>>>);
+        impl Host for Rec {
+            fn disk_floor(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+            fn provision(&self, _: &Path) -> Result<ProvisionCounts, String> {
+                Err("unused".into())
+            }
+            fn start(&self, _: &str, _: &str) -> Result<i32, String> {
+                Err("unused".into())
+            }
+            fn claude_alive(&self, _: u32) -> bool {
+                false
+            }
+            fn role_epoch(&self, _: &str) -> Result<Option<u64>, String> {
+                Ok(if self.0.borrow().is_empty() {
+                    None
+                } else {
+                    Some(1)
+                })
+            }
+            fn claim_from(&self, _: &str, home: Option<&Path>) -> Result<(), String> {
+                self.0.borrow_mut().push(home.map(Path::to_path_buf));
+                Ok(())
+            }
+        }
+        let h = Rec(RefCell::new(Vec::new()));
+        let own = Path::new("C:/own/synapse-home");
+        crate::lane_new::step_claim_from(&h, "kiss", Some(own), true).unwrap();
+        assert_eq!(*h.0.borrow(), vec![Some(own.to_path_buf())]);
+    }
+
+    #[test]
+    fn a_roster_that_cannot_be_read_whole_never_reads_as_the_role_being_absent() {
+        let good = r#"{"global_id":"easyants@ciresnave","epoch":3}"#;
+        // control: the same roster without the target is a clean absence
+        assert_eq!(epoch_from_list(good, "kiss"), Ok(None));
+        // a truncated row beside a valid one
+        let torn = format!(
+            "{good}
+{{\"global_id\":\"kiss@cires"
+        );
+        assert!(epoch_from_list(&torn, "kiss").is_err());
+        // the target listed with a missing, zero or malformed epoch
+        for bad in [
+            r#"{"global_id":"kiss@ciresnave"}"#,
+            r#"{"global_id":"kiss@ciresnave","epoch":"7"}"#,
+        ] {
+            let text = format!(
+                "{good}
+{bad}"
+            );
+            assert!(epoch_from_list(&text, "kiss").is_err(), "{bad}");
+        }
+        // the same short name under two accounts is an ambiguity, not an answer
+        let two = format!(
+            "{good}
+{}
+{}",
+            r#"{"global_id":"kiss@ciresnave","epoch":7}"#,
+            r#"{"global_id":"kiss@other","epoch":2}"#
+        );
+        assert!(epoch_from_list(&two, "kiss").is_err());
+        // control: one well-formed row for the target reads as its epoch
+        let one = format!(
+            "{good}
+{}",
+            r#"{"global_id":"kiss@ciresnave","epoch":7}"#
+        );
+        assert_eq!(epoch_from_list(&one, "kiss"), Ok(Some(7)));
+    }
 
     #[test]
     fn the_counts_line_is_parsed_whole_or_refused() {
@@ -244,6 +507,156 @@ mod tests {
         ] {
             assert!(parse_counts(bad).is_err(), "{bad:?} was accepted");
         }
+    }
+
+    const ROSTER: &str = concat!(
+        r#"{"epoch":7,"global_id":"kiss@ciresnave","online":true}"#,
+        "\n",
+        r#"{"epoch":0,"global_id":"easyants@ciresnave","online":false}"#,
+        "\n",
+        r#"{"epoch":1,"global_id":"aocl@ciresnave","online":false}"#,
+        "\n"
+    );
+
+    #[test]
+    fn the_roster_gives_a_claimed_roles_epoch_and_nothing_for_an_unclaimed_one() {
+        assert_eq!(epoch_from_list(ROSTER, "kiss"), Ok(Some(7)));
+        assert_eq!(epoch_from_list(ROSTER, "aocl"), Ok(Some(1)));
+        // listed but epoch 0 is not known; absent is not known; a prefix is not the role
+        assert_eq!(epoch_from_list(ROSTER, "easyants"), Ok(None));
+        assert_eq!(epoch_from_list(ROSTER, "kiss-ref"), Ok(None));
+        assert_eq!(epoch_from_list(ROSTER, "kis"), Ok(None));
+    }
+
+    #[test]
+    fn an_empty_or_unparseable_roster_is_an_error_not_an_absent_role() {
+        for bad in ["", "\n", "error: no daemon answered", "{not json}"] {
+            assert!(
+                epoch_from_list(bad, "kiss").is_err(),
+                "{bad:?} read as a roster"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slow_daemon_is_retried_with_back_off_and_a_dead_one_is_told_with_the_count() {
+        let mut calls = 0;
+        let mut pauses = Vec::new();
+        let ok = retry_claim(
+            4,
+            &mut || {
+                calls += 1;
+                if calls < 3 {
+                    Err("did not answer within 60 s".into())
+                } else {
+                    Ok(())
+                }
+            },
+            &mut |n| pauses.push(n),
+        );
+        assert_eq!((ok, calls, pauses.clone()), (Ok(()), 3, vec![1, 2]));
+        let mut n = 0;
+        let mut pauses = Vec::new();
+        let err = retry_claim(
+            3,
+            &mut || {
+                n += 1;
+                Err("no daemon answered".into())
+            },
+            &mut |p| pauses.push(p),
+        )
+        .unwrap_err();
+        assert_eq!((n, pauses), (3, vec![1, 2]));
+        assert!(
+            err.contains("no claim after 3 tries") && err.contains("no daemon answered"),
+            "{err}"
+        );
+    }
+
+    /// A roster fake for `step_claim`: `known` is the epoch it answers before any claim; `claim_works`
+    /// says whether a claim makes the roster list the role.
+    struct RosterHost {
+        known: Option<u64>,
+        roster_error: bool,
+        claim_works: bool,
+        claimed: RefCell<bool>,
+        claims: RefCell<u32>,
+    }
+    impl RosterHost {
+        fn new(known: Option<u64>) -> RosterHost {
+            RosterHost {
+                known,
+                roster_error: false,
+                claim_works: true,
+                claimed: RefCell::new(false),
+                claims: RefCell::new(0),
+            }
+        }
+    }
+    impl Host for RosterHost {
+        fn disk_floor(&self, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        fn provision(&self, _: &Path) -> Result<ProvisionCounts, String> {
+            Err("unused".into())
+        }
+        fn start(&self, _: &str, _: &str) -> Result<i32, String> {
+            Err("unused".into())
+        }
+        fn claude_alive(&self, _: u32) -> bool {
+            false
+        }
+        fn role_epoch(&self, _: &str) -> Result<Option<u64>, String> {
+            if self.roster_error {
+                return Err("synapse did not answer within 60 s".into());
+            }
+            Ok(self
+                .known
+                .or_else(|| (*self.claimed.borrow() && self.claim_works).then_some(1)))
+        }
+        fn claim(&self, _: &str) -> Result<(), String> {
+            *self.claims.borrow_mut() += 1;
+            *self.claimed.borrow_mut() = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn step_claim_registers_an_unknown_role_and_reads_it_back() {
+        use crate::lane_new::{step_claim, Status};
+        let h = RosterHost::new(None);
+        // dry run: would, and nothing claimed
+        assert_eq!(step_claim(&h, "aocl", false).unwrap().0, Status::Would);
+        assert_eq!(*h.claims.borrow(), 0);
+        // apply: claimed once, read back
+        let (s, d) = step_claim(&h, "aocl", true).unwrap();
+        assert_eq!((s, *h.claims.borrow()), (Status::Ok, 1));
+        assert!(d.contains("epoch 1"), "{d}");
+        // run again: now known, not claimed a second time
+        assert_eq!(step_claim(&h, "aocl", true).unwrap().0, Status::Already);
+        assert_eq!(*h.claims.borrow(), 1);
+    }
+
+    #[test]
+    fn step_claim_never_takes_over_a_known_role_and_never_reads_a_slow_daemon_as_empty() {
+        use crate::lane_new::{step_claim, Status};
+        let known = RosterHost::new(Some(7));
+        assert_eq!(step_claim(&known, "kiss", true).unwrap().0, Status::Already);
+        assert_eq!(*known.claims.borrow(), 0, "a known role was claimed over");
+        let mut slow = RosterHost::new(None);
+        slow.roster_error = true;
+        let e = step_claim(&slow, "aocl", true).unwrap_err();
+        assert!(e.contains("did not answer"), "{e}");
+        assert_eq!(
+            *slow.claims.borrow(),
+            0,
+            "claimed while the roster was unreadable"
+        );
+        let mut liar = RosterHost::new(None);
+        liar.claim_works = false;
+        assert!(step_claim(&liar, "aocl", true)
+            .unwrap_err()
+            .contains("still does not list"));
     }
 
     #[test]
@@ -313,6 +726,15 @@ mod run_tests {
     }
 
     impl Host for FakeHost {
+        fn role_epoch(&self, role: &str) -> Result<Option<u64>, String> {
+            let claimed = self.calls.borrow().contains(&format!("claim {role}"));
+            Ok(claimed.then_some(1))
+        }
+        fn claim(&self, role: &str) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!("claim {role}"));
+            Ok(())
+        }
+
         fn disk_floor(&self, _: &Path) -> Result<(), String> {
             self.calls.borrow_mut().push("disk".into());
             if self.lie == Lie::DiskFull {
@@ -469,7 +891,10 @@ mod run_tests {
         );
         assert!(detail.contains("host-zetafish-7777.log"), "{detail}");
         // order, and the roles file held this role and no other
-        assert_eq!(h.calls(), vec!["disk", "provision", "start", "alive 4242"]);
+        assert_eq!(
+            h.calls(),
+            vec!["disk", "provision", "claim zetafish", "start", "alive 4242"]
+        );
         assert_eq!(h.roles_file_text.borrow().as_deref(), Some("zetafish\n"));
         assert!(
             !listing(&r).iter().any(|n| n.contains("roles.tmp")),
@@ -538,7 +963,7 @@ mod run_tests {
         assert!(!rep.failed(), "{}", rep.render(true));
         assert_eq!(row(&rep, 6).0, Status::Ok);
         assert_eq!(row(&rep, 7).0, Status::Skipped);
-        assert_eq!(h.calls(), vec!["disk", "provision"]);
+        assert_eq!(h.calls(), vec!["disk", "provision", "claim zetafish"]);
         let have = spec::read(&r.state_dir, "zetafish").unwrap();
         assert_eq!(have.state, SpecState::Suspended);
         // control: without the flag the same run starts the lane (the spec goes running)

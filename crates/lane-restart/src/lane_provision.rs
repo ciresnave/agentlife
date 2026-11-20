@@ -124,10 +124,15 @@ pub fn run(
     let mcp_same = existing.as_ref() == Some(&want);
     // A different config is the lane's own setup only when it already works: it names a synapse
     // server and its identity directory is there. Anything else is a conflict, not overwritten.
-    let own_setup = !mcp_same && {
+    // That setup's home is where the role is claimed from (not `lane_homes/<role>`).
+    let own_home: Option<PathBuf> = if mcp_same {
+        None
+    } else {
         let (ok, home) = spec_audit_read(dir, role);
-        ok && home.is_some_and(|h| std::path::Path::new(&h).join("roles").join(role).is_dir())
+        home.filter(|h| ok && std::path::Path::new(h).join("roles").join(role).is_dir())
+            .map(PathBuf::from)
     };
+    let own_setup = own_home.is_some();
     if mcp_exists && !mcp_same && !own_setup {
         fail(
             &mut rows,
@@ -219,6 +224,22 @@ pub fn run(
                     return done(rows, apply);
                 }
             },
+        }
+    }
+
+    // --- step 6b: the daemon must know the role (a never-claimed role cannot queue or wake) ----------
+    if let Some(h) = host {
+        match crate::lane_new::step_claim_from(h, role, own_home.as_deref(), apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 6,
+                name: "synapse claim",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 6, "synapse claim", e);
+                return done(rows, apply);
+            }
         }
     }
 

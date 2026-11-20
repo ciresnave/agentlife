@@ -470,6 +470,50 @@ pub(crate) fn step_identity(
     }
 }
 
+/// Step 6b: make the daemon KNOW the role. A role that was never claimed is unknown to Synapse, so mail to
+/// it cannot queue and cannot wake it (PM finding 2026-11-19: ~57 soft-slept lanes created that way).
+/// Read the roster first: a role already there (epoch >= 1) is `Already` and is NOT claimed, because a
+/// claim takes a role over from its holder. A roster that cannot be read is an error, never "absent".
+/// After the claim the roster is read again and must show epoch >= 1.
+pub(crate) fn step_claim(
+    host: &dyn Host,
+    role: &str,
+    apply: bool,
+) -> Result<(Status, String), String> {
+    step_claim_from(host, role, None, apply)
+}
+
+/// [`step_claim`] from a named Synapse home (a lane with its own setup); `None` is the lane-home default.
+pub(crate) fn step_claim_from(
+    host: &dyn Host,
+    role: &str,
+    home: Option<&Path>,
+    apply: bool,
+) -> Result<(Status, String), String> {
+    if let Some(n) = host.role_epoch(role)? {
+        return Ok((
+            Status::Already,
+            format!("the daemon knows {role} (epoch {n}); not claimed again"),
+        ));
+    }
+    if !apply {
+        return Ok((
+            Status::Would,
+            format!("synapse claim --role {role} from its lane home, retried with back-off"),
+        ));
+    }
+    host.claim_from(role, home)?;
+    match host.role_epoch(role)? {
+        Some(n) => Ok((
+            Status::Ok,
+            format!("claimed; the daemon now lists {role} at epoch {n}"),
+        )),
+        None => Err(format!(
+            "the claim reported success but the roster still does not list {role}"
+        )),
+    }
+}
+
 /// Step 7: start the lane. The spec is `suspended` until this; the read-back is the lane's own state file
 /// naming a live `claude`, the spec now `running`, and a non-empty host log written since this step began.
 fn step_start(
@@ -1121,6 +1165,18 @@ fn run_inner(
             }),
             Err(e) => {
                 fail(&mut rows, 6, "synapse identity", e);
+                return rep(rows, paths);
+            }
+        }
+        match step_claim(h, role, apply) {
+            Ok((status, detail)) => rows.push(StepRow {
+                n: 6,
+                name: "synapse claim",
+                status,
+                detail,
+            }),
+            Err(e) => {
+                fail(&mut rows, 6, "synapse claim", e);
                 return rep(rows, paths);
             }
         }

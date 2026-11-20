@@ -959,11 +959,8 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         for (text, reached) in &rep.alarms {
             log(&format!("alarm {text:?} reached={reached}"));
         }
-        if rep.decided + rep.posted + rep.cleared > 0 {
-            log(&format!(
-                "cycle: decided={} posted={} cleared={}",
-                rep.decided, rep.posted, rep.cleared
-            ));
+        for line in rep.log_lines() {
+            log(&line);
         }
         if rep.session_lost {
             if let Some(r) = &record {

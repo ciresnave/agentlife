@@ -112,6 +112,17 @@ pub fn startup_prompt(role: &str) -> String {
     format!("read {role} HANDOFF and continue, and arm every WAIT in it (lane-restart waits)")
 }
 
+/// The first prompt when the LAUNCHER started the lane because mail arrived (PM ruling 2026-11-19: a woken
+/// lane must fetch its inbox first, not discover the notice late as a channel event). The launcher knows
+/// only the Synapse signal id (`<role>:<enqueue time of the oldest waiting message>`), not the sender, the
+/// message id or the text, so the prompt names the signal and says where to read the rest. No `;` (a
+/// `wt.exe` command separator), and the id is already restricted to `[A-Za-z0-9_.:-]`.
+pub fn mail_startup_prompt(role: &str, signal_id: &str) -> String {
+    format!(
+        "You were started because mail arrived for you (signal {signal_id}). Fetch your inbox FIRST, ack and act on that message, then read {role} HANDOFF and arm every WAIT in it (lane-restart waits)"
+    )
+}
+
 /// Every check a launch must pass BEFORE anything is killed or spawned: a
 /// plain role and name, a model that is not Opus (unless overridden), and no
 /// `;` in the working directory or any argv element (`wt.exe` reads it as a
@@ -121,7 +132,21 @@ pub fn prepare_launch(
     policy_default: &str,
     permit: Option<&OpusPermit>,
 ) -> Result<PreparedLaunch, RelaunchError> {
-    let prompt = startup_prompt(spec.role.as_str());
+    prepare_launch_for(spec, policy_default, permit, None)
+}
+
+/// [`prepare_launch`], with `wake_signal` = the mail-waiting signal id when the launcher started the lane:
+/// the prompt is then [`mail_startup_prompt`], else the generic [`startup_prompt`].
+pub fn prepare_launch_for(
+    spec: &LaunchSpec,
+    policy_default: &str,
+    permit: Option<&OpusPermit>,
+    wake_signal: Option<&str>,
+) -> Result<PreparedLaunch, RelaunchError> {
+    let prompt = match wake_signal {
+        Some(sig) => mail_startup_prompt(spec.role.as_str(), sig),
+        None => startup_prompt(spec.role.as_str()),
+    };
     let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, permit)?;
     let argv = launch_argv(spec, &prompt, model.as_str());
     // Checked as the FINAL command line (cwd + host-wrapped argv, the `lane-restart.exe` path
@@ -267,6 +292,7 @@ pub fn launch_and_wait_with(
     timing: &LivenessTiming,
     policy_default: &str,
     permit: Option<&OpusPermit>,
+    wake_signal: Option<&str>,
     spawn: &SpawnFn,
     sleep: &mut dyn FnMut(Duration),
     on_awaiting: &mut dyn FnMut(),
@@ -274,7 +300,7 @@ pub fn launch_and_wait_with(
     let PreparedLaunch {
         argv,
         carries_dev_channels_flag,
-    } = prepare_launch(spec, policy_default, permit)?;
+    } = prepare_launch_for(spec, policy_default, permit, wake_signal)?;
     let launched_after_secs = crate::stop::launched_after(facts.now());
     spawn(spec, &argv)?;
     wait_for_liveness(
@@ -311,6 +337,7 @@ pub fn launch_and_wait(
         timing,
         &policy_default_model(&crate::state_dir()),
         OpusPermit::from_env().as_ref(),
+        None,
         &spawn_launch,
         &mut std::thread::sleep,
         on_awaiting,
@@ -913,6 +940,7 @@ mod tests {
             &short(),
             "sonnet",
             None,
+            None,
             &move |s, argv| {
                 lg.borrow_mut()
                     .push(format!("spawn {} {} {}", s.role, s.cwd, argv.join(" ")));
@@ -995,6 +1023,7 @@ mod tests {
             &short(),
             "claude-opus-5",
             None,
+            None,
             &|_, _| panic!("spawned an Opus launch"),
             &mut |_| {},
             &mut || {},
@@ -1015,6 +1044,7 @@ mod tests {
             None,
             &short(),
             "sonnet",
+            None,
             None,
             &|_, _| Err(RelaunchError::Spawn("no wt".into())),
             &mut |_| {},
@@ -1042,6 +1072,7 @@ mod tests {
             None,
             &short(),
             "sonnet",
+            None,
             None,
             &|_, _| Ok(()),
             &mut |_| slept += 1,
