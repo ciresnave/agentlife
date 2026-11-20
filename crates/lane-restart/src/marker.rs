@@ -64,6 +64,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 
 /// The MAC for `spec`, creating the key if there is none. `None` when no key can be had (the spec is
 /// then written without a MAC and its soft stop reads as unclassified).
+#[must_use]
 pub fn sign(dir: &Path, spec: &SpecFile) -> Option<String> {
     let key = load_key(dir, true)?;
     mac_hex(&key, &message(spec)?)
@@ -277,7 +278,7 @@ mod tests {
         assert!(verify(d.path(), &signed));
         let other = tempfile::tempdir().unwrap();
         assert!(!verify(other.path(), &signed), "a directory with no key");
-        sign(other.path(), &s);
+        let _ = sign(other.path(), &s);
         assert!(!verify(other.path(), &signed), "a different key");
     }
 

@@ -1252,6 +1252,7 @@ mod tests {
         .unwrap()
     }
 
+    #[must_use]
     fn go(r: &Roots, role: &str, apply: bool) -> Report {
         run_local(r, role, "zetafish", "sonnet", apply, Utc::now())
     }
@@ -1323,7 +1324,7 @@ mod tests {
     fn rerunning_converges_and_a_missing_artifact_is_the_only_thing_redone() {
         let d = tempdir().unwrap();
         let r = roots(&d);
-        go(&r, "zetafish", true);
+        let _ = go(&r, "zetafish", true);
         let spec_bytes = std::fs::read(r.spec_path("zetafish")).unwrap();
         let again = go(&r, "zetafish", true);
         assert_eq!(
@@ -1351,7 +1352,7 @@ mod tests {
     fn the_spec_is_suspended_with_no_kind_reads_back_whole_and_the_launcher_refuses_it() {
         let d = tempdir().unwrap();
         let r = roots(&d);
-        go(&r, "zetafish", true);
+        let _ = go(&r, "zetafish", true);
         let s = spec::read(&r.state_dir, "zetafish").unwrap();
         assert_eq!(s.state, SpecState::Suspended);
         assert!(s.stop_kind.is_none());

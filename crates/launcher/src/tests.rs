@@ -149,8 +149,8 @@ fn a_replay_inside_the_window_launches_once_and_answers_the_recorded_result() {
 fn the_same_key_after_the_window_is_a_new_request_and_keeps_the_old_row() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 5, 1), 1000);
-    e.handle(&sig("fuel", 5, 1), 1000 + REPLAY_WINDOW_SECS + 1);
+    let _ = e.handle(&sig("fuel", 5, 1), 1000);
+    let _ = e.handle(&sig("fuel", 5, 1), 1000 + REPLAY_WINDOW_SECS + 1);
     assert_eq!(m.n(), 2);
     let gens: Vec<u32> = e.data().requests.iter().map(|r| r.generation).collect();
     assert_eq!(gens, [0, 1], "no overwrite, no collision");
@@ -179,9 +179,9 @@ fn a_changed_epoch_is_not_a_replay() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
     let mut s = sig("fuel", 5, 1);
-    e.handle(&s, 1000);
+    let _ = e.handle(&s, 1000);
     s.epoch = "1".into();
-    e.handle(&s, 1010);
+    let _ = e.handle(&s, 1010);
     assert_eq!(m.n(), 2);
 }
 
@@ -263,11 +263,11 @@ fn a_rate_refusal_is_cleared_once_a_slot_frees_and_deleted_only_after_the_clear_
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
     for i in 0..RATE_PER_ROLE as u64 {
-        e.handle(&sig("fuel", i, 1), 100);
+        let _ = e.handle(&sig("fuel", i, 1), 100);
         e.observe_online(&BTreeSet::from(["fuel".to_string()]), 100)
             .unwrap();
     }
-    e.handle(&sig("fuel", 9, 1), 200); // refused: rate
+    let _ = e.handle(&sig("fuel", 9, 1), 200); // refused: rate
     assert!(e.recheck(300).unwrap().is_empty(), "no slot has freed yet");
     let later = 100 + HOUR_SECS + 1;
     assert_eq!(e.recheck(later).unwrap(), vec!["fuel".to_string()]);
@@ -295,7 +295,7 @@ fn a_signal_with_a_model_field_launches_with_sonnet() {
     .unwrap();
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
-    e.handle(&s, 10);
+    let _ = e.handle(&s, 10);
     assert_eq!(m.calls.borrow()[0], ("fuel".into(), "sonnet".into()));
 }
 
@@ -332,7 +332,7 @@ fn a_restart_does_not_relaunch_inside_the_window() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     {
         let mut e = open(&io, &m, &d);
-        e.handle(&sig("fuel", 5, 1), 1000);
+        let _ = e.handle(&sig("fuel", 5, 1), 1000);
     }
     let mut e2 = Engine::open(&io, &m, &d, false).unwrap();
     e2.set_allowlist_confirmed(true);
@@ -464,8 +464,8 @@ fn three_spawns_without_a_claim_become_no_claim_and_being_seen_online_clears_it(
 fn records_older_than_a_day_are_pruned() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 1, 1), 0);
-    e.handle(&sig("other", 1, 1), PRUNE_SECS + 5);
+    let _ = e.handle(&sig("fuel", 1, 1), 0);
+    let _ = e.handle(&sig("other", 1, 1), PRUNE_SECS + 5);
     assert_eq!(e.data().requests.len(), 1);
     assert_eq!(e.data().requests[0].role, "other");
 }
@@ -501,7 +501,7 @@ fn already_running_and_held_for_memory_do_not_consume_the_budget() {
     let m = Mech::new(vec![MechResult::AlreadyRunning, MechResult::HeldForMemory]);
     let mut e = open(&io, &m, &d);
     for i in 0..10u64 {
-        e.handle(&sig("fuel", i, 1), 10 + i as i64);
+        let _ = e.handle(&sig("fuel", i, 1), 10 + i as i64);
     }
     assert_eq!(e.spawns_last_hour(100, None), 0);
     assert_eq!(e.data().roles["fuel"].spawns_since_online, 0);
@@ -531,9 +531,9 @@ fn an_already_running_streak_raises_one_alarm_until_the_role_is_seen_online() {
     let (io, d) = (Mem::new(), Dir::new());
     let m = Mech::new(vec![MechResult::Started, MechResult::AlreadyRunning]);
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 0, 1), 10);
+    let _ = e.handle(&sig("fuel", 0, 1), 10);
     for i in 1..=STALL_STREAK as u64 {
-        e.handle(&sig("fuel", i, 1), 10 + i as i64);
+        let _ = e.handle(&sig("fuel", i, 1), 10 + i as i64);
     }
     let a = e.alarms(60, 120);
     assert_eq!(
@@ -552,7 +552,7 @@ fn an_already_running_streak_raises_one_alarm_until_the_role_is_seen_online() {
 fn a_stale_started_never_claimed_raises_the_alarm_once() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 1, 1), 100);
+    let _ = e.handle(&sig("fuel", 1, 1), 100);
     assert!(
         e.alarms(100 + 240, 120).is_empty(),
         "exactly 2 x launch_wait is not older"
@@ -608,7 +608,7 @@ fn a_row_left_in_intent_by_a_crash_is_resolved_not_re_called() {
 fn an_unacknowledged_result_stays_in_the_outbox_until_posted() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 1, 1), 10);
+    let _ = e.handle(&sig("fuel", 1, 1), 10);
     assert_eq!(e.outbox().len(), 1);
     assert_eq!(e.outbox().len(), 1, "reading it does not drain it");
     let r = e.outbox().remove(0);
@@ -625,7 +625,7 @@ fn a_rule_7_refusal_is_cleared_when_a_grant_appears() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     d.grant.set(false);
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 1, 1), 10);
+    let _ = e.handle(&sig("fuel", 1, 1), 10);
     assert!(e.recheck(20).unwrap().is_empty());
     d.grant.set(true);
     assert_eq!(e.recheck(30).unwrap(), vec!["fuel".to_string()]);
@@ -636,7 +636,7 @@ fn a_rule_7_refusal_is_cleared_when_a_grant_appears() {
 fn an_alarm_stays_pending_until_it_is_marked_delivered() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
-    e.handle(&sig("fuel", 1, 1), 100);
+    let _ = e.handle(&sig("fuel", 1, 1), 100);
     let due = e.pending_alarms(100 + 241, 120);
     assert_eq!(
         due,
@@ -661,11 +661,11 @@ fn recheck_reports_a_save_failure_so_the_caller_does_not_clear() {
     let (io, m, d) = (Mem::new(), started(), Dir::new());
     let mut e = open(&io, &m, &d);
     for i in 0..RATE_PER_ROLE as u64 {
-        e.handle(&sig("fuel", i, 1), 100);
+        let _ = e.handle(&sig("fuel", i, 1), 100);
         e.observe_online(&BTreeSet::from(["fuel".to_string()]), 100)
             .unwrap();
     }
-    e.handle(&sig("fuel", 9, 1), 200); // refused: rate
+    let _ = e.handle(&sig("fuel", 9, 1), 200); // refused: rate
     let later = 100 + HOUR_SECS + 1;
     io.fail_save.set(true);
     assert!(e.recheck(later).is_err(), "the Clearing mark did not save");

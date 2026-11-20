@@ -100,6 +100,7 @@ fn unposted_row_exists(engine: &Engine<'_>, s: &Signal) -> bool {
 }
 
 /// Runs one cycle. `wait_secs` is the long-poll hold (0 in tests); `launch_wait` is Synapse's.
+#[must_use]
 pub fn cycle(
     engine: &mut Engine<'_>,
     src: &dyn Source,
@@ -134,7 +135,7 @@ pub fn cycle(
                 if unposted_row_exists(engine, s) {
                     continue;
                 }
-                engine.handle(s, now);
+                let _ = engine.handle(s, now);
                 rep.decided += 1;
             }
         }
@@ -426,7 +427,7 @@ mod tests {
             .borrow_mut()
             .push(signal("fuel", "s1", 1, "e"));
         let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
-        cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
         assert!(r.src.cleared.borrow().is_empty());
         *r.dir.granted.borrow_mut() = true;
         let rep = cycle(&mut e, &r.src, &r.bell, 110, 120, 0);
@@ -443,7 +444,7 @@ mod tests {
             .borrow_mut()
             .push(signal("ghost", "g1", 1, "e"));
         let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
-        cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
         let rep = cycle(&mut e, &r.src, &r.bell, 110, 120, 0);
         assert_eq!(rep.cleared, 0);
         assert_eq!(r.src.posted.borrow()[0].reason, "unknown-role");
@@ -473,7 +474,7 @@ mod tests {
             .borrow_mut()
             .push(signal("fuel", "s1", 1, "e"));
         let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
-        cycle(&mut e, &r.src, &r.bell, 100, 120, 0); // started
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0); // started
         r.src.signals.borrow_mut().clear();
         let bell = FlakyBell {
             works: RefCell::new(false),

@@ -591,6 +591,7 @@ pub fn write_caller_record(state_dir: &Path, rec: &LauncherRecord) -> std::io::R
 
 /// Removes the record only if it still names `rec` (this pid and start time): a successor's
 /// record is never deleted. Returns whether a file was removed.
+#[must_use]
 pub fn remove_caller_record(state_dir: &Path, rec: &LauncherRecord) -> bool {
     let path = record_path(state_dir);
     let still_mine = std::fs::read(&path)

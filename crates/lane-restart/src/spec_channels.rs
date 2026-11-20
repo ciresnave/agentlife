@@ -444,6 +444,7 @@ mod tests {
         spec::write_atomic(dir, &s).unwrap();
     }
 
+    #[must_use]
     fn write_cfg(dir: &Path, role: &str, with_synapse: bool) -> String {
         let p = dir.join(format!("{role}.mcp.json"));
         let body = if with_synapse {
@@ -490,7 +491,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         write_spec(d.path(), "nocfg", &[DEV_CHANNELS, PEERS]);
         write_spec(d.path(), "nosyn", &[DEV_CHANNELS, PEERS]);
-        write_cfg(d.path(), "nosyn", false);
+        let _ = write_cfg(d.path(), "nosyn", false);
         for role in ["nocfg", "nosyn", "Bad/Role"] {
             let r = rewrite_roles(d.path(), &[role.to_string()], false, Utc::now());
             assert!(

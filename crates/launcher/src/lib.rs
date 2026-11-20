@@ -387,6 +387,7 @@ impl<'a> Engine<'a> {
 
     /// Decides one signal, in the order of OverMind's section 2, and returns the result to post.
     /// The result is also kept in the outbox until [`Engine::mark_posted`].
+    #[must_use]
     pub fn handle(&mut self, sig: &Signal, now: i64) -> LaunchResult {
         self.prune(now);
         // The row is built once; `finish` stores it and saves, failing closed on a write error.
