@@ -91,6 +91,8 @@ blocked it. This closes "a wake works" for that case only; it is not a general r
 
 ## Scratch test plan, on the `launchtest` role first (nothing runs on a real lane)
 
+**Correction 2026-11-20:** this plan assumed `launchtest` was an existing scratch role. It was not (no launch spec, no directory; I took the name from the PM's wording and never checked). The PM created it that day with `lane-new-worktree` (worktree `C:/Projects/agentlife-wt-launchtest`, off origin/main, no repo created; claimed at epoch 1, read by the PM, not by me: the lane has no `see` grant on it). Its first two real starts (minimize test, `docs`/ROADMAP O15) showed one more precondition: a scratch lane treats a PM `[TASK]` that arrives over Synapse as untrusted and may decline it (start 2 did; start 1 acted), so its HANDOFF needs one line authorizing the step the test asks of it (the PM adds it before a start).
+
 Precondition: B1 and B2 settled for `launchtest` only (its own `see` grant for the launcher; the sender allowed).
 
 | # | Step | Read-back |
