@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.80 — wake path: claim step, mail-aware start prompt, launcher cycle log; durable-timers and sub-lanes designs; cancel-test results
+
+One day of work on branch feat/wake-path (PM TASKs 2026-11-19). **Code:** (1) `lane-new` and `lane-provision` gain a claim step so the daemon knows a new role (a never-claimed role cannot queue or wake): the roster is read first, a role it lists is never claimed again (a claim takes a role over), an unknown one is claimed from its lane home with 4 tries and 5/10/20 s back-off, and the roster is read again; an unreadable roster is an error, not "absent". (2) A lane the LAUNCHER starts for a mail signal gets the start prompt "You were started because mail arrived for you (signal ...). Fetch your inbox FIRST ...", a start by a person or a restart keeps the generic prompt; the launcher knows only the signal id, not sender or text. (3) The launcher log adds `cycle: role=<r> outcome=<started|already-running|refused:<why>|failed:<why>>` per posted result. **Docs:** `docs/DURABLE-TIMERS.md` (design; B1 the sender is not a launch sender, B2 the launcher lacks `see`, kiss wake MEASURED N=1), `docs/SUB-LANES.md` (design), `docs/RUNNER-CANCEL-TEST.md` (trigger corrected to the push form, results recorded, relayed by the PM), ROADMAP D7-D9, O6, O12 closed, O13, O14. **Verified:** `lane_new_host`, `lane_provision`, `step_claim` (38), `start::`/`launch::` (121) and the launcher crate (40) tests pass locally; the claim step was not run against the real daemon.
+
 ## 0.30.79 — docs: runner cancel test design, ROADMAP O11 and O12
 
 Docs only: `docs/RUNNER-CANCEL-TEST.md` designs (does not run) the two-case cancel test for the humboldt runner (PM plan 2026-11-19); ROADMAP O11 (drop lettre after the Synapse email opt-in release) and O12 (the cancel test).
