@@ -115,6 +115,35 @@ pub fn launch_outcome(o: Outcome) -> synapsed_client::LaunchOutcome {
     }
 }
 
+/// The daemon's announce file in the Synapse home (`synapsed-client`'s `ANNOUNCE_FILE`).
+const ANNOUNCE_FILE: &str = "synapsed.json";
+
+/// The address the announce file names (`{"addr": "127.0.0.1:port", ...}`); `None` when the text
+/// is not that. Reads nothing else from it.
+pub fn announce_addr(text: &str) -> Option<std::net::SocketAddr> {
+    serde_json::from_str::<Value>(text)
+        .ok()?
+        .get("addr")?
+        .as_str()?
+        .parse()
+        .ok()
+}
+
+/// Whether something accepts a connection at the address the home's announce file names. It sends
+/// nothing and proves nothing (`Daemon::connect` does the proof); it only answers "is there a
+/// daemon to find", because `Daemon::connect` STARTS a bare `synapsed` when nothing answers, with
+/// none of the environment the daemon's own task sets (`SYNAPSE_LAUNCHER_ROLES`,
+/// `SYNAPSE_LAUNCH_SENDERS`). That auto-start at logon, ahead of the task, left the launcher
+/// refused on the launch routes (PM, 2026-11-21: synapsed pid 19312, auto-spawned 04:50:47).
+pub fn daemon_listening(home: &Path) -> bool {
+    std::fs::read_to_string(home.join(ANNOUNCE_FILE))
+        .ok()
+        .and_then(|t| announce_addr(&t))
+        .is_some_and(|a| {
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(1)).is_ok()
+        })
+}
+
 /// The real daemon, as role [`LAUNCHER_ROLE`].
 pub struct SynapseSource {
     daemon: synapsed_client::Daemon,

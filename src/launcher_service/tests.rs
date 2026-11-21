@@ -13,6 +13,42 @@ impl ProcessTable for Nothing {
     }
 }
 
+#[test]
+fn the_announce_address_is_read_and_anything_else_is_none() {
+    let ok = r#"{"addr":"127.0.0.1:9123","instance_id":"x","pid":7}"#;
+    assert_eq!(announce_addr(ok), Some("127.0.0.1:9123".parse().unwrap()));
+    for bad in [
+        "",
+        "not json",
+        r#"{"pid":7}"#,
+        r#"{"addr":5}"#,
+        r#"{"addr":"nope"}"#,
+    ] {
+        assert_eq!(announce_addr(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_home_with_no_announce_file_has_no_daemon_to_find() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!daemon_listening(dir.path()));
+}
+
+#[test]
+fn a_listener_at_the_announced_address_is_found_and_a_closed_port_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::fs::write(
+        dir.path().join("synapsed.json"),
+        format!(r#"{{"addr":"{addr}","instance_id":"x","pid":1}}"#),
+    )
+    .unwrap();
+    assert!(daemon_listening(dir.path()), "control: a live listener");
+    drop(l);
+    assert!(!daemon_listening(dir.path()), "the same address, closed");
+}
+
 // ---- the wire shapes, read from Synapse's own tests (`crates/synapsed/tests/launch.rs`) ----
 
 #[test]

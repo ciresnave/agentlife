@@ -874,6 +874,16 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         Ok(h) => h,
         Err(e) => return fail(e),
     };
+    // Never let `Daemon::connect` start a bare `synapsed` (no SYNAPSE_LAUNCHER_ROLES): wait for
+    // the daemon's own task to bring it up, and say so in the log every 30 s.
+    let mut waited = 0u32;
+    while !svc::daemon_listening(&home) {
+        if waited % 6 == 0 {
+            log("waiting for synapsed to be up (the launcher never starts it)");
+        }
+        waited += 1;
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
     let source = match svc::SynapseSource::connect(&home) {
         Ok(s) => s,
         Err(e) => return fail(e),
