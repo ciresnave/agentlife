@@ -878,7 +878,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
     // the daemon's own task to bring it up, and say so in the log every 30 s.
     let mut waited = 0u32;
     while !svc::daemon_listening(&home) {
-        if waited % 6 == 0 {
+        if waited.is_multiple_of(6) {
             log("waiting for synapsed to be up (the launcher never starts it)");
         }
         waited += 1;
