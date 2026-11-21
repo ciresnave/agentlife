@@ -112,6 +112,13 @@ pub trait ParentProcess {
     fn start_time_of(&self, _pid: u32) -> Option<u64> {
         None
     }
+
+    /// Drops any cached view of the process table so the next lookup reads it again; `true` when
+    /// there was something to drop (a real table). A fixed fake has nothing to refresh, so a
+    /// retry against it would only repeat the same answer.
+    fn refresh(&self) -> bool {
+        false
+    }
 }
 
 /// What `claude`'s own launch command line says, that no hook field
@@ -196,7 +203,7 @@ pub fn parse_claude_cli_flags(cmdline: &[String]) -> ClaudeCliFlags {
 /// parent was `bash.exe`, not `claude.exe`, so the single-hop check this
 /// module shipped with (verified only against a headless `claude -p`
 /// session, §10.3) refused every real interactive write.
-use crate::platform::names::{image_base, is_lane_restart, is_shell};
+use crate::platform::names::{image_base, is_lane_restart, is_shell, is_transparent_wrapper};
 
 /// How many shell layers this walk tolerates before giving up. The real chain needed 2
 /// (RESTART-TOOL-DESIGN.md §11.1), but a Bash-tool command's own shape adds layers: on this box
@@ -217,6 +224,48 @@ const MAX_ANCESTRY_HOPS: u32 = 8;
 /// NEAREST `claude` above, so a process under a lane's `claude` is that lane, and one under no
 /// `claude` is still refused.
 pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32, PidError> {
+    // A process that is missing from the table can be a table read that came up short (a loaded
+    // machine), so a real table is read again before the walk gives up. A parent that really is
+    // gone (a backgrounded or orphaned command) stays missing and fails after the last attempt.
+    for attempt in 0..WALK_ATTEMPTS {
+        match walk_once(my_pid, lookup) {
+            Err(PidError::ParentNotFound) if attempt + 1 < WALK_ATTEMPTS && lookup.refresh() => {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            other => return other,
+        }
+    }
+    Err(PidError::ParentNotFound)
+}
+
+/// Reads of the process table `claude_parent_pid` makes before it reports a missing parent.
+const WALK_ATTEMPTS: u32 = 3;
+
+/// The ancestry as text, for an error message: `pid name > pid name ...`, ending at `claude`, at
+/// the first process that has no parent in the table, or after `MAX_ANCESTRY_HOPS + 4` links.
+pub fn describe_walk(my_pid: u32, lookup: &dyn ParentProcess) -> String {
+    let mut parts = vec![format!("{my_pid} (this process)")];
+    let mut current = my_pid;
+    for _ in 0..MAX_ANCESTRY_HOPS + 4 {
+        match lookup.parent_of(current) {
+            Some((pid, name)) => {
+                parts.push(format!("{pid} {name}"));
+                if image_base(&name) == "claude" {
+                    return parts.join(" > ");
+                }
+                current = pid;
+            }
+            None => {
+                parts.push(format!("(no parent of {current} in the process table)"));
+                return parts.join(" > ");
+            }
+        }
+    }
+    parts.push("...".to_string());
+    parts.join(" > ")
+}
+
+fn walk_once(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32, PidError> {
     let mut current = my_pid;
     for _ in 0..MAX_ANCESTRY_HOPS {
         let (parent_pid, name) = lookup.parent_of(current).ok_or(PidError::ParentNotFound)?;
@@ -224,7 +273,7 @@ pub fn claude_parent_pid(my_pid: u32, lookup: &dyn ParentProcess) -> Result<u32,
         if base == "claude" {
             return Ok(parent_pid);
         }
-        if !is_shell(&base) && !is_lane_restart(&base) {
+        if !is_shell(&base) && !is_lane_restart(&base) && !is_transparent_wrapper(&base) {
             return Err(PidError::UnexpectedAncestor(name));
         }
         current = parent_pid;
@@ -450,6 +499,84 @@ mod tests {
             claude_parent_pid(start, &lookup),
             Err(PidError::HopLimitExceeded)
         ));
+    }
+
+    /// 2026-11-21 (pm-ants, ontologicant): the Bash tool's chain, bash.exe under Git bash.exe -c,
+    /// with `nohup` or `timeout` in front of the command. Control: a stranger is still refused.
+    #[test]
+    fn walks_past_bash_in_bash_and_transparent_wrappers() {
+        let lookup = FakeAncestry::chain(&[
+            (1, 5, "nohup.exe"),
+            (5, 10, "bash.exe"),
+            (10, 20, "bash.exe"),
+            (20, 30, "timeout.exe"),
+            (30, 40, "bash.exe"),
+            (40, 99, "claude.exe"),
+        ]);
+        assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+        let stranger = FakeAncestry::chain(&[(1, 5, "nohup.exe"), (5, 99, "python.exe")]);
+        assert!(matches!(
+            claude_parent_pid(1, &stranger),
+            Err(PidError::UnexpectedAncestor(_))
+        ));
+    }
+
+    /// A real process table that comes up short once: the walk reads it again and finds `claude`.
+    /// A fixed table never retries, and a table that stays short fails after exactly
+    /// `WALK_ATTEMPTS` reads.
+    struct Flaky {
+        short_reads: std::cell::Cell<u32>,
+        refreshes: std::cell::Cell<u32>,
+        inner: FakeAncestry,
+    }
+    impl ParentProcess for Flaky {
+        fn parent_of(&self, pid: u32) -> Option<(u32, String)> {
+            if self.short_reads.get() > 0 {
+                return None;
+            }
+            self.inner.parent_of(pid)
+        }
+        fn cmdline_of(&self, _pid: u32) -> Option<Vec<String>> {
+            None
+        }
+        fn refresh(&self) -> bool {
+            self.refreshes.set(self.refreshes.get() + 1);
+            self.short_reads
+                .set(self.short_reads.get().saturating_sub(1));
+            true
+        }
+    }
+
+    #[test]
+    fn a_short_table_read_is_retried_and_a_missing_parent_still_fails() {
+        let flaky = |short| Flaky {
+            short_reads: std::cell::Cell::new(short),
+            refreshes: std::cell::Cell::new(0),
+            inner: FakeAncestry::chain(&[(1, 10, "bash"), (10, 99, "claude")]),
+        };
+        let once = flaky(1);
+        assert_eq!(claude_parent_pid(1, &once).unwrap(), 99);
+        assert_eq!(once.refreshes.get(), 1);
+        let always = flaky(100);
+        assert!(matches!(
+            claude_parent_pid(1, &always),
+            Err(PidError::ParentNotFound)
+        ));
+        assert_eq!(always.refreshes.get(), WALK_ATTEMPTS - 1, "bounded retries");
+    }
+
+    #[test]
+    fn describe_walk_names_every_link_and_where_it_ends() {
+        let lookup = FakeAncestry::chain(&[(1, 10, "bash.exe"), (10, 99, "claude.exe")]);
+        assert_eq!(
+            describe_walk(1, &lookup),
+            "1 (this process) > 10 bash.exe > 99 claude.exe"
+        );
+        let orphan = FakeAncestry::chain(&[(1, 10, "bash.exe")]);
+        assert_eq!(
+            describe_walk(1, &orphan),
+            "1 (this process) > 10 bash.exe > (no parent of 10 in the process table)"
+        );
     }
 
     #[test]

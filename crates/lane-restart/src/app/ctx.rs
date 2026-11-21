@@ -193,16 +193,33 @@ impl Ctx {
         if let Some(caller) = &self.caller {
             return caller();
         }
-        let pid =
-            crate::lane_state_writer::claude_parent_pid(std::process::id(), &*self.parents()).ok();
+        let pid = self.walk_to_claude();
         let facts = self.facts();
         crate::start::caller_role(&self.state_dir, pid, &*facts)
+    }
+
+    /// The `claude` above this process, or `None`; and when `None`, stderr says why and shows the
+    /// ancestry that was read (2026-11-21: "could not be found" named neither, so a lane could not
+    /// tell a stranger in the chain from a parent missing from the process table).
+    fn walk_to_claude(&mut self) -> Option<u32> {
+        let me = std::process::id();
+        let parents = self.parents();
+        match crate::lane_state_writer::claude_parent_pid(me, &*parents) {
+            Ok(pid) => Some(pid),
+            Err(e) => {
+                let chain = crate::lane_state_writer::describe_walk(me, &*parents);
+                self.errln(&format!(
+                    "lane-restart: no claude session found above this command: {e}; ancestry read: {chain}"
+                ));
+                None
+            }
+        }
     }
 
     /// The pid of the `claude` session running this command (the nearest `claude` ancestor), or
     /// `None` when there is none. `stop` needs it as well as the verified role.
     pub(crate) fn caller_claude_pid(&mut self) -> Option<u32> {
-        crate::lane_state_writer::claude_parent_pid(std::process::id(), &*self.parents()).ok()
+        self.walk_to_claude()
     }
 
     /// The caller of a `start`: the PM session by process (as for every command), else the launcher
