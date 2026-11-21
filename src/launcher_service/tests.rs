@@ -13,6 +13,48 @@ impl ProcessTable for Nothing {
     }
 }
 
+/// The reboot case: the launcher's task starts at logon BEFORE synapsed's task, so for a while no
+/// daemon answers. Waiting must start nothing. `synapsed-client`'s `spawn_daemon` always creates
+/// `synapsed-start.err` in the home before it spawns, so that file (and any announce file) absent
+/// after the wait is the observable "spawn_daemon was never called".
+#[test]
+fn waiting_for_a_daemon_that_is_not_up_never_starts_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut seen = Vec::new();
+    let up = wait_for_daemon(
+        dir.path(),
+        Some(3),
+        std::time::Duration::from_millis(1),
+        |n| seen.push(n),
+    );
+    assert!(!up);
+    assert_eq!(seen, vec![0, 1, 2], "it waited and reported each poll");
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(left.is_empty(), "nothing was created in the home: {left:?}");
+}
+
+#[test]
+fn waiting_returns_at_once_when_a_daemon_is_listening() {
+    let dir = tempfile::tempdir().unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std::fs::write(
+        dir.path().join("synapsed.json"),
+        format!(
+            r#"{{"addr":"{}","instance_id":"x","pid":1}}"#,
+            l.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut calls = 0;
+    assert!(wait_for_daemon(
+        dir.path(),
+        Some(3),
+        std::time::Duration::from_millis(1),
+        |_| calls += 1
+    ));
+    assert_eq!(calls, 0);
+}
+
 #[test]
 fn the_announce_address_is_read_and_anything_else_is_none() {
     let ok = r#"{"addr":"127.0.0.1:9123","instance_id":"x","pid":7}"#;

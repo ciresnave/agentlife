@@ -144,6 +144,30 @@ pub fn daemon_listening(home: &Path) -> bool {
         })
 }
 
+/// Polls [`daemon_listening`] every `pause` until it is true (`max_polls`: `None` = for ever, the
+/// service; `Some(n)` = n polls, for tests). `on_wait` gets the poll count (0, 1, ...) before each
+/// sleep. Returns whether a daemon is listening. It never starts one: the launcher's only way to
+/// reach `synapsed_client::Daemon::connect` (which would `spawn_daemon`) is after this is true.
+pub fn wait_for_daemon(
+    home: &Path,
+    max_polls: Option<u32>,
+    pause: std::time::Duration,
+    mut on_wait: impl FnMut(u32),
+) -> bool {
+    let mut n = 0u32;
+    loop {
+        if daemon_listening(home) {
+            return true;
+        }
+        if max_polls.is_some_and(|m| n >= m) {
+            return false;
+        }
+        on_wait(n);
+        n += 1;
+        std::thread::sleep(pause);
+    }
+}
+
 /// The real daemon, as role [`LAUNCHER_ROLE`].
 pub struct SynapseSource {
     daemon: synapsed_client::Daemon,
