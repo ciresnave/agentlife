@@ -59,6 +59,10 @@ impl Outcome<'_> {
             let mut v = serde_json::json!({
                 "role": self.args.role, "outcome": outcome, "reason": reason,
             });
+            // The refusal's own words (floor and free memory, which cap): the launcher logs them.
+            if let Some(d) = text.strip_prefix("refused: ") {
+                v["detail"] = d.into();
+            }
             if let Some(s) = secs {
                 v["launch_to_live_secs"] = s.into();
             }

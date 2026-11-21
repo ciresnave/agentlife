@@ -397,6 +397,12 @@ fn start_json_maps_to_the_eight_results() {
         MechResult::AlreadyRunning
     );
     assert_eq!(
+        start_detail(r#"{"role":"a","outcome":"failed","reason":"held-for-memory","detail":"held for memory: 3.1 GB free, floor 8 GB"}"#)
+            .as_deref(),
+        Some("held for memory: 3.1 GB free, floor 8 GB")
+    );
+    assert_eq!(start_detail(&j("started", "started")), None);
+    assert_eq!(
         map_start_json(&j("failed", "held-for-memory")),
         MechResult::HeldForMemory
     );

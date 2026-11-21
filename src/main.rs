@@ -997,6 +997,9 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         for (text, reached) in &rep.alarms {
             log(&format!("alarm {text:?} reached={reached}"));
         }
+        for note in svc::take_start_notes() {
+            log(&format!("start refused: {note}"));
+        }
         for line in rep.log_lines() {
             log(&line);
         }

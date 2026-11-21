@@ -257,6 +257,25 @@ fn rate_caps_bound_spawns_per_role_and_overall() {
     );
 }
 
+// a rate refusal names which cap and the counts (2026-11-21: "refused:rate" hid that it was the
+// overall cap, not the role's)
+#[test]
+fn the_rate_text_names_the_role_and_overall_counts() {
+    let (io, m, d) = (Mem::new(), started(), Dir::new());
+    let mut e = open(&io, &m, &d);
+    for k in 0..2u64 {
+        let _ = e.handle(&sig("fuel", k, 1), 100 + k as i64);
+        e.observe_online(&BTreeSet::from(["fuel".to_string()]), 100 + k as i64)
+            .unwrap();
+    }
+    let _ = e.handle(&sig("other", 1, 1), 110);
+    assert_eq!(RATE_OVERALL, 24);
+    assert_eq!(
+        e.rate_text(200, "fuel"),
+        format!("role 2/{RATE_PER_ROLE}, overall 3/{RATE_OVERALL}")
+    );
+}
+
 // (f) after the window frees a slot the service clears the role itself
 #[test]
 fn a_rate_refusal_is_cleared_once_a_slot_frees_and_deleted_only_after_the_clear_succeeds() {

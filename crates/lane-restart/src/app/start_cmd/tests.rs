@@ -279,12 +279,20 @@ fn a_launcher_start_is_held_for_memory_and_proceeds_with_enough() {
     assert!(!code_is(code, 0));
     let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(json["reason"], "held-for-memory", "{out}");
+    assert_eq!(
+        json["detail"], "held for memory: 1.0 GB free, floor 8 GB",
+        "the floor and the measured free memory are in the answer: {out}"
+    );
     assert_eq!(*calls.borrow(), 0, "a held start spawned");
     // control: with memory above the floor the same call reaches the (failing) spawn
     let (code, (out, _)) = run(100.0, &calls);
     assert!(code_is(code, 1), "{code:?}");
     let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(json["reason"], "spawn-failed", "{out}");
+    assert!(
+        json.get("detail").is_none(),
+        "only a refusal has detail: {out}"
+    );
     assert_eq!(*calls.borrow(), 1);
     let logged = rows(&state);
     assert_eq!(logged.len(), 2, "{logged:?}");

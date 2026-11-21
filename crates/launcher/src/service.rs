@@ -163,7 +163,11 @@ pub fn cycle(
             Ok(()) | Err(SourceError::Stale) => match engine.mark_posted(&r) {
                 Ok(()) => {
                     rep.posted += 1;
-                    rep.results.push(crate::result_text(&r));
+                    let mut text = crate::result_text(&r);
+                    if r.reason == "rate" {
+                        text.push_str(&format!(" ({})", engine.rate_text(now, &r.role)));
+                    }
+                    rep.results.push(text);
                 }
                 Err(e) => rep.notes.push(format!("store: {e}")),
             },

@@ -578,6 +578,24 @@ pub fn map_start_json(line: &str) -> MechResult {
     }
 }
 
+thread_local! {
+    /// What the start path said about a refusal (`held for memory: 3.1 GB free, floor 8 GB`), for the
+    /// service log; drained by [`take_start_notes`]. The mechanism returns only a code.
+    static NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The `detail` of a `lane-restart start --json` line (present on a refusal), if any.
+pub fn start_detail(line: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
+    let d = v.get("detail")?.as_str()?;
+    (!d.is_empty()).then(|| d.to_string())
+}
+
+/// Takes the refusal details noted by starts since the last call.
+pub fn take_start_notes() -> Vec<String> {
+    NOTES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
 /// The real mechanism: `lane-restart start --role R --model M --signal-id S --json`, run as a
 /// direct child of this service (the caller identity `launcher_gate` accepts). It is only handed
 /// to the engine when `lazy_enabled` is on.
@@ -634,7 +652,12 @@ impl Mechanism for LaneRestartMechanism {
         }
         let text = reader.join().unwrap_or_default();
         match text.lines().rev().find(|l| l.trim_start().starts_with('{')) {
-            Some(line) => map_start_json(line),
+            Some(line) => {
+                if let Some(d) = start_detail(line) {
+                    NOTES.with(|n| n.borrow_mut().push(format!("role={role} {d}")));
+                }
+                map_start_json(line)
+            }
             None => MechResult::Failed("unparsable-output".into()),
         }
     }

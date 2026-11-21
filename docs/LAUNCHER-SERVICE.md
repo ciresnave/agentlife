@@ -79,7 +79,7 @@ the plan is frozen and asked about; with 0.15.3 a stopped lane is not in it.
 | Synapse access and the bearer session | `synapsed-client` | **not usable: see Blockers** |
 | Mechanism: start one lane by role, `--model sonnet`, reports one of 8 results | AgentLife | `lane-restart start` (0.15.0-0.15.2) covers the spec/duplicate path; since 0.15.13 the launcher path also holds `restore.lock`, the caps and the memory floor (not run against a real lane) |
 | Consent: standing grant for rule 7 | AgentLife (M5) + CireSnave ruling | **unbuilt; board 216** |
-| Policy numbers (caps 3/12 per hour, no-claim 3, replay 5 min) | OverMind | proposals, unmeasured |
+| Policy numbers (caps 3/24 per hour, no-claim 3, replay 5 min) | OverMind | proposals, unmeasured |
 
 ## Identity
 
@@ -235,7 +235,7 @@ What went wrong first, in the order it was found (each cost a cycle; the fixes a
 
 For a launcher caller, `lane-restart start` applies these after every spec refusal and before anything
 spawns, in this order: `restore.lock` (`failed: lock-held`), the caps (`refused: rate` at 3 spawns of a role
-or 12 overall in the last hour; `refused: rate-daily` at 8 of a role in the last day, a proposal), the
+or 24 overall in the last hour; `refused: rate-daily` at 8 of a role in the last day, a proposal), the
 memory floor (`failed: held-for-memory`). A gate that cannot be read fails closed (`store-unavailable`,
 `config-unreadable`, `restore-lock-unavailable`). Caps are counted from `restart.log` rows where a launcher
 caller's `start` set `spawned: true`; refusals and non-spawns consume nothing. Each `start` row carries

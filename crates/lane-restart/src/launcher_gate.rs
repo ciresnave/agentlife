@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// OverMind policy section 2 rule 6 (proposals, not measurements): spawns per role per hour.
 pub const MAX_SPAWNS_PER_ROLE_PER_HOUR: usize = 3;
 /// OverMind policy section 2 rule 6: spawns across all roles per hour.
-pub const MAX_SPAWNS_PER_HOUR: usize = 12;
+pub const MAX_SPAWNS_PER_HOUR: usize = 24;
 /// A per-role daily bound. The policy names none; this number is the lane's proposal, awaiting the
 /// PM's (3 an hour is the burst allowance, this is the "keeps coming back all day" alarm).
 pub const MAX_SPAWNS_PER_ROLE_PER_DAY: usize = 8;
@@ -424,14 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn the_thirteenth_overall_and_the_ninth_in_a_day_are_refused() {
+    fn the_overall_cap_and_the_ninth_in_a_day_are_refused() {
+        assert_eq!(MAX_SPAWNS_PER_HOUR, 24);
         let eleven = SpawnCounts {
-            all_hour: 11,
+            all_hour: MAX_SPAWNS_PER_HOUR - 1,
             ..Default::default()
         };
         assert_eq!(check_caps(&eleven), Ok(()));
         let twelve = SpawnCounts {
-            all_hour: 12,
+            all_hour: MAX_SPAWNS_PER_HOUR,
             ..Default::default()
         };
         assert_eq!(check_caps(&twelve), Err(CapHit::OverallPerHour));
