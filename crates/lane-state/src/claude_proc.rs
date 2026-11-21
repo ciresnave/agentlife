@@ -533,7 +533,7 @@ mod tests {
             (30, 99, "claude.exe"),
         ]);
         assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
-        assert!(is_transparent_wrapper("C:\msys\usr\bin\timeout.exe"));
+        assert!(is_transparent_wrapper(r"C:\msys\usr\bin\timeout.exe"));
         assert!(!is_transparent_wrapper("python.exe"));
     }
 
