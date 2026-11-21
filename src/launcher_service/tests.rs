@@ -13,6 +13,92 @@ impl ProcessTable for Nothing {
     }
 }
 
+// ---- refresh_sibling (O16, PM option B) ----
+// A fake exe is a file whose text is `v=<version>`; the injected reader returns that version.
+
+fn fake_version(p: &Path) -> Option<String> {
+    std::fs::read_to_string(p)
+        .ok()?
+        .strip_prefix("v=")
+        .map(|v| v.trim().to_string())
+}
+
+fn refresh_setup(src_v: &str, sib_v: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hooks-lane-restart.exe");
+    let sib = dir.path().join("lane-restart.exe");
+    std::fs::write(&src, format!("v={src_v}")).unwrap();
+    std::fs::write(&sib, format!("v={sib_v}")).unwrap();
+    (dir, src, sib)
+}
+
+#[test]
+fn a_stale_sibling_is_replaced_by_the_matching_build_and_the_old_one_is_kept() {
+    let (dir, src, sib) = refresh_setup("0.30.81", "0.30.67");
+    match refresh_sibling(&src, &sib, "0.30.81", &fake_version) {
+        SiblingRefresh::Replaced { from, to, kept, .. } => {
+            assert_eq!(from.as_deref(), Some("0.30.67"));
+            assert_eq!(to, "0.30.81");
+            assert_eq!(
+                kept.unwrap(),
+                dir.path().join("lane-restart.exe.bak-0.30.67")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&sib).unwrap(), "v=0.30.81");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("lane-restart.exe.bak-0.30.67")).unwrap(),
+        "v=0.30.67"
+    );
+}
+
+#[test]
+fn a_sibling_that_already_matches_is_not_touched() {
+    let (dir, src, sib) = refresh_setup("0.30.81", "0.30.81");
+    assert_eq!(
+        refresh_sibling(&src, &sib, "0.30.81", &fake_version),
+        SiblingRefresh::Same("0.30.81".into())
+    );
+    assert!(!dir.path().join("lane-restart.exe.bak-0.30.81").exists());
+}
+
+#[test]
+fn a_source_that_is_not_the_launchers_version_is_never_copied() {
+    let (_dir, src, sib) = refresh_setup("0.30.80", "0.30.67");
+    match refresh_sibling(&src, &sib, "0.30.81", &fake_version) {
+        SiblingRefresh::NotReplaced(why) => assert!(why.contains("not 0.30.81"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&sib).unwrap(), "v=0.30.67");
+}
+
+/// A file a live session holds open without delete sharing cannot be moved aside: that is reported,
+/// not skipped silently, and the file is left as it was.
+#[cfg(windows)]
+#[test]
+fn a_held_sibling_is_reported_and_left_alone() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_dir, src, sib) = refresh_setup("0.30.81", "0.30.67");
+    let _held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&sib)
+        .unwrap();
+    // fake_version cannot read a file opened with no sharing, so say the version directly
+    let version = |p: &Path| {
+        if p == sib {
+            Some("0.30.67".to_string())
+        } else {
+            fake_version(p)
+        }
+    };
+    match refresh_sibling(&src, &sib, "0.30.81", &version) {
+        SiblingRefresh::NotReplaced(why) => assert!(why.starts_with("held:"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn the_lane_restart_version_is_read_from_its_first_line_and_a_mismatch_is_a_warning() {
     let out = "lane-restart 0.30.67\nembedded approvals: none\n";

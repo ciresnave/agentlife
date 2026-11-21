@@ -843,6 +843,29 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
                 // The launcher runs the `lane-restart` NEXT TO ITSELF, so replacing only
                 // agentlife.exe leaves the old start path (generic prompt, no claim step) in use:
                 // 2026-11-21 retest, 0.30.81 launcher beside a 0.30.67 lane-restart. Say which.
+                let source = lane_restart::install::hooks_dir().join("lane-restart.exe");
+                match svc::refresh_sibling(
+                    &source,
+                    &m.exe,
+                    env!("CARGO_PKG_VERSION"),
+                    &svc::lane_restart_version_of,
+                ) {
+                    svc::SiblingRefresh::Same(_) => {}
+                    svc::SiblingRefresh::Replaced {
+                        from,
+                        to,
+                        kept,
+                        sha256,
+                    } => log(&format!(
+                        "lane-restart {} replaced: {} -> {to} (sha256 {sha256} read back from the copy; old kept at {})",
+                        m.exe.display(),
+                        from.as_deref().unwrap_or("unknown"),
+                        kept.map_or("(none: no old file)".into(), |p| p.display().to_string())
+                    )),
+                    svc::SiblingRefresh::NotReplaced(why) => {
+                        log(&format!("WARNING: lane-restart sibling NOT refreshed: {why}"))
+                    }
+                }
                 log(&svc::lane_restart_version_line(
                     &m.exe,
                     env!("CARGO_PKG_VERSION"),

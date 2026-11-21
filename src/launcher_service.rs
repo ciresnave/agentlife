@@ -425,6 +425,95 @@ impl Mechanism for SwitchedMechanism<'_> {
 /// later change ever reaches it, the answer is a failure, never a launch.
 pub struct NoMechanism;
 
+/// What [`refresh_sibling`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SiblingRefresh {
+    /// The sibling already is the launcher's version: nothing touched.
+    Same(String),
+    /// Replaced; the old one is kept at `kept`, and both files' SHA-256 were read back equal.
+    Replaced {
+        from: Option<String>,
+        to: String,
+        kept: Option<PathBuf>,
+        sha256: String,
+    },
+    /// Not replaced, and why (source not the launcher's version, file held, copy or hash failed).
+    /// Never silent: the caller logs it.
+    NotReplaced(String),
+}
+
+/// PM option B (2026-11-21, ROADMAP O16): the launcher runs the `lane-restart` next to its own exe,
+/// so at start it makes that sibling the launcher's own version, copying `source` (the installed
+/// `.claude-hooks/lane-restart.exe`) over it ONLY when the versions differ and `source` IS the
+/// launcher's version. The old file is renamed to `lane-restart.exe.bak-<version>` first (Windows
+/// lets a running exe be renamed but not overwritten, so a file held by a live session moves aside
+/// rather than blocking), the copy is read back by hash, and any failure puts the old file back.
+/// `version_of` reads a file's `lane-restart --version` (injected so a test needs no real exe).
+pub fn refresh_sibling(
+    source: &Path,
+    sibling: &Path,
+    own: &str,
+    version_of: &dyn Fn(&Path) -> Option<String>,
+) -> SiblingRefresh {
+    let sib_v = version_of(sibling);
+    if sib_v.as_deref() == Some(own) {
+        return SiblingRefresh::Same(own.to_string());
+    }
+    match version_of(source) {
+        Some(v) if v == own => {}
+        Some(v) => {
+            return SiblingRefresh::NotReplaced(format!(
+                "source {} is {v}, not {own}: not copying a build that does not match the launcher",
+                source.display()
+            ))
+        }
+        None => {
+            return SiblingRefresh::NotReplaced(format!(
+                "cannot read the version of source {}",
+                source.display()
+            ))
+        }
+    }
+    let kept = sibling.exists().then(|| {
+        let mut name = sibling.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".bak-{}", sib_v.as_deref().unwrap_or("unknown")));
+        sibling.with_file_name(name)
+    });
+    if let Some(bak) = &kept {
+        let _ = std::fs::remove_file(bak);
+        if let Err(e) = std::fs::rename(sibling, bak) {
+            return SiblingRefresh::NotReplaced(format!(
+                "held: cannot move {} aside: {e}",
+                sibling.display()
+            ));
+        }
+    }
+    let put_back = |why: String| {
+        let _ = std::fs::remove_file(sibling);
+        if let Some(bak) = &kept {
+            let _ = std::fs::rename(bak, sibling);
+        }
+        SiblingRefresh::NotReplaced(why)
+    };
+    if let Err(e) = std::fs::copy(source, sibling) {
+        return put_back(format!("copy to {} failed: {e}", sibling.display()));
+    }
+    match (
+        lane_restart::install::sha256_file(source),
+        lane_restart::install::sha256_file(sibling),
+    ) {
+        (Ok(a), Ok(b)) if a == b => SiblingRefresh::Replaced {
+            from: sib_v,
+            to: own.to_string(),
+            kept,
+            sha256: a,
+        },
+        (a, b) => put_back(format!(
+            "hash read-back differs or failed (source {a:?}, copy {b:?}); old file put back"
+        )),
+    }
+}
+
 /// The version in `lane-restart --version` output (`lane-restart 0.30.81` on the first line).
 pub fn parse_lane_restart_version(out: &str) -> Option<&str> {
     out.lines()
@@ -432,6 +521,16 @@ pub fn parse_lane_restart_version(out: &str) -> Option<&str> {
         .strip_prefix("lane-restart ")?
         .split_whitespace()
         .next()
+}
+
+/// `<exe> --version` parsed; `None` when it cannot run or does not say `lane-restart <v>`.
+pub fn lane_restart_version_of(exe: &Path) -> Option<String> {
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_lane_restart_version(&String::from_utf8_lossy(&out.stdout)).map(str::to_string)
 }
 
 /// The log line naming the `lane-restart` the launcher will run and whether it matches this
