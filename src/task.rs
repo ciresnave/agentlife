@@ -292,6 +292,7 @@ impl WaitReport {
 
 /// Waits until every precondition holds or `budget` has been slept. Always probes at least once, so a
 /// zero budget is "check now". Each probe round re-checks only what is still missing.
+#[must_use]
 pub fn wait_ready(probe: &dyn Probe, budget: Duration, interval: Duration) -> WaitReport {
     let mut missing: Vec<Precondition> = Precondition::ALL.to_vec();
     let mut waited = Duration::ZERO;
@@ -515,7 +516,7 @@ mod tests {
             (Precondition::Broker, Some(0)),
             (Precondition::HostProgram, Some(0)),
         ]);
-        wait_ready(&f, 120 * S, 1 * S);
+        let _ = wait_ready(&f, 120 * S, 1 * S);
         // round 0: three probes; rounds 1 and 2: only the network one.
         assert_eq!(f.probes.get(), 3 + 1 + 1);
     }

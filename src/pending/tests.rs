@@ -145,6 +145,7 @@ fn rig() -> Rig {
     }
 }
 
+#[must_use]
 fn made(r: &mut Rig, p: &Plan) -> PendingRestore {
     create(&r.home, &mut r.consent, p, "after the update", t0()).unwrap()
 }
@@ -452,7 +453,7 @@ fn a_request_the_store_no_longer_holds_is_not_claimed_as_superseded() {
     let mut r = rig();
     let old = made(&mut r, &plan_with(&["a"], "default"));
     r.consent.withdraw(&old.pending_id).unwrap();
-    made(&mut r, &plan_with(&["a", "b"], "default"));
+    let _ = made(&mut r, &plan_with(&["a", "b"], "default"));
     assert!(load(&r.home, &old.pending_id).unwrap().is_open());
 }
 
@@ -528,7 +529,7 @@ fn the_last_approved_plan_is_the_baseline_and_none_before_any_approval() {
     );
     std::fs::remove_file(r.home.pending_dir().join("broken.json")).unwrap();
     let p2 = plan_with(&["a", "b"], "default");
-    made(&mut r, &p2);
+    let _ = made(&mut r, &p2);
     assert_eq!(
         last_approved_plan(&r.home).unwrap().entries.len(),
         1,

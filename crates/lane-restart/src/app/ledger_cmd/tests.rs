@@ -30,6 +30,7 @@ fn ctx_in(dir: &Path) -> Ctx {
 }
 
 /// Three entries: alpha acted (restart), alpha refused (start), beta acted (stop); 2026-10-14.
+#[must_use]
 fn write_log(state: &Path) -> PathBuf {
     let path = state.join("restart.log");
     let at = |h| chrono::Utc.with_ymd_and_hms(2026, 10, 14, h, 0, 0).unwrap();
@@ -77,7 +78,7 @@ fn a_missing_log_is_an_empty_ledger_not_an_error() {
 #[test]
 fn the_text_view_prints_one_row_per_entry_oldest_first_and_a_footer() {
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("state"));
+    let _ = write_log(&d.path().join("state"));
     let mut ctx = ctx_in(d.path());
     assert!(ok(run(&mut ctx, filter(), false, None, false)));
     let out = ctx.captured().0;
@@ -101,7 +102,7 @@ fn the_text_view_prints_one_row_per_entry_oldest_first_and_a_footer() {
 #[test]
 fn filters_by_role_and_by_acted_and_last_select_the_rows_asked_for() {
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("state"));
+    let _ = write_log(&d.path().join("state"));
     let count = |f: ledger::Filter| {
         let mut ctx = ctx_in(d.path());
         assert!(ok(run(&mut ctx, f, false, None, false)));
@@ -133,7 +134,7 @@ fn filters_by_role_and_by_acted_and_last_select_the_rows_asked_for() {
 #[test]
 fn since_keeps_only_newer_entries_and_a_bad_since_is_named_and_fails() {
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("state"));
+    let _ = write_log(&d.path().join("state"));
     let mut ctx = ctx_in(d.path());
     assert!(ok(run(
         &mut ctx,
@@ -167,7 +168,7 @@ fn since_keeps_only_newer_entries_and_a_bad_since_is_named_and_fails() {
 #[test]
 fn json_prints_one_object_per_line_on_stdout_and_the_footer_on_stderr() {
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("state"));
+    let _ = write_log(&d.path().join("state"));
     let mut ctx = ctx_in(d.path());
     assert!(ok(run(&mut ctx, filter(), true, None, false)));
     let (out, err) = ctx.captured();
@@ -184,7 +185,7 @@ fn json_prints_one_object_per_line_on_stdout_and_the_footer_on_stderr() {
 #[test]
 fn by_lane_counts_acted_and_refused_per_role() {
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("state"));
+    let _ = write_log(&d.path().join("state"));
     let mut ctx = ctx_in(d.path());
     assert!(ok(run(&mut ctx, filter(), false, None, true)));
     assert_eq!(
@@ -213,7 +214,7 @@ fn an_unreadable_line_is_counted_and_named_never_dropped_silently() {
 fn the_log_is_read_from_the_contexts_state_directory_only() {
     // A log in the test's OTHER directory is not read: the path comes from the context.
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("elsewhere"));
+    let _ = write_log(&d.path().join("elsewhere"));
     let mut ctx = ctx_in(d.path());
     assert!(ok(run(&mut ctx, filter(), false, None, false)));
     assert_eq!(
@@ -225,7 +226,7 @@ fn the_log_is_read_from_the_contexts_state_directory_only() {
 #[test]
 fn the_command_line_reaches_it_through_run_with_and_bad_arguments_do_not() {
     let d = tempfile::tempdir().unwrap();
-    write_log(&d.path().join("state"));
+    let _ = write_log(&d.path().join("state"));
     let mut ctx = ctx_in(d.path());
     assert!(ok(run_with(
         &mut ctx,

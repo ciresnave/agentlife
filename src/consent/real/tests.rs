@@ -61,6 +61,7 @@ fn request_for(h: &str) -> Request {
     }
 }
 
+#[must_use]
 fn submit(b: &mut UserRequestBackend, h: &str) -> String {
     b.submit(&request_for(h), &Grant::OneUse, h).unwrap()
 }
@@ -363,7 +364,7 @@ fn with_no_store_nothing_is_created_by_asking_and_nothing_is_found() {
         .is_err());
     assert!(!store.exists(), "reading and spending never create a store");
     // Positive control: a submit does.
-    submit(&mut r.backend, &h);
+    let _ = submit(&mut r.backend, &h);
     assert!(store.exists());
 }
 

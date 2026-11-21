@@ -964,7 +964,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         }
         if rep.session_lost {
             if let Some(r) = &record {
-                svc::remove_caller_record(&record_dir, r);
+                let _ = svc::remove_caller_record(&record_dir, r);
             }
             holding = false;
             log("session lost: caller record removed");
@@ -991,7 +991,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
     };
     if holding {
         if let Some(r) = &record {
-            svc::remove_caller_record(&record_dir, r);
+            let _ = svc::remove_caller_record(&record_dir, r);
         }
     }
     exit

@@ -225,6 +225,7 @@ pub fn relay_chunk(
 /// Relays what the reader sends after the main loop has stopped, until the reader ends (its
 /// sender is dropped) or `deadline` passes. Returns how many chunks it relayed. A write error
 /// stops the relay (the outer side is gone) but never panics or hangs the teardown.
+#[must_use]
 pub fn drain_tail(
     rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     output_writer: &mut impl Write,
@@ -745,7 +746,7 @@ fn run_with_handlers_and_window_watched(
     // Whatever the reader still delivers while the ConPTY closes is the child's last output
     // (a ConPTY may flush its final frame only when it is closed), so it is relayed here, not
     // left in a channel nobody reads any more: this wait is also the drain.
-    drain_tail(
+    let _ = drain_tail(
         &rx,
         &mut outer_output,
         &mut parser,

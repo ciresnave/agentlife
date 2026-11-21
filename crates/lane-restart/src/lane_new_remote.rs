@@ -1064,6 +1064,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("README.md")).unwrap(), b"mine");
     }
 
+    #[must_use]
     fn remote_with(v: &Fake, files: &[(&str, &[u8])]) -> Tree {
         let t: Tree = files
             .iter()
@@ -1113,7 +1114,7 @@ mod tests {
         let readme = s.iter().find(|f| f.path == "README.md").unwrap();
         let d = tempdir().unwrap();
         let v = Fake::default().with_repo(NWO);
-        remote_with(&v, &[("README.md", readme.bytes.as_slice())]);
+        let _ = remote_with(&v, &[("README.md", readme.bytes.as_slice())]);
         let (o, detail) = step_seed(&v, NWO, &d.path().join("zetafish"), &s, true, true).unwrap();
         assert_eq!(o, Outcome::Ok, "{detail}");
         let have: Vec<String> = v.remote.borrow()[NWO].1.keys().cloned().collect();

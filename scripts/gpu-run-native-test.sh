@@ -74,7 +74,9 @@ if [ -n "$PS1" ]; then
     wait $pn
     check "ps1 waits for the native holder (>= 2 s)" "[ $((p1 - p0)) -ge 2 ]"
     "$EXE" -Project native2 -- cmd /c "echo n" >/dev/null 2>&1
-    check "native and ps1 write the same log" "grep -q '\[ps v3' '$LOG' && grep -q '\[native2 v3' '$LOG'"
+    # The ps1's version moves on its own (baracuda's is v4 since 2026-11-07, the native's is v3): the line
+    # shape is what must match, the number is only logged ("version skew is surfaced, not enforced").
+    check "native and ps1 write the same log" "grep -Eq '\[ps v[0-9]+ pid=[0-9]+\]' '$LOG' && grep -q '\[native2 v3' '$LOG'"
   else
     echo "SKIPPED - ps1 interleave: powershell.exe did not start within 20 s (the AMSI/Defender hang this tool exists to avoid)"
   fi

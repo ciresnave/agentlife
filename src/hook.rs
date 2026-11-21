@@ -817,6 +817,7 @@ mod tests {
         v.to_string()
     }
 
+    #[must_use]
     fn go(
         r: &Rig,
         env: &FakeEnv,
@@ -1134,7 +1135,7 @@ mod tests {
         a.cmdline = ["claude.exe", "-n", "first-name"]
             .map(String::from)
             .to_vec();
-        go(
+        let _ = go(
             &r,
             &a,
             &Alive(vec![]),
@@ -1147,7 +1148,7 @@ mod tests {
         b.cmdline = ["claude.exe", "-n", "second-name"]
             .map(String::from)
             .to_vec();
-        go(
+        let _ = go(
             &r,
             &b,
             &Alive(vec![]),
@@ -1188,7 +1189,7 @@ mod tests {
         let r = rig();
         let env = FakeEnv::lane(100);
         let alive = Alive(vec![(100, 5100)]);
-        go(
+        let _ = go(
             &r,
             &env,
             &alive,
@@ -1197,7 +1198,7 @@ mod tests {
             &payload("s1", Some("startup")),
         );
         // Compaction: the same session id fires SessionStart again. Not a new launch.
-        go(
+        let _ = go(
             &r,
             &env,
             &alive,
@@ -1233,7 +1234,7 @@ mod tests {
         let r = rig();
         let mut env = FakeEnv::lane(100);
         let alive = Alive(vec![(100, 5100)]);
-        go(
+        let _ = go(
             &r,
             &env,
             &alive,
@@ -1290,7 +1291,7 @@ mod tests {
         let r = rig();
         let env = FakeEnv::lane(100);
         let alive = Alive(vec![(100, 5100)]);
-        go(&r, &env, &alive, "SessionStart", None, &payload("s1", None));
+        let _ = go(&r, &env, &alive, "SessionStart", None, &payload("s1", None));
         let end = payload("s1", None).replace("SessionStart", "SessionEnd");
         let Outcome::Ended { agent_id } = go(&r, &env, &alive, "SessionEnd", Some("made-up"), &end)
         else {
@@ -1589,7 +1590,7 @@ mod tests {
             .update(&agent_id, |rec| rec.intent = Intent::Lazy)
             .unwrap();
         let third = FakeEnv::lane(300);
-        go(
+        let _ = go(
             &r,
             &third,
             &Alive(vec![(300, 5300)]),
@@ -1633,7 +1634,7 @@ mod tests {
             })
             .unwrap();
         let end = payload("s1", None).replace("SessionStart", "SessionEnd");
-        go(
+        let _ = go(
             &r,
             &env,
             &alive,
