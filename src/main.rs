@@ -812,6 +812,20 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         ExitCode::FAILURE
     };
 
+    // Host logs older than 24 h (every role): they were the biggest Defender scan cost on this box.
+    {
+        let dir = lane_restart::state_dir();
+        let n = lane_restart::host::prune_host_logs(
+            &dir,
+            lane_restart::host::HOST_LOG_MAX_AGE,
+            std::time::SystemTime::now(),
+            None,
+        );
+        log(&format!(
+            "pruned {n} host log file(s) older than 24 h in {}",
+            dir.display()
+        ));
+    }
     let _lock = match svc::take_instance_lock(&state_dir) {
         Ok(Some(l)) => l,
         Ok(None) => {
