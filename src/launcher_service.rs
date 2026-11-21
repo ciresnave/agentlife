@@ -425,6 +425,35 @@ impl Mechanism for SwitchedMechanism<'_> {
 /// later change ever reaches it, the answer is a failure, never a launch.
 pub struct NoMechanism;
 
+/// The version in `lane-restart --version` output (`lane-restart 0.30.81` on the first line).
+pub fn parse_lane_restart_version(out: &str) -> Option<&str> {
+    out.lines()
+        .next()?
+        .strip_prefix("lane-restart ")?
+        .split_whitespace()
+        .next()
+}
+
+/// The log line naming the `lane-restart` the launcher will run and whether it matches this
+/// launcher's own version (`own`). Runs `<exe> --version` (a read-only flag).
+pub fn lane_restart_version_line(exe: &Path, own: &str) -> String {
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let theirs = out.as_ref().ok().and_then(|o| {
+        parse_lane_restart_version(&String::from_utf8_lossy(&o.stdout)).map(str::to_string)
+    });
+    match theirs {
+        Some(v) if v == own => format!("lane-restart {} is {v}, same as this launcher", exe.display()),
+        Some(v) => format!(
+            "WARNING: lane-restart {} is {v} but this launcher is {own}: replace it with the matching build (a woken lane gets the OLD start prompt and claim step)",
+            exe.display()
+        ),
+        None => format!("WARNING: cannot read the version of lane-restart {}", exe.display()),
+    }
+}
+
 impl Mechanism for NoMechanism {
     fn start(&self, _role: &str, _model: &str, _signal_id: &str) -> MechResult {
         MechResult::Failed("mechanism-not-built".into())

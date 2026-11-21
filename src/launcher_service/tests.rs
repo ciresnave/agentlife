@@ -13,6 +13,17 @@ impl ProcessTable for Nothing {
     }
 }
 
+#[test]
+fn the_lane_restart_version_is_read_from_its_first_line_and_a_mismatch_is_a_warning() {
+    let out = "lane-restart 0.30.67\nembedded approvals: none\n";
+    assert_eq!(parse_lane_restart_version(out), Some("0.30.67"));
+    for bad in ["", "agentlife 0.30.81", "lane-restart"] {
+        assert_eq!(parse_lane_restart_version(bad), None, "{bad:?}");
+    }
+    let missing = lane_restart_version_line(Path::new("no-such-lane-restart.exe"), "0.30.81");
+    assert!(missing.starts_with("WARNING: cannot read"), "{missing}");
+}
+
 /// The reboot case: the launcher's task starts at logon BEFORE synapsed's task, so for a while no
 /// daemon answers. Waiting must start nothing. `synapsed-client`'s `spawn_daemon` always creates
 /// `synapsed-start.err` in the home before it spawns, so that file (and any announce file) absent

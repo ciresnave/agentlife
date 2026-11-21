@@ -840,6 +840,13 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         let wait = std::time::Duration::from_secs((svc::LAUNCH_WAIT_SECS - 10).max(1) as u64);
         match svc::LaneRestartMechanism::sibling(wait) {
             Ok(m) => {
+                // The launcher runs the `lane-restart` NEXT TO ITSELF, so replacing only
+                // agentlife.exe leaves the old start path (generic prompt, no claim step) in use:
+                // 2026-11-21 retest, 0.30.81 launcher beside a 0.30.67 lane-restart. Say which.
+                log(&svc::lane_restart_version_line(
+                    &m.exe,
+                    env!("CARGO_PKG_VERSION"),
+                ));
                 real_mech = m;
                 switched = svc::SwitchedMechanism {
                     inner: real_mech,
