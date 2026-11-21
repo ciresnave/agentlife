@@ -521,6 +521,22 @@ mod tests {
         ));
     }
 
+    /// PM measurement 2026-11-21: `lane-restart stop ...` plain verified the caller; the same command
+    /// as `timeout 60 lane-restart stop ...` did not (timeout.exe between the shell and the tool).
+    #[test]
+    fn a_timeout_between_the_shell_and_the_tool_is_walked_past() {
+        let lookup = FakeAncestry::chain(&[
+            (1, 5, "timeout.exe"),
+            (5, 10, "bash.exe"),
+            (10, 20, "bash.exe"),
+            (20, 30, "bash.exe"),
+            (30, 99, "claude.exe"),
+        ]);
+        assert_eq!(claude_parent_pid(1, &lookup).unwrap(), 99);
+        assert!(is_transparent_wrapper("C:\msys\usr\bin\timeout.exe"));
+        assert!(!is_transparent_wrapper("python.exe"));
+    }
+
     /// A real process table that comes up short once: the walk reads it again and finds `claude`.
     /// A fixed table never retries, and a table that stays short fails after exactly
     /// `WALK_ATTEMPTS` reads.

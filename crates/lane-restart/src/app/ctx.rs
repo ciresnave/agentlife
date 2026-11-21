@@ -209,7 +209,7 @@ impl Ctx {
             Err(e) => {
                 let chain = crate::lane_state_writer::describe_walk(me, &*parents);
                 self.errln(&format!(
-                    "lane-restart: no claude session found above this command: {e}; ancestry read: {chain}"
+                    "lane-restart: no claude session found above this command: {e}; ancestry read: {chain} (a wrapper such as timeout or nohup between the shell and lane-restart can be the cause: run the command plain)"
                 ));
                 None
             }
