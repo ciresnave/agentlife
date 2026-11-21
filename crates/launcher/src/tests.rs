@@ -802,6 +802,16 @@ fn the_cycle_log_names_each_result_and_is_silent_when_nothing_happened() {
             "cycle: role=kiss outcome=started".to_string()
         ]
     );
+    // the decided signal is named, so its enqueue time (in the id) can be read against the log timestamp
+    let named = crate::service::Report {
+        decided: 1,
+        seen: vec!["kiss:2026-11-21T16:18:37.052522Z attempt 1".to_string()],
+        ..Default::default()
+    };
+    assert_eq!(
+        named.log_lines()[1],
+        "cycle: decided signal kiss:2026-11-21T16:18:37.052522Z attempt 1"
+    );
     // control: an idle cycle prints nothing
     assert!(crate::service::Report::default().log_lines().is_empty());
 }

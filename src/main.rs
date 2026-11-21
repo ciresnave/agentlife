@@ -959,6 +959,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
             ));
         }
         let wait = if once { 0 } else { svc::POLL_WAIT_SECS };
+        let cycle_began = std::time::Instant::now();
         let rep = service::cycle(
             &mut engine,
             &source,
@@ -975,6 +976,12 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         }
         for line in rep.log_lines() {
             log(&line);
+        }
+        if rep.decided > 0 {
+            log(&format!(
+                "cycle: took {} ms from poll start to decision and start result",
+                cycle_began.elapsed().as_millis()
+            ));
         }
         if rep.session_lost {
             if let Some(r) = &record {
