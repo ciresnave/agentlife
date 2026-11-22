@@ -478,6 +478,49 @@ pub fn slow_note(event: &str, elapsed: std::time::Duration, full_scans: u32) -> 
     })
 }
 
+/// A role's hook journal grows to this, then is rotated to `<role>.hooks.log.1` (one generation).
+pub const HOOK_JOURNAL_MAX: u64 = 64 * 1024;
+
+/// The journal file of `role`: one line per hook invocation, `<rfc3339> <event> ok|err <ms>ms`.
+/// Its modification time is "when this lane's hooks last ran", success or not; an idle lane has an
+/// old one, a lane whose hooks are dead has an old one too, and only a lane that is working AND has
+/// an old one is the stuck-hooks case.
+pub fn hook_journal_path(state_dir: &Path, role: &str) -> PathBuf {
+    state_dir.join(format!("{role}.hooks.log"))
+}
+
+/// Appends one journal line. Best effort by design: a full disk or a held file must never fail
+/// the hook (the state write already carries that), so every error is swallowed.
+pub fn journal_hook(
+    state_dir: &Path,
+    role: &str,
+    event: &str,
+    ok: bool,
+    elapsed: Duration,
+    now: chrono::DateTime<Utc>,
+) {
+    use std::io::Write;
+    let path = hook_journal_path(state_dir, role);
+    let _ = std::fs::create_dir_all(state_dir);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= HOOK_JOURNAL_MAX) {
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    let line = format!(
+        "{} {event} {} {}ms
+",
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        if ok { "ok" } else { "err" },
+        elapsed.as_millis()
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// The whole hook invocation: read stdin, lock, read-modify-write, unlock.
 pub fn run(
     state_dir: &Path,
@@ -487,17 +530,59 @@ pub fn run(
     lane_role_env: Option<&str>,
     stdin: &mut dyn Read,
 ) -> Result<(), String> {
+    run_routed(
+        state_dir,
+        event,
+        my_pid,
+        parent_lookup,
+        lane_role_env,
+        stdin,
+    )
+    .1
+}
+
+/// The role a hook journal line goes under when the hook failed before it knew the role.
+pub const UNROUTED_ROLE: &str = "_unrouted";
+
+/// Like [`run`], but also returns the role the event was routed to (`None` when the hook failed
+/// before it had one), so the caller can journal the invocation under it.
+pub fn run_routed(
+    state_dir: &Path,
+    event: &str,
+    my_pid: u32,
+    parent_lookup: &dyn ParentProcess,
+    lane_role_env: Option<&str>,
+    stdin: &mut dyn Read,
+) -> (Option<String>, Result<(), String>) {
     let mut buf = String::new();
-    stdin
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("could not read hook input: {e}"))?;
-    let input: HookInput =
-        serde_json::from_str(&buf).map_err(|e| format!("could not parse hook input: {e}"))?;
+    if let Err(e) = stdin.read_to_string(&mut buf) {
+        return (None, Err(format!("could not read hook input: {e}")));
+    }
+    let input: HookInput = match serde_json::from_str(&buf) {
+        Ok(i) => i,
+        Err(e) => return (None, Err(format!("could not parse hook input: {e}"))),
+    };
 
     // The verified claude pid first: it is what names this process's file.
-    let pid = claude_parent_pid(my_pid, parent_lookup).map_err(|e| e.to_string())?;
+    let pid = match claude_parent_pid(my_pid, parent_lookup) {
+        Ok(p) => p,
+        Err(e) => return (None, Err(e.to_string())),
+    };
     let (cli_flags, started) = read_claude_process(pid, parent_lookup);
     let role = hook_role(state_dir, &input, lane_role_env, pid);
+    let result = write_event(state_dir, event, &input, &role, pid, &cli_flags, started);
+    (Some(role), result)
+}
+
+fn write_event(
+    state_dir: &Path,
+    event: &str,
+    input: &HookInput,
+    role: &str,
+    pid: u32,
+    cli_flags: &ClaudeCliFlags,
+    started: Option<u64>,
+) -> Result<(), String> {
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let path = state_dir.join(format!("{role}.json"));
     let lock = StateLock::acquire(
@@ -507,8 +592,8 @@ pub fn run(
     )
     .map_err(|e| e.to_string())?;
 
-    let existing = crate::state::load(state_dir, &role).ok();
-    let next = apply_event(existing, event, &input, &role, pid, &cli_flags, Utc::now())
+    let existing = crate::state::load(state_dir, role).ok();
+    let next = apply_event(existing, event, input, role, pid, cli_flags, Utc::now())
         .map(|state| with_start_time(state, pid, started));
 
     let result = match next {

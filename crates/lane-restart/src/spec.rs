@@ -656,6 +656,12 @@ pub struct Activity {
     /// not-busy process with a large value is the quiet stall no hook event announces. No
     /// threshold is applied here: the number is the whole claim.
     pub quiet_secs: i64,
+    /// Seconds since a HOOK last ran for this role (success or failure), from its hook journal's
+    /// modification time; `None` when no journal exists (a lane that has not run a hook since the
+    /// journal was introduced). Unlike `quiet_secs` it is not moved by `assert-idle` or the
+    /// launcher, so "no events because idle" (small `quiet`, large `hook`) reads apart from "hooks
+    /// dead" (the lane is working, yet `hook` keeps growing).
+    pub last_hook_secs: Option<i64>,
     /// Only with `status --quiet-over N`: whether `quiet_secs > N`. Absent without the flag, so the
     /// default output is unchanged. It is a mark on the raw number, not a stall verdict: a lane in
     /// one long tool call is also quiet.
@@ -723,6 +729,15 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 idle: st.is_idle(),
                 idle_blockers: st.idle_blockers(),
                 quiet_secs: (facts.now() - st.updated_at).num_seconds().max(0),
+                last_hook_secs: crate::lane_state_writer::hook_journal_path(dir, role)
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|t| {
+                        (facts.now() - chrono::DateTime::<chrono::Utc>::from(t))
+                            .num_seconds()
+                            .max(0)
+                    }),
                 quiet_over: None,
             });
             out.channels = st

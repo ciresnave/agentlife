@@ -23,13 +23,24 @@ pub(super) fn run(ctx: &mut Ctx, event: &str) -> ExitCode {
     let lane_role_env = ctx.lane_role.clone();
     let mut stdin = ctx.stdin();
     let lookup = ctx.parents();
-    let result = lane_state_writer::run(
+    let (routed, result) = lane_state_writer::run_routed(
         &ctx.state_dir,
         event,
         my_pid,
         &*lookup,
         lane_role_env.as_deref(),
         &mut *stdin,
+    );
+    // The per-role journal (role, event, ok/err, ms): how a session whose hooks stop is seen.
+    lane_state_writer::journal_hook(
+        &ctx.state_dir,
+        routed
+            .as_deref()
+            .unwrap_or(lane_state_writer::UNROUTED_ROLE),
+        event,
+        result.is_ok(),
+        started.elapsed(),
+        chrono::Utc::now(),
     );
     if let Some(note) =
         lane_state_writer::slow_note(event, started.elapsed(), ctx.parent_full_scans())
