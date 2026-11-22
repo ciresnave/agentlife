@@ -791,19 +791,156 @@ fn host_log_path(role: &str) -> std::path::PathBuf {
     crate::state_dir().join(format!("host-{role}-{}.log", std::process::id()))
 }
 
-/// Best-effort append - never fatal to the relay that's still running.
-fn append_host_log(path: &std::path::Path, line: &str) {
+/// A host log is rotated when it reaches this size: the file moves to `<name>.1` (replacing the
+/// previous one), so at most two files per host, each at most this size plus one write.
+pub const HOST_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// A host log older than this is deleted by [`prune_host_logs`].
+pub const HOST_LOG_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+
+/// The environment variable that turns the raw terminal stream into the host log. Off by default
+/// (2026-11-21, Defender recording: every redraw wrote two lines and every write was scanned; the
+/// host logs were the biggest single scan cost on the machine).
+pub const RAW_LOG_VAR: &str = "LANE_HOST_RAW_LOG";
+
+/// How often a raw-stream log is flushed to disk, when it is on.
+const RAW_LOG_FLUSH: Duration = Duration::from_secs(3);
+
+/// `1` or `true` (any case) turns the raw stream on; anything else, or unset, leaves it off.
+pub fn raw_log_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+}
+
+/// Best-effort append - never fatal to the relay that's still running. Rotates first when the file
+/// has reached [`HOST_LOG_MAX_BYTES`].
+fn append_host_log(path: &std::path::Path, text: &str) {
     use std::io::Write as _;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    rotate_if_full(path, HOST_LOG_MAX_BYTES);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "{line}");
+        let _ = writeln!(f, "{text}");
     }
+}
+
+/// Moves `path` to `<path>.1` when it is at least `max` bytes, replacing a previous `.1`.
+fn rotate_if_full(path: &std::path::Path, max: u64) {
+    let full = std::fs::metadata(path).is_ok_and(|m| m.len() >= max);
+    if full {
+        let mut old = path.as_os_str().to_owned();
+        old.push(".1");
+        let old = std::path::PathBuf::from(old);
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::rename(path, &old);
+    }
+}
+
+/// The raw terminal stream, buffered: lines are held and written in one append every
+/// [`RAW_LOG_FLUSH`] (or at 64 KiB, or when the host ends), not one write per chunk. Only exists
+/// when [`RAW_LOG_VAR`] is on.
+struct RawLog {
+    path: std::path::PathBuf,
+    pending: Mutex<(String, Instant)>,
+    flush_every: Duration,
+}
+
+impl RawLog {
+    fn new(path: std::path::PathBuf, flush_every: Duration) -> Self {
+        Self {
+            path,
+            pending: Mutex::new((String::new(), Instant::now())),
+            flush_every,
+        }
+    }
+
+    fn push(&self, direction: &str, bytes: &[u8]) {
+        let line = format!(
+            "[{}] {direction} n={} {}\n",
+            chrono::Utc::now().to_rfc3339(),
+            bytes.len(),
+            escape_bytes(bytes)
+        );
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        p.0.push_str(&line);
+        if p.1.elapsed() >= self.flush_every || p.0.len() >= 64 * 1024 {
+            let text = std::mem::take(&mut p.0);
+            p.1 = Instant::now();
+            drop(p);
+            self.write(&text);
+        }
+    }
+
+    fn write(&self, text: &str) {
+        use std::io::Write as _;
+        if text.is_empty() {
+            return;
+        }
+        rotate_if_full(&self.path, HOST_LOG_MAX_BYTES);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = f.write_all(text.as_bytes());
+        }
+    }
+}
+
+impl Drop for RawLog {
+    fn drop(&mut self) {
+        let text = std::mem::take(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()).0);
+        self.write(&text);
+    }
+}
+
+/// `(role, pid)` of a host log file name: `host-<role>-<pid>.log` or `.log.1`.
+fn host_log_name_parts(name: &str) -> Option<(&str, &str)> {
+    let stem = name.strip_prefix("host-")?;
+    let stem = stem
+        .strip_suffix(".log.1")
+        .or_else(|| stem.strip_suffix(".log"))?;
+    let (role, pid) = stem.rsplit_once('-')?;
+    (!role.is_empty() && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+        .then_some((role, pid))
+}
+
+/// Deletes `host-<role>-<pid>.log` (and `.log.1`) files in `dir` last written more than `max_age`
+/// before `now`; with `role`, only that role's. Returns how many were deleted. Only files that
+/// match the host log name exactly are touched.
+pub fn prune_host_logs(
+    dir: &std::path::Path,
+    max_age: Duration,
+    now: std::time::SystemTime,
+    role: Option<&str>,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut deleted = 0;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some((r, _)) = host_log_name_parts(&name) else {
+            continue;
+        };
+        if role.is_some_and(|want| want != r) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        if old && std::fs::remove_file(e.path()).is_ok() {
+            deleted += 1;
+        }
+    }
+    deleted
 }
 
 /// Convenience entry point for real production use: loads the user's
@@ -815,6 +952,12 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     detach_session_if_headless();
     let log_path = host_log_path(role);
     let started_at = chrono::Utc::now();
+    let _ = prune_host_logs(
+        &crate::state_dir(),
+        HOST_LOG_MAX_AGE,
+        std::time::SystemTime::now(),
+        Some(role),
+    );
 
     eprintln!("lane-restart host: loading approvals...");
     let (config, loaded) = match crate::paths::home_dir() {
@@ -850,6 +993,20 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     for (h, hash) in &loaded.handlers {
         append_host_log(&log_path, &format!("  active {} {hash}", h.id));
     }
+    let raw_log = raw_log_enabled(std::env::var(RAW_LOG_VAR).ok().as_deref())
+        .then(|| RawLog::new(log_path.clone(), RAW_LOG_FLUSH));
+    append_host_log(
+        &log_path,
+        &format!(
+            "[{}] RAW-STREAM {}",
+            started_at.to_rfc3339(),
+            if raw_log.is_some() {
+                format!("on ({RAW_LOG_VAR}): buffered, flushed every 3 s")
+            } else {
+                format!("off (set {RAW_LOG_VAR}=1 to record it)")
+            }
+        ),
+    );
     for (name, reason) in &loaded.refused {
         append_host_log(&log_path, &format!("  REFUSED {name}: {reason}"));
     }
@@ -872,7 +1029,6 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             .map_or(notify::Transport::Broker, |c| c.notify_transport),
     );
     let log_path_for_attempts = log_path.clone();
-    let log_path_for_raw_io = log_path.clone();
     let log_path_for_unhandled = log_path.clone();
     let role_for_unhandled = role.to_string();
     let on_unhandled = move |screen: String| {
@@ -966,15 +1122,9 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             }
         },
         move |direction, bytes| {
-            append_host_log(
-                &log_path_for_raw_io,
-                &format!(
-                    "[{}] {direction} n={} {}",
-                    chrono::Utc::now().to_rfc3339(),
-                    bytes.len(),
-                    escape_bytes(bytes)
-                ),
-            );
+            if let Some(raw) = &raw_log {
+                raw.push(direction, bytes);
+            }
         },
         Some(watch_hub),
         None,
@@ -1184,6 +1334,114 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), unix_script.to_string()]
         }
+    }
+
+    // -- host log volume (2026-11-21, Defender recording) -------------------- //
+
+    #[test]
+    fn the_raw_stream_is_off_unless_the_flag_says_one_or_true() {
+        for off in [None, Some(""), Some("0"), Some("yes"), Some("false")] {
+            assert!(!raw_log_enabled(off), "{off:?}");
+        }
+        for on in [Some("1"), Some(" 1 "), Some("true"), Some("TRUE")] {
+            assert!(raw_log_enabled(on), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn a_raw_log_writes_once_per_interval_not_once_per_chunk_and_flushes_at_the_end() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("host-x-1.log");
+        // an interval that does not elapse during the test: 500 chunks, nothing on disk yet
+        let raw = RawLog::new(path.clone(), Duration::from_secs(3600));
+        for i in 0..500 {
+            raw.push("child->relay", format!("chunk {i}").as_bytes());
+        }
+        assert!(!path.exists(), "buffered, not written per chunk");
+        drop(raw);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            500,
+            "every chunk is there after the flush"
+        );
+        // control: an interval of zero writes as it goes
+        let eager = RawLog::new(d.path().join("host-y-1.log"), Duration::ZERO);
+        eager.push("child->relay", b"a");
+        assert!(d.path().join("host-y-1.log").exists());
+    }
+
+    #[test]
+    fn a_full_host_log_rotates_to_dot_one_and_keeps_two_files() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("host-x-1.log");
+        std::fs::write(&path, vec![b'a'; 100]).unwrap();
+        rotate_if_full(&path, 100);
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(d.path().join("host-x-1.log.1"))
+                .unwrap()
+                .len(),
+            100
+        );
+        // a second rotation replaces the .1: two files at most
+        std::fs::write(&path, vec![b'b'; 100]).unwrap();
+        rotate_if_full(&path, 100);
+        assert_eq!(
+            std::fs::read(d.path().join("host-x-1.log.1")).unwrap()[0],
+            b'b'
+        );
+        // control: a file under the cap is left alone
+        std::fs::write(&path, b"short").unwrap();
+        rotate_if_full(&path, 100);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn old_host_logs_are_pruned_and_nothing_else_is() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |n: &str| std::fs::write(d.path().join(n), "x").unwrap();
+        for n in [
+            "host-fuel-100.log",
+            "host-fuel-100.log.1",
+            "host-ml-convertant-7.log",
+            "host-fuel-abc.log",
+            "host-.log",
+            "restart.log",
+            "launcher-store.json",
+            "fuel.json",
+        ] {
+            w(n);
+        }
+        let later = std::time::SystemTime::now() + Duration::from_secs(25 * 3600);
+        // one role only
+        assert_eq!(
+            prune_host_logs(d.path(), HOST_LOG_MAX_AGE, later, Some("fuel")),
+            2
+        );
+        assert!(d.path().join("host-ml-convertant-7.log").exists());
+        // every role; hyphenated roles parse; unrelated files survive
+        assert_eq!(prune_host_logs(d.path(), HOST_LOG_MAX_AGE, later, None), 1);
+        for n in [
+            "host-fuel-abc.log",
+            "host-.log",
+            "restart.log",
+            "launcher-store.json",
+            "fuel.json",
+        ] {
+            assert!(d.path().join(n).exists(), "{n}");
+        }
+        // control: nothing is old at the real time
+        w("host-fuel-200.log");
+        assert_eq!(
+            prune_host_logs(
+                d.path(),
+                HOST_LOG_MAX_AGE,
+                std::time::SystemTime::now(),
+                None
+            ),
+            0
+        );
     }
 
     /// Issue #117: a gate for the startup window that opens when the child's output has

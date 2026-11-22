@@ -61,6 +61,10 @@ pub trait Notify {
 pub struct Report {
     /// Signals decided this cycle (a mechanism or a refusal; not skipped repeats).
     pub decided: usize,
+    /// `<signal_id> attempt <n>` of each signal decided this cycle. The signal id ends with the
+    /// enqueue time of the oldest waiting message, so this line's own timestamp minus that is the
+    /// wait from mail to decision (2026-11-21 retest: ~75 s, location unmeasured).
+    pub seen: Vec<String>,
     pub posted: usize,
     pub cleared: usize,
     /// Each result posted this cycle as `role=<r> outcome=<started|already-running|refused:<why>|failed:<why>>`
@@ -84,6 +88,11 @@ impl Report {
             "cycle: decided={} posted={} cleared={}",
             self.decided, self.posted, self.cleared
         )];
+        lines.extend(
+            self.seen
+                .iter()
+                .map(|s| format!("cycle: decided signal {s}")),
+        );
         lines.extend(self.results.iter().map(|r| format!("cycle: {r}")));
         lines
     }
@@ -137,6 +146,8 @@ pub fn cycle(
                 }
                 let _ = engine.handle(s, now);
                 rep.decided += 1;
+                rep.seen
+                    .push(format!("{} attempt {}", s.signal_id, s.attempt));
             }
         }
         Err(SourceError::Unauthorized(w)) => {
@@ -152,7 +163,11 @@ pub fn cycle(
             Ok(()) | Err(SourceError::Stale) => match engine.mark_posted(&r) {
                 Ok(()) => {
                     rep.posted += 1;
-                    rep.results.push(crate::result_text(&r));
+                    let mut text = crate::result_text(&r);
+                    if r.reason == "rate" {
+                        text.push_str(&format!(" ({})", engine.rate_text(now, &r.role)));
+                    }
+                    rep.results.push(text);
                 }
                 Err(e) => rep.notes.push(format!("store: {e}")),
             },

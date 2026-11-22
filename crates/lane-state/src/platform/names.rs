@@ -69,6 +69,16 @@ pub fn is_shell(name: &str) -> bool {
     SHELLS.contains(&b.as_str())
 }
 
+/// Commands that only run another command (`nohup lane-restart ...`, `timeout 60 lane-restart ...`):
+/// they add a process between a lane-restart and its `claude` and change nothing about who asked.
+/// The walk still answers with the NEAREST `claude`, so passing one grants no identity.
+pub fn is_transparent_wrapper(name: &str) -> bool {
+    matches!(
+        image_base(name).as_str(),
+        "nohup" | "env" | "timeout" | "time" | "setsid" | "stdbuf"
+    )
+}
+
 /// A terminal host from [`TERMINAL_HOSTS`].
 pub fn is_terminal_host(name: &str) -> bool {
     let b = image_base(name);

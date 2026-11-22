@@ -812,6 +812,20 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         ExitCode::FAILURE
     };
 
+    // Host logs older than 24 h (every role): they were the biggest Defender scan cost on this box.
+    {
+        let dir = lane_restart::state_dir();
+        let n = lane_restart::host::prune_host_logs(
+            &dir,
+            lane_restart::host::HOST_LOG_MAX_AGE,
+            std::time::SystemTime::now(),
+            None,
+        );
+        log(&format!(
+            "pruned {n} host log file(s) older than 24 h in {}",
+            dir.display()
+        ));
+    }
     let _lock = match svc::take_instance_lock(&state_dir) {
         Ok(Some(l)) => l,
         Ok(None) => {
@@ -840,6 +854,36 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         let wait = std::time::Duration::from_secs((svc::LAUNCH_WAIT_SECS - 10).max(1) as u64);
         match svc::LaneRestartMechanism::sibling(wait) {
             Ok(m) => {
+                // The launcher runs the `lane-restart` NEXT TO ITSELF, so replacing only
+                // agentlife.exe leaves the old start path (generic prompt, no claim step) in use:
+                // 2026-11-21 retest, 0.30.81 launcher beside a 0.30.67 lane-restart. Say which.
+                let source = lane_restart::install::hooks_dir().join("lane-restart.exe");
+                match svc::refresh_sibling(
+                    &source,
+                    &m.exe,
+                    env!("CARGO_PKG_VERSION"),
+                    &svc::lane_restart_version_of,
+                ) {
+                    svc::SiblingRefresh::Same(_) => {}
+                    svc::SiblingRefresh::Replaced {
+                        from,
+                        to,
+                        kept,
+                        sha256,
+                    } => log(&format!(
+                        "lane-restart {} replaced: {} -> {to} (sha256 {sha256} read back from the copy; old kept at {})",
+                        m.exe.display(),
+                        from.as_deref().unwrap_or("unknown"),
+                        kept.map_or("(none: no old file)".into(), |p| p.display().to_string())
+                    )),
+                    svc::SiblingRefresh::NotReplaced(why) => {
+                        log(&format!("WARNING: lane-restart sibling NOT refreshed: {why}"))
+                    }
+                }
+                log(&svc::lane_restart_version_line(
+                    &m.exe,
+                    env!("CARGO_PKG_VERSION"),
+                ));
                 real_mech = m;
                 switched = svc::SwitchedMechanism {
                     inner: real_mech,
@@ -874,6 +918,13 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         Ok(h) => h,
         Err(e) => return fail(e),
     };
+    // Never let `Daemon::connect` start a bare `synapsed` (no SYNAPSE_LAUNCHER_ROLES): wait for
+    // the daemon's own task to bring it up, and say so in the log every 30 s.
+    svc::wait_for_daemon(&home, None, std::time::Duration::from_secs(5), |n| {
+        if n.is_multiple_of(6) {
+            log("waiting for synapsed to be up (the launcher never starts it)");
+        }
+    });
     let source = match svc::SynapseSource::connect(&home) {
         Ok(s) => s,
         Err(e) => return fail(e),
@@ -945,6 +996,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
             ));
         }
         let wait = if once { 0 } else { svc::POLL_WAIT_SECS };
+        let cycle_began = std::time::Instant::now();
         let rep = service::cycle(
             &mut engine,
             &source,
@@ -959,8 +1011,17 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         for (text, reached) in &rep.alarms {
             log(&format!("alarm {text:?} reached={reached}"));
         }
+        for note in svc::take_start_notes() {
+            log(&format!("start refused: {note}"));
+        }
         for line in rep.log_lines() {
             log(&line);
+        }
+        if rep.decided > 0 {
+            log(&format!(
+                "cycle: took {} ms from poll start to decision and start result",
+                cycle_began.elapsed().as_millis()
+            ));
         }
         if rep.session_lost {
             if let Some(r) = &record {

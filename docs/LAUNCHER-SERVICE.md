@@ -79,7 +79,7 @@ the plan is frozen and asked about; with 0.15.3 a stopped lane is not in it.
 | Synapse access and the bearer session | `synapsed-client` | **not usable: see Blockers** |
 | Mechanism: start one lane by role, `--model sonnet`, reports one of 8 results | AgentLife | `lane-restart start` (0.15.0-0.15.2) covers the spec/duplicate path; since 0.15.13 the launcher path also holds `restore.lock`, the caps and the memory floor (not run against a real lane) |
 | Consent: standing grant for rule 7 | AgentLife (M5) + CireSnave ruling | **unbuilt; board 216** |
-| Policy numbers (caps 3/12 per hour, no-claim 3, replay 5 min) | OverMind | proposals, unmeasured |
+| Policy numbers (caps 3/24 per hour, no-claim 3, replay 5 min) | OverMind | proposals, unmeasured |
 
 ## Identity
 
@@ -222,20 +222,20 @@ What went wrong first, in the order it was found (each cost a cycle; the fixes a
    (`tool_version` 0.29.0, no `stop_mac`); `spec::read` reads such a stop as unclassified and every launcher refuses it, by design. It is
    reported as `unknown-role` for a registry-less lane (a test pins that). To wake one: start it once and let it stop itself (`stop
    --self` signs), or a PM re-sign decision.
-6. **The launcher role needs `see` grants** for `/v1/list` to show it who is online (it has none in the pilot `access.json`), or its
-   `launch-stalled ... started-never-claimed` alarm fires about 4 minutes after every successful wake (seen for capant and cpufish).
-   UNVERIFIED: the launcher's own `/v1/list` was not read. Alarms go over claude-peers while `notify_transport` is the default broker.
-   **Grants the launcher role still lacks (CireSnave, account holder; the PM's role cannot grant):** `see` on `agent:capant@ciresnave`,
-   `agent:cpufish@ciresnave`, `agent:sageant@ciresnave`, `agent:surfaceant@ciresnave` and `agent:thinkersfoundation@ciresnave` (and any
-   lane it may wake), as `synapse access grant --role <account holder> --to agentlife-launcher@ciresnave --action see --object
-   agent:<role>@ciresnave` (repeat `--object`); and `send` on `agent:pm@ciresnave` before `notify_transport` is set to `synapse`
-   (the Synapse alarm sends as the launcher to the PM, and is refused without it). Until then the stalled alarm is known noise.
+6. **The launcher role needs `see` grants** for `/v1/list` to show it who is online. WITHOUT one it can never see the role online, so
+   `spawns_since_online` only rises: the `launch-stalled ... started-never-claimed` alarm fires ~4 minutes after every wake AND rule 5
+   (`no-claim`, bound 3) refuses the role on its third wake (measured 2026-11-21: `launchtest` 3 and refused, kiss, capant, cpufish at 1;
+   not alarm text only). **Measured after CireSnave's grant (2026-11-21, five `synapse:see` grants to `agentlife-launcher@ciresnave`, 73 lanes):
+   no launcher restart was needed (last `started` line 16:34:50Z, none after); `launcher-store.json` rewritten 17:13:24Z had kiss, capant, cpufish
+   `spawns_since_online` 0, `alarmed` false, `last_seen_online` 17:12:58Z (N=1 observation).** `launchtest` stays at 1 with `last_seen_online` null
+   until it is next seen online (it is soft-stopped). **A NEW LANE that gets a launch spec needs `synapse:see` for `agentlife-launcher@ciresnave`
+   in the same step** (account holder; a grant object holds at most 16): `synapse access grant --role <account holder> --to agentlife-launcher@ciresnave --action see --object agent:<role>@ciresnave`.
 
 ## Caps, ledger line, memory floor and `restore.lock` (0.15.13)
 
 For a launcher caller, `lane-restart start` applies these after every spec refusal and before anything
 spawns, in this order: `restore.lock` (`failed: lock-held`), the caps (`refused: rate` at 3 spawns of a role
-or 12 overall in the last hour; `refused: rate-daily` at 8 of a role in the last day, a proposal), the
+or 24 overall in the last hour; `refused: rate-daily` at 8 of a role in the last day, a proposal), the
 memory floor (`failed: held-for-memory`). A gate that cannot be read fails closed (`store-unavailable`,
 `config-unreadable`, `restore-lock-unavailable`). Caps are counted from `restart.log` rows where a launcher
 caller's `start` set `spawned: true`; refusals and non-spawns consume nothing. Each `start` row carries

@@ -115,6 +115,59 @@ pub fn launch_outcome(o: Outcome) -> synapsed_client::LaunchOutcome {
     }
 }
 
+/// The daemon's announce file in the Synapse home (`synapsed-client`'s `ANNOUNCE_FILE`).
+const ANNOUNCE_FILE: &str = "synapsed.json";
+
+/// The address the announce file names (`{"addr": "127.0.0.1:port", ...}`); `None` when the text
+/// is not that. Reads nothing else from it.
+pub fn announce_addr(text: &str) -> Option<std::net::SocketAddr> {
+    serde_json::from_str::<Value>(text)
+        .ok()?
+        .get("addr")?
+        .as_str()?
+        .parse()
+        .ok()
+}
+
+/// Whether something accepts a connection at the address the home's announce file names. It sends
+/// nothing and proves nothing (`Daemon::connect` does the proof); it only answers "is there a
+/// daemon to find", because `Daemon::connect` STARTS a bare `synapsed` when nothing answers, with
+/// none of the environment the daemon's own task sets (`SYNAPSE_LAUNCHER_ROLES`,
+/// `SYNAPSE_LAUNCH_SENDERS`). That auto-start at logon, ahead of the task, left the launcher
+/// refused on the launch routes (PM, 2026-11-21: synapsed pid 19312, auto-spawned 04:50:47).
+pub fn daemon_listening(home: &Path) -> bool {
+    std::fs::read_to_string(home.join(ANNOUNCE_FILE))
+        .ok()
+        .and_then(|t| announce_addr(&t))
+        .is_some_and(|a| {
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(1)).is_ok()
+        })
+}
+
+/// Polls [`daemon_listening`] every `pause` until it is true (`max_polls`: `None` = for ever, the
+/// service; `Some(n)` = n polls, for tests). `on_wait` gets the poll count (0, 1, ...) before each
+/// sleep. Returns whether a daemon is listening. It never starts one: the launcher's only way to
+/// reach `synapsed_client::Daemon::connect` (which would `spawn_daemon`) is after this is true.
+pub fn wait_for_daemon(
+    home: &Path,
+    max_polls: Option<u32>,
+    pause: std::time::Duration,
+    mut on_wait: impl FnMut(u32),
+) -> bool {
+    let mut n = 0u32;
+    loop {
+        if daemon_listening(home) {
+            return true;
+        }
+        if max_polls.is_some_and(|m| n >= m) {
+            return false;
+        }
+        on_wait(n);
+        n += 1;
+        std::thread::sleep(pause);
+    }
+}
+
 /// The real daemon, as role [`LAUNCHER_ROLE`].
 pub struct SynapseSource {
     daemon: synapsed_client::Daemon,
@@ -372,6 +425,134 @@ impl Mechanism for SwitchedMechanism<'_> {
 /// later change ever reaches it, the answer is a failure, never a launch.
 pub struct NoMechanism;
 
+/// What [`refresh_sibling`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SiblingRefresh {
+    /// The sibling already is the launcher's version: nothing touched.
+    Same(String),
+    /// Replaced; the old one is kept at `kept`, and both files' SHA-256 were read back equal.
+    Replaced {
+        from: Option<String>,
+        to: String,
+        kept: Option<PathBuf>,
+        sha256: String,
+    },
+    /// Not replaced, and why (source not the launcher's version, file held, copy or hash failed).
+    /// Never silent: the caller logs it.
+    NotReplaced(String),
+}
+
+/// PM option B (2026-11-21, ROADMAP O16): the launcher runs the `lane-restart` next to its own exe,
+/// so at start it makes that sibling the launcher's own version, copying `source` (the installed
+/// `.claude-hooks/lane-restart.exe`) over it ONLY when the versions differ and `source` IS the
+/// launcher's version. The old file is renamed to `lane-restart.exe.bak-<version>` first (Windows
+/// lets a running exe be renamed but not overwritten, so a file held by a live session moves aside
+/// rather than blocking), the copy is read back by hash, and any failure puts the old file back.
+/// `version_of` reads a file's `lane-restart --version` (injected so a test needs no real exe).
+pub fn refresh_sibling(
+    source: &Path,
+    sibling: &Path,
+    own: &str,
+    version_of: &dyn Fn(&Path) -> Option<String>,
+) -> SiblingRefresh {
+    let sib_v = version_of(sibling);
+    if sib_v.as_deref() == Some(own) {
+        return SiblingRefresh::Same(own.to_string());
+    }
+    match version_of(source) {
+        Some(v) if v == own => {}
+        Some(v) => {
+            return SiblingRefresh::NotReplaced(format!(
+                "source {} is {v}, not {own}: not copying a build that does not match the launcher",
+                source.display()
+            ))
+        }
+        None => {
+            return SiblingRefresh::NotReplaced(format!(
+                "cannot read the version of source {}",
+                source.display()
+            ))
+        }
+    }
+    let kept = sibling.exists().then(|| {
+        let mut name = sibling.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".bak-{}", sib_v.as_deref().unwrap_or("unknown")));
+        sibling.with_file_name(name)
+    });
+    if let Some(bak) = &kept {
+        let _ = std::fs::remove_file(bak);
+        if let Err(e) = std::fs::rename(sibling, bak) {
+            return SiblingRefresh::NotReplaced(format!(
+                "held: cannot move {} aside: {e}",
+                sibling.display()
+            ));
+        }
+    }
+    let put_back = |why: String| {
+        let _ = std::fs::remove_file(sibling);
+        if let Some(bak) = &kept {
+            let _ = std::fs::rename(bak, sibling);
+        }
+        SiblingRefresh::NotReplaced(why)
+    };
+    if let Err(e) = std::fs::copy(source, sibling) {
+        return put_back(format!("copy to {} failed: {e}", sibling.display()));
+    }
+    match (
+        lane_restart::install::sha256_file(source),
+        lane_restart::install::sha256_file(sibling),
+    ) {
+        (Ok(a), Ok(b)) if a == b => SiblingRefresh::Replaced {
+            from: sib_v,
+            to: own.to_string(),
+            kept,
+            sha256: a,
+        },
+        (a, b) => put_back(format!(
+            "hash read-back differs or failed (source {a:?}, copy {b:?}); old file put back"
+        )),
+    }
+}
+
+/// The version in `lane-restart --version` output (`lane-restart 0.30.81` on the first line).
+pub fn parse_lane_restart_version(out: &str) -> Option<&str> {
+    out.lines()
+        .next()?
+        .strip_prefix("lane-restart ")?
+        .split_whitespace()
+        .next()
+}
+
+/// `<exe> --version` parsed; `None` when it cannot run or does not say `lane-restart <v>`.
+pub fn lane_restart_version_of(exe: &Path) -> Option<String> {
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_lane_restart_version(&String::from_utf8_lossy(&out.stdout)).map(str::to_string)
+}
+
+/// The log line naming the `lane-restart` the launcher will run and whether it matches this
+/// launcher's own version (`own`). Runs `<exe> --version` (a read-only flag).
+pub fn lane_restart_version_line(exe: &Path, own: &str) -> String {
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let theirs = out.as_ref().ok().and_then(|o| {
+        parse_lane_restart_version(&String::from_utf8_lossy(&o.stdout)).map(str::to_string)
+    });
+    match theirs {
+        Some(v) if v == own => format!("lane-restart {} is {v}, same as this launcher", exe.display()),
+        Some(v) => format!(
+            "WARNING: lane-restart {} is {v} but this launcher is {own}: replace it with the matching build (a woken lane gets the OLD start prompt and claim step)",
+            exe.display()
+        ),
+        None => format!("WARNING: cannot read the version of lane-restart {}", exe.display()),
+    }
+}
+
 impl Mechanism for NoMechanism {
     fn start(&self, _role: &str, _model: &str, _signal_id: &str) -> MechResult {
         MechResult::Failed("mechanism-not-built".into())
@@ -395,6 +576,24 @@ pub fn map_start_json(line: &str) -> MechResult {
         (_, reason) if !reason.is_empty() => MechResult::Failed(reason.to_string()),
         _ => MechResult::Failed("unparsable-output".into()),
     }
+}
+
+thread_local! {
+    /// What the start path said about a refusal (`held for memory: 3.1 GB free, floor 8 GB`), for the
+    /// service log; drained by [`take_start_notes`]. The mechanism returns only a code.
+    static NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The `detail` of a `lane-restart start --json` line (present on a refusal), if any.
+pub fn start_detail(line: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
+    let d = v.get("detail")?.as_str()?;
+    (!d.is_empty()).then(|| d.to_string())
+}
+
+/// Takes the refusal details noted by starts since the last call.
+pub fn take_start_notes() -> Vec<String> {
+    NOTES.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
 /// The real mechanism: `lane-restart start --role R --model M --signal-id S --json`, run as a
@@ -453,7 +652,12 @@ impl Mechanism for LaneRestartMechanism {
         }
         let text = reader.join().unwrap_or_default();
         match text.lines().rev().find(|l| l.trim_start().starts_with('{')) {
-            Some(line) => map_start_json(line),
+            Some(line) => {
+                if let Some(d) = start_detail(line) {
+                    NOTES.with(|n| n.borrow_mut().push(format!("role={role} {d}")));
+                }
+                map_start_json(line)
+            }
             None => MechResult::Failed("unparsable-output".into()),
         }
     }

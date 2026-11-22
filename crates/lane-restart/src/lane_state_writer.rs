@@ -14,7 +14,7 @@
 use crate::state::LaneState;
 use chrono::Utc;
 pub use lane_state::claude_proc::{
-    claude_parent_pid, parse_claude_cli_flags, recorded_cwd, transcript_project_dir,
+    claude_parent_pid, describe_walk, parse_claude_cli_flags, recorded_cwd, transcript_project_dir,
     ClaudeCliFlags, HookInput, ModelField, ParentProcess, PidError,
 };
 use std::io::{ErrorKind, Read};
@@ -662,6 +662,11 @@ impl RealParentProcess {
 }
 
 impl ParentProcess for RealParentProcess {
+    fn refresh(&self) -> bool {
+        // the next lookup scans the table again
+        self.snapshot.borrow_mut().take().is_some()
+    }
+
     fn start_time_of(&self, pid: u32) -> Option<u64> {
         self.with_snapshot(|sys| {
             sys.process(sysinfo::Pid::from_u32(pid))

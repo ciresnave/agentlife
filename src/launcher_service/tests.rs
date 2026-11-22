@@ -13,6 +13,181 @@ impl ProcessTable for Nothing {
     }
 }
 
+// ---- refresh_sibling (O16, PM option B) ----
+// A fake exe is a file whose text is `v=<version>`; the injected reader returns that version.
+
+fn fake_version(p: &Path) -> Option<String> {
+    std::fs::read_to_string(p)
+        .ok()?
+        .strip_prefix("v=")
+        .map(|v| v.trim().to_string())
+}
+
+fn refresh_setup(src_v: &str, sib_v: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hooks-lane-restart.exe");
+    let sib = dir.path().join("lane-restart.exe");
+    std::fs::write(&src, format!("v={src_v}")).unwrap();
+    std::fs::write(&sib, format!("v={sib_v}")).unwrap();
+    (dir, src, sib)
+}
+
+#[test]
+fn a_stale_sibling_is_replaced_by_the_matching_build_and_the_old_one_is_kept() {
+    let (dir, src, sib) = refresh_setup("0.30.81", "0.30.67");
+    match refresh_sibling(&src, &sib, "0.30.81", &fake_version) {
+        SiblingRefresh::Replaced { from, to, kept, .. } => {
+            assert_eq!(from.as_deref(), Some("0.30.67"));
+            assert_eq!(to, "0.30.81");
+            assert_eq!(
+                kept.unwrap(),
+                dir.path().join("lane-restart.exe.bak-0.30.67")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&sib).unwrap(), "v=0.30.81");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("lane-restart.exe.bak-0.30.67")).unwrap(),
+        "v=0.30.67"
+    );
+}
+
+#[test]
+fn a_sibling_that_already_matches_is_not_touched() {
+    let (dir, src, sib) = refresh_setup("0.30.81", "0.30.81");
+    assert_eq!(
+        refresh_sibling(&src, &sib, "0.30.81", &fake_version),
+        SiblingRefresh::Same("0.30.81".into())
+    );
+    assert!(!dir.path().join("lane-restart.exe.bak-0.30.81").exists());
+}
+
+#[test]
+fn a_source_that_is_not_the_launchers_version_is_never_copied() {
+    let (_dir, src, sib) = refresh_setup("0.30.80", "0.30.67");
+    match refresh_sibling(&src, &sib, "0.30.81", &fake_version) {
+        SiblingRefresh::NotReplaced(why) => assert!(why.contains("not 0.30.81"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&sib).unwrap(), "v=0.30.67");
+}
+
+/// A file a live session holds open without delete sharing cannot be moved aside: that is reported,
+/// not skipped silently, and the file is left as it was.
+#[cfg(windows)]
+#[test]
+fn a_held_sibling_is_reported_and_left_alone() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_dir, src, sib) = refresh_setup("0.30.81", "0.30.67");
+    let _held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&sib)
+        .unwrap();
+    // fake_version cannot read a file opened with no sharing, so say the version directly
+    let version = |p: &Path| {
+        if p == sib {
+            Some("0.30.67".to_string())
+        } else {
+            fake_version(p)
+        }
+    };
+    match refresh_sibling(&src, &sib, "0.30.81", &version) {
+        SiblingRefresh::NotReplaced(why) => assert!(why.starts_with("held:"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_lane_restart_version_is_read_from_its_first_line_and_a_mismatch_is_a_warning() {
+    let out = "lane-restart 0.30.67\nembedded approvals: none\n";
+    assert_eq!(parse_lane_restart_version(out), Some("0.30.67"));
+    for bad in ["", "agentlife 0.30.81", "lane-restart"] {
+        assert_eq!(parse_lane_restart_version(bad), None, "{bad:?}");
+    }
+    let missing = lane_restart_version_line(Path::new("no-such-lane-restart.exe"), "0.30.81");
+    assert!(missing.starts_with("WARNING: cannot read"), "{missing}");
+}
+
+/// The reboot case: the launcher's task starts at logon BEFORE synapsed's task, so for a while no
+/// daemon answers. Waiting must start nothing. `synapsed-client`'s `spawn_daemon` always creates
+/// `synapsed-start.err` in the home before it spawns, so that file (and any announce file) absent
+/// after the wait is the observable "spawn_daemon was never called".
+#[test]
+fn waiting_for_a_daemon_that_is_not_up_never_starts_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut seen = Vec::new();
+    let up = wait_for_daemon(
+        dir.path(),
+        Some(3),
+        std::time::Duration::from_millis(1),
+        |n| seen.push(n),
+    );
+    assert!(!up);
+    assert_eq!(seen, vec![0, 1, 2], "it waited and reported each poll");
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(left.is_empty(), "nothing was created in the home: {left:?}");
+}
+
+#[test]
+fn waiting_returns_at_once_when_a_daemon_is_listening() {
+    let dir = tempfile::tempdir().unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std::fs::write(
+        dir.path().join("synapsed.json"),
+        format!(
+            r#"{{"addr":"{}","instance_id":"x","pid":1}}"#,
+            l.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut calls = 0;
+    assert!(wait_for_daemon(
+        dir.path(),
+        Some(3),
+        std::time::Duration::from_millis(1),
+        |_| calls += 1
+    ));
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn the_announce_address_is_read_and_anything_else_is_none() {
+    let ok = r#"{"addr":"127.0.0.1:9123","instance_id":"x","pid":7}"#;
+    assert_eq!(announce_addr(ok), Some("127.0.0.1:9123".parse().unwrap()));
+    for bad in [
+        "",
+        "not json",
+        r#"{"pid":7}"#,
+        r#"{"addr":5}"#,
+        r#"{"addr":"nope"}"#,
+    ] {
+        assert_eq!(announce_addr(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_home_with_no_announce_file_has_no_daemon_to_find() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!daemon_listening(dir.path()));
+}
+
+#[test]
+fn a_listener_at_the_announced_address_is_found_and_a_closed_port_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::fs::write(
+        dir.path().join("synapsed.json"),
+        format!(r#"{{"addr":"{addr}","instance_id":"x","pid":1}}"#),
+    )
+    .unwrap();
+    assert!(daemon_listening(dir.path()), "control: a live listener");
+    drop(l);
+    assert!(!daemon_listening(dir.path()), "the same address, closed");
+}
+
 // ---- the wire shapes, read from Synapse's own tests (`crates/synapsed/tests/launch.rs`) ----
 
 #[test]
@@ -221,6 +396,12 @@ fn start_json_maps_to_the_eight_results() {
         map_start_json(&j("already-running", "start-lock-held")),
         MechResult::AlreadyRunning
     );
+    assert_eq!(
+        start_detail(r#"{"role":"a","outcome":"failed","reason":"held-for-memory","detail":"held for memory: 3.1 GB free, floor 8 GB"}"#)
+            .as_deref(),
+        Some("held for memory: 3.1 GB free, floor 8 GB")
+    );
+    assert_eq!(start_detail(&j("started", "started")), None);
     assert_eq!(
         map_start_json(&j("failed", "held-for-memory")),
         MechResult::HeldForMemory

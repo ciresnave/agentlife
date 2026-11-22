@@ -26,7 +26,7 @@ pub const PRUNE_SECS: i64 = 24 * 3600;
 const HOUR_SECS: i64 = 3600;
 /// Rule 6: spawns per role and overall in the last hour.
 pub const RATE_PER_ROLE: usize = 3;
-pub const RATE_OVERALL: usize = 12;
+pub const RATE_OVERALL: usize = 24;
 /// Rule 5: consecutive spawns without the role having been seen online.
 pub const NO_CLAIM_BOUND: u32 = 3;
 /// R7: consecutive `already-running` answers without the role seen online.
@@ -374,6 +374,15 @@ impl<'a> Engine<'a> {
 
     fn prune(&mut self, now: i64) {
         self.data.requests.retain(|r| now - r.at < PRUNE_SECS);
+    }
+
+    /// What rule 6 reads, as log text: `role n/3, overall n/24` (which cap a `rate` refusal hit).
+    pub fn rate_text(&self, now: i64, role: &str) -> String {
+        format!(
+            "role {}/{RATE_PER_ROLE}, overall {}/{RATE_OVERALL}",
+            self.spawns_last_hour(now, Some(role)),
+            self.spawns_last_hour(now, None)
+        )
     }
 
     fn spawns_last_hour(&self, now: i64, role: Option<&str>) -> usize {
