@@ -100,7 +100,8 @@ impl Registry {
 
     /// The lane is up: drop its entries whose time has passed.
     pub fn drop_passed(&mut self, role: &str, now: DateTime<Utc>) {
-        self.wakes.retain(|w| !(w.role == role && w.wake_utc <= now));
+        self.wakes
+            .retain(|w| !(w.role == role && w.wake_utc <= now));
     }
 
     /// Remove one entry once the launcher has dealt with it.
@@ -128,6 +129,24 @@ pub fn register_from_handoff(
     Ok(reg.wakes.iter().filter(|w| w.role == role).count())
 }
 
+/// Remove the entry the launcher knows by `(role, event, signal_id)`; returns whether one was removed.
+pub fn consume_by_signal(
+    state_dir: &Path,
+    role: &str,
+    event: &str,
+    signal: &str,
+) -> Result<bool, String> {
+    let mut reg = Registry::load(state_dir)?;
+    let before = reg.wakes.len();
+    reg.wakes
+        .retain(|w| !(w.role == role && w.event == event && signal_id(w) == signal));
+    let removed = reg.wakes.len() != before;
+    if removed {
+        reg.save(state_dir)?;
+    }
+    Ok(removed)
+}
+
 /// A stable offset in `0..JITTER_MAX_SECS` from the role name (FNV-1a).
 pub fn jitter_secs(role: &str) -> i64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -146,9 +165,7 @@ pub fn due_at(w: &Wake) -> DateTime<Utc> {
 /// The wakes due at `now`, earliest due time first (ties by role, then event).
 pub fn due(reg: &Registry, now: DateTime<Utc>) -> Vec<&Wake> {
     let mut v: Vec<&Wake> = reg.wakes.iter().filter(|w| due_at(w) <= now).collect();
-    v.sort_by(|a, b| {
-        (due_at(a), &a.role, &a.event).cmp(&(due_at(b), &b.role, &b.event))
-    });
+    v.sort_by(|a, b| (due_at(a), &a.role, &a.event).cmp(&(due_at(b), &b.role, &b.event)));
     v
 }
 
@@ -180,11 +197,7 @@ pub struct Row {
 }
 
 /// Every entry with its state: `role-running`, `due-waiting-for-launcher` or `pending`; soonest first.
-pub fn readout(
-    reg: &Registry,
-    now: DateTime<Utc>,
-    running: &dyn Fn(&str) -> bool,
-) -> Vec<Row> {
+pub fn readout(reg: &Registry, now: DateTime<Utc>, running: &dyn Fn(&str) -> bool) -> Vec<Row> {
     let mut rows: Vec<Row> = reg
         .wakes
         .iter()
@@ -255,14 +268,29 @@ mod tests {
     #[test]
     fn replace_role_drops_a_removed_line_and_keeps_other_roles() {
         let mut r = Registry::default();
-        r.replace_role("a", &[wait("x", "2026-11-24T01:00:00Z"), wait("y", "2026-11-24T02:00:00Z")], t(NOW));
+        r.replace_role(
+            "a",
+            &[
+                wait("x", "2026-11-24T01:00:00Z"),
+                wait("y", "2026-11-24T02:00:00Z"),
+            ],
+            t(NOW),
+        );
         r.replace_role("b", &[wait("z", "2026-11-24T03:00:00Z")], t(NOW));
         r.replace_role("a", &[wait("y", "2026-11-24T02:00:00Z")], t(NOW));
-        let mut have: Vec<_> = r.wakes.iter().map(|w| (w.role.as_str(), w.event.as_str())).collect();
+        let mut have: Vec<_> = r
+            .wakes
+            .iter()
+            .map(|w| (w.role.as_str(), w.event.as_str()))
+            .collect();
         have.sort();
         assert_eq!(have, vec![("a", "y"), ("b", "z")]);
         r.replace_role("a", &[], t(NOW));
-        assert_eq!(r.wakes.len(), 1, "no wait lines: the role's entries are gone");
+        assert_eq!(
+            r.wakes.len(),
+            1,
+            "no wait lines: the role's entries are gone"
+        );
     }
 
     #[test]
@@ -274,11 +302,39 @@ prose WAIT: not one
         assert_eq!(register_from_handoff(&d, "r", text, t(NOW)).unwrap(), 1);
         assert_eq!(register_from_handoff(&d, "other", text, t(NOW)).unwrap(), 1);
         // The lane deleted its line: re-registering empties only its own entries.
-        assert_eq!(register_from_handoff(&d, "r", "no waits
-", t(NOW)).unwrap(), 0);
+        assert_eq!(
+            register_from_handoff(
+                &d,
+                "r",
+                "no waits
+",
+                t(NOW)
+            )
+            .unwrap(),
+            0
+        );
         let reg = Registry::load(&d).unwrap();
         assert_eq!(reg.wakes.len(), 1);
         assert_eq!(reg.wakes[0].role, "other");
+    }
+
+    #[test]
+    fn consume_by_signal_removes_only_the_named_entry() {
+        let d = tmp("cons");
+        let text = "WAIT: a | check: true | wake: 2026-11-24T01:00:00Z
+WAIT: b | check: true | wake: 2026-11-24T02:00:00Z
+";
+        register_from_handoff(&d, "r", text, t(NOW)).unwrap();
+        assert!(consume_by_signal(&d, "r", "a", "r:wake-20261124T010000Z").unwrap());
+        assert!(
+            !consume_by_signal(&d, "r", "a", "r:wake-20261124T010000Z").unwrap(),
+            "already gone"
+        );
+        assert!(
+            !consume_by_signal(&d, "r", "b", "r:wake-20261124T010000Z").unwrap(),
+            "wrong time"
+        );
+        assert_eq!(Registry::load(&d).unwrap().wakes.len(), 1);
     }
 
     #[test]
@@ -296,7 +352,10 @@ prose WAIT: not one
         let mut r = Registry::default();
         r.replace_role("a", &[wait("e", "2026-11-24T01:00:00Z")], t(NOW));
         let due_at_ = due_at(&r.wakes[0]);
-        assert_eq!(due_at_, t("2026-11-24T01:00:00Z") + Duration::seconds(jitter_secs("a")));
+        assert_eq!(
+            due_at_,
+            t("2026-11-24T01:00:00Z") + Duration::seconds(jitter_secs("a"))
+        );
         assert!(due(&r, due_at_ - Duration::seconds(1)).is_empty());
         assert_eq!(due(&r, due_at_).len(), 1);
     }
@@ -322,7 +381,10 @@ prose WAIT: not one
         let mut r = Registry::default();
         r.replace_role(
             "a",
-            &[wait("old", "2026-11-23T05:00:00Z"), wait("new", "2026-11-25T05:00:00Z")],
+            &[
+                wait("old", "2026-11-23T05:00:00Z"),
+                wait("new", "2026-11-25T05:00:00Z"),
+            ],
             t(NOW),
         );
         r.drop_passed("a", t(NOW));
@@ -340,7 +402,10 @@ prose WAIT: not one
         assert_eq!(id, "agentlife:wake-20261124T010203Z");
         assert!(is_wake_signal(&id, "agentlife"));
         assert!(!is_wake_signal(&id, "other"));
-        assert!(!is_wake_signal("agentlife:2026-11-19T15:48:49.123Z", "agentlife"));
+        assert!(!is_wake_signal(
+            "agentlife:2026-11-19T15:48:49.123Z",
+            "agentlife"
+        ));
         assert!(crate::start::signal_names_role(&id, "agentlife"));
     }
 

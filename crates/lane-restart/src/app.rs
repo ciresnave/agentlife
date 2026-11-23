@@ -374,7 +374,9 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
             return match cli::wakes(rest) {
                 Ok(json) => wakes_cmd::run(ctx, json),
                 Err(e) => {
-                    ctx.errln(&format!("lane-restart wakes: {e}; expected `wakes [--json]`"));
+                    ctx.errln(&format!(
+                        "lane-restart wakes: {e}; expected `wakes [--json]`"
+                    ));
                     ExitCode::FAILURE
                 }
             };

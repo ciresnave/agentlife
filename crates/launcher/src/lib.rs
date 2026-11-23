@@ -31,6 +31,12 @@ pub const RATE_OVERALL: usize = 24;
 pub const NO_CLAIM_BOUND: u32 = 3;
 /// R7: consecutive `already-running` answers without the role seen online.
 pub const STALL_STREAK: u32 = 5;
+/// A wake-at signal's epoch (`docs/WAKE-AT.md`): the launcher's own, never the daemon's.
+pub const WAKE_EPOCH: &str = "wake";
+/// At most this many wake-starts per cycle, so a burst of wakes spreads over several cycles.
+pub const WAKES_PER_CYCLE: usize = 2;
+/// A wake still refused this long after it fell due is given up (logged), never retried for ever.
+pub const WAKE_EXPIRY_SECS: i64 = 24 * 3600;
 /// The store's schema; a store with a newer one is refused, never rewritten.
 pub const SCHEMA: u32 = 1;
 
@@ -477,7 +483,7 @@ impl<'a> Engine<'a> {
         }
         // Rule 7b: a grant is not enough while the daemon cannot say who may raise a signal. With
         // no allowlist, any local sender's mail would be a reason to start a lane.
-        if !self.allowlist_confirmed {
+        if !self.allowlist_confirmed && !is_wake(sig) {
             return self.refuse(row, "no-sender-allowlist", Status::Transient, sig);
         }
         // Rule 8: intent saved first, then the one mechanism call, then the result saved.
@@ -502,6 +508,22 @@ impl<'a> Engine<'a> {
         self.note_role(&sig.role, &answer, now);
         let result = self.data.requests[idx].result();
         // A failed save leaves the row in `Intent` on disk: the call is not repeated (recover()).
+        let _ = self.save();
+        result
+    }
+
+    /// [`Engine::handle`] for a wake-at signal (`docs/WAKE-AT.md`): the same rules, but nothing is ever
+    /// posted to Synapse (there is no signal to answer) and a refusal the caller will retry leaves no
+    /// `Transient` row behind, so no `launch-clear` is ever sent for a wake.
+    #[must_use]
+    pub fn handle_wake(&mut self, sig: &Signal, now: i64) -> LaunchResult {
+        let result = self.handle(sig, now);
+        self.data
+            .requests
+            .retain(|r| !(r.key_eq(sig) && r.status == Status::Transient));
+        for r in self.data.requests.iter_mut().filter(|r| r.key_eq(sig)) {
+            r.posted = true;
+        }
         let _ = self.save();
         result
     }
@@ -744,6 +766,16 @@ impl<'a> Engine<'a> {
             .retain(|r| !(r.role == role && r.status == Status::Clearing));
         self.save()
     }
+}
+
+/// A wake-at signal: the launcher's own, raised from the registry, not by mail (no sender to allow).
+fn is_wake(sig: &Signal) -> bool {
+    sig.epoch == WAKE_EPOCH
+        && sig
+            .signal_id
+            .strip_prefix(sig.role.as_str())
+            .and_then(|r| r.strip_prefix(':'))
+            .is_some_and(|rest| rest.starts_with("wake-"))
 }
 
 pub mod service;

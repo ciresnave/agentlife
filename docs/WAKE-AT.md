@@ -1,6 +1,6 @@
 # Wake-at registry (design; PM TASK `scheduled-wake-outside-the-session`, 2026-11-23)
 
-Status: DESIGN, written before any code. Nothing here is MEASURED unless marked.
+Status: BUILT 2026-11-23 on branch feat/o19-roster-epoch (unmerged), unit-tested with a fake clock; NOT run on a real lane. Nothing here is MEASURED unless marked. Built as designed, except: `WAKES_PER_CYCLE` and the 24 h expiry live in `crates/launcher/src/lib.rs`; a wake refused for a retryable reason leaves no engine row (so no `launch-clear` is ever sent for a wake) and is not logged each cycle (`lane-restart wakes` shows it); the wake step runs after the online read so a lane just seen online has its rule-5 counter reset first.
 
 ## The question
 

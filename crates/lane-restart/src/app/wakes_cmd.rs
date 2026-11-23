@@ -84,8 +84,11 @@ mod tests {
             format!("{:?}", run_with(&mut ctx, args(&["wakes"]))),
             format!("{:?}", ExitCode::SUCCESS)
         );
-        assert_eq!(ctx.captured().0, "no wakes registered
-");
+        assert_eq!(
+            ctx.captured().0,
+            "no wakes registered
+"
+        );
 
         wakes::register_from_handoff(
             &d.path().join("state"),

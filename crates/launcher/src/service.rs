@@ -11,10 +11,12 @@
 //! 4. read the online set (R7) and re-check conditional refusals, clearing the ones that ended;
 //! 5. collect the stall alarms.
 //!
+//! Wake-at entries (`docs/WAKE-AT.md`) are decided after step 4's online read, through the same engine, and never posted.
+//!
 //! A 401/403 from the daemon ends the cycle with `session_lost`: the caller must drop the caller
 //! record at once (rule 5 of the design's Identity section) and stop answering as this role.
 
-use crate::{Engine, LaunchResult, Signal, Status};
+use crate::{Engine, LaunchResult, Outcome, Signal, Status};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,17 @@ pub enum SourceError {
     Stale,
     /// Anything else: transport, a 5xx, an unreadable reply. Retried next cycle.
     Unavailable(String),
+}
+
+/// One wake-at entry that has fallen due (`docs/WAKE-AT.md`), as the registry reader reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeDue {
+    pub role: String,
+    pub event: String,
+    /// `<role>:wake-<compact time>`: the synthetic signal id the start is made under.
+    pub signal_id: String,
+    /// Unix seconds at which it fell due (its time plus the role's offset).
+    pub due_ts: i64,
 }
 
 /// The daemon, as the service needs it.
@@ -44,6 +57,12 @@ pub trait Source {
             "this source cannot read the sender allowlist".to_string(),
         ))
     }
+    /// The wake-at entries due at `now`, earliest first. Default: none.
+    fn due_wakes(&self, _now: i64) -> Vec<WakeDue> {
+        Vec::new()
+    }
+    /// The launcher has dealt with this wake (started, running, or given up): drop it. Default: nothing.
+    fn consume_wake(&self, _w: &WakeDue) {}
     /// Anything the source noticed since the last call that the log should carry (an entry it
     /// could not read and skipped). Default: nothing.
     fn drain_notes(&self) -> Vec<String> {
@@ -106,6 +125,56 @@ fn unposted_row_exists(engine: &Engine<'_>, s: &Signal) -> bool {
             && !r.posted
             && r.status != Status::Intent
     })
+}
+
+/// Starts due wake-at entries through the same engine as a mail signal (caps, grant, closed-on-purpose),
+/// at most [`crate::WAKES_PER_CYCLE`] per cycle. Not posted to Synapse: there is no signal to answer.
+fn run_wakes(engine: &mut Engine<'_>, src: &dyn Source, now: i64, rep: &mut Report) {
+    let mut starts = 0usize;
+    for w in src.due_wakes(now) {
+        if starts >= crate::WAKES_PER_CYCLE {
+            break;
+        }
+        let sig = Signal {
+            role: w.role.clone(),
+            signal_id: w.signal_id.clone(),
+            attempt: 1,
+            epoch: crate::WAKE_EPOCH.to_string(),
+        };
+        let res = engine.handle_wake(&sig, now);
+        // The wake is spent once the lane is up (or was), or is stopped on purpose; any other refusal
+        // or a failure keeps it for the next cycle, until it is a day old.
+        let spent = match res.outcome {
+            Outcome::Started | Outcome::AlreadyRunning => true,
+            Outcome::Refused => matches!(
+                res.reason.as_str(),
+                "closed-on-purpose" | "unknown-role" | "invalid-role"
+            ),
+            Outcome::Failed => false,
+        };
+        let expired = !spent && now.saturating_sub(w.due_ts) > crate::WAKE_EXPIRY_SECS;
+        if spent || expired {
+            src.consume_wake(&w);
+        }
+        if expired {
+            rep.notes.push(format!(
+                "wake expired: {} {} ({})",
+                w.role,
+                w.event,
+                crate::result_text(&res)
+            ));
+        }
+        if matches!(res.outcome, Outcome::Started | Outcome::Failed) {
+            starts += 1;
+        }
+        // A refusal that will be retried is not logged every cycle: `lane-restart wakes` shows it.
+        if spent || res.outcome != Outcome::Refused {
+            rep.decided += 1;
+            rep.seen.push(format!("{} attempt 1", w.signal_id));
+            rep.results
+                .push(format!("wake {}", crate::result_text(&res)));
+        }
+    }
 }
 
 /// Runs one cycle. `wait_secs` is the long-poll hold (0 in tests); `launch_wait` is Synapse's.
@@ -194,6 +263,9 @@ pub fn cycle(
         Err(e) => rep.notes.push(format!("list: {e:?}")),
     }
 
+    // After the online read, so a lane just seen online has its rule-5 counter reset before its wake is decided.
+    run_wakes(engine, src, now, &mut rep);
+
     let to_clear = match engine.recheck(now) {
         Ok(roles) => roles,
         Err(e) => {
@@ -266,6 +338,8 @@ mod tests {
         fn lane(&self, role: &str) -> Lane {
             match role {
                 "fuel" => Lane::Launchable,
+                r if r.starts_with('r') => Lane::Launchable,
+                "stopped" => Lane::ClosedOnPurpose,
                 _ => Lane::Unknown,
             }
         }
@@ -287,8 +361,20 @@ mod tests {
         post_err: RefCell<Option<SourceError>>,
         /// What `senders_set` answers: `None` is an unreadable answer.
         senders: RefCell<Option<bool>>,
+        wakes: RefCell<Vec<WakeDue>>,
     }
     impl Source for Src {
+        fn due_wakes(&self, now: i64) -> Vec<WakeDue> {
+            self.wakes
+                .borrow()
+                .iter()
+                .filter(|w| w.due_ts <= now)
+                .cloned()
+                .collect()
+        }
+        fn consume_wake(&self, w: &WakeDue) {
+            self.wakes.borrow_mut().retain(|x| x != w);
+        }
         fn senders_set(&self) -> Result<bool, SourceError> {
             (*self.senders.borrow()).ok_or_else(|| SourceError::Unavailable("stats".into()))
         }
@@ -351,6 +437,195 @@ mod tests {
             },
             bell: Bell(RefCell::new(Vec::new())),
         }
+    }
+
+    fn wake(role: &str, event: &str, due_ts: i64) -> WakeDue {
+        WakeDue {
+            role: role.into(),
+            event: event.into(),
+            signal_id: format!("{role}:wake-{event}"),
+            due_ts,
+        }
+    }
+
+    // docs/WAKE-AT.md. A due wake starts the lane once, is consumed, posts nothing to Synapse, and needs
+    // no sender allowlist (there is no sender).
+    #[test]
+    fn a_due_wake_starts_the_lane_once_and_posts_nothing() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        *r.src.senders.borrow_mut() = None; // allowlist unreadable: mail would be refused
+        r.src.wakes.borrow_mut().push(wake("fuel", "e1", 50));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let a = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 1);
+        assert!(r.src.wakes.borrow().is_empty(), "consumed");
+        assert!(
+            r.src.posted.borrow().is_empty(),
+            "nothing posted to Synapse"
+        );
+        assert!(e.outbox().is_empty());
+        assert_eq!(a.decided, 1);
+        assert!(
+            a.log_lines()
+                .iter()
+                .any(|l| l == "cycle: wake role=fuel outcome=started"),
+            "{:?}",
+            a.log_lines()
+        );
+        let b = cycle(&mut e, &r.src, &r.bell, 105, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 1, "a second cycle starts nothing");
+        assert_eq!(b.decided, 0);
+        assert!(e.data().requests.iter().all(|x| x.posted));
+    }
+
+    #[test]
+    fn a_wake_not_yet_due_does_nothing() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        r.src.wakes.borrow_mut().push(wake("fuel", "e1", 500));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 0);
+        assert_eq!(r.src.wakes.borrow().len(), 1);
+    }
+
+    // The lane was already started by mail (or never stopped): no double start, the wake is spent.
+    #[test]
+    fn a_wake_for_a_running_lane_is_consumed_without_a_second_start() {
+        struct Running(RefCell<u32>);
+        impl Mechanism for Running {
+            fn start(&self, _: &str, _: &str, _: &str) -> MechResult {
+                *self.0.borrow_mut() += 1;
+                MechResult::AlreadyRunning
+            }
+        }
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        r.src.wakes.borrow_mut().push(wake("fuel", "e1", 50));
+        let m = Running(RefCell::new(0));
+        let mut e = Engine::open(&r.io, &m, &r.dir, true).unwrap();
+        let a = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert!(r.src.wakes.borrow().is_empty());
+        assert!(a
+            .log_lines()
+            .iter()
+            .any(|l| l == "cycle: wake role=fuel outcome=already-running"));
+        let _ = cycle(&mut e, &r.src, &r.bell, 105, 120, 0);
+        assert_eq!(*m.0.borrow(), 1);
+    }
+
+    #[test]
+    fn a_wake_for_a_lane_stopped_on_purpose_is_consumed_and_not_started() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        r.src.wakes.borrow_mut().push(wake("stopped", "e1", 50));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let a = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 0);
+        assert!(r.src.wakes.borrow().is_empty());
+        assert!(
+            a.log_lines()
+                .iter()
+                .any(|l| l == "cycle: wake role=stopped outcome=refused:closed-on-purpose"),
+            "{:?}",
+            a.log_lines()
+        );
+    }
+
+    // Five lanes due at once start two per cycle; none is lost.
+    #[test]
+    fn a_burst_of_wakes_spreads_over_cycles_and_none_is_lost() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        for i in 1..=5 {
+            r.src
+                .wakes
+                .borrow_mut()
+                .push(wake(&format!("r{i}"), "e", 50));
+        }
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let mut started = Vec::new();
+        for (i, now) in [100, 130, 160, 190].into_iter().enumerate() {
+            let _ = cycle(&mut e, &r.src, &r.bell, now, 120, 0);
+            started.push(*r.mech.0.borrow());
+            assert!(i < 3 || r.src.wakes.borrow().is_empty());
+        }
+        assert_eq!(started, vec![2, 4, 5, 5]);
+        assert!(r.src.wakes.borrow().is_empty());
+    }
+
+    // Four wakes for one lane: the 4th meets the cap and is KEPT, then starts once the hour has passed
+    // and the lane has been seen online (rule 5).
+    #[test]
+    fn a_wake_refused_by_a_cap_is_kept_and_starts_when_the_cap_clears() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        for i in 1..=4 {
+            r.src
+                .wakes
+                .borrow_mut()
+                .push(wake("fuel", &format!("e{i}"), 50));
+        }
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        let _ = cycle(&mut e, &r.src, &r.bell, 130, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 3);
+        assert_eq!(r.src.wakes.borrow().len(), 1, "the 4th is kept");
+        assert!(
+            r.src.cleared.borrow().is_empty(),
+            "no launch-clear for a wake"
+        );
+        r.src.online.borrow_mut().insert("fuel".into());
+        let _ = cycle(&mut e, &r.src, &r.bell, 100 + 3700, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 4);
+        assert!(r.src.wakes.borrow().is_empty());
+        assert!(r.src.cleared.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_wake_that_stays_refused_for_a_day_is_given_up_with_a_note() {
+        let r = rig();
+        // no grant: refused, kept ...
+        r.src.wakes.borrow_mut().push(wake("fuel", "e1", 50));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let a = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert_eq!(r.src.wakes.borrow().len(), 1);
+        assert_eq!(*r.mech.0.borrow(), 0);
+        assert!(!a.notes.iter().any(|n| n.contains("expired")));
+        // ... until a day past its due time
+        let b = cycle(
+            &mut e,
+            &r.src,
+            &r.bell,
+            50 + crate::WAKE_EXPIRY_SECS + 1,
+            120,
+            0,
+        );
+        assert!(r.src.wakes.borrow().is_empty());
+        assert!(
+            b.notes
+                .iter()
+                .any(|n| n.contains("wake expired") && n.contains("fuel")),
+            "{:?}",
+            b.notes
+        );
+    }
+
+    // A mail signal still needs the allowlist: only a wake is exempt, and only with the wake epoch.
+    #[test]
+    fn a_mail_signal_still_needs_the_allowlist() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        *r.src.senders.borrow_mut() = Some(false);
+        r.src
+            .signals
+            .borrow_mut()
+            .push(signal("fuel", "fuel:wake-spoof", 1, "ep-A"));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert_eq!(*r.mech.0.borrow(), 0);
+        assert_eq!(r.src.posted.borrow()[0].reason, "no-sender-allowlist");
     }
 
     // A notifier-only service answers `refused: no-grant`, echoes the epoch string verbatim and
