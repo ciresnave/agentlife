@@ -63,6 +63,7 @@ pub mod tab_close;
 mod testing;
 pub mod waits;
 pub mod waits_poll;
+pub mod wakes;
 pub mod watch;
 pub mod window_start;
 pub mod wsl;
