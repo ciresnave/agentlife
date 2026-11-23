@@ -59,6 +59,8 @@ struct LaneNewWorld {
     host: Option<Rc<dyn Host>>,
 }
 
+type RosterEpoch = Box<dyn Fn(&std::path::Path, &str) -> Result<Option<u64>, String>>;
+
 pub(crate) struct Ctx {
     /// The lane state directory. For the real `Ctx` this is `lane_restart::state_dir()`.
     pub(crate) state_dir: PathBuf,
@@ -103,6 +105,8 @@ pub(crate) struct Ctx {
     disk: Option<DiskGuard>,
     /// `None`: ask the Synapse daemon through the `synapse` CLI (`spec_audit::real_presence`).
     presence: Option<Box<dyn Fn() -> crate::spec_audit::PresenceMap>>,
+    /// `None`: ask the daemon through `synapse list` under the lane's own home (`epoch_check`).
+    roster_epoch: Option<RosterEpoch>,
 }
 
 impl Ctx {
@@ -137,6 +141,7 @@ impl Ctx {
             free_memory_gb: None,
             disk: None,
             presence: None,
+            roster_epoch: None,
         }
     }
 
@@ -254,6 +259,30 @@ impl Ctx {
             Some(f) => Rc::clone(f),
             None => Rc::new(crate::host::run),
         }
+    }
+
+    /// The role's epoch in the roster as seen from `home`: read-only, never `--role` (that claims).
+    pub(crate) fn roster_epoch(
+        &self,
+        home: &std::path::Path,
+        role: &str,
+    ) -> Result<Option<u64>, String> {
+        match &self.roster_epoch {
+            Some(f) => f(home, role),
+            None => {
+                let mut c = std::process::Command::new("synapse");
+                c.arg("list").env("SYNAPSE_HOME", home);
+                let out = crate::lane_new_host::run_limited(c, Duration::from_secs(30))?;
+                crate::lane_new_host::epoch_from_list(&out, role)
+            }
+        }
+    }
+
+    /// Test only: this roster reader instead of running `synapse list`.
+    #[cfg(test)]
+    pub(crate) fn with_roster_epoch(mut self, f: RosterEpoch) -> Self {
+        self.roster_epoch = Some(f);
+        self
     }
 
     /// Waits `d`: really, unless a test supplied its own.
@@ -541,6 +570,9 @@ impl Ctx {
             env: None,
             free_memory_gb: None,
             disk: Some(Box::new(|_| Ok(roomy_disk()))),
+            roster_epoch: Some(Box::new(|_, _| {
+                Err("no daemon in a capture context".to_string())
+            })),
             presence: Some(Box::new(|| {
                 Err("no daemon in a capture context".to_string())
             })),

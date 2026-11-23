@@ -26,6 +26,7 @@ pub mod authorize;
 pub mod cli;
 pub mod disk;
 pub mod duplicate;
+pub mod epoch_check;
 pub mod folder_trust;
 pub mod handlers;
 pub mod handoff_lint;
