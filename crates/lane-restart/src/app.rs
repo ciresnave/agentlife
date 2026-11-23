@@ -30,6 +30,7 @@ mod stop_cmd;
 mod test_fixtures;
 mod waits_cmd;
 mod waits_poll_cmd;
+mod wakes_cmd;
 
 use crate::cli;
 use ctx::Ctx;
@@ -125,6 +126,12 @@ USAGE:
         prints each wait soonest first with the time left; a starting lane runs
         it and arms a timer (ScheduleWakeup or a cron) for every `wake`, because a
         session timer dies with its session. Exit 1 when a line is malformed.
+
+    lane-restart wakes [--json]
+        The wake-at registry (docs/WAKE-AT.md): each lane's recorded wake times, soonest first, with
+        the time the launcher will act (wake + a stable per-role offset under 10 min) and the state
+        (pending, due-waiting-for-launcher, role-running). Read-only. `assert-idle` records a lane's
+        valid WAIT lines here; the launcher starts a stopped lane when its time is due.
 
     lane-restart waits-poll [--dry-run]
         The supervisor's pass over those WAIT lines: for every live role with a
@@ -359,6 +366,15 @@ pub(crate) fn run_with(ctx: &mut Ctx, args: Vec<std::ffi::OsString>) -> ExitCode
                 Ok(dry_run) => waits_poll_cmd::run(ctx, dry_run),
                 Err(e) => {
                     ctx.errln(&format!("lane-restart waits-poll: {e}"));
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        if first == "wakes" {
+            return match cli::wakes(rest) {
+                Ok(json) => wakes_cmd::run(ctx, json),
+                Err(e) => {
+                    ctx.errln(&format!("lane-restart wakes: {e}; expected `wakes [--json]`"));
                     ExitCode::FAILURE
                 }
             };

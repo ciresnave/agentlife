@@ -268,6 +268,12 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     );
     match result {
         Ok(done) => {
+            // The lane is up and runs `lane-restart waits` itself: its passed wake times are done
+            // (docs/WAKE-AT.md). Best effort; a stale entry is consumed by the launcher anyway.
+            if let Ok(mut reg) = crate::wakes::Registry::load(&state) {
+                reg.drop_passed(&role_for_notice, chrono::Utc::now());
+                let _ = reg.save(&state);
+            }
             let warn = done
                 .spec_warning
                 .as_deref()

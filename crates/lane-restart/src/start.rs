@@ -861,6 +861,36 @@ mod tests {
         assert_ne!(prompt, pm.argv[1]);
     }
 
+    /// docs/WAKE-AT.md: a lane started at its scheduled wake time (no mail) is told so, and is not told
+    /// to fetch mail that does not exist.
+    #[test]
+    fn a_wake_start_carries_the_wake_prompt_not_the_mail_prompt() {
+        let (d, facts) = world();
+        write_spec(d.path(), "baracuda", "sonnet", SpecState::Suspended);
+        set_kind(d.path(), "baracuda", Some("soft"));
+        let mut r = req("baracuda");
+        r.signal_id = Some("baracuda:wake-20261124T010203Z");
+        let p = plan_start(
+            d.path(),
+            &r,
+            Ok("launcher:agentlife-launcher".to_string()),
+            &facts,
+        )
+        .unwrap();
+        let prompt = p.argv[1].clone();
+        assert!(
+            prompt.starts_with("You were started at your scheduled wake time (no mail"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("lane-restart waits"), "{prompt}");
+        assert!(!prompt.contains("Fetch your inbox FIRST"), "{prompt}");
+        assert!(!prompt.contains(';'), "wt.exe would split on it: {prompt}");
+        assert_eq!(
+            p.wake_signal.as_deref(),
+            Some("baracuda:wake-20261124T010203Z")
+        );
+    }
+
     fn set_kind(dir: &Path, role: &str, kind: Option<&str>) {
         if kind == Some("soft") {
             // Through `write_atomic`, as a real stop writes it: a soft stop is signed there, and a

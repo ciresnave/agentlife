@@ -44,6 +44,7 @@ pub(super) fn run(ctx: &mut Ctx, role_override: Option<String>) -> ExitCode {
             }
         }
     }
+    let handoff_for_wakes = super::handoff_text(&cwd, &role);
     match lane_state_writer::run_assert_idle(
         &ctx.state_dir,
         my_pid,
@@ -52,6 +53,20 @@ pub(super) fn run(ctx: &mut Ctx, role_override: Option<String>) -> ExitCode {
         &cwd,
     ) {
         Ok(()) => {
+            // Copy the wake times where the launcher can read them while this lane is stopped
+            // (docs/WAKE-AT.md). A failure is loud but never a refusal: the restart is mandatory.
+            if let Some(text) = &handoff_for_wakes {
+                if let Err(e) = crate::wakes::register_from_handoff(
+                    &ctx.state_dir,
+                    &role,
+                    text,
+                    chrono::Utc::now(),
+                ) {
+                    ctx.errln(&format!(
+                        "lane-restart assert-idle: WARNING: wake times were not registered ({e}); the launcher will not start this lane at its wake time"
+                    ));
+                }
+            }
             for w in &wait_warnings {
                 ctx.errln(&format!("lane-restart assert-idle: WARNING: {w}"));
             }
@@ -110,7 +125,7 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("line 1: no `wake: <time>`"), "{err}");
-        // Refused before the state directory was touched at all.
+        // Refused before the state directory was touched at all (so no wake was registered either).
         assert!(!d.path().join("state").exists());
     }
 

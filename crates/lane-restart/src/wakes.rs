@@ -110,6 +110,24 @@ impl Registry {
     }
 }
 
+/// Record `role`'s valid `WAIT:` lines from its HANDOFF `text` (replacing its earlier entries) and
+/// return how many are now registered. The caller has already refused a malformed wait.
+pub fn register_from_handoff(
+    state_dir: &Path,
+    role: &str,
+    text: &str,
+    now: DateTime<Utc>,
+) -> Result<usize, String> {
+    let waits: Vec<Wait> = crate::waits::parse(text)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    let mut reg = Registry::load(state_dir)?;
+    reg.replace_role(role, &waits, now);
+    reg.save(state_dir)?;
+    Ok(reg.wakes.iter().filter(|w| w.role == role).count())
+}
+
 /// A stable offset in `0..JITTER_MAX_SECS` from the role name (FNV-1a).
 pub fn jitter_secs(role: &str) -> i64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -245,6 +263,22 @@ mod tests {
         assert_eq!(have, vec![("a", "y"), ("b", "z")]);
         r.replace_role("a", &[], t(NOW));
         assert_eq!(r.wakes.len(), 1, "no wait lines: the role's entries are gone");
+    }
+
+    #[test]
+    fn register_from_handoff_replaces_the_roles_entries_and_ignores_prose() {
+        let d = tmp("reg");
+        let text = "WAIT: a | check: true | wake: 2026-11-24T01:00:00Z
+prose WAIT: not one
+";
+        assert_eq!(register_from_handoff(&d, "r", text, t(NOW)).unwrap(), 1);
+        assert_eq!(register_from_handoff(&d, "other", text, t(NOW)).unwrap(), 1);
+        // The lane deleted its line: re-registering empties only its own entries.
+        assert_eq!(register_from_handoff(&d, "r", "no waits
+", t(NOW)).unwrap(), 0);
+        let reg = Registry::load(&d).unwrap();
+        assert_eq!(reg.wakes.len(), 1);
+        assert_eq!(reg.wakes[0].role, "other");
     }
 
     #[test]
