@@ -21,6 +21,14 @@ fn quiet_mark(a: &crate::spec::Activity, quiet_over: Option<i64>) -> String {
     }
 }
 
+/// ` hook=Ns` (seconds since this role's hooks last ran), or ` hook=none` with no journal.
+fn hook_mark(a: &crate::spec::Activity) -> String {
+    match a.last_hook_secs {
+        Some(s) => format!(" hook={s}s"),
+        None => " hook=none".to_string(),
+    }
+}
+
 /// `\tduplicate-risk: host pid N, claude pid M`, or nothing for a normal row.
 fn duplicate_text(d: &[crate::duplicate::Duplicate]) -> String {
     if d.is_empty() {
@@ -118,14 +126,16 @@ pub(super) fn run(
             r.startable,
             match &r.activity {
                 Some(a) if a.idle => format!(
-                    "idle=true quiet={}s{}",
+                    "idle=true quiet={}s{}{}",
                     a.quiet_secs,
+                    hook_mark(a),
                     quiet_mark(a, quiet_over)
                 ),
                 Some(a) => format!(
-                    "idle=false({}) quiet={}s{}",
+                    "idle=false({}) quiet={}s{}{}",
                     a.idle_blockers.join("+"),
                     a.quiet_secs,
+                    hook_mark(a),
                     quiet_mark(a, quiet_over)
                 ),
                 None => "idle=-".to_string(),

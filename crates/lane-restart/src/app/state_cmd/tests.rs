@@ -181,3 +181,48 @@ fn the_real_context_builds_no_parent_walk_until_the_hook_asks() {
     let c = Ctx::real();
     assert_eq!(c.parent_full_scans(), 0);
 }
+
+#[test]
+fn every_hook_is_journaled_under_its_role_with_event_outcome_and_ms() {
+    let d = tempfile::tempdir().unwrap();
+    let state = d.path().join("state");
+    let mut c = ctx(&state, Some("alpha"), &hook_json("PreToolUse"));
+    assert!(ok(run(&mut c, "PreToolUse")));
+    let line = std::fs::read_to_string(state.join("alpha.hooks.log")).expect("journal written");
+    let f: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!((f.len(), f[1], f[2]), (4, "PreToolUse", "ok"), "{line}");
+    assert!(f[3].ends_with("ms"), "{line}");
+}
+
+#[test]
+fn a_failed_hook_is_journaled_err_and_one_before_its_role_is_known_goes_unrouted() {
+    let d = tempfile::tempdir().unwrap();
+    let state = d.path().join("state");
+    let mut c = ctx(&state, Some("alpha"), "not json");
+    assert!(failed(run(&mut c, "Stop")));
+    let line = std::fs::read_to_string(state.join("_unrouted.hooks.log")).unwrap();
+    assert!(line.contains(" Stop err "), "{line}");
+    assert!(!state.join("alpha.hooks.log").exists());
+}
+
+#[test]
+fn the_journal_rotates_at_its_ceiling_keeping_one_generation() {
+    let d = tempfile::tempdir().unwrap();
+    let state = d.path().to_path_buf();
+    let p = crate::lane_state_writer::hook_journal_path(&state, "alpha");
+    std::fs::write(
+        &p,
+        vec![b'x'; crate::lane_state_writer::HOOK_JOURNAL_MAX as usize],
+    )
+    .unwrap();
+    crate::lane_state_writer::journal_hook(
+        &state,
+        "alpha",
+        "Stop",
+        true,
+        Duration::from_millis(3),
+        chrono::Utc::now(),
+    );
+    assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 1);
+    assert!(state.join("alpha.hooks.log.1").exists());
+}

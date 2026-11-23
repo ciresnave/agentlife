@@ -40,6 +40,24 @@ use std::time::{Duration, Instant};
 /// actually times a stuck session out).
 pub const STARTUP_WINDOW: Duration = Duration::from_secs(60);
 
+/// A screen that is only a dialog footer this long gets a repaint request, up to `MAX_REPAINTS`.
+const REPAINT_AFTER: Duration = Duration::from_secs(2);
+const MAX_REPAINTS: u32 = 5;
+
+/// True when the screen holds exactly one non-blank line and it is a dialog footer
+/// ("Enter to confirm", "Esc to cancel"): the footer of a dialog whose body never reached the
+/// screen model, which no handler can match.
+fn footer_only(screen: &str) -> bool {
+    let mut lines = screen.lines().map(str::trim).filter(|l| !l.is_empty());
+    match (lines.next(), lines.next()) {
+        (Some(line), None) => {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("enter to confirm") || lower.contains("esc to cancel")
+        }
+        _ => false,
+    }
+}
+
 /// ⚠️ ROOT CAUSE, PM finding 2026-09-19 (real-restart-3, raw I/O log): the
 /// CPR went out (`child->relay n=4 "\x1b[6n"`) and NOTHING ever came back
 /// on stdin - zero `outer_stdin->child` entries. Windows consoles start in
@@ -590,15 +608,31 @@ fn run_with_handlers_and_window_watched(
     // see end-of-file - once the child is gone.
     let (stop_resize, stop_resize_rx) = std::sync::mpsc::channel::<()>();
     let (resize_flag, resize_alive) = LiveFlag::new();
+    // Set by the relay loop to ask for a repaint: this thread owns the master, so it does the
+    // resize nudge (one column wider and back), which makes ConPTY repaint the whole screen.
+    let nudge = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let resize_thread = {
         let master_for_resize = pair.master;
         let mut last = (cols, rows);
+        let nudge = Arc::clone(&nudge);
         std::thread::spawn(move || {
             let _alive = resize_flag;
             // Ends on a stop message or when the host drops the sender.
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stop_resize_rx.recv_timeout(Duration::from_millis(500))
             {
+                if nudge.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    let (c, r) = last;
+                    let size = |cols| PtySize {
+                        rows: r,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    };
+                    let _ = master_for_resize.resize(size(c.saturating_add(1)));
+                    std::thread::sleep(Duration::from_millis(100));
+                    let _ = master_for_resize.resize(size(c));
+                }
                 if let Some((c, r)) = current_console_size() {
                     if (c, r) != last {
                         let _ = master_for_resize.resize(PtySize {
@@ -668,6 +702,8 @@ fn run_with_handlers_and_window_watched(
     );
     let mut matched_ids: HashSet<String> = HashSet::new();
     let mut last_logged_screen: Option<String> = None;
+    let mut footer_since: Option<Instant> = None;
+    let mut repaints = 0u32;
     // The window runs from spawn unless a test gated it (see `window_gate`).
     let mut window_started = window_gate.is_none().then(Instant::now);
     loop {
@@ -728,6 +764,30 @@ fn run_with_handlers_and_window_watched(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     break;
+                }
+                // 2026-11-22: four dialogs stayed as "Enter to confirm / Esc to cancel" with no
+                // body, so no handler could match and nothing re-read the screen (handlers run
+                // only when output arrives). A footer alone for REPAINT_AFTER asks ConPTY to
+                // repaint; the repaint is output, so the handlers run on it as usual.
+                if still_in_startup_window
+                    && matched_ids.is_empty()
+                    && repaints < MAX_REPAINTS
+                    && footer_since.is_none_or(|t| t.elapsed() >= REPAINT_AFTER)
+                {
+                    let text = screen_text(&parser);
+                    if footer_only(&text) {
+                        if footer_since.is_some() {
+                            repaints += 1;
+                            nudge.store(true, std::sync::atomic::Ordering::SeqCst);
+                            on_raw_io(
+                                "host-note",
+                                format!("REPAINT {repaints}/{MAX_REPAINTS}: only a dialog footer on screen for {} s, resize nudge sent; screen {text:?}", REPAINT_AFTER.as_secs()).as_bytes(),
+                            );
+                        }
+                        footer_since = Some(Instant::now());
+                    } else {
+                        footer_since = None;
+                    }
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1029,6 +1089,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             .map_or(notify::Transport::Broker, |c| c.notify_transport),
     );
     let log_path_for_attempts = log_path.clone();
+    let log_path_for_notes = log_path.clone();
     let log_path_for_unhandled = log_path.clone();
     let role_for_unhandled = role.to_string();
     let on_unhandled = move |screen: String| {
@@ -1122,7 +1183,17 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             }
         },
         move |direction, bytes| {
-            if let Some(raw) = &raw_log {
+            // The relay's own notes (a repaint request) always reach the host log.
+            if direction == "host-note" {
+                append_host_log(
+                    &log_path_for_notes,
+                    &format!(
+                        "[{}] {}",
+                        chrono::Utc::now().to_rfc3339(),
+                        String::from_utf8_lossy(bytes)
+                    ),
+                );
+            } else if let Some(raw) = &raw_log {
                 raw.push(direction, bytes);
             }
         },
@@ -2314,6 +2385,72 @@ mod tests {
              back on its own stdin - got {text:?}"
         );
         assert!(outcome.child_exit_code.is_some());
+    }
+
+    #[test]
+    fn a_footer_alone_is_told_from_a_dialog_with_a_body_and_from_a_blank_screen() {
+        assert!(footer_only("\n\nEnter to confirm \u{b7} Esc to cancel\n"));
+        assert!(footer_only("   Esc to cancel"));
+        // Controls: a body above the footer, a blank screen, and one unrelated line.
+        assert!(!footer_only(
+            "Quick safety check: is this a project you trust?\nEnter to confirm \u{b7} Esc to cancel"
+        ));
+        assert!(!footer_only("\n\n"));
+        assert!(!footer_only("PROBE_MARKER"));
+    }
+
+    /// 2026-11-22: a dialog whose body never reached the screen model sat unanswered for the whole
+    /// window. The host now asks for a repaint (and says so in the host log) instead of waiting.
+    #[test]
+    fn a_dialog_footer_with_no_body_gets_repaint_requests_in_the_host_log() {
+        let notes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let notes_for_cb = Arc::clone(&notes);
+        struct Sink;
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let child_argv = platform_child(
+            vec![
+                "cmd.exe".to_string(),
+                "/c".to_string(),
+                "echo Enter to confirm . Esc to cancel & choice /t 7 /d y >nul".to_string(),
+            ],
+            "echo 'Enter to confirm . Esc to cancel'; sleep 7",
+        );
+        run_with_handlers_and_window_watched(
+            "overmind",
+            &child_argv,
+            Vec::new(),
+            80,
+            25,
+            Cursor::new(b"\x1b[1;1R".to_vec()),
+            Sink,
+            |_| {},
+            |_| {},
+            Duration::from_secs(6),
+            |_, _| {},
+            move |direction, bytes| {
+                if direction == "host-note" {
+                    notes_for_cb
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(bytes).into_owned());
+                }
+            },
+            None,
+            None,
+        )
+        .expect("run failed");
+        let notes = notes.lock().unwrap();
+        assert!(
+            !notes.is_empty() && notes[0].starts_with("REPAINT 1/"),
+            "a footer alone for {REPAINT_AFTER:?} must ask for a repaint, notes: {notes:?}"
+        );
     }
 
     // -- on_unhandled: §12.6 unhandled-prompt capture --------------------- //
