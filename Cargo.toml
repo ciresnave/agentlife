@@ -46,8 +46,8 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 persistant = "0.14.3"
 user-request = "0.16.0"
 launcher = { package = "agentlife-launcher", version = "0.30.19", path = "crates/launcher" }
-synapsed-client = "=6.0.0-rc.123"
-synapse = { version = "=6.0.0-rc.123", default-features = false, features = ["native-base"] }
+synapsed-client = "=6.0.0-rc.266"
+synapse = { version = "=6.0.0-rc.266", default-features = false, features = ["native-base"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
