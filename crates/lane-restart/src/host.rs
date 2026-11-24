@@ -2418,10 +2418,13 @@ mod tests {
             vec![
                 "cmd.exe".to_string(),
                 "/c".to_string(),
-                "echo Enter to confirm . Esc to cancel & choice /t 7 /d y >nul".to_string(),
+                "echo Enter to confirm . Esc to cancel & choice /t 11 /d y >nul".to_string(),
             ],
-            "echo 'Enter to confirm . Esc to cancel'; sleep 7",
+            "echo 'Enter to confirm . Esc to cancel'; sleep 11",
         );
+        // The repaint fires REPAINT_AFTER (2 s) after the footer is first SEEN, so the footer must appear within
+        // (window - 2 s) of the spawn. A 6 s window left 3.8 s of slack and failed once on a loaded ubuntu runner
+        // (main fe03f444, 2026-11-24; 5 earlier runs passed); 10 s leaves about 7.9 s.
         run_with_handlers_and_window_watched(
             "overmind",
             &child_argv,
@@ -2432,7 +2435,7 @@ mod tests {
             Sink,
             |_| {},
             |_| {},
-            Duration::from_secs(6),
+            Duration::from_secs(10),
             |_, _| {},
             move |direction, bytes| {
                 if direction == "host-note" {
