@@ -207,7 +207,7 @@ pub fn roles(dir: &Path) -> Vec<String> {
 }
 
 /// The `--home` (or `SYNAPSE_HOME`) a role's mcp file gives its synapse server.
-fn mcp_home(v: &Value) -> Option<String> {
+pub(crate) fn mcp_home(v: &Value) -> Option<String> {
     let s = v.get("mcpServers")?.get("synapse")?;
     let from_args = s.get("args").and_then(Value::as_array).and_then(|a| {
         let i = a.iter().position(|x| x.as_str() == Some("--home"))?;

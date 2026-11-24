@@ -175,9 +175,17 @@ pub struct SynapseSource {
     /// 2026-10-17: a bare `pm` is `unknown_recipient`).
     account: String,
     notes: std::cell::RefCell<Vec<String>>,
+    /// The lane state directory whose wake-at registry (`docs/WAKE-AT.md`) the cycle reads; `None`: no wakes.
+    wake_dir: Option<PathBuf>,
 }
 
 impl SynapseSource {
+    /// Reads the wake-at registry in `dir` each cycle.
+    pub fn with_wake_dir(mut self, dir: PathBuf) -> Self {
+        self.wake_dir = Some(dir);
+        self
+    }
+
     /// Finds this home's daemon (starting `synapsed` if nothing answers, as every Synapse client
     /// does) and proves it.
     pub fn connect(home: &Path) -> Result<Self, String> {
@@ -187,6 +195,7 @@ impl SynapseSource {
                 daemon,
                 account,
                 notes: std::cell::RefCell::new(Vec::new()),
+                wake_dir: None,
             })
             .map_err(|e| e.to_string())
     }
@@ -219,6 +228,41 @@ impl SynapseSource {
 }
 
 impl Source for SynapseSource {
+    fn due_wakes(&self, now: i64) -> Vec<launcher::service::WakeDue> {
+        let Some(dir) = &self.wake_dir else {
+            return Vec::new();
+        };
+        let reg = match lane_restart::wakes::Registry::load(dir) {
+            Ok(r) => r,
+            Err(e) => {
+                // Loud, never "no wakes": an unreadable registry must not look empty.
+                self.notes.borrow_mut().push(format!("wakes: {e}"));
+                return Vec::new();
+            }
+        };
+        let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
+        lane_restart::wakes::due(&reg, at)
+            .into_iter()
+            .map(|w| launcher::service::WakeDue {
+                role: w.role.clone(),
+                event: w.event.clone(),
+                signal_id: lane_restart::wakes::signal_id(w),
+                due_ts: lane_restart::wakes::due_at(w).timestamp(),
+            })
+            .collect()
+    }
+
+    fn consume_wake(&self, w: &launcher::service::WakeDue) {
+        let Some(dir) = &self.wake_dir else { return };
+        if let Err(e) = lane_restart::wakes::consume_by_signal(dir, &w.role, &w.event, &w.signal_id)
+        {
+            self.notes.borrow_mut().push(format!(
+                "wakes: could not consume {} {}: {e}",
+                w.role, w.event
+            ));
+        }
+    }
+
     fn waiting(&self, wait_secs: u64) -> Result<Vec<Signal>, SourceError> {
         let reply = self
             .daemon

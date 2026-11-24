@@ -123,6 +123,14 @@ pub fn mail_startup_prompt(role: &str, signal_id: &str) -> String {
     )
 }
 
+/// The first prompt when the LAUNCHER started the lane at its scheduled wake time (`docs/WAKE-AT.md`): no
+/// mail is waiting, so it is not told to fetch any. Same constraints as [`mail_startup_prompt`].
+pub fn wake_startup_prompt(role: &str, signal_id: &str) -> String {
+    format!(
+        "You were started at your scheduled wake time (no mail, wake {signal_id}). Read {role} HANDOFF, run lane-restart waits, run each due check and act on the result"
+    )
+}
+
 /// Every check a launch must pass BEFORE anything is killed or spawned: a
 /// plain role and name, a model that is not Opus (unless overridden), and no
 /// `;` in the working directory or any argv element (`wt.exe` reads it as a
@@ -144,6 +152,9 @@ pub fn prepare_launch_for(
     wake_signal: Option<&str>,
 ) -> Result<PreparedLaunch, RelaunchError> {
     let prompt = match wake_signal {
+        Some(sig) if crate::wakes::is_wake_signal(sig, spec.role.as_str()) => {
+            wake_startup_prompt(spec.role.as_str(), sig)
+        }
         Some(sig) => mail_startup_prompt(spec.role.as_str(), sig),
         None => startup_prompt(spec.role.as_str()),
     };

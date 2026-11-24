@@ -168,7 +168,7 @@ pub fn retry_claim(
 
 /// Runs `cmd` to the end or kills it after `limit`; `Ok(stdout)` only on exit 0. Both pipes are drained
 /// on their own threads while the child runs, so a long answer cannot fill a pipe and stall the child.
-fn run_limited(
+pub(crate) fn run_limited(
     mut cmd: std::process::Command,
     limit: std::time::Duration,
 ) -> Result<String, String> {

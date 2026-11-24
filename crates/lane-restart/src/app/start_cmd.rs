@@ -87,6 +87,36 @@ impl Outcome<'_> {
     }
 }
 
+/// O19(a): the roster epoch beside the lane home's cached epoch, printed and returned as a ledger
+/// suffix. Never blocks a start: any part that cannot be read just says so.
+fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan) -> String {
+    let role = plan.launch.role.to_string();
+    let Some(cfg) = crate::spec_synapse::mcp_config_arg(&plan.argv) else {
+        return String::new();
+    };
+    let home = std::fs::read_to_string(cfg)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| crate::spec_audit::mcp_home(&v));
+    let Some(home) = home else {
+        return String::new();
+    };
+    let home = std::path::PathBuf::from(home);
+    let msg = match (
+        crate::epoch_check::cached_epoch(&home, &role),
+        ctx.roster_epoch(&home, &role),
+    ) {
+        (Ok(c), Ok(r)) => crate::epoch_check::note(&role, c, r).0,
+        (c, r) => format!(
+            "synapse epoch for {role}: not compared (cached: {}; roster: {})",
+            c.map_or_else(|e| e, |_| "ok".to_string()),
+            r.map_or_else(|e| e, |_| "ok".to_string())
+        ),
+    };
+    ctx.errln(&format!("lane-restart start: {msg}"));
+    format!(" [{msg}]")
+}
+
 pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     let facts = ctx.facts();
     let caller = ctx.verified_start_caller();
@@ -215,6 +245,7 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     } else {
         None
     };
+    let pin_note = format!("{pin_note}{}", epoch_note(ctx, &plan));
     ctx.errln(&format!(
         "lane-restart start: launching {} on {}...",
         args.role, plan.model
@@ -237,6 +268,12 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     );
     match result {
         Ok(done) => {
+            // The lane is up and runs `lane-restart waits` itself: its passed wake times are done
+            // (docs/WAKE-AT.md). Best effort; a stale entry is consumed by the launcher anyway.
+            if let Ok(mut reg) = crate::wakes::Registry::load(&state) {
+                reg.drop_passed(&role_for_notice, chrono::Utc::now());
+                let _ = reg.save(&state);
+            }
             let warn = done
                 .spec_warning
                 .as_deref()

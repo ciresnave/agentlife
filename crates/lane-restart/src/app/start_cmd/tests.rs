@@ -475,3 +475,52 @@ fn an_unreadable_disk_is_a_warning_not_a_refusal() {
         "an unreadable disk must not block the launch"
     );
 }
+
+#[test]
+fn a_start_logs_the_roster_epoch_beside_the_cached_epoch_and_warns_when_ahead() {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(
+        d.path(),
+        "alpha",
+        "# h
+",
+    );
+    // A lane home whose session file caches epoch 6, and an mcp file naming that home.
+    let home = d.path().join("home");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::write(
+        home.join("sessions").join("alpha.json"),
+        r#"{"instance_id":"i","token":"SECRET","global_id":"alpha@a","epoch":6}"#,
+    )
+    .unwrap();
+    let mcp = d.path().join("alpha.mcp.json");
+    let cfg = serde_json::json!({"mcpServers":{"synapse":{"env":{"SYNAPSE_HOME": home.to_string_lossy()}}}});
+    std::fs::write(&mcp, cfg.to_string()).unwrap();
+    let mut spec = crate::spec::read(&state, "alpha").unwrap();
+    spec.launch_args.extend([
+        "--mcp-config".to_string(),
+        mcp.to_string_lossy().into_owned(),
+    ]);
+    crate::spec::write_atomic(&state, &spec).unwrap();
+    let calls = Rc::new(RefCell::new(0));
+    let mut c = ctx(&state, Some("pm"), dead(), &calls)
+        .with_launch_spawn(coming_up_spawn(&state, &calls))
+        .with_roster_epoch(Box::new(|_, role| {
+            assert_eq!(role, "alpha");
+            Ok(Some(7))
+        }));
+    let code = run_with(
+        &mut c,
+        args(&["start", "--role", "alpha", "--reason", "epoch test"]),
+    );
+    let (out, err) = c.captured();
+    assert!(
+        code_is(code, 0),
+        "{code:?}
+{out}
+{err}"
+    );
+    assert!(err.contains("roster 7 cached 6"), "{err}");
+    assert!(err.contains("WARNING"), "{err}");
+    assert!(!err.contains("SECRET") && !out.contains("SECRET"));
+}

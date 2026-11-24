@@ -926,7 +926,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         }
     });
     let source = match svc::SynapseSource::connect(&home) {
-        Ok(s) => s,
+        Ok(s) => s.with_wake_dir(state_dir.clone()),
         Err(e) => return fail(e),
     };
     let peer_notify = svc::PeerNotify {

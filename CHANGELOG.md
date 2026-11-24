@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.84 — wake-at registry: a stopped lane is started at its WAIT wake time
+
+`lane-restart assert-idle` now copies a lane's valid `WAIT:` lines to `<state>/wakes.json`, and the launcher starts a stopped lane when a wake falls due (its time plus a stable per-role offset under 10 minutes), with no mail and no session. A wake goes through the same engine as a mail signal, so the 3/h per-role, 24/h overall and 8/day caps, the grant and the closed-on-purpose refusal all apply; at most 2 wake-starts per cycle; nothing is posted to Synapse; a wake refused for a cap is kept and retried, and given up after 24 h with a log note; a lane already running is not started twice. `start` drops passed entries, a wake start gets its own prompt (no mail to fetch), and `lane-restart wakes [--json]` lists pending wakes. Also (O19a): `start` logs the roster epoch beside the cached epoch and warns on a mismatch. Design: `docs/WAKE-AT.md`. Verified with fake-clock tests (`wakes.rs`, `launcher/src/service.rs`), `cargo clippy --workspace --all-targets -- -D warnings` clean; not yet run on a real lane.
+
 ## 0.30.83 — a startup dialog that shows only its footer is repainted, not left unanswered
 
 Four launches on 2026-11-22 stopped on "a startup dialog no approval matched" with a captured screen of only "Enter to confirm / Esc to cancel". The dialog body never reached the host's screen model, and handlers run only when output arrives, so nothing looked again. The host now notices a screen that is one dialog footer line for 2 s, asks ConPTY for a repaint (the pty is resized one column wider and back, up to 5 times), and the repaint's output runs the handlers as usual. Each request is written to the host log as `REPAINT n/5` with the screen. Verified: a test with a child that prints only a footer sees the request (and fails with the repaints set to 0); a control confirms a footer with a body, a blank screen and an unrelated line are not taken for a bare footer. Not verified against a real claude dialog under load. The capture file still holds the screen as the host saw it.

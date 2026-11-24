@@ -135,6 +135,19 @@ pub(crate) fn waits(rest: &[String]) -> Result<Option<String>, String> {
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+struct Wakes {
+    #[arg(long, overrides_with = "json")]
+    json: bool,
+}
+
+/// `wakes [--json]` -> `json`.
+pub(crate) fn wakes(rest: &[String]) -> Result<bool, String> {
+    let a: Wakes = parse("wakes", &[], rest)?;
+    Ok(a.json)
+}
+
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 struct WaitsPoll {
     #[arg(long, overrides_with = "dry_run")]
     dry_run: bool,
