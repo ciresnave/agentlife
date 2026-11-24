@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.85 — host footer-repaint test: wider slack after one ubuntu flake
+
+`host::tests::a_dialog_footer_with_no_body_gets_repaint_requests_in_the_host_log` failed once on the ubuntu CI job of main fe03f444 (job 138130494943, "notes: []"). The test needs the dialog footer on screen within (startup window - 2 s) of the spawn; the window was 6 s, so 3.8 s of slack, and a loaded runner can miss that. The window is now 10 s and the child sleeps 11 s (about 7.9 s of slack). Test-only; no product code changed. The cause is INFERRED, not reproduced: the same test passed in 5 earlier CI runs and in 7 local Ubuntu 24.04 (WSL) runs, including 2-core-pinned ones. If it fails again on Ubuntu the next step is a fake clock to make it deterministic, not a wider window.
+
 ## 0.30.84 — wake-at registry: a stopped lane is started at its WAIT wake time
 
 `lane-restart assert-idle` now copies a lane's valid `WAIT:` lines to `<state>/wakes.json`, and the launcher starts a stopped lane when a wake falls due (its time plus a stable per-role offset under 10 minutes), with no mail and no session. A wake goes through the same engine as a mail signal, so the 3/h per-role, 24/h overall and 8/day caps, the grant and the closed-on-purpose refusal all apply; at most 2 wake-starts per cycle; nothing is posted to Synapse; a wake refused for a cap is kept and retried, and given up after 24 h with a log note; a lane already running is not started twice. `start` drops passed entries, a wake start gets its own prompt (no mail to fetch), and `lane-restart wakes [--json]` lists pending wakes. Also (O19a): `start` logs the roster epoch beside the cached epoch and warns on a mismatch. Design: `docs/WAKE-AT.md`. Verified with fake-clock tests (`wakes.rs`, `launcher/src/service.rs`), `cargo clippy --workspace --all-targets -- -D warnings` clean; not yet run on a real lane.

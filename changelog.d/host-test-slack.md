@@ -1,3 +1,0 @@
-kind: host footer-repaint test: wider slack after one ubuntu flake
----
-`host::tests::a_dialog_footer_with_no_body_gets_repaint_requests_in_the_host_log` failed once on the ubuntu CI job of main fe03f444 (job 138130494943, "notes: []"). The test needs the dialog footer on screen within (startup window - 2 s) of the spawn; the window was 6 s, so 3.8 s of slack, and a loaded runner can miss that. The window is now 10 s and the child sleeps 11 s (about 7.9 s of slack). Test-only; no product code changed. The cause is INFERRED, not reproduced: the same test passed in 5 earlier CI runs and in 7 local Ubuntu 24.04 (WSL) runs, including 2-core-pinned ones. If it fails again on Ubuntu the next step is a fake clock to make it deterministic, not a wider window.
