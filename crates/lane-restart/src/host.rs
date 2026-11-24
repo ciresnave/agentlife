@@ -2428,7 +2428,14 @@ mod tests {
             Vec::new(),
             80,
             25,
-            Cursor::new(b"\x1b[1;1R".to_vec()),
+            // The reply to the ConPTY startup cursor query is only needed on Windows. A Unix pty ECHOES it onto the
+            // screen as `^[[1;1R`; when that lands after the child's output the footer is no longer alone and no
+            // repaint is asked for (CI main fe03f444 and #302 db374d1; reproduced with 12 parallel runs on 2 cores).
+            Cursor::new(if cfg!(windows) {
+                b"[1;1R".to_vec()
+            } else {
+                Vec::new()
+            }),
             Sink,
             |_| {},
             |_| {},
