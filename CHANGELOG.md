@@ -2,9 +2,9 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
-## 0.30.85 — host footer-repaint test: wider slack after one ubuntu flake
+## 0.30.85 — host footer-repaint test: stop feeding a pty-echoed reply on Unix
 
-`host::tests::a_dialog_footer_with_no_body_gets_repaint_requests_in_the_host_log` failed once on the ubuntu CI job of main fe03f444 (job 138130494943, "notes: []"). The test needs the dialog footer on screen within (startup window - 2 s) of the spawn; the window was 6 s, so 3.8 s of slack, and a loaded runner can miss that. The window is now 10 s and the child sleeps 11 s (about 7.9 s of slack). Test-only; no product code changed. The cause is INFERRED, not reproduced: the same test passed in 5 earlier CI runs and in 7 local Ubuntu 24.04 (WSL) runs, including 2-core-pinned ones. If it fails again on Ubuntu the next step is a fake clock to make it deterministic, not a wider window.
+`host::tests::a_dialog_footer_with_no_body_gets_repaint_requests_in_the_host_log` failed on the ubuntu CI job of main fe03f444 (job 138130494943) and again on this PR's first head, whose 10 s window therefore refuted the timing explanation. Cause, observed: the test feeds the host `ESC[1;1R` as outer stdin (the reply ConPTY needs on Windows); a Unix pty echoes it onto the screen as `^[[1;1R`, and when the echo lands AFTER the child's `echo` the screen has two lines (`Enter to confirm . Esc to cancel` / `^[[1;1R`), so `footer_only` is false and no repaint is requested ("notes: []"); when it lands first, both share one line and the test passes, hence the intermittency. The failing screen was captured on Ubuntu 24.04 (WSL) with 12 parallel copies of the test pinned to 2 cores. Fix, test-only: the reply is fed only on Windows, and the window and child sleep are back to 6 s and 7 s. No product code changed.
 
 ## 0.30.84 — wake-at registry: a stopped lane is started at its WAIT wake time
 

@@ -2418,24 +2418,28 @@ mod tests {
             vec![
                 "cmd.exe".to_string(),
                 "/c".to_string(),
-                "echo Enter to confirm . Esc to cancel & choice /t 11 /d y >nul".to_string(),
+                "echo Enter to confirm . Esc to cancel & choice /t 7 /d y >nul".to_string(),
             ],
-            "echo 'Enter to confirm . Esc to cancel'; sleep 11",
+            "echo 'Enter to confirm . Esc to cancel'; sleep 7",
         );
-        // The repaint fires REPAINT_AFTER (2 s) after the footer is first SEEN, so the footer must appear within
-        // (window - 2 s) of the spawn. A 6 s window left 3.8 s of slack and failed once on a loaded ubuntu runner
-        // (main fe03f444, 2026-11-24; 5 earlier runs passed); 10 s leaves about 7.9 s.
         run_with_handlers_and_window_watched(
             "overmind",
             &child_argv,
             Vec::new(),
             80,
             25,
-            Cursor::new(b"\x1b[1;1R".to_vec()),
+            // The reply to the ConPTY startup cursor query is only needed on Windows. A Unix pty ECHOES it onto the
+            // screen as `^[[1;1R`; when that lands after the child's output the footer is no longer alone and no
+            // repaint is asked for (CI main fe03f444 and #302 db374d1; reproduced with 12 parallel runs on 2 cores).
+            Cursor::new(if cfg!(windows) {
+                b"[1;1R".to_vec()
+            } else {
+                Vec::new()
+            }),
             Sink,
             |_| {},
             |_| {},
-            Duration::from_secs(10),
+            Duration::from_secs(6),
             |_, _| {},
             move |direction, bytes| {
                 if direction == "host-note" {
