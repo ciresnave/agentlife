@@ -119,7 +119,7 @@ pub fn startup_prompt(role: &str) -> String {
 /// `wt.exe` command separator), and the id is already restricted to `[A-Za-z0-9_.:-]`.
 pub fn mail_startup_prompt(role: &str, signal_id: &str) -> String {
     format!(
-        "You were started because mail arrived for you (signal {signal_id}). Fetch your inbox FIRST, ack and act on that message, then read {role} HANDOFF and arm every WAIT in it (lane-restart waits)"
+        "You were started because mail arrived for you (signal {signal_id}). Fetch your inbox FIRST, ack and act on that message. An empty fetch does NOT mean no mail: the message may already be leased to your session channel and arrive as a channel event within seconds, so wait for it (about 2 minutes) before concluding the inbox is empty or soft-stopping. Then read {role} HANDOFF and arm every WAIT in it (lane-restart waits)"
     )
 }
 
