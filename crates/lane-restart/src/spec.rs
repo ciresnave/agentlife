@@ -667,6 +667,11 @@ pub struct Activity {
     /// one long tool call is also quiet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quiet_over: Option<bool>,
+    /// Seconds since the lane's last context-compaction summary when no assistant entry has followed it
+    /// (`compaction_stall.rs`, ROADMAP O21); absent when the lane has answered or the transcript could not
+    /// be read. The number is the claim: `status` marks it from `compaction_stall::STALL_AFTER_SECS`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_stall_secs: Option<i64>,
 }
 
 fn handoff_size(cwd: &str, role: &str) -> Option<HandoffSize> {
@@ -739,6 +744,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                             .max(0)
                     }),
                 quiet_over: None,
+                compaction_stall_secs: None,
             });
             out.channels = st
                 .launch_args
