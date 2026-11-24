@@ -863,12 +863,24 @@ pub const HOST_LOG_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// host logs were the biggest single scan cost on the machine).
 pub const RAW_LOG_VAR: &str = "LANE_HOST_RAW_LOG";
 
+/// The value of [`RAW_LOG_VAR`] a launcher start sets: the raw stream for the startup window only.
+pub const RAW_LOG_STARTUP: &str = "startup";
+/// A startup capture stops after this long ...
+const RAW_STARTUP_WINDOW: Duration = Duration::from_secs(120);
+/// ... or after this many bytes of log text, whichever comes first.
+const RAW_STARTUP_MAX_BYTES: usize = 1024 * 1024;
+
 /// How often a raw-stream log is flushed to disk, when it is on.
 const RAW_LOG_FLUSH: Duration = Duration::from_secs(3);
 
 /// `1` or `true` (any case) turns the raw stream on; anything else, or unset, leaves it off.
 pub fn raw_log_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+}
+
+/// `startup` asks for the bounded raw stream (a launcher start; see [`RAW_STARTUP_WINDOW`]).
+pub fn raw_log_startup(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case(RAW_LOG_STARTUP))
 }
 
 /// Best-effort append - never fatal to the relay that's still running. Rotates first when the file
@@ -907,6 +919,16 @@ struct RawLog {
     path: std::path::PathBuf,
     pending: Mutex<(String, Instant)>,
     flush_every: Duration,
+    /// `Some` for a startup capture: it stops at the window or the byte cap and says so once.
+    limit: Option<RawLimit>,
+}
+
+struct RawLimit {
+    started: Instant,
+    window: Duration,
+    max_bytes: usize,
+    /// Bytes of log text accepted so far; `None` once the capture has stopped.
+    taken: Mutex<Option<usize>>,
 }
 
 impl RawLog {
@@ -915,7 +937,29 @@ impl RawLog {
             path,
             pending: Mutex::new((String::new(), Instant::now())),
             flush_every,
+            limit: None,
         }
+    }
+
+    /// A capture of the startup window only: [`RAW_STARTUP_WINDOW`] and [`RAW_STARTUP_MAX_BYTES`].
+    fn startup(path: std::path::PathBuf, flush_every: Duration) -> Self {
+        Self::bounded(path, flush_every, RAW_STARTUP_WINDOW, RAW_STARTUP_MAX_BYTES)
+    }
+
+    fn bounded(
+        path: std::path::PathBuf,
+        flush_every: Duration,
+        window: Duration,
+        max_bytes: usize,
+    ) -> Self {
+        let mut r = Self::new(path, flush_every);
+        r.limit = Some(RawLimit {
+            started: Instant::now(),
+            window,
+            max_bytes,
+            taken: Mutex::new(Some(0)),
+        });
+        r
     }
 
     fn push(&self, direction: &str, bytes: &[u8]) {
@@ -926,6 +970,24 @@ impl RawLog {
             escape_bytes(bytes)
         );
         let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = &self.limit {
+            let mut taken = l.taken.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(n) = *taken else { return };
+            if l.started.elapsed() >= l.window || n + line.len() > l.max_bytes {
+                *taken = None;
+                p.0.push_str(&format!(
+                    "[{}] RAW-STREAM stopped: startup capture is limited to {} s and {} bytes\n",
+                    chrono::Utc::now().to_rfc3339(),
+                    l.window.as_secs(),
+                    l.max_bytes
+                ));
+                let text = std::mem::take(&mut p.0);
+                drop(p);
+                self.write(&text);
+                return;
+            }
+            *taken = Some(n + line.len());
+        }
         p.0.push_str(&line);
         if p.1.elapsed() >= self.flush_every || p.0.len() >= 64 * 1024 {
             let text = std::mem::take(&mut p.0);
@@ -1053,15 +1115,29 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     for (h, hash) in &loaded.handlers {
         append_host_log(&log_path, &format!("  active {} {hash}", h.id));
     }
-    let raw_log = raw_log_enabled(std::env::var(RAW_LOG_VAR).ok().as_deref())
-        .then(|| RawLog::new(log_path.clone(), RAW_LOG_FLUSH));
+    let raw_var = std::env::var(RAW_LOG_VAR).ok();
+    let raw_log = if raw_log_enabled(raw_var.as_deref()) {
+        Some(RawLog::new(log_path.clone(), RAW_LOG_FLUSH))
+    } else if raw_log_startup(raw_var.as_deref()) {
+        Some(RawLog::startup(log_path.clone(), RAW_LOG_FLUSH))
+    } else {
+        None
+    };
     append_host_log(
         &log_path,
         &format!(
             "[{}] RAW-STREAM {}",
             started_at.to_rfc3339(),
             if raw_log.is_some() {
-                format!("on ({RAW_LOG_VAR}): buffered, flushed every 3 s")
+                if raw_log_startup(raw_var.as_deref()) {
+                    format!(
+                        "on (launcher start): first {} s, at most {} bytes, flushed every 3 s",
+                        RAW_STARTUP_WINDOW.as_secs(),
+                        RAW_STARTUP_MAX_BYTES
+                    )
+                } else {
+                    format!("on ({RAW_LOG_VAR}): buffered, flushed every 3 s")
+                }
             } else {
                 format!("off (set {RAW_LOG_VAR}=1 to record it)")
             }
@@ -1440,6 +1516,35 @@ mod tests {
         let eager = RawLog::new(d.path().join("host-y-1.log"), Duration::ZERO);
         eager.push("child->relay", b"a");
         assert!(d.path().join("host-y-1.log").exists());
+    }
+
+    #[test]
+    fn startup_raw_capture_stops_at_the_byte_cap_and_the_window_and_says_so_once() {
+        assert!(raw_log_startup(Some("startup")) && raw_log_startup(Some(" Startup ")));
+        // control: the full-capture values and unset are not the startup mode
+        for no in [None, Some("1"), Some("true"), Some("")] {
+            assert!(!raw_log_startup(no), "{no:?}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("host-x-1.log");
+        let raw = RawLog::bounded(path.clone(), Duration::ZERO, Duration::from_secs(3600), 400);
+        for _ in 0..50 {
+            raw.push("child->relay", b"0123456789");
+        }
+        drop(raw);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let chunks = text.lines().filter(|l| l.contains("child->relay")).count();
+        assert!((1..50).contains(&chunks), "capped, got {chunks}");
+        assert_eq!(text.matches("RAW-STREAM stopped").count(), 1, "{text}");
+        // window: a zero window stops at the first chunk
+        let p2 = d.path().join("host-y-1.log");
+        let raw = RawLog::bounded(p2.clone(), Duration::ZERO, Duration::ZERO, 1 << 20);
+        raw.push("child->relay", b"a");
+        raw.push("child->relay", b"b");
+        drop(raw);
+        let t2 = std::fs::read_to_string(&p2).unwrap();
+        assert_eq!(t2.matches("child->relay").count(), 0, "{t2}");
+        assert_eq!(t2.matches("RAW-STREAM stopped").count(), 1, "{t2}");
     }
 
     #[test]

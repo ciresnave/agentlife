@@ -445,6 +445,14 @@ impl HostedArgv {
         })
     }
 
+    /// Marks this a launcher start: `--raw-startup` goes right after the role, so the host records
+    /// the raw terminal stream for its startup window (2026-11-24, footer-only dialogs).
+    pub fn with_raw_startup(mut self) -> Self {
+        // [exe, "host", "--role", <role>, "--", ...]
+        self.hosted.insert(4, "--raw-startup".to_string());
+        self
+    }
+
     /// The `wsl.exe` command of a WSL lane; `None` for a Windows lane.
     pub fn wsl_command(&self) -> Option<&[String]> {
         self.wsl.as_deref()
@@ -1590,6 +1598,18 @@ mod tests {
         assert_eq!(&normal[..4], ["-w", "new", "-d", "C:/Projects/kiss"]);
         assert!(!normal.iter().any(|a| a == "--title"));
         assert_eq!(min[5..], normal[2..]);
+    }
+
+    #[test]
+    fn a_raw_startup_marker_goes_after_the_role_and_a_plain_argv_has_none() {
+        let plain = HostedArgv::new("C:/Projects/x", "x", strs(&["claude", "go"])).unwrap();
+        assert!(!plain.hosted().iter().any(|a| a == "--raw-startup"));
+        let marked = plain.with_raw_startup();
+        let h = marked.hosted();
+        assert_eq!((h[1].as_str(), h[2].as_str(), h[3].as_str()), ("host", "--role", "x"));
+        assert_eq!((h[4].as_str(), h[5].as_str()), ("--raw-startup", "--"));
+        // the lane's own argv is untouched
+        assert_eq!(&marked[..], &strs(&["claude", "go"])[..]);
     }
 
     // -- host_wrapped_argv --------------------------------------------- //

@@ -848,6 +848,24 @@ mod cli_tests {
     }
 
     #[test]
+    fn host_args_take_raw_startup_before_the_separator_only() {
+        let (role, child, raw) = cli::host_full(&strs(&[
+            "--role",
+            "x",
+            "--raw-startup",
+            "--",
+            "claude",
+        ]))
+        .unwrap();
+        assert_eq!((role.as_str(), child, raw), ("x", strs(&["claude"]), true));
+        // control: without the flag it is false, and a flag after `--` is the child's own
+        let (_, child, raw) =
+            cli::host_full(&strs(&["--role", "x", "--", "claude", "--raw-startup"])).unwrap();
+        assert!(!raw);
+        assert_eq!(child, strs(&["claude", "--raw-startup"]));
+    }
+
+    #[test]
     fn host_args_requires_a_separator() {
         assert!(cli::host(&strs(&["--role", "overmind"])).is_err());
     }

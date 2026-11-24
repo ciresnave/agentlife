@@ -170,6 +170,12 @@ pub fn prepare_launch_for(
             HostedArgv::new_wsl(&wsl::host_start_dir(), spec.role.as_str(), argv, command)?
         }
     };
+    // Only a launcher start (it carries a signal) records the raw stream, for the startup window.
+    let argv = if wake_signal.is_some() {
+        argv.with_raw_startup()
+    } else {
+        argv
+    };
     // PM finding, 2026-09-19: judge the argv ABOUT TO BE LAUNCHED (it already
     // went through the allowlist), never the original launch flags.
     let carries_dev_channels_flag = has_dev_channels_flag(&argv);
@@ -1094,6 +1100,16 @@ mod tests {
             Err(RelaunchError::SessionNeverProcessedPrompt)
         ));
         assert_eq!(slept, 2, "the 2 s progress timeout of `short()`");
+    }
+
+    #[test]
+    fn only_a_launcher_start_with_a_signal_asks_the_host_for_the_raw_startup_capture() {
+        let s = spec("alpha");
+        let with = prepare_launch_for(&s, "sonnet", None, Some("alpha:7")).unwrap();
+        assert!(with.argv.hosted().iter().any(|a| a == "--raw-startup"));
+        // control: no signal (a hand start, a restart) never does
+        let without = prepare_launch_for(&s, "sonnet", None, None).unwrap();
+        assert!(!without.argv.hosted().iter().any(|a| a == "--raw-startup"));
     }
 
     // ---- launch mode `wsl` (docs/LANE-RESTART-WSL.md section 3) ----
