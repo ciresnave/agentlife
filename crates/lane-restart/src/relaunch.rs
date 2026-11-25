@@ -1606,7 +1606,10 @@ mod tests {
         assert!(!plain.hosted().iter().any(|a| a == "--raw-startup"));
         let marked = plain.with_raw_startup();
         let h = marked.hosted();
-        assert_eq!((h[1].as_str(), h[2].as_str(), h[3].as_str()), ("host", "--role", "x"));
+        assert_eq!(
+            (h[1].as_str(), h[2].as_str(), h[3].as_str()),
+            ("host", "--role", "x")
+        );
         assert_eq!((h[4].as_str(), h[5].as_str()), ("--raw-startup", "--"));
         // the lane's own argv is untouched
         assert_eq!(&marked[..], &strs(&["claude", "go"])[..]);
