@@ -12,16 +12,7 @@ Writers today, by folder (newest file per folder, scan 2026-11-12): `.cargo\regi
 
 ## A. Per Rust runner: a private CARGO_HOME
 
-The six runner services (read from the service registry 2026-11-12, all Running): 
-
-| account | runner directory | repo workflows that run cargo on it (read) | action |
-|---|---|---|---|
-| `gh-runner` | `C:\gh-runner\ciresnave-PersistAnt` | PersistAnt `machine-durability.yml`, `synapse-power-cut.yml` | A1 |
-| `gh-runner-cpufish` | `C:\gh-runner-cpufish\ThinkersJournal-cpufish` | cpufish `ci.yml`, `aocl.yml` | A1 |
-| `ghr-baracuda` | `C:\ghr-baracuda\actions-runner` | baracuda `ci.yml`, `device-tests*.yml` | A1 |
-| `ghr-fuel` | `C:\ghr-fuel\actions-runner` | fuel `rust-ci.yml`, `cuda-metal-compile-check.yml`, `checkpoint-tests.yml`, `device-tests.yml` | A1 |
-| `ghr-licence-tools` | `C:\ghr-licence-tools\ThinkersJournal-licence-tools` | `ci.yml` has no cargo line | none |
-| `ghr-mlmf-corpus` | `C:\gh-runner-ghr-mlmf-corpus\ciresnave-mlmf` | mlmf `corpus-tests.yml` | A2: `-Rearm` (agentlife#272/#273) writes `CARGO_HOME` itself |
+Which runners need A1 is read in the one table under "State read 2026-11-24" below (A1 rows: `ghr-fuel` and `ghr-baracuda`; mlmf is done; aocl is read at the elevated step; the rest need nothing). The older six-row list that stood here was superseded 2026-11-24 (PM FIX rust-acl-table-discrepancy).
 
 Not runners but accounts that will inherit the machine variables: `antspawn-run`, `antspawn-v0-broker`, `ghr-spawn1`, `ghr-spawn2` (AntSpawn's launcher). They run no job today; the antspawn lane sets `CARGO_HOME` in the launcher environment before its first Rust job. `james`, `kims2`, `waemi`, `Administrator`, `Guest` are disabled.
 
