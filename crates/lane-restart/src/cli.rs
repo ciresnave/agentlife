@@ -552,6 +552,7 @@ struct Host {
 
 /// `host --role <role> -- <child argv...>` -> `(role, child_argv)`. The `--` separator belongs to
 /// this grammar, so `parse`'s refusal of a bare `--` does not apply.
+#[cfg(test)]
 pub(crate) fn host(rest: &[String]) -> Result<(String, Vec<String>), String> {
     host_full(rest).map(|(role, child, _)| (role, child))
 }
