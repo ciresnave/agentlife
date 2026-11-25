@@ -119,7 +119,7 @@ pub fn startup_prompt(role: &str) -> String {
 /// `wt.exe` command separator), and the id is already restricted to `[A-Za-z0-9_.:-]`.
 pub fn mail_startup_prompt(role: &str, signal_id: &str) -> String {
     format!(
-        "You were started because mail arrived for you (signal {signal_id}). Fetch your inbox FIRST, ack and act on that message, then read {role} HANDOFF and arm every WAIT in it (lane-restart waits)"
+        "You were started because mail arrived for you (signal {signal_id}). Fetch your inbox FIRST, ack and act on that message. An empty fetch does NOT mean no mail: the message may already be leased to your session channel and arrive as a channel event within seconds, so wait for it (about 2 minutes) before concluding the inbox is empty or soft-stopping. Then read {role} HANDOFF and arm every WAIT in it (lane-restart waits)"
     )
 }
 
@@ -169,6 +169,12 @@ pub fn prepare_launch_for(
                 .map_err(|e| RelaunchError::Wsl(e.to_string()))?;
             HostedArgv::new_wsl(&wsl::host_start_dir(), spec.role.as_str(), argv, command)?
         }
+    };
+    // Only a launcher start (it carries a signal) records the raw stream, for the startup window.
+    let argv = if wake_signal.is_some() {
+        argv.with_raw_startup()
+    } else {
+        argv
     };
     // PM finding, 2026-09-19: judge the argv ABOUT TO BE LAUNCHED (it already
     // went through the allowlist), never the original launch flags.
@@ -1094,6 +1100,16 @@ mod tests {
             Err(RelaunchError::SessionNeverProcessedPrompt)
         ));
         assert_eq!(slept, 2, "the 2 s progress timeout of `short()`");
+    }
+
+    #[test]
+    fn only_a_launcher_start_with_a_signal_asks_the_host_for_the_raw_startup_capture() {
+        let s = spec("alpha");
+        let with = prepare_launch_for(&s, "sonnet", None, Some("alpha:7")).unwrap();
+        assert!(with.argv.hosted().iter().any(|a| a == "--raw-startup"));
+        // control: no signal (a hand start, a restart) never does
+        let without = prepare_launch_for(&s, "sonnet", None, None).unwrap();
+        assert!(!without.argv.hosted().iter().any(|a| a == "--raw-startup"));
     }
 
     // ---- launch mode `wsl` (docs/LANE-RESTART-WSL.md section 3) ----

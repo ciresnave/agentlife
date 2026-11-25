@@ -545,16 +545,25 @@ struct Host {
     /// Everything after the first `--` that is not a `--role` value, verbatim.
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     child: Vec<String>,
+    /// Set by a launcher start only: record the raw terminal stream for the startup window.
+    #[arg(long)]
+    raw_startup: bool,
 }
 
 /// `host --role <role> -- <child argv...>` -> `(role, child_argv)`. The `--` separator belongs to
 /// this grammar, so `parse`'s refusal of a bare `--` does not apply.
+#[cfg(test)]
 pub(crate) fn host(rest: &[String]) -> Result<(String, Vec<String>), String> {
+    host_full(rest).map(|(role, child, _)| (role, child))
+}
+
+/// [`host`], plus whether `--raw-startup` was given (a launcher start).
+pub(crate) fn host_full(rest: &[String]) -> Result<(String, Vec<String>, bool), String> {
     let a = Host::try_parse_from(
         std::iter::once("lane-restart host".to_string()).chain(rest.iter().cloned()),
     )
     .map_err(|e| e.render().to_string().trim_end().to_string())?;
-    Ok((a.role, a.child))
+    Ok((a.role, a.child, a.raw_startup))
 }
 
 #[cfg(test)]

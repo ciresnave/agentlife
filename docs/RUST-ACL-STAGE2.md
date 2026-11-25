@@ -12,16 +12,7 @@ Writers today, by folder (newest file per folder, scan 2026-11-12): `.cargo\regi
 
 ## A. Per Rust runner: a private CARGO_HOME
 
-The six runner services (read from the service registry 2026-11-12, all Running): 
-
-| account | runner directory | repo workflows that run cargo on it (read) | action |
-|---|---|---|---|
-| `gh-runner` | `C:\gh-runner\ciresnave-PersistAnt` | PersistAnt `machine-durability.yml`, `synapse-power-cut.yml` | A1 |
-| `gh-runner-cpufish` | `C:\gh-runner-cpufish\ThinkersJournal-cpufish` | cpufish `ci.yml`, `aocl.yml` | A1 |
-| `ghr-baracuda` | `C:\ghr-baracuda\actions-runner` | baracuda `ci.yml`, `device-tests*.yml` | A1 |
-| `ghr-fuel` | `C:\ghr-fuel\actions-runner` | fuel `rust-ci.yml`, `cuda-metal-compile-check.yml`, `checkpoint-tests.yml`, `device-tests.yml` | A1 |
-| `ghr-licence-tools` | `C:\ghr-licence-tools\ThinkersJournal-licence-tools` | `ci.yml` has no cargo line | none |
-| `ghr-mlmf-corpus` | `C:\gh-runner-ghr-mlmf-corpus\ciresnave-mlmf` | mlmf `corpus-tests.yml` | A2: `-Rearm` (agentlife#272/#273) writes `CARGO_HOME` itself |
+Which runners need A1 is read in the one table under "State read 2026-11-24" below (A1 rows: `ghr-fuel` and `ghr-baracuda`; mlmf is done; aocl is read at the elevated step; the rest need nothing). The older six-row list that stood here was superseded 2026-11-24 (PM FIX rust-acl-table-discrepancy).
 
 Not runners but accounts that will inherit the machine variables: `antspawn-run`, `antspawn-v0-broker`, `ghr-spawn1`, `ghr-spawn2` (AntSpawn's launcher). They run no job today; the antspawn lane sets `CARGO_HOME` in the launcher environment before its first Rust job. `james`, `kims2`, `waemi`, `Administrator`, `Guest` are disabled.
 
@@ -84,3 +75,28 @@ Children inherit, so one command covers the tree (a child with its OWN entry wou
 | aocl (`ghr-aocl`) | `selfhosted.yml:scalapack`, dispatch only, cargo | not read (run 44915169257, success 14:40Z, prints no CARGO_HOME); the script writes it for new runners | read `.env` names elevated once, else probe like mlmf |
 
 **Order:** stage 1 (credentials.toml) any time; the baracuda workflow PR (drop `dtolnay`) first; A1 for fuel and baracuda between jobs; one green job each with a CARGO_HOME probe step; read the aocl `.env` names (elevated: `Get-Content <dir>\.env | % { ($_ -split '=',2)[0] }`); then B with its backup (`icacls C:\rust /save C:\rust-acl-20261112.txt /t /c`) and restore (`icacls C:\ /restore C:\rust-acl-20261112.txt`) exactly as above, then the deny control from step 4. The commands above are unchanged and were NOT run by this lane.
+
+## State read 2026-11-24 (PM TASK `rust-acl-stage2-refresh`; read-only, nothing applied; one run, one machine)
+
+**Live service registry** (HKLM `Services` with a `RunnerService.exe` ImagePath, since `Get-CimInstance Win32_Service` throws here): the same seven services as 2026-11-21, no new runner (no spawn, wsl or humboldt service). Six Running; `actions.runner.ciresnave-aocl...` Stopped. `C:ust` still has `Authenticated Users:(I)(M)` and `(I)(OI)(CI)(IO)(M)`; MACHINE `CARGO_HOME=C:ust\.cargo`. Runner `.env` files are unreadable to a lane (access denied on fuel and baracuda), so `.env` is not read; job logs are the evidence.
+
+| runner (account) | mark | evidence |
+|---|---|---|
+| fuel (`ghr-fuel`) | **A1** | run 45305681272 (2026-11-24 01:43Z, success) printed `CARGO_HOME=C:ust\.cargo`, `RUSTUP_HOME=C:ust\.rustup`; no `dtolnay` in its self-hosted jobs |
+| baracuda (`ghr-baracuda`) | **A1** (workflow half done) | `device-tests.yml` and `device-tests-kernel-features.yml` on origin/main no longer use `dtolnay/rust-toolchain` (the comment cites this stage); run 45296368885 (2026-11-24 00:20Z) still printed `CARGO_HOME=C:ust\.cargo`, so the `.env` change is what remains. `ci.yml` still has `dtolnay`: its `runs-on` was not read here |
+| mlmf (`ghr-mlmf-corpus`) | **done** for CARGO_HOME (2026-11-21 run 44908109292 printed the private path; not re-read today); RUSTUP_HOME stays shared read-only | |
+| aocl (`ghr-aocl`) | **unread**: service Stopped, `.env` names unread, no job today | read the `.env` names elevated first (command in the 2026-11-21 section) |
+| PersistAnt, cpufish, licence-tools | **none** | no cargo step at the default branch on 2026-11-21; not re-read job by job today |
+| antspawn accounts | **none** (not services) | set `CARGO_HOME` in the launcher before a first Rust job |
+
+**The scripts** (this lane wrote `scripts/rust-acl-stage2.ps1`; **dry run by default, `-Apply` needs an elevated shell and is never run by a lane**). Run unelevated with no `-Apply` on 2026-11-24: `-Step A1 -Runner ghr-fuel`, `-Step A1 -Runner ghr-baracuda` and `-Step B` each found the one service, printed the exact commands and changed nothing (outputs in the PR). **Not run:** `-Undo` for either step and the `-Apply` elevation refusal (a permission classifier declined that batch; the code path is read, not exercised), and no `-Apply` anywhere. The A1 block is the plan's, with a refusal to run twice (the `.env.bak-<stamp>` must not exist). One-line restores: A1 `-Step A1 -Runner <acct> -Undo -Apply` (copies the `.env` backup back, restarts the service); B `-Step B -Undo -Apply` (`icacls C:\ /restore C:ust-acl-20261112.txt`).
+
+**Job in flight:** a service stop kills a running job. None of the runners was read for a policy; before each A1, from the PM: `gh run list -R <repo> --status in_progress` must be empty. No runner is known to wait for a job to finish on its own.
+
+**ONE ordered list for the board (a single elevated item, runner stops only between jobs):**
+1. Stage 1: `icacls C:ust\.cargo\credentials.toml /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F TUF-LAPTOP\cires:M` if not already done (the PM reports it done 2026-11-12; read the ACL to confirm).
+2. `rust-acl-stage2.ps1 -Step A1 -Runner ghr-baracuda -Apply`, after no baracuda job is in progress; dispatch one device-tests run and look for `C:\ghr-baracuda\cargo-homeegistry`.
+3. The same for `ghr-fuel`.
+4. Read the aocl `.env` names; give it A1 only if it lacks `CARGO_HOME`.
+5. `rust-acl-stage2.ps1 -Step B -Apply` (backup, then tighten), then the deny control and one cargo job per Rust runner (fuel, baracuda, mlmf, aocl if used).
+6. Restore if any step 5 job fails: `-Step B -Undo -Apply`.

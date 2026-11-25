@@ -16,8 +16,13 @@ use std::process::ExitCode;
 pub(super) fn run(ctx: &mut Ctx, rest: &[String]) -> ExitCode {
     // Before anything can fail or wait: a restart that finds no record knows the host never ran.
     crate::host_boot::record(&ctx.state_dir, rest);
-    match cli::host(rest) {
-        Ok((role, child_argv)) => {
+    match cli::host_full(rest) {
+        Ok((role, child_argv, raw_startup)) => {
+            // An explicit LANE_HOST_RAW_LOG (full capture) wins; a launcher start asks for the
+            // bounded startup capture only. Single-threaded here, before the host starts.
+            if raw_startup && std::env::var_os(crate::host::RAW_LOG_VAR).is_none() {
+                std::env::set_var(crate::host::RAW_LOG_VAR, crate::host::RAW_LOG_STARTUP);
+            }
             let host = ctx.host_runner();
             match (*host)(&role, &child_argv) {
                 Ok(outcome) => match outcome.child_exit_code {

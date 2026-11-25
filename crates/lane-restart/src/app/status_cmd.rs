@@ -85,6 +85,14 @@ pub(super) fn run(
         report.mark_quiet_over(secs);
     }
     crate::duplicate::annotate(&mut report, &state, &*facts);
+    if let Some(home) = crate::paths::home_dir() {
+        crate::compaction_stall::annotate(
+            &mut report,
+            &state,
+            &home.join(".claude").join("projects"),
+            chrono::Utc::now(),
+        );
+    }
     let peers_moved = with_peers && ctx.transport() == crate::notify::Transport::Synapse;
     if peers_moved {
         // The published lane-restart crate does not depend on Synapse: the join moved.
@@ -130,6 +138,7 @@ pub(super) fn run(
                     a.quiet_secs,
                     hook_mark(a),
                     quiet_mark(a, quiet_over)
+                        + &crate::compaction_stall::mark(a.compaction_stall_secs)
                 ),
                 Some(a) => format!(
                     "idle=false({}) quiet={}s{}{}",
@@ -137,6 +146,7 @@ pub(super) fn run(
                     a.quiet_secs,
                     hook_mark(a),
                     quiet_mark(a, quiet_over)
+                        + &crate::compaction_stall::mark(a.compaction_stall_secs)
                 ),
                 None => "idle=-".to_string(),
             },

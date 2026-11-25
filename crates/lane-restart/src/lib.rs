@@ -24,6 +24,7 @@ mod app;
 pub mod approvals;
 pub mod authorize;
 pub mod cli;
+pub mod compaction_stall;
 pub mod disk;
 pub mod duplicate;
 pub mod epoch_check;

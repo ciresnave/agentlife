@@ -42,7 +42,7 @@ impl Rig {
         let src = example_path();
         assert!(
             src.exists(),
-            "the fake_claude example is not built at {}: `cargo test` builds examples, `cargo test --test hook_e2e` may not",
+            "the fake_claude example is not built at {}: this is the BOX, not a failing test (rustc 1.100 keeps examples in the build-dir). Run `cargo build --examples -p agentlife` first",
             src.display()
         );
         let claude = dir.path().join(if cfg!(windows) {

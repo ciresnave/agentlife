@@ -86,7 +86,7 @@ impl Rig {
             let src = example(name);
             assert!(
                 src.exists(),
-                "{} is not built: `cargo test` builds examples",
+                "{} is not built: this is the BOX, not a failing test (rustc 1.100 keeps examples in the build-dir). Run `cargo build --examples -p agentlife` first",
                 src.display()
             );
             std::fs::copy(&src, to).expect("copy the stand-in");

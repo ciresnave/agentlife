@@ -845,6 +845,11 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("Fetch your inbox FIRST"), "{prompt}");
+        // 2026-11-24: mail can land seconds AFTER the session starts, so one empty fetch must not end the wait.
+        assert!(
+            prompt.contains("empty fetch does NOT mean no mail") && prompt.contains("2 minutes"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("read baracuda HANDOFF") && prompt.contains("arm every WAIT"),
             "{prompt}"
