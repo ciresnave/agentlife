@@ -1,3 +1,0 @@
-kind: lane-restart host records the raw terminal stream for the startup window of a launcher start
----
-lane-restart host: a launcher start (`--raw-startup`, added after the role by a start that carries a signal) records the raw terminal stream for the first 120 s and at most 1 MiB of the host log, then writes one `RAW-STREAM stopped` line. Hand starts and running lanes are unchanged (off unless `LANE_HOST_RAW_LOG=1`). Why: on 2026-11-24 two launcher starts stayed on a footer-only dialog through 5 of 5 repaints with the bytes unknown. The capture holds what the TUI paints at startup (no secret is typed there) and is deleted with the host logs after 24 h.
