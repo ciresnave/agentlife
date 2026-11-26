@@ -44,7 +44,7 @@ foreach ($v in @($Exe, $SynapseHome)) {
 $wrapper = @"
 @echo off
 rem Written by agentlife scripts\launcher-task-wrapper.ps1. Edit the script, not this file.
-rem The scheduled task `agentlife-launcher` runs with no environment: this wrapper gives it the pilot daemon's home and
+rem The scheduled task agentlife-launcher runs with no environment: this wrapper gives it the pilot daemon's home and
 rem address, and the portfolio's lane-to-cluster-PM table (the once-a-day daily-cap mail goes to a role's cluster PM).
 set "SYNAPSE_HOME=$SynapseHome"
 set "SYNAPSE_ADDR=$Addr"

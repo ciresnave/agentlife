@@ -28,6 +28,9 @@ $r = Run @('-Out', $out)
 Check 'dry run exits 0' ($r.Code -eq 0) $r.Text
 Check 'default sets AGENTLIFE_LANE_REPORTING to the portfolio table' ($r.Text.Contains('set "AGENTLIFE_LANE_REPORTING=C:\Projects\LANE-REPORTING.md"')) $r.Text
 Check 'it still sets SYNAPSE_ADDR and runs the exe with the log' (($r.Text.Contains('set "SYNAPSE_ADDR=127.0.0.1:7920"')) -and ($r.Text.Contains('agentlife.exe" %* 2>>'))) $r.Text
+Check 'the wrapper sets SYNAPSE_HOME to the pilot daemon home' ($r.Text.Contains('set "SYNAPSE_HOME=%LOCALAPPDATA%\synapse-pilot"')) $r.Text
+Check 'the wrapper text is pure ASCII' (-not ($r.Text -match '[^	
+ -~]')) 'a non-ASCII character is in the dry-run text'
 Check 'a dry run writes nothing' (-not (Test-Path -LiteralPath $out))
 
 # 2. -LaneReporting overrides; -Write writes exactly the text (CRLF) and nothing else.
