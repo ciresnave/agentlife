@@ -1,0 +1,3 @@
+kind: host log records the pty size; mail-before-first-turn docs and probe tool
+---
+The lane-restart host now writes the pty size at creation (and whether it came from the console or the 80x25 fallback) and every resize it applies (nudge wider, nudge back, follows the host's own console) to the host log, so a footer-only stall in a tiny pty can be traced to its source (design note docs/FOOTER-STALL-PTY-SIZE.md; no behaviour change). Adds docs/MAIL-BEFORE-FIRST-TURN.md and tools/mail-first-latency.py, ROADMAP O10 and O23 rows, a visible SKIP for the e2e tests under a claude ancestor, and the coderipper caller pin at 467fd259. Verified: clippy --workspace, cargo test.
