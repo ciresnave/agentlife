@@ -34,6 +34,28 @@ pub const SETTLE_SECS: i64 = 10 * 60;
 /// The ledger `kind` of a row saying whether a started session ran (`ran`), keyed by `signal_id`.
 pub const SETTLE_KIND: &str = "settle";
 
+/// Appends the `settle` row for a start left at the dialog whose session the launcher then saw online
+/// (`ran: true`, keyed by `signal_id`; `docs/LAUNCHER-CAP-DESIGN.md` A1) to `<state_dir>/restart.log`.
+/// `true` when the line was written.
+pub fn write_settle_row(state_dir: &Path, role: &str, signal_id: &str) -> bool {
+    let entry = crate::log::Entry {
+        timestamp: Utc::now(),
+        requested_by: crate::start::LAUNCHER_ROLE,
+        role,
+        outcome: "settled: the session was seen online".to_string(),
+        acted: false,
+        kind: Some(SETTLE_KIND),
+        caller_role: None,
+        model: None,
+        reason: None,
+        signal_id: Some(signal_id),
+        result: Some("settled:ran"),
+        spawned: None,
+        ran: Some(true),
+    };
+    crate::log::append(&state_dir.join("restart.log"), &entry).is_ok()
+}
+
 /// What a start's `<outcome>:<reason>` result says about whether its session ran: `Some(true)` reached
 /// progress, `Some(false)` the spawn failed, `None` unknown (left at the dialog) or not a spawn.
 pub fn ran_from_result(result: &str) -> Option<bool> {
@@ -510,6 +532,26 @@ mod tests {
         assert_eq!(count_spawns(&[r], "a", now()).role_day, 1);
         let bare = row("a", 100, Some(L), Some(true));
         assert_eq!(count_spawns(&[bare], "a", now()).role_day, 1);
+    }
+
+    /// The writer and the counter agree: a dialog start older than the window is 0 daily until the settle row
+    /// the launcher writes lands, then 1. Goes through the real file.
+    #[test]
+    fn the_settle_row_the_launcher_writes_makes_the_dialog_start_count_daily() {
+        let d = tempdir().unwrap();
+        let start = start_row("a", 30, "s1", "started:awaiting-dialog", None);
+        assert_eq!(
+            count_spawns(std::slice::from_ref(&start), "a", now()).role_day,
+            0
+        );
+        assert!(write_settle_row(d.path(), "a", "s1"));
+        let read = crate::ledger::read(&d.path().join("restart.log")).unwrap();
+        assert!(read.unreadable.is_empty());
+        let mut rows = vec![start];
+        rows.extend(read.rows);
+        assert_eq!(rows[1].kind.as_deref(), Some(SETTLE_KIND));
+        assert_eq!(rows[1].ran, Some(true));
+        assert_eq!(count_spawns(&rows, "a", now()).role_day, 1);
     }
 
     #[test]

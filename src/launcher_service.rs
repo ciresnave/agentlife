@@ -325,6 +325,13 @@ impl Source for SynapseSource {
             .ok_or_else(|| SourceError::Unavailable("stats has no launch_senders_set".into()))
     }
 
+    fn settle(&self, role: &str, signal_id: &str) -> bool {
+        // The state directory is the wake dir the service was given; without one there is no ledger to write.
+        self.wake_dir
+            .as_deref()
+            .is_some_and(|d| lane_restart::launcher_gate::write_settle_row(d, role, signal_id))
+    }
+
     fn drain_notes(&self) -> Vec<String> {
         std::mem::take(&mut *self.notes.borrow_mut())
     }
@@ -752,6 +759,64 @@ pub fn notify_transport(home: Option<&Path>) -> lane_restart::notify::Transport 
     lane_restart::approvals::configured_transport(home)
 }
 
+/// Where the daily-cap mail goes when the role's cluster PM cannot be found (`docs/LAUNCHER-CAP-DESIGN.md` B).
+pub const CAP_FALLBACK_ROLE: &str = "pm-platform";
+/// The portfolio's lane-to-cluster-PM table (`LANE-REPORTING.md`); unset: every cap mail goes to the fallback.
+pub const LANE_REPORTING_ENV: &str = "AGENTLIFE_LANE_REPORTING";
+
+/// The cluster PM whose row of the `LANE-REPORTING.md` table lists `role`, as a whole name (a lane may be
+/// followed by a parenthetical, as `auth-framework (primary; ...)`). `None` when it is in no row.
+pub fn cluster_pm_of(role: &str, reporting_md: &str) -> Option<String> {
+    for line in reporting_md
+        .lines()
+        .filter(|l| l.trim_start().starts_with('|'))
+    {
+        let cells: Vec<&str> = line
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        if cells.len() < 2 {
+            continue;
+        }
+        let pm = cells[0]
+            .split_whitespace()
+            .next()
+            .map(|w| w.trim_matches('`'))
+            .filter(|w| w.starts_with("pm"));
+        let Some(pm) = pm else { continue };
+        let listed = cells[1].split(',').any(|t| {
+            t.split_whitespace()
+                .next()
+                .is_some_and(|w| w.trim_matches('`') == role)
+        });
+        if listed && pm != "pm" {
+            return Some(pm.to_string());
+        }
+    }
+    None
+}
+
+/// `(recipient, text)` of the daily-cap mail: the role's cluster PM, else [`CAP_FALLBACK_ROLE`] with a note
+/// saying the cluster PM was not resolved.
+pub fn cap_mail_target(role: &str, text: &str, reporting_md: Option<&str>) -> (String, String) {
+    match reporting_md.and_then(|md| cluster_pm_of(role, md)) {
+        Some(pm) => (pm, text.to_string()),
+        None => (
+            CAP_FALLBACK_ROLE.to_string(),
+            format!(
+                "{text}
+note: cluster PM not resolved for {role}; sent to {CAP_FALLBACK_ROLE}"
+            ),
+        ),
+    }
+}
+
+fn reporting_text() -> Option<String> {
+    std::env::var_os(LANE_REPORTING_ENV).and_then(|p| std::fs::read_to_string(p).ok())
+}
+
 /// Stall alarms to the PM lane, through the Synapse daemon as [`LAUNCHER_ROLE`].
 pub struct SynapseNotify<'a> {
     pub source: &'a SynapseSource,
@@ -765,6 +830,16 @@ impl Notify for SynapseNotify<'_> {
             std::process::id()
         );
         self.source.send(ALARM_ROLE, &id, text).is_ok()
+    }
+
+    fn cap_notice(&self, role: &str, text: &str) -> bool {
+        let (to, body) = cap_mail_target(role, text, reporting_text().as_deref());
+        // One id per role per UTC day: a resend of a delivered mail is a duplicate at the daemon, not a second copy.
+        let id = format!(
+            "launcher-cap-{role}-{}",
+            chrono::Utc::now().format("%Y%m%d")
+        );
+        self.source.send(&to, &id, &body).is_ok()
     }
 }
 
@@ -788,6 +863,17 @@ impl Notify for PeerNotify<'_> {
             self.state_dir,
             ALARM_ROLE,
             text,
+        )
+        .is_ok()
+    }
+
+    fn cap_notice(&self, role: &str, text: &str) -> bool {
+        let (to, body) = cap_mail_target(role, text, reporting_text().as_deref());
+        lane_restart::notify::notify_role(
+            lane_restart::notify::broker_addr(),
+            self.state_dir,
+            &to,
+            &body,
         )
         .is_ok()
     }

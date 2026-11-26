@@ -1644,7 +1644,11 @@ mod tests {
     #[test]
     fn a_stopping_spec_with_no_process_reads_suspended_only_after_the_stale_window() {
         assert_eq!(STOPPING_STALE_SECS, 15 * 60);
-        assert_eq!(stopping_aged(14), Lifecycle::Crashed, "in flight or just failed: as before");
+        assert_eq!(
+            stopping_aged(14),
+            Lifecycle::Crashed,
+            "in flight or just failed: as before"
+        );
         assert_eq!(stopping_aged(16), Lifecycle::Suspended);
     }
 

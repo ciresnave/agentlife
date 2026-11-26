@@ -602,6 +602,7 @@ fn a_row_left_in_intent_by_a_crash_is_resolved_not_re_called() {
             reason: "in-flight".into(),
             called: true,
             posted: false,
+            settled: false,
         }],
         roles: BTreeMap::new(),
     };

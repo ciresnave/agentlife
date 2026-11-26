@@ -63,6 +63,11 @@ pub trait Source {
     }
     /// The launcher has dealt with this wake (started, running, or given up): drop it. Default: nothing.
     fn consume_wake(&self, _w: &WakeDue) {}
+    /// Writes the `settle` ledger row for a start left at the dialog whose role is now online (`ran: true`,
+    /// keyed by `signal_id`; `docs/LAUNCHER-CAP-DESIGN.md` A1). `true` when it was written. Default: not written.
+    fn settle(&self, _role: &str, _signal_id: &str) -> bool {
+        false
+    }
     /// Anything the source noticed since the last call that the log should carry (an entry it
     /// could not read and skipped). Default: nothing.
     fn drain_notes(&self) -> Vec<String> {
@@ -74,6 +79,11 @@ pub trait Source {
 pub trait Notify {
     /// `true` when it reached someone.
     fn alarm(&self, text: &str) -> bool;
+    /// The once-a-day daily-cap mail for `role` (`docs/LAUNCHER-CAP-DESIGN.md` B): to the role's cluster PM.
+    /// Default: the same place as an alarm.
+    fn cap_notice(&self, _role: &str, text: &str) -> bool {
+        self.alarm(text)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -254,6 +264,14 @@ pub fn cycle(
             if let Err(e) = engine.observe_online(&online, now) {
                 rep.notes.push(format!("store: {e}"));
             }
+            // A start left at the dialog whose session is now online ran: say so in the ledger, once.
+            for (role, signal_id) in engine.unsettled_online(&online) {
+                if src.settle(&role, &signal_id) {
+                    if let Err(e) = engine.mark_settled(&signal_id) {
+                        rep.notes.push(format!("store: {e}"));
+                    }
+                }
+            }
         }
         Err(SourceError::Unauthorized(w)) => {
             rep.session_lost = true;
@@ -288,6 +306,15 @@ pub fn cycle(
                 return rep;
             }
             Err(e) => rep.notes.push(format!("clear {role}: {e:?}")),
+        }
+    }
+
+    // The daily-cap mail: marked sent only after it reached someone, so a failed delivery is offered again.
+    for (role, text) in engine.pending_cap_notices(now) {
+        if notify.cap_notice(&role, &text) {
+            if let Err(e) = engine.mark_cap_notified(&role, now) {
+                rep.notes.push(format!("store: {e}"));
+            }
         }
     }
 
@@ -362,8 +389,17 @@ mod tests {
         /// What `senders_set` answers: `None` is an unreadable answer.
         senders: RefCell<Option<bool>>,
         wakes: RefCell<Vec<WakeDue>>,
+        /// `(role, signal_id)` of each settle the cycle asked for; `settle_ok` is what the write answers.
+        settled: RefCell<Vec<(String, String)>>,
+        settle_fails: RefCell<bool>,
     }
     impl Source for Src {
+        fn settle(&self, role: &str, signal_id: &str) -> bool {
+            self.settled
+                .borrow_mut()
+                .push((role.into(), signal_id.into()));
+            !*self.settle_fails.borrow()
+        }
         fn due_wakes(&self, now: i64) -> Vec<WakeDue> {
             self.wakes
                 .borrow()
@@ -446,6 +482,200 @@ mod tests {
             signal_id: format!("{role}:wake-{event}"),
             due_ts,
         }
+    }
+
+    /// A mechanism that leaves every start at the dialog.
+    struct DialogMech;
+    impl Mechanism for DialogMech {
+        fn start(&self, _: &str, _: &str, _: &str) -> MechResult {
+            MechResult::AwaitingDialog
+        }
+    }
+
+    /// A mechanism whose every start is refused by the daily cap.
+    struct CapMech;
+    impl Mechanism for CapMech {
+        fn start(&self, _: &str, _: &str, _: &str) -> MechResult {
+            MechResult::Failed("rate-daily".into())
+        }
+    }
+
+    /// Records the cap notices; `fail` makes delivery fail.
+    #[derive(Default)]
+    struct CapBell {
+        notices: RefCell<Vec<(String, String)>>,
+        fail: RefCell<bool>,
+    }
+    impl Notify for CapBell {
+        fn alarm(&self, _: &str) -> bool {
+            true
+        }
+        fn cap_notice(&self, role: &str, text: &str) -> bool {
+            self.notices.borrow_mut().push((role.into(), text.into()));
+            !*self.fail.borrow()
+        }
+    }
+
+    fn cap_rig_cycle(e: &mut Engine<'_>, r: &Rig, b: &CapBell, id: &str, now: i64) {
+        r.src.signals.borrow_mut().clear();
+        r.src.signals.borrow_mut().push(signal("r1", id, 1, "e"));
+        let _ = cycle(e, &r.src, b, now, 120, 0);
+    }
+
+    // docs/LAUNCHER-CAP-DESIGN.md B: one mail per role per UTC day, with the cap number and the last 8 outcomes.
+    #[test]
+    fn a_daily_cap_refusal_mails_once_per_role_per_utc_day() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        let b = CapBell::default();
+        let mut e = Engine::open(&r.io, &CapMech, &r.dir, true).unwrap();
+        let day0 = 20_000 * 86_400; // a UTC midnight
+        cap_rig_cycle(&mut e, &r, &b, "r1:a", day0 + 100);
+        cap_rig_cycle(&mut e, &r, &b, "r1:b", day0 + 200);
+        assert_eq!(
+            b.notices.borrow().len(),
+            1,
+            "second refusal the same day: no second mail"
+        );
+        let (role, text) = b.notices.borrow()[0].clone();
+        assert_eq!(role, "r1");
+        assert!(
+            text.starts_with("[FINDING] launch-cap-hit ref=r1 "),
+            "{text}"
+        );
+        assert!(text.contains("8-per-role-per-day"), "{text}");
+        cap_rig_cycle(&mut e, &r, &b, "r1:c", day0 + 86_400 + 5);
+        assert_eq!(b.notices.borrow().len(), 2, "a new UTC day sends again");
+    }
+
+    #[test]
+    fn a_cap_mail_that_did_not_deliver_is_retried_and_then_not_repeated() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        let b = CapBell::default();
+        *b.fail.borrow_mut() = true;
+        let mut e = Engine::open(&r.io, &CapMech, &r.dir, true).unwrap();
+        let day0 = 20_000 * 86_400;
+        cap_rig_cycle(&mut e, &r, &b, "r1:a", day0 + 100);
+        cap_rig_cycle(&mut e, &r, &b, "r1:b", day0 + 200);
+        assert_eq!(b.notices.borrow().len(), 2, "offered again next cycle");
+        *b.fail.borrow_mut() = false;
+        cap_rig_cycle(&mut e, &r, &b, "r1:c", day0 + 300);
+        assert_eq!(b.notices.borrow().len(), 3);
+        cap_rig_cycle(&mut e, &r, &b, "r1:d", day0 + 400);
+        assert_eq!(
+            b.notices.borrow().len(),
+            3,
+            "delivered: never again that day"
+        );
+    }
+
+    #[test]
+    fn the_cap_mail_carries_the_last_eight_outcomes_oldest_first_and_no_more() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        let b = CapBell::default();
+        *b.fail.borrow_mut() = true; // keep it pending so the last notice shows the full list
+        let mut e = Engine::open(&r.io, &CapMech, &r.dir, true).unwrap();
+        let day0 = 20_000 * 86_400;
+        for i in 0..10 {
+            cap_rig_cycle(&mut e, &r, &b, &format!("r1:{i}"), day0 + 100 + i);
+        }
+        let text = b.notices.borrow().last().unwrap().1.clone();
+        let outcome_lines = text
+            .lines()
+            .filter(|l| l.starts_with("note: ") && l.contains("refused rate-daily"))
+            .count();
+        assert_eq!(outcome_lines, 8, "{text}");
+        assert!(
+            text.contains("r1:9") || text.contains(&format!("{}", day0 + 109)),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!("t={} ", day0 + 100)),
+            "oldest two dropped: {text}"
+        );
+    }
+
+    #[test]
+    fn a_hourly_or_started_result_sends_no_cap_mail() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        let b = CapBell::default();
+        r.src
+            .signals
+            .borrow_mut()
+            .push(signal("r1", "r1:a", 1, "e"));
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &b, 100, 120, 0);
+        assert!(b.notices.borrow().is_empty());
+    }
+
+    // docs/LAUNCHER-CAP-DESIGN.md A1: the launcher writes the settle row when it sees the role online.
+    #[test]
+    fn a_dialog_start_is_settled_once_when_its_role_is_seen_online() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        r.src
+            .signals
+            .borrow_mut()
+            .push(signal("r1", "r1:sig", 1, "e"));
+        let mut e = Engine::open(&r.io, &DialogMech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        assert!(r.src.settled.borrow().is_empty(), "not online yet");
+        r.src.online.borrow_mut().insert("r1".into());
+        let _ = cycle(&mut e, &r.src, &r.bell, 160, 120, 0);
+        assert_eq!(
+            *r.src.settled.borrow(),
+            vec![("r1".to_string(), "r1:sig".to_string())]
+        );
+        let _ = cycle(&mut e, &r.src, &r.bell, 220, 120, 0);
+        assert_eq!(
+            r.src.settled.borrow().len(),
+            1,
+            "settled once, not every cycle"
+        );
+    }
+
+    #[test]
+    fn a_settle_write_that_fails_is_offered_again_next_cycle() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        *r.src.settle_fails.borrow_mut() = true;
+        r.src
+            .signals
+            .borrow_mut()
+            .push(signal("r1", "r1:sig", 1, "e"));
+        r.src.online.borrow_mut().insert("r1".into());
+        let mut e = Engine::open(&r.io, &DialogMech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        let _ = cycle(&mut e, &r.src, &r.bell, 160, 120, 0);
+        let _ = cycle(&mut e, &r.src, &r.bell, 220, 120, 0);
+        assert!(r.src.settled.borrow().len() >= 2, "retried");
+        *r.src.settle_fails.borrow_mut() = false;
+        let _ = cycle(&mut e, &r.src, &r.bell, 280, 120, 0);
+        let n = r.src.settled.borrow().len();
+        let _ = cycle(&mut e, &r.src, &r.bell, 340, 120, 0);
+        assert_eq!(
+            r.src.settled.borrow().len(),
+            n,
+            "no more after one that landed"
+        );
+    }
+
+    #[test]
+    fn a_plain_started_row_is_never_settled() {
+        let r = rig();
+        *r.dir.granted.borrow_mut() = true;
+        r.src
+            .signals
+            .borrow_mut()
+            .push(signal("r1", "r1:sig", 1, "e"));
+        r.src.online.borrow_mut().insert("r1".into());
+        let mut e = Engine::open(&r.io, &r.mech, &r.dir, true).unwrap();
+        let _ = cycle(&mut e, &r.src, &r.bell, 100, 120, 0);
+        let _ = cycle(&mut e, &r.src, &r.bell, 160, 120, 0);
+        assert!(r.src.settled.borrow().is_empty());
     }
 
     // docs/WAKE-AT.md. A due wake starts the lane once, is consumed, posts nothing to Synapse, and needs
