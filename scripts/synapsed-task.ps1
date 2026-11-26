@@ -13,7 +13,7 @@
 
   The contract, and where each line of it lands here:
     - Fixed environment: SYNAPSE_HOME, SYNAPSE_ADDR, SYNAPSE_LAUNCHER_ROLES (and SYNAPSE_MAILBOX_STORE, only when
-      -MailboxStore is given; SYNAPSE_LAUNCH_SENDERS, only when -LaunchSenders is given) are SET in the wrapper, so a lane's environment never reaches the daemon. Every lane launch must pass the same SYNAPSE_HOME and SYNAPSE_ADDR.
+      -MailboxStore is given; SYNAPSE_LAUNCH_SENDERS, only when -LaunchSenders is given; SYNAPSE_FETCH_LOG, only when -FetchLog is given) are SET in the wrapper, so a lane's environment never reaches the daemon. Every lane launch must pass the same SYNAPSE_HOME and SYNAPSE_ADDR.
     - Loopback only: -Addr is refused unless it is 127.0.0.1 or [::1] with a port (the daemon exits 2 otherwise).
     - Restart policy: Task Scheduler restarts a failed task at most 3 times, 1 minute apart. `synapsed` exits 2
       for a configuration or lock problem (not an address, not loopback, cannot bind, store error, second
@@ -32,6 +32,7 @@
 .PARAMETER LauncherRoles  SYNAPSE_LAUNCHER_ROLES. Empty until the launch poller service is live; then `agentlife-launcher`.
 .PARAMETER MailboxStore  SYNAPSE_MAILBOX_STORE (e.g. `sqlite`). Default unset: the wrapper then has no such line and the daemon runs as before.
 .PARAMETER LaunchSenders  SYNAPSE_LAUNCH_SENDERS (synapsed rc.178: the signed senders whose launch signals the daemon accepts). Default unset: the wrapper then has no such line, the daemon has no launch senders, and the launcher reads that as not confirmed (rule 7b).
+.PARAMETER FetchLog  SYNAPSE_FETCH_LOG (e.g. 1: the daemon logs each fetch, so a lease time can be read). Default unset: the wrapper then has no such line and the daemon runs as before.
 .PARAMETER LogDir  Where synapsed.log and the wrapper go. Default <Home>\task.
 #>
 [CmdletBinding()]
@@ -42,6 +43,7 @@ param(
   [string]$LauncherRoles = '',
   [string]$MailboxStore = '',
   [string]$LaunchSenders = '',
+  [string]$FetchLog = '',
   [string]$LogDir,
   [switch]$Register,
   [switch]$Remove
@@ -66,6 +68,7 @@ if ($Addr -notmatch '^(127\.0\.0\.1|\[::1\]):(\d{1,5})$' -or [int]$Matches[2] -l
 }
 if ($LauncherRoles -match '[%"&|<>^\r\n]') { throw 'LauncherRoles holds a character the wrapper cannot carry' }
 if ($MailboxStore -match '[%"&|<>^\r\n]') { throw 'MailboxStore holds a character the wrapper cannot carry' }
+if ($FetchLog -match '[%"&|<>^\r\n]') { throw 'FetchLog holds a character the wrapper cannot carry' }
 if ($LaunchSenders -match '[%"&|<>^\r\n]') { throw 'LaunchSenders holds a character the wrapper cannot carry' }
 if ($Exe -notmatch '^([A-Za-z]:\\|\\\\)') { throw 'Exe must be a full path (relative and drive-relative paths are refused)' }
 # The task runs from another working directory: make every path absolute now.
@@ -81,6 +84,7 @@ if ($Register -and -not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "E
 $wrapperPath = Join-Path $LogDir ('synapsed-run-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff') + '.cmd')
 $logPath = Join-Path $LogDir 'synapsed.log'
 $mailboxLine = if ($MailboxStore) { "set `"SYNAPSE_MAILBOX_STORE=$MailboxStore`"`n" } else { '' }
+$fetchLogLine = if ($FetchLog) { "set `"SYNAPSE_FETCH_LOG=$FetchLog`"`n" } else { '' }
 $sendersLine = if ($LaunchSenders) { "set `"SYNAPSE_LAUNCH_SENDERS=$LaunchSenders`"`n" } else { '' }
 $wrapper = @"
 @echo off
@@ -88,7 +92,7 @@ rem Written by agentlife scripts\synapsed-task.ps1. Edit the script, not this fi
 set "SYNAPSE_HOME=$SynapseHome"
 set "SYNAPSE_ADDR=$Addr"
 set "SYNAPSE_LAUNCHER_ROLES=$LauncherRoles"
-${mailboxLine}${sendersLine}"$Exe" 2>>"$logPath"
+${mailboxLine}${sendersLine}${fetchLogLine}"$Exe" 2>>"$logPath"
 set "RC=%ERRORLEVEL%"
 if "%RC%"=="2" (
   echo %DATE% %TIME% synapsed exited 2: refused to start, not restarting ^(see lines above^)>>"$logPath"
