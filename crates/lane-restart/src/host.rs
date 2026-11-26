@@ -615,8 +615,22 @@ fn run_with_handlers_and_window_watched(
         let master_for_resize = pair.master;
         let mut last = (cols, rows);
         let nudge = Arc::clone(&nudge);
+        let on_raw_io = Arc::clone(&on_raw_io);
         std::thread::spawn(move || {
             let _alive = resize_flag;
+            // Every size this thread sets goes to the host log (2026-11-26 PM row: launcher starts
+            // stall on a footer-only dialog in a 2-row or ~10-column pty; where the size came from
+            // was not recorded). A failed resize is logged too.
+            let note = |what: &str, c: u16, r: u16, res: &std::io::Result<()>| {
+                let outcome = match res {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("FAILED {e}"),
+                };
+                on_raw_io(
+                    "host-note",
+                    format!("PTY SIZE {what}: {c}x{r} (cols x rows) {outcome}").as_bytes(),
+                );
+            };
             // Ends on a stop message or when the host drops the sender.
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stop_resize_rx.recv_timeout(Duration::from_millis(500))
@@ -629,18 +643,33 @@ fn run_with_handlers_and_window_watched(
                         pixel_width: 0,
                         pixel_height: 0,
                     };
-                    let _ = master_for_resize.resize(size(c.saturating_add(1)));
+                    let wider = c.saturating_add(1);
+                    let res = master_for_resize
+                        .resize(size(wider))
+                        .map_err(std::io::Error::other);
+                    note("nudge wider", wider, r, &res);
                     std::thread::sleep(Duration::from_millis(100));
-                    let _ = master_for_resize.resize(size(c));
+                    let res = master_for_resize
+                        .resize(size(c))
+                        .map_err(std::io::Error::other);
+                    note("nudge back", c, r, &res);
                 }
                 if let Some((c, r)) = current_console_size() {
                     if (c, r) != last {
-                        let _ = master_for_resize.resize(PtySize {
-                            rows: r,
-                            cols: c,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        });
+                        let res = master_for_resize
+                            .resize(PtySize {
+                                rows: r,
+                                cols: c,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            })
+                            .map_err(std::io::Error::other);
+                        note(
+                            &format!("follows the host's own console (was {}x{})", last.0, last.1),
+                            c,
+                            r,
+                            &res,
+                        );
                         last = (c, r);
                     }
                 }
@@ -1153,7 +1182,20 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     #[cfg(any(windows, unix))]
     let _raw_console_guard = RawConsoleGuard::enable();
 
-    let (cols, rows) = current_console_size().unwrap_or((80, 25));
+    let console_size = current_console_size();
+    let (cols, rows) = console_size.unwrap_or((80, 25));
+    append_host_log(
+        &log_path,
+        &format!(
+            "[{}] PTY SIZE at creation: {cols}x{rows} (cols x rows), source: {}",
+            chrono::Utc::now().to_rfc3339(),
+            if console_size.is_some() {
+                "the host's own console (GetConsoleScreenBufferInfo / tcgetwinsize)"
+            } else {
+                "FALLBACK 80x25: the console size query failed"
+            }
+        ),
+    );
     let log_path_for_answered = log_path.clone();
     let role_for_answered = role.to_string();
     let notify_for_answered = (
