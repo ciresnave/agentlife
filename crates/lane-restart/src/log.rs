@@ -46,6 +46,9 @@ pub struct Entry<'a> {
     /// Whether a start tried to spawn; the launcher caps count rows where this is true (0.15.13).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spawned: Option<bool>,
+    /// Whether the started session ran; see `ledger::Row::ran`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ran: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -92,6 +95,7 @@ mod tests {
             signal_id: None,
             result: None,
             spawned: None,
+            ran: None,
         }
     }
 

@@ -362,6 +362,7 @@ impl Ctx {
             signal_id,
             result: Some(result),
             spawned: Some(spawned),
+            ran: crate::launcher_gate::ran_from_result(result),
         };
         if let Err(e) = crate::log::append(&self.state_dir.join("restart.log"), &entry) {
             self.errln(&format!(
@@ -397,6 +398,7 @@ impl Ctx {
             signal_id: None,
             result: None,
             spawned: None,
+            ran: None,
         };
         if let Err(e) = crate::log::append(&self.state_dir.join("restart.log"), &entry) {
             self.errln(&format!(

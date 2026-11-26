@@ -54,6 +54,7 @@ fn write_log(state: &Path) -> PathBuf {
                 signal_id: None,
                 result: None,
                 spawned: None,
+                ran: None,
             },
         )
         .unwrap();

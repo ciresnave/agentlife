@@ -700,6 +700,11 @@ pub(crate) fn state_process_is_live(st: &state::LaneState, facts: &dyn SystemFac
     }
 }
 
+/// A `stopping` spec with no live process this old is a stop whose final write failed (`lane-restart stop`
+/// writes `stopping` BEFORE the kill): `status` reads it as suspended, as the launcher already does.
+/// Ruled 15 min by the PM, 2026-11-26 (`docs/LAUNCHER-CAP-DESIGN.md` C).
+pub const STOPPING_STALE_SECS: i64 = 15 * 60;
+
 /// Liveness comes from the process table, never from a file's age (14.2).
 pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatus {
     let mut out = RoleStatus {
@@ -795,6 +800,16 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
     }
     match (spec_state, &lane_state) {
         (Some(SpecState::Suspended), _) => out.state = Lifecycle::Suspended,
+        (Some(SpecState::Stopping), _)
+            if (facts.now() - out.since.unwrap_or_else(|| facts.now())).num_seconds()
+                >= STOPPING_STALE_SECS =>
+        {
+            out.state = Lifecycle::Suspended;
+            out.detail = Some(format!(
+                "stop did not finish: the launch spec has said `stopping` for over {} min and no process is running",
+                STOPPING_STALE_SECS / 60
+            ));
+        }
         (Some(SpecState::Running | SpecState::Stopping | SpecState::Crashed), _) => {
             out.state = Lifecycle::Crashed
         }
@@ -1613,6 +1628,35 @@ mod tests {
         assert!(v["disk"]["floor_bytes"].as_u64().unwrap() > 0, "{v}");
         assert!(v["disk"].get("below_floor").is_some(), "{v}");
         assert_eq!(v["schema"], 1);
+    }
+
+    /// docs/LAUNCHER-CAP-DESIGN.md C (PM ruling jds-kt, 15 min): the kill happens after `stopping` is
+    /// written, so an old `stopping` with no process is a stop whose last write failed: suspended.
+    fn stopping_aged(mins: i64) -> Lifecycle {
+        let d = tempdir().unwrap();
+        let facts = dead_facts();
+        let mut s = built("baracuda", SpecState::Stopping);
+        s.written_at = facts.now() - chrono::Duration::minutes(mins);
+        write_atomic(d.path(), &s).unwrap();
+        role_status(d.path(), "baracuda", &facts).state
+    }
+
+    #[test]
+    fn a_stopping_spec_with_no_process_reads_suspended_only_after_the_stale_window() {
+        assert_eq!(STOPPING_STALE_SECS, 15 * 60);
+        assert_eq!(stopping_aged(14), Lifecycle::Crashed, "in flight or just failed: as before");
+        assert_eq!(stopping_aged(16), Lifecycle::Suspended);
+    }
+
+    #[test]
+    fn a_stale_stopping_spec_says_the_stop_did_not_finish() {
+        let d = tempdir().unwrap();
+        let facts = dead_facts();
+        let mut s = built("baracuda", SpecState::Stopping);
+        s.written_at = facts.now() - chrono::Duration::minutes(20);
+        write_atomic(d.path(), &s).unwrap();
+        let st = role_status(d.path(), "baracuda", &facts);
+        assert!(st.detail.unwrap().contains("stop did not finish"));
     }
 
     #[test]
