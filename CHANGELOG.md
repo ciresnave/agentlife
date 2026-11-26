@@ -2,6 +2,10 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.30.87 — host ignores a degenerate console size and redraws once; host log records the pty size; mail-before-first-turn docs and probe tool
+
+The lane-restart host now writes the pty size at creation (and whether it came from the console or the 80x25 fallback) and every resize it applies (nudge wider, nudge back, follows the host's own console) to the host log, so a footer-only stall in a tiny pty can be traced to its source (design note docs/FOOTER-STALL-PTY-SIZE.md). Behaviour: a polled console under 10 rows or 40 columns is no longer forwarded to the pty, and a footer-only dialog still footer-only after 2 repaints gets one resize to 120x30 so the handlers can match it; an unmatched dialog is never answered. Adds docs/MAIL-BEFORE-FIRST-TURN.md and tools/mail-first-latency.py, ROADMAP O10 and O23 rows, a visible SKIP for the e2e tests under a claude ancestor, and the coderipper caller pin at 467fd259. Verified: clippy --workspace, cargo test.
+
 ## 0.30.86 — status flags a lane that resumed after a context compaction and went silent
 
 `lane-restart status` now reads the end of each live lane's newest Claude transcript (`~/.claude/projects/<cwd with every non-alphanumeric as `-`>/*.jsonl`) and appends ` COMPACT-STALL=<N>s` when the last entry is a compaction summary (`type:"user"`, `isCompactSummary:true`) with no assistant entry after it for 600 s or more; `status --json` carries `activity.compaction_stall_secs` (absent when the lane has answered or the transcript cannot be read). Background: three lanes wrote nothing for 33-51 minutes after a "This session is being continued" entry while `claude.exe` stayed alive (PM finding 2026-11-23). The summary is matched by its fields, not its text, because the same prose appears inside quoted peer messages. Detection only: no nudge is sent yet (ROADMAP O21(b)). Verified with fixture-transcript tests; a live run over 87 roles found no stalled lane, so there is no positive control on real data yet.

@@ -30,6 +30,31 @@ fn example_path() -> PathBuf {
     debug.join("examples").join(name)
 }
 
+/// True when this test process runs under a real `claude` (a session like the one that started the
+/// run): the hook then rightly skips the stand-ins and the real-chain tests would fail for that
+/// reason alone. A visible SKIP, never a silent pass; CI has no claude ancestor, so it is unaffected.
+/// Run them detached instead (a scheduled task with `/it`, see HANDOFF).
+fn skip_under_claude(test: &str) -> bool {
+    use agentlife::hook::{HookEnv, RealEnv};
+    if std::env::var_os("AGENTLIFE_E2E_FORCE").is_some() {
+        return false;
+    }
+    let env = RealEnv::new();
+    // Any `claude` above this process, through whatever (cargo, a shell): `claude_pid` alone refuses
+    // a non-shell hop and would miss the `claude -> bash -> cargo -> test` chain that fails these tests.
+    if env
+        .ancestor_images(std::process::id())
+        .iter()
+        .any(|i| i == "claude")
+    {
+        eprintln!(
+            "SKIP {test}: a real claude is an ancestor of this test process, so the hook skips the stand-ins; run detached or set AGENTLIFE_E2E_FORCE=1"
+        );
+        return true;
+    }
+    false
+}
+
 struct Rig {
     dir: tempfile::TempDir,
     home: PathBuf,
@@ -37,7 +62,14 @@ struct Rig {
 }
 
 impl Rig {
-    fn new() -> Rig {
+    fn new() -> Option<Rig> {
+        if skip_under_claude(module_path!()) {
+            return None;
+        }
+        Some(Rig::build())
+    }
+
+    fn build() -> Rig {
         let dir = tempfile::tempdir().expect("tempdir");
         let src = example_path();
         assert!(
@@ -283,7 +315,7 @@ const LANE_ARGS: &[&str] = &[
 
 #[test]
 fn a_session_start_through_the_real_chain_registers_the_agent_and_list_sees_it_alive() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let start = rig.payload("start.json", "SessionStart", "sess-1", Some("startup"));
     let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
     let report = rig.dir.path().join("report.txt");
@@ -358,7 +390,7 @@ fn a_session_start_through_the_real_chain_registers_the_agent_and_list_sees_it_a
 
 #[test]
 fn session_end_stamps_the_reason_inside_its_budget_and_deletes_nothing() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let start = rig.payload("start.json", "SessionStart", "sess-1", Some("startup"));
     let end = rig.payload("end.json", "SessionEnd", "sess-1", None);
     let script = rig.script(
@@ -431,7 +463,7 @@ fn session_end_stamps_the_reason_inside_its_budget_and_deletes_nothing() {
 
 #[test]
 fn a_headless_session_is_not_registered_and_the_log_says_why() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let start = rig.payload("start.json", "SessionStart", "sess-1", Some("startup"));
     let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
     let r = rig.run(&["-p", "do a thing"], &script, &[]);
@@ -446,7 +478,7 @@ fn a_headless_session_is_not_registered_and_the_log_says_why() {
 
 #[test]
 fn a_session_under_another_claude_is_not_registered() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let start = rig.payload("start.json", "SessionStart", "sess-1", Some("startup"));
     let script = rig.script("script.txt", &[("SessionStart", "-", &start)]);
     let report = rig.dir.path().join("report-nest.txt");
@@ -466,7 +498,7 @@ fn a_session_under_another_claude_is_not_registered() {
 
 #[test]
 fn a_hook_run_outside_any_claude_is_skipped_and_still_exits_zero() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let mut child = Command::new(AGENTLIFE)
         .args(["hook", "SessionStart"])
         .env("AGENTLIFE_HOME", &rig.home)
@@ -497,7 +529,7 @@ fn a_hook_run_outside_any_claude_is_skipped_and_still_exits_zero() {
 
 #[test]
 fn malformed_hook_input_is_logged_as_an_error_and_never_fails_the_session() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let bad = rig.raw_payload("bad.json", "{ this is not json");
     let script = rig.script("script.txt", &[("SessionStart", "-", &bad)]);
     let r = rig.run(LANE_ARGS, &script, &[]);
@@ -508,7 +540,7 @@ fn malformed_hook_input_is_logged_as_an_error_and_never_fails_the_session() {
 
 #[test]
 fn the_agent_id_environment_variable_joins_two_different_launches_into_one_agent() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let s1 = rig.payload("s1.json", "SessionStart", "sess-1", Some("startup"));
     let s2 = rig.payload("s2.json", "SessionStart", "sess-2", Some("startup"));
     let id = [("AGENTLIFE_AGENT_ID", "e2e-agent")];
@@ -532,7 +564,7 @@ fn the_agent_id_environment_variable_joins_two_different_launches_into_one_agent
 
 #[test]
 fn a_hand_started_agent_started_again_after_its_process_died_is_one_agent() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let s1 = rig.payload("s1.json", "SessionStart", "sess-1", Some("startup"));
     let s2 = rig.payload("s2.json", "SessionStart", "sess-2", Some("startup"));
     let s3 = rig.payload("s3.json", "SessionStart", "sess-3", Some("startup"));
@@ -571,7 +603,7 @@ fn a_hand_started_agent_started_again_after_its_process_died_is_one_agent() {
 
 #[test]
 fn clear_in_the_same_process_is_one_agent_whose_first_session_ended_with_clear() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let s1 = rig.payload("s1.json", "SessionStart", "sess-1", Some("startup"));
     let s2 = rig.payload("s2.json", "SessionStart", "sess-2", Some("clear"));
     let script = rig.script(
@@ -617,7 +649,7 @@ fn json_of(out: &std::process::Output) -> serde_json::Value {
 
 #[test]
 fn reconcile_tells_an_exited_agent_from_a_vanished_one_in_the_real_registry() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let s1 = rig.payload("s1.json", "SessionStart", "sess-1", Some("startup"));
     let e1 = rig.payload("e1.json", "SessionEnd", "sess-1", None);
     let s2 = rig.payload("s2.json", "SessionStart", "sess-2", Some("startup"));
@@ -703,7 +735,7 @@ fn reconcile_tells_an_exited_agent_from_a_vanished_one_in_the_real_registry() {
     );
     assert_eq!(second["persisted"], false);
     // A dry run writes nothing at all.
-    let rig2 = Rig::new();
+    let Some(rig2) = Rig::new() else { return };
     let s = rig2.payload("s.json", "SessionStart", "sess-1", Some("startup"));
     let e = rig2.payload("e.json", "SessionEnd", "sess-1", None);
     rig2.run(
@@ -724,7 +756,7 @@ fn reconcile_tells_an_exited_agent_from_a_vanished_one_in_the_real_registry() {
 
 #[test]
 fn a_lane_can_mark_itself_pinned_and_waiting_and_list_shows_it() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let s = rig.payload("s.json", "SessionStart", "sess-1", Some("startup"));
     let script = rig.raw_script(
         "a.txt",
@@ -761,7 +793,7 @@ fn a_lane_can_mark_itself_pinned_and_waiting_and_list_shows_it() {
 
 #[test]
 fn a_lane_cannot_park_another_agent_and_nothing_changes() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let t = rig.payload("t.json", "SessionStart", "sess-t", Some("startup"));
     let i = rig.payload("i.json", "SessionStart", "sess-i", Some("startup"));
     rig.run(
@@ -801,7 +833,7 @@ fn a_lane_cannot_park_another_agent_and_nothing_changes() {
 
 #[test]
 fn the_pm_by_the_visible_rule_can_park_and_unpark_a_stopped_agent_and_a_lookalike_cannot() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     // The PM is named by the rule: pin_roles + portfolio_root. Point the root at the test's
     // directory, where the stand-in's payload says it was launched.
     std::fs::create_dir_all(&rig.home).unwrap();
@@ -860,7 +892,7 @@ fn the_pm_by_the_visible_rule_can_park_and_unpark_a_stopped_agent_and_a_lookalik
 
     // The lookalike: the same name, launched with NO config naming this directory as the portfolio
     // root, is just a lane, and is refused. (Same flow, fresh home, default rule.)
-    let rig2 = Rig::new();
+    let Some(rig2) = Rig::new() else { return };
     let t2 = rig2.payload("t.json", "SessionStart", "sess-t", Some("startup"));
     let p2 = rig2.payload("p.json", "SessionStart", "sess-p", Some("startup"));
     rig2.run(
@@ -1027,8 +1059,8 @@ struct Down {
 
 /// A running target lane `target`, registered through the real hook, with a helper child, plus a
 /// broker that knows the helper as the lane's peer and a config pointing at it.
-fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
-    let rig = Rig::new();
+fn running_target(extra_target_args: &[&str], peers_match: bool) -> Option<Down> {
+    let rig = Rig::new()?;
     let broker = FakeBroker::start();
     let lane_state = rig.dir.path().join("lane-state");
     std::fs::create_dir_all(&lane_state).unwrap();
@@ -1063,7 +1095,7 @@ fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
         {"id": "peer-t", "pid": peer_pid, "cwd": rig.cwd(), "git_root": null, "tty": null,
          "registered_at": "t", "last_seen": "t", "summary": "target lane"}
     ]));
-    Down {
+    Some(Down {
         rig,
         broker,
         lane_state,
@@ -1071,7 +1103,7 @@ fn running_target(extra_target_args: &[&str], peers_match: bool) -> Down {
         target_pid,
         helper_pid,
         _cleanup: Cleanup(vec![target_pid, helper_pid]),
-    }
+    })
 }
 
 /// A lane is stopped only if it can be started again, so `park` of a running lane needs the
@@ -1192,7 +1224,9 @@ fn journal_kinds(rig: &Rig) -> Vec<String> {
 
 #[test]
 fn a_person_gracefully_parks_a_running_lane_and_the_process_really_ends() {
-    let mut d = running_target(&[], true);
+    let Some(mut d) = running_target(&[], true) else {
+        return;
+    };
     assert!(
         pid_alive(d.target_pid),
         "the target is running before the park"
@@ -1256,7 +1290,9 @@ fn a_person_gracefully_parks_a_running_lane_and_the_process_really_ends() {
 /// ends, and the intent is untouched. The happy-path test above is the control (same rig, a person).
 #[test]
 fn the_pm_agent_cannot_stop_a_running_lane() {
-    let d = running_target(&[], true);
+    let Some(d) = running_target(&[], true) else {
+        return;
+    };
     let lane = play_the_lane(&d);
     let code = pm_runs(&d, &["--yes", "--timeout", "4"]);
     drop(lane);
@@ -1279,7 +1315,9 @@ fn the_pm_agent_cannot_stop_a_running_lane() {
 
 #[test]
 fn without_yes_nothing_is_asked_and_nothing_is_stopped() {
-    let d = running_target(&[], true);
+    let Some(d) = running_target(&[], true) else {
+        return;
+    };
     let (code, _) = person_runs(&d, &[]);
     assert_eq!(
         code, 2,
@@ -1298,7 +1336,9 @@ fn without_yes_nothing_is_asked_and_nothing_is_stopped() {
 
 #[test]
 fn a_lane_that_never_wraps_up_is_left_running() {
-    let d = running_target(&[], true);
+    let Some(d) = running_target(&[], true) else {
+        return;
+    };
     // No lane simulation: nobody writes a HANDOFF or an idle claim.
     let (code, _) = person_runs(&d, &["--yes", "--timeout", "4"]);
     assert_ne!(code, 0, "{}", d.rig.log());
@@ -1318,7 +1358,9 @@ fn a_lane_that_never_wraps_up_is_left_running() {
 
 #[test]
 fn a_live_shell_below_the_lane_blocks_the_stop_even_after_it_wrote_everything() {
-    let d = running_target(&["--fake-shell-child"], true);
+    let Some(d) = running_target(&["--fake-shell-child"], true) else {
+        return;
+    };
     let lane = play_the_lane(&d);
     let (code, _) = person_runs(&d, &["--yes", "--timeout", "5"]);
     lane.join().unwrap();
@@ -1372,7 +1414,9 @@ fn a_live_shell_below_the_lane_blocks_the_stop_even_after_it_wrote_everything() 
 fn a_lane_that_cannot_be_found_among_the_peers_is_not_asked_and_not_stopped() {
     // The broker has a peer, but its helper is not below the target's process: the join is by
     // parent process, so this peer is nobody's.
-    let d = running_target(&[], false);
+    let Some(d) = running_target(&[], false) else {
+        return;
+    };
     let lane = play_the_lane(&d);
     let (code, _) = person_runs(&d, &["--yes", "--timeout", "4"]);
     assert_ne!(code, 0, "{}", d.rig.log());
@@ -1408,7 +1452,7 @@ fn tree_bytes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 
 #[test]
 fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_one() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     let lane_state = rig.dir.path().join("lane-state");
     std::fs::create_dir_all(&lane_state).unwrap();
     std::fs::create_dir_all(&rig.home).unwrap();
@@ -1520,7 +1564,7 @@ fn restore_dry_run_launches_a_lane_from_its_launch_spec_when_it_has_a_complete_o
 /// shows the injection is read at all.
 #[test]
 fn the_restore_plan_depends_on_injected_free_memory_not_on_the_hosts() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     std::fs::create_dir_all(&rig.home).unwrap();
     std::fs::write(
         rig.home.join("config.json"),
@@ -1578,7 +1622,7 @@ fn the_restore_plan_depends_on_injected_free_memory_not_on_the_hosts() {
 
 #[test]
 fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_nothing() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     // The portfolio root for this run is the rig directory, so the stand-ins' cwd is inside it.
     std::fs::create_dir_all(&rig.home).unwrap();
     std::fs::write(
@@ -1677,7 +1721,7 @@ fn restore_dry_run_over_the_real_registry_plans_the_stopped_lane_and_writes_noth
 
 #[test]
 fn restore_below_the_disk_floor_is_refused_before_anyone_is_asked() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     std::fs::create_dir_all(&rig.home).unwrap();
     std::fs::write(
         rig.home.join("config.json"),
@@ -1708,7 +1752,7 @@ fn restore_below_the_disk_floor_is_refused_before_anyone_is_asked() {
 
 #[test]
 fn restore_without_an_approval_starts_nothing_and_leaves_a_pending_request() {
-    let rig = Rig::new();
+    let Some(rig) = Rig::new() else { return };
     // The rig directory is the portfolio root, so the gone lane is planned (an empty plan asks nothing).
     std::fs::create_dir_all(&rig.home).unwrap();
     std::fs::write(
