@@ -44,6 +44,22 @@ pub const STARTUP_WINDOW: Duration = Duration::from_secs(60);
 const REPAINT_AFTER: Duration = Duration::from_secs(2);
 const MAX_REPAINTS: u32 = 5;
 
+/// A polled console smaller than this is not a real terminal (PM ruling toupv5-jds-jw, 2026-11-26:
+/// launcher starts collapsed the pty to 2 rows x 46 columns or about 10 columns wide). Logged, never forwarded.
+const MIN_PLAUSIBLE_ROWS: u16 = 10;
+const MIN_PLAUSIBLE_COLS: u16 = 40;
+/// The size the pty is redrawn at, once per start, when the nudges did not bring the dialog body back.
+const REDRAW_SIZE: (u16, u16) = (120, 30);
+/// The repaint count after which the one REDRAW is asked for.
+const REDRAW_AFTER_REPAINTS: u32 = 2;
+
+/// What the resize poll does with the console size it just read: `Some(size)` to forward it to the pty,
+/// `None` to leave the pty alone (unchanged, or degenerate).
+fn forwardable_console_size(last: (u16, u16), polled: (u16, u16)) -> Option<(u16, u16)> {
+    let (c, r) = polled;
+    (polled != last && r >= MIN_PLAUSIBLE_ROWS && c >= MIN_PLAUSIBLE_COLS).then_some(polled)
+}
+
 /// True when the screen holds exactly one non-blank line and it is a dialog footer
 /// ("Enter to confirm", "Esc to cancel"): the footer of a dialog whose body never reached the
 /// screen model, which no handler can match.
@@ -611,10 +627,13 @@ fn run_with_handlers_and_window_watched(
     // Set by the relay loop to ask for a repaint: this thread owns the master, so it does the
     // resize nudge (one column wider and back), which makes ConPTY repaint the whole screen.
     let nudge = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Set once per start by the relay loop: resize the pty to `REDRAW_SIZE` and leave it there.
+    let redraw = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let resize_thread = {
         let master_for_resize = pair.master;
         let mut last = (cols, rows);
         let nudge = Arc::clone(&nudge);
+        let redraw = Arc::clone(&redraw);
         let on_raw_io = Arc::clone(&on_raw_io);
         std::thread::spawn(move || {
             let _alive = resize_flag;
@@ -635,6 +654,21 @@ fn run_with_handlers_and_window_watched(
             while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 stop_resize_rx.recv_timeout(Duration::from_millis(500))
             {
+                if redraw.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    let (c, r) = REDRAW_SIZE;
+                    let res = master_for_resize
+                        .resize(PtySize {
+                            rows: r,
+                            cols: c,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .map_err(std::io::Error::other);
+                    note("REDRAW", c, r, &res);
+                    if res.is_ok() {
+                        last = (c, r);
+                    }
+                }
                 if nudge.swap(false, std::sync::atomic::Ordering::SeqCst) {
                     let (c, r) = last;
                     let size = |cols| PtySize {
@@ -654,8 +688,18 @@ fn run_with_handlers_and_window_watched(
                         .map_err(std::io::Error::other);
                     note("nudge back", c, r, &res);
                 }
-                if let Some((c, r)) = current_console_size() {
-                    if (c, r) != last {
+                if let Some(polled) = current_console_size() {
+                    if polled != last && forwardable_console_size(last, polled).is_none() {
+                        on_raw_io(
+                            "host-note",
+                            format!(
+                                "PTY SIZE ignored a degenerate console size {}x{} (cols x rows); the pty stays {}x{}",
+                                polled.0, polled.1, last.0, last.1
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                    if let Some((c, r)) = forwardable_console_size(last, polled) {
                         let res = master_for_resize
                             .resize(PtySize {
                                 rows: r,
@@ -812,6 +856,13 @@ fn run_with_handlers_and_window_watched(
                                 "host-note",
                                 format!("REPAINT {repaints}/{MAX_REPAINTS}: only a dialog footer on screen for {} s, resize nudge sent; screen {text:?}", REPAINT_AFTER.as_secs()).as_bytes(),
                             );
+                            if repaints == REDRAW_AFTER_REPAINTS {
+                                redraw.store(true, std::sync::atomic::Ordering::SeqCst);
+                                on_raw_io(
+                                    "host-note",
+                                    format!("REDRAW: still only a dialog footer after {repaints} repaints, pty resized once to {}x{}; a footer is never answered, only the handlers answer a matched dialog", REDRAW_SIZE.0, REDRAW_SIZE.1).as_bytes(),
+                                );
+                            }
                         }
                         footer_since = Some(Instant::now());
                     } else {
@@ -2548,6 +2599,21 @@ mod tests {
 
     /// 2026-11-22: a dialog whose body never reached the screen model sat unanswered for the whole
     /// window. The host now asks for a repaint (and says so in the host log) instead of waiting.
+    #[test]
+    fn a_degenerate_polled_console_size_is_never_forwarded_to_the_pty() {
+        // The 2026-11-25 stalls: the console query said 2 rows x 46 columns (and about 10 wide).
+        assert_eq!(forwardable_console_size((120, 30), (46, 2)), None);
+        assert_eq!(forwardable_console_size((120, 30), (10, 30)), None);
+        assert_eq!(forwardable_console_size((120, 30), (120, 9)), None);
+        // Controls: a real change is forwarded, an unchanged size is not.
+        assert_eq!(
+            forwardable_console_size((120, 30), (100, 40)),
+            Some((100, 40))
+        );
+        assert_eq!(forwardable_console_size((120, 30), (120, 30)), None);
+        assert_eq!(forwardable_console_size((80, 25), (40, 10)), Some((40, 10)));
+    }
+
     #[test]
     fn a_dialog_footer_with_no_body_gets_repaint_requests_in_the_host_log() {
         let notes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

@@ -16,10 +16,13 @@ thread then applies to the pty: the first nudge falls in the same loop pass, whi
 arriving ~0.3 s after the first REPAINT in the 02:57 capture and the size varying between starts.
 The new "follows the host's own console" lines confirm or refute this.
 
-## Proposed (needs PM read before code)
-1. Guard: a polled size under 10 rows or 40 columns is logged and NOT forwarded; the pty keeps its size.
-2. Fallback: if the screen is footer-only for N s (proposal 20 s) after the guard, the host answers the
-   warning with option 1 (Enter) exactly as the handler would, logged as FALLBACK-ANSWER, once per start.
-   Rationale: the footer is the dev-channels dialog's own; option 1 is the default. Risk: answering a dialog
-   the model never matched; limit to footer text that is exactly "Enter to confirm . Esc to cancel".
-3. Test: a fake pty whose console query returns 2x46 must leave the pty size unchanged.
+## Built (PM ruling toupv5-jds-jw, 2026-11-26)
+1. Guard: a polled console size under 10 rows or 40 columns is logged (`PTY SIZE ignored a degenerate ...`) and
+   NOT forwarded; the pty keeps its size. Test: `a_degenerate_polled_console_size_is_never_forwarded_to_the_pty`
+   (pure decision function, 2x46 and ~10-wide inputs, with real-change and unchanged controls).
+2. REDRAW, not an answer: after 2 repaints with the screen still footer-only, the pty is resized ONCE per start to
+   120x30 and the existing handlers match the full dialog when it repaints. Logged as `REDRAW`. Still footer-only
+   after that: nothing further, the lane needs a person.
+3. A dialog the handlers did not match is NEVER answered: the footer "Enter to confirm . Esc to cancel" is shared by
+   every confirmation dialog, so answering on footer text alone would be a blind answer. The earlier Enter
+   fallback proposal is withdrawn.
