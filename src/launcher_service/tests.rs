@@ -1030,3 +1030,17 @@ fn an_unresolved_cluster_pm_falls_back_to_pm_platform_and_says_so() {
     let (to, _) = cap_mail_target("kiss", "[FINDING] x", None);
     assert_eq!(to, CAP_FALLBACK_ROLE, "no table at all");
 }
+
+#[test]
+fn a_start_notice_is_read_from_the_json_line_and_absent_means_none() {
+    let with = r#"{"role":"a","outcome":"started","reason":"started","notice":"NOTICE: your Synapse channel may not connect (x)"}"#;
+    assert_eq!(
+        start_notice(with).as_deref(),
+        Some("NOTICE: your Synapse channel may not connect (x)")
+    );
+    assert_eq!(
+        start_notice(r#"{"role":"a","outcome":"started","reason":"started"}"#),
+        None
+    );
+    assert_eq!(start_notice("not json"), None);
+}

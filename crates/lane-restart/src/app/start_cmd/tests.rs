@@ -609,3 +609,116 @@ fn a_launcher_start_never_claims_over_an_online_role_and_a_manual_start_does_not
     let (n, err) = reclaim_case("pm", false);
     assert_eq!(n, 0, "{err}");
 }
+
+/// O22(b): what a launcher start does with the lane's first prompt and its JSON when the channel is not expected
+/// to connect. Returns (the spawned command line, the JSON line on stdout).
+fn notice_case(
+    caller: &'static str,
+    online: Result<Option<bool>, String>,
+    claim_ok: bool,
+) -> (String, String) {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(
+        d.path(),
+        "alpha",
+        "# h
+",
+    );
+    let home = d.path().join("home");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::write(
+        home.join("sessions").join("alpha.json"),
+        r#"{"instance_id":"i","token":"SECRET","global_id":"alpha@a","epoch":6}"#,
+    )
+    .unwrap();
+    let mcp = d.path().join("alpha.mcp.json");
+    let cfg = serde_json::json!({"mcpServers":{"synapse":{"env":{"SYNAPSE_HOME": home.to_string_lossy()}}}});
+    std::fs::write(&mcp, cfg.to_string()).unwrap();
+    let mut spec = crate::spec::read(&state, "alpha").unwrap();
+    spec.launch_args.extend([
+        "--mcp-config".to_string(),
+        mcp.to_string_lossy().into_owned(),
+    ]);
+    crate::spec::write_atomic(&state, &spec).unwrap();
+    let ah = d.path().join("agentlife-home");
+    std::fs::create_dir_all(&ah).unwrap();
+    let ah_s = ah.to_string_lossy().into_owned();
+    let mut facts = dead();
+    facts.live_pid = Some((std::process::id(), 100));
+    let calls = Rc::new(RefCell::new(0));
+    let argv = Rc::new(RefCell::new(String::new()));
+    let inner = coming_up_spawn(&state, &calls);
+    let seen = Rc::clone(&argv);
+    let spawn: Rc<crate::launch::SpawnFn> = Rc::new(move |s, a| {
+        *seen.borrow_mut() = a.hosted().join(" ");
+        inner(s, a)
+    });
+    let mut c = ctx(&state, Some(caller), facts, &calls)
+        .with_env(&[
+            ("AGENTLIFE_HOME", &ah_s),
+            ("AGENTLIFE_FREE_RAM_FLOOR_GB", "8"),
+        ])
+        .with_free_memory_gb(Some(100.0))
+        .with_launch_spawn(spawn)
+        .with_roster_epoch(Box::new(|_, _| Ok(Some(7))))
+        .with_roster_online(Box::new(move |_, _| online.clone()))
+        .with_role_claim(Box::new(move |_, _| {
+            if claim_ok {
+                Ok(())
+            } else {
+                Err("claim refused".to_string())
+            }
+        }));
+    let mut a = vec!["start", "--role", "alpha", "--reason", "o22b", "--json"];
+    if caller.starts_with("launcher:") {
+        a.extend(["--signal-id", "alpha:m1"]);
+    }
+    let code = run_with(&mut c, args(&a));
+    let (out, err) = c.captured();
+    assert!(
+        code_is(code, 0),
+        "{code:?}
+{out}
+{err}"
+    );
+    let spawned = argv.borrow().clone();
+    (spawned, out)
+}
+
+#[test]
+fn a_launcher_start_whose_channel_will_not_connect_says_so_in_the_first_prompt_and_the_json() {
+    const L: &str = "launcher:agentlife-launcher";
+    // online elsewhere, a claim that fails, and an online state that cannot be read: each is told.
+    for (online, claim_ok, why) in [
+        (Ok(Some(true)), true, "held"),
+        (Ok(Some(false)), false, "claim"),
+        (Err("synapse down".to_string()), true, "unread"),
+    ] {
+        let (argv, out) = notice_case(L, online, claim_ok);
+        assert!(
+            argv.contains("NOTICE: your Synapse channel may not connect"),
+            "{why}: {argv}"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(out.trim().lines().last().unwrap()).unwrap();
+        assert!(
+            json["notice"]
+                .as_str()
+                .is_some_and(|n| n.contains("may not connect")),
+            "{why}: {out}"
+        );
+    }
+    // controls: a reclaimed role, a manual start, and an unchanged cache carry no notice.
+    let (argv, out) = notice_case(L, Ok(Some(false)), true);
+    assert!(
+        !argv.contains("NOTICE") && !out.contains("notice"),
+        "{argv}
+{out}"
+    );
+    let (argv, out) = notice_case("pm", Ok(Some(true)), true);
+    assert!(
+        !argv.contains("NOTICE") && !out.contains("notice"),
+        "{argv}
+{out}"
+    );
+}

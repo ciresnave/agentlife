@@ -642,6 +642,14 @@ pub fn start_detail(line: &str) -> Option<String> {
     (!d.is_empty()).then(|| d.to_string())
 }
 
+/// O22(b): the `notice` of a `lane-restart start --json` line, the words the lane was given when its channel was
+/// not expected to connect. Logged by the service so a deaf start is visible there too.
+pub fn start_notice(line: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
+    let n = v.get("notice")?.as_str()?;
+    (!n.is_empty()).then(|| n.to_string())
+}
+
 /// Takes the refusal details noted by starts since the last call.
 pub fn take_start_notes() -> Vec<String> {
     NOTES.with(|n| std::mem::take(&mut *n.borrow_mut()))
@@ -706,6 +714,13 @@ impl Mechanism for LaneRestartMechanism {
             Some(line) => {
                 if let Some(d) = start_detail(line) {
                     NOTES.with(|n| n.borrow_mut().push(format!("role={role} {d}")));
+                }
+                if let Some(d) = start_notice(line) {
+                    NOTES.with(|n| {
+                        n.borrow_mut().push(format!(
+                            "role={role} started without a channel expected: {d}"
+                        ))
+                    });
                 }
                 map_start_json(line)
             }
