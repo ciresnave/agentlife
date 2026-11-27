@@ -37,6 +37,12 @@ pub const WAKE_EPOCH: &str = "wake";
 pub const WAKES_PER_CYCLE: usize = 2;
 /// A wake still refused this long after it fell due is given up (logged), never retried for ever.
 pub const WAKE_EXPIRY_SECS: i64 = 24 * 3600;
+/// The reason `lane-restart start` gives when a role has used its daily cap (`launcher_gate::CapHit::RolePerDay`).
+pub const DAILY_CAP_REASON: &str = "rate-daily";
+/// The cap number the mail names (`launcher_gate::MAX_SPAWNS_PER_ROLE_PER_DAY`, PM ruling 2026-11-26).
+pub const DAILY_CAP_BASIS: &str = "8-per-role-per-day";
+/// How many of the role's latest outcomes the mail lists.
+pub const CAP_MAIL_OUTCOMES: usize = 8;
 /// The store's schema; a store with a newer one is refused, never rewritten.
 pub const SCHEMA: u32 = 1;
 
@@ -175,6 +181,10 @@ pub struct Request {
     pub called: bool,
     /// The result reached Synapse.
     pub posted: bool,
+    /// A start left at the dialog whose session was seen online has had its `settle` ledger row written
+    /// (`docs/LAUNCHER-CAP-DESIGN.md` A1). Rows from before this field read `false`.
+    #[serde(default)]
+    pub settled: bool,
 }
 
 impl Request {
@@ -209,6 +219,10 @@ pub struct RoleRow {
     pub alarmed: bool,
     /// When the latest counted spawn was recorded.
     pub last_spawn_at: Option<i64>,
+    /// The UTC day (`epoch secs / 86400`) whose daily-cap mail reached the cluster PM: at most one a day
+    /// (`docs/LAUNCHER-CAP-DESIGN.md` B). Set only after delivery.
+    #[serde(default)]
+    pub cap_notified_day: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +322,10 @@ pub fn map_mechanism(r: &MechResult) -> (Outcome, &'static str) {
         MechResult::AlreadyRunning => (Outcome::AlreadyRunning, "already-running"),
         MechResult::HeldForMemory => (Outcome::Failed, "held-for-memory"),
         MechResult::LockHeld => (Outcome::Failed, "lock-held"),
+        // The per-role daily cap (`lane-restart start`): a refusal, not a failed spawn, so it spends no hourly budget.
+        MechResult::Failed(code) if code == DAILY_CAP_REASON => {
+            (Outcome::Refused, DAILY_CAP_REASON)
+        }
         MechResult::Failed(code) if code == "model-not-pinned" => {
             (Outcome::Failed, "model-not-pinned")
         }
@@ -426,6 +444,7 @@ impl<'a> Engine<'a> {
             reason: String::new(),
             called: false,
             posted: false,
+            settled: false,
         };
 
         // Rule 2.
@@ -556,7 +575,9 @@ impl<'a> Engine<'a> {
                 r.last_spawn_at = Some(now);
             }
             MechResult::AlreadyRunning => r.already_running_streak += 1,
-            MechResult::Failed(c) if c != "model-not-pinned" => r.last_spawn_at = Some(now),
+            MechResult::Failed(c) if c != "model-not-pinned" && c != DAILY_CAP_REASON => {
+                r.last_spawn_at = Some(now)
+            }
             _ => {}
         }
     }
@@ -637,6 +658,100 @@ impl<'a> Engine<'a> {
         self.note_role(&role, answer, now);
         self.save()?;
         Ok(true)
+    }
+
+    /// The daily-cap mails owed now, as `(role, text)`: a role whose latest start today was refused by the daily
+    /// cap and whose mail for this UTC day has not been delivered (`docs/LAUNCHER-CAP-DESIGN.md` B). The text is
+    /// an L1 `[FINDING]`: the cap number and the role's last [`CAP_MAIL_OUTCOMES`] launcher outcomes, oldest first.
+    /// **Not marked sent**: the caller delivers each and calls [`Engine::mark_cap_notified`].
+    pub fn pending_cap_notices(&self, now: i64) -> Vec<(String, String)> {
+        let today = now.div_euclid(86_400);
+        let mut roles: Vec<&str> = self
+            .data
+            .requests
+            .iter()
+            .filter(|r| {
+                r.called && r.reason == DAILY_CAP_REASON && r.at.div_euclid(86_400) == today
+            })
+            .map(|r| r.role.as_str())
+            .collect();
+        roles.sort_unstable();
+        roles.dedup();
+        let mut out = Vec::new();
+        for role in roles {
+            if self.data.roles.get(role).and_then(|r| r.cap_notified_day) == Some(today) {
+                continue;
+            }
+            let mut rows: Vec<&Request> = self
+                .data
+                .requests
+                .iter()
+                .filter(|r| r.called && r.role == role)
+                .collect();
+            rows.sort_by_key(|r| r.at);
+            let start = rows.len().saturating_sub(CAP_MAIL_OUTCOMES);
+            let mut text = format!(
+                "[FINDING] launch-cap-hit ref={role} by=agentlife-launcher status=refused basis={DAILY_CAP_BASIS}"
+            );
+            for r in &rows[start..] {
+                let outcome = serde_json::to_string(&r.outcome)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string();
+                text.push_str(&format!(
+                    "
+note: t={} {outcome} {}",
+                    r.at, r.reason
+                ));
+            }
+            text.push_str(
+                "
+note: t is epoch seconds; the role is refused until its oldest counted start leaves the 24 h window
+note: — lane: agentlife (agentlife-launcher)",
+            );
+            out.push((role.to_string(), text));
+        }
+        out
+    }
+
+    /// The cap mail for `role` reached someone: no second one this UTC day.
+    pub fn mark_cap_notified(&mut self, role: &str, now: i64) -> Result<(), StoreError> {
+        self.data
+            .roles
+            .entry(role.to_string())
+            .or_default()
+            .cap_notified_day = Some(now.div_euclid(86_400));
+        self.save()
+    }
+
+    /// `(role, signal_id)` of every start left at the dialog whose role is now online and whose settle
+    /// row is not yet written: the session ran, so its start spends the daily cap (A1). Oldest first.
+    pub fn unsettled_online(&self, online: &BTreeSet<String>) -> Vec<(String, String)> {
+        self.data
+            .requests
+            .iter()
+            .filter(|r| {
+                r.called
+                    && !r.settled
+                    && r.outcome == Outcome::Started
+                    && r.reason == "awaiting-dialog"
+                    && online.contains(&r.role)
+            })
+            .map(|r| (r.role.clone(), r.signal_id.clone()))
+            .collect()
+    }
+
+    /// The settle row for `signal_id` is written: never offered again.
+    pub fn mark_settled(&mut self, signal_id: &str) -> Result<(), StoreError> {
+        for r in self
+            .data
+            .requests
+            .iter_mut()
+            .filter(|r| r.signal_id == signal_id)
+        {
+            r.settled = true;
+        }
+        self.save()
     }
 
     /// R7, once per poll cycle: `online` is the set of roles Synapse's `/v1/list` shows online.

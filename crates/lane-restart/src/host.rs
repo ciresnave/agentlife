@@ -60,6 +60,136 @@ fn forwardable_console_size(last: (u16, u16), polled: (u16, u16)) -> Option<(u16
     (polled != last && r >= MIN_PLAUSIBLE_ROWS && c >= MIN_PLAUSIBLE_COLS).then_some(polled)
 }
 
+/// What one resize poll does (L1/N4 of Pip's review of #304): forward a plausible new size, note a degenerate
+/// one ONCE (not every 500 ms while the console stays that way), or nothing. `noted` is the degenerate size
+/// already logged; it is cleared when the console is plausible again or back at the pty's own size.
+#[derive(Debug, PartialEq, Eq)]
+enum PollAction {
+    Forward((u16, u16)),
+    NoteDegenerate,
+    Nothing,
+}
+
+fn poll_action(last: (u16, u16), polled: (u16, u16), noted: &mut Option<(u16, u16)>) -> PollAction {
+    if let Some(size) = forwardable_console_size(last, polled) {
+        *noted = None;
+        return PollAction::Forward(size);
+    }
+    if polled == last {
+        *noted = None;
+        return PollAction::Nothing;
+    }
+    if *noted == Some(polled) {
+        return PollAction::Nothing;
+    }
+    *noted = Some(polled);
+    PollAction::NoteDegenerate
+}
+
+/// The size the pty is created at, and where it came from (L2 of Pip's review of #304): the host's own console
+/// when it is plausible, else 80x25 with the reason, so a degenerate creation size never sticks for the session.
+fn creation_size(console: Option<(u16, u16)>) -> ((u16, u16), String) {
+    match console {
+        Some((c, r)) if r >= MIN_PLAUSIBLE_ROWS && c >= MIN_PLAUSIBLE_COLS => (
+            (c, r),
+            "the host's own console (GetConsoleScreenBufferInfo / tcgetwinsize)".to_string(),
+        ),
+        Some((c, r)) => (
+            (80, 25),
+            format!("FALLBACK 80x25: the console reported a degenerate size {c}x{r} (cols x rows)"),
+        ),
+        None => (
+            (80, 25),
+            "FALLBACK 80x25: the console size query failed".to_string(),
+        ),
+    }
+}
+
+/// The host-log line when the one REDRAW is asked for. The resize itself happens on the resize thread, which logs
+/// its own outcome as `PTY SIZE REDRAW`; this line says only that it was requested.
+fn redraw_request_note(repaints: u32) -> String {
+    format!(
+        "REDRAW requested: still only a dialog footer after {repaints} repaints, asking for one resize to {}x{} (the resize thread logs `PTY SIZE REDRAW` with its outcome); a footer is never answered, only the handlers answer a matched dialog",
+        REDRAW_SIZE.0, REDRAW_SIZE.1
+    )
+}
+
+/// Where the lane's Synapse adapter looks for host requests: the `--home` and `--role` its `--mcp-config` file gives
+/// the `synapse` server (the adapter's own `home` and `role`; the host's role is the fallback for a file with none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SynapseTarget {
+    home: std::path::PathBuf,
+    role: String,
+}
+
+fn synapse_target(host_role: &str, child_argv: &[String]) -> Option<SynapseTarget> {
+    let path = crate::spec_synapse::mcp_config_arg(child_argv)?;
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let home = crate::spec_audit::mcp_home(&v)?;
+    let role = v
+        .get("mcpServers")
+        .and_then(|m| m.get("synapse"))
+        .and_then(|s| s.get("args"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|a| {
+            let i = a.iter().position(|x| x.as_str() == Some("--role"))?;
+            a.get(i + 1)?.as_str().map(str::to_string)
+        })
+        .unwrap_or_else(|| host_role.to_string());
+    Some(SynapseTarget {
+        home: std::path::PathBuf::from(home),
+        role,
+    })
+}
+
+/// The file a host creates in the Synapse home to ask `role`'s adapter to write its unacked mail again. Mirrors
+/// synapse's `redeliver_request_path` (branch lane/h1-redeliver d7f0bdf3): ASCII alphanumerics, `-` and `_` are
+/// kept, anything else becomes `_`.
+fn redeliver_request_path(home: &std::path::Path, role: &str) -> std::path::PathBuf {
+    let safe: String = role
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    home.join(format!("redeliver-{safe}.request"))
+}
+
+/// Right after the host answers a dev-channels dialog, and before the lane's first prompt: ask the adapter to write
+/// the lane's unacked mail again (H1, `docs/MAIL-BEFORE-FIRST-TURN.md`). `None` for any other dialog; otherwise the
+/// host-log line. A failure is that line, never a failed start.
+fn request_redeliver_after_answer(
+    handler_id: &str,
+    target: Option<&SynapseTarget>,
+) -> Option<String> {
+    if !handler_id.contains("dev-channel") {
+        return None;
+    }
+    let Some(t) = target else {
+        return Some(
+            "REDELIVER not requested: no Synapse home in the lane's --mcp-config".to_string(),
+        );
+    };
+    let path = redeliver_request_path(&t.home, &t.role);
+    Some(
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => format!("REDELIVER requested: created {}", path.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                format!("REDELIVER request already pending: {}", path.display())
+            }
+            Err(e) => format!("REDELIVER not requested: {}: {e}", path.display()),
+        },
+    )
+}
+
 /// True when the screen holds exactly one non-blank line and it is a dialog footer
 /// ("Enter to confirm", "Esc to cancel"): the footer of a dialog whose body never reached the
 /// screen model, which no handler can match.
@@ -632,6 +762,8 @@ fn run_with_handlers_and_window_watched(
     let resize_thread = {
         let master_for_resize = pair.master;
         let mut last = (cols, rows);
+        // The degenerate console size already logged (noted once, not every poll).
+        let mut noted_degenerate: Option<(u16, u16)> = None;
         let nudge = Arc::clone(&nudge);
         let redraw = Arc::clone(&redraw);
         let on_raw_io = Arc::clone(&on_raw_io);
@@ -689,17 +821,18 @@ fn run_with_handlers_and_window_watched(
                     note("nudge back", c, r, &res);
                 }
                 if let Some(polled) = current_console_size() {
-                    if polled != last && forwardable_console_size(last, polled).is_none() {
+                    let action = poll_action(last, polled, &mut noted_degenerate);
+                    if action == PollAction::NoteDegenerate {
                         on_raw_io(
                             "host-note",
                             format!(
-                                "PTY SIZE ignored a degenerate console size {}x{} (cols x rows); the pty stays {}x{}",
+                                "PTY SIZE ignored a degenerate console size {}x{} (cols x rows); the pty stays {}x{} (noted once while the console stays this size)",
                                 polled.0, polled.1, last.0, last.1
                             )
                             .as_bytes(),
                         );
                     }
-                    if let Some((c, r)) = forwardable_console_size(last, polled) {
+                    if let PollAction::Forward((c, r)) = action {
                         let res = master_for_resize
                             .resize(PtySize {
                                 rows: r,
@@ -858,10 +991,7 @@ fn run_with_handlers_and_window_watched(
                             );
                             if repaints == REDRAW_AFTER_REPAINTS {
                                 redraw.store(true, std::sync::atomic::Ordering::SeqCst);
-                                on_raw_io(
-                                    "host-note",
-                                    format!("REDRAW: still only a dialog footer after {repaints} repaints, pty resized once to {}x{}; a footer is never answered, only the handlers answer a matched dialog", REDRAW_SIZE.0, REDRAW_SIZE.1).as_bytes(),
-                                );
+                                on_raw_io("host-note", redraw_request_note(repaints).as_bytes());
                             }
                         }
                         footer_since = Some(Instant::now());
@@ -1233,22 +1363,17 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     #[cfg(any(windows, unix))]
     let _raw_console_guard = RawConsoleGuard::enable();
 
-    let console_size = current_console_size();
-    let (cols, rows) = console_size.unwrap_or((80, 25));
+    let ((cols, rows), size_source) = creation_size(current_console_size());
     append_host_log(
         &log_path,
         &format!(
-            "[{}] PTY SIZE at creation: {cols}x{rows} (cols x rows), source: {}",
-            chrono::Utc::now().to_rfc3339(),
-            if console_size.is_some() {
-                "the host's own console (GetConsoleScreenBufferInfo / tcgetwinsize)"
-            } else {
-                "FALLBACK 80x25: the console size query failed"
-            }
+            "[{}] PTY SIZE at creation: {cols}x{rows} (cols x rows), source: {size_source}",
+            chrono::Utc::now().to_rfc3339()
         ),
     );
     let log_path_for_answered = log_path.clone();
     let role_for_answered = role.to_string();
+    let redeliver_target = synapse_target(role, child_argv);
     let notify_for_answered = (
         config
             .as_ref()
@@ -1309,6 +1434,14 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                     answered.matched_screen_text
                 ),
             );
+            if let Some(note) =
+                request_redeliver_after_answer(&answered.handler_id, redeliver_target.as_ref())
+            {
+                append_host_log(
+                    &log_path_for_answered,
+                    &format!("[{}] {note}", chrono::Utc::now().to_rfc3339()),
+                );
+            }
             if let Some(folder) = &answered.resolved_folder {
                 record_folder_trust_answer(
                     &crate::state_dir(),
@@ -2612,6 +2745,192 @@ mod tests {
         );
         assert_eq!(forwardable_console_size((120, 30), (120, 30)), None);
         assert_eq!(forwardable_console_size((80, 25), (40, 10)), Some((40, 10)));
+    }
+
+    // Pip's review of #304, L1: the note for a degenerate size repeated every 500 ms (15 identical lines in ~7 s).
+    #[test]
+    fn a_degenerate_console_size_is_noted_once_not_every_poll() {
+        let mut noted = None;
+        let last = (120, 30);
+        assert_eq!(
+            poll_action(last, (46, 2), &mut noted),
+            PollAction::NoteDegenerate
+        );
+        for _ in 0..15 {
+            assert_eq!(
+                poll_action(last, (46, 2), &mut noted),
+                PollAction::Nothing,
+                "same size: silent"
+            );
+        }
+        // A different degenerate size is news.
+        assert_eq!(
+            poll_action(last, (10, 30), &mut noted),
+            PollAction::NoteDegenerate
+        );
+        // Back to the pty's own size, then degenerate again: noted again.
+        assert_eq!(poll_action(last, last, &mut noted), PollAction::Nothing);
+        assert_eq!(
+            poll_action(last, (10, 30), &mut noted),
+            PollAction::NoteDegenerate
+        );
+    }
+
+    #[test]
+    fn a_real_console_resize_is_still_forwarded_and_clears_the_note() {
+        let mut noted = Some((46, 2));
+        assert_eq!(
+            poll_action((120, 30), (100, 40), &mut noted),
+            PollAction::Forward((100, 40))
+        );
+        assert_eq!(noted, None);
+    }
+
+    // L2: the pty was created at whatever the console query said, with no degenerate check.
+    #[test]
+    fn a_degenerate_console_size_at_creation_creates_the_pty_at_80x25_and_says_so() {
+        let (size, why) = creation_size(Some((46, 2)));
+        assert_eq!(size, (80, 25));
+        assert!(
+            why.contains("FALLBACK 80x25") && why.contains("46x2"),
+            "{why}"
+        );
+        let (size, why) = creation_size(Some((10, 30)));
+        assert_eq!(size, (80, 25));
+        assert!(why.contains("10x30"), "{why}");
+        // Controls: a real console is used as is, and a failed query still falls back.
+        let (size, why) = creation_size(Some((120, 30)));
+        assert_eq!(size, (120, 30));
+        assert!(why.contains("the host's own console"), "{why}");
+        let (size, why) = creation_size(None);
+        assert_eq!(size, (80, 25));
+        assert!(why.contains("the console size query failed"), "{why}");
+    }
+
+    // H1 (PM row 2026-11-26 ~05:25Z): after the dev-channels dialog answer the host asks the Synapse adapter to write
+    // the lane's unacked mail again, by creating `redeliver-<role>.request` in the lane's Synapse home.
+    #[test]
+    fn a_dev_channels_answer_creates_the_redeliver_request_in_the_synapse_home() {
+        let d = tempfile::tempdir().unwrap();
+        let target = SynapseTarget {
+            home: d.path().to_path_buf(),
+            role: "launchtest".into(),
+        };
+        let note = request_redeliver_after_answer("synapse-dev-channel-any-lane", Some(&target));
+        assert!(d.path().join("redeliver-launchtest.request").is_file());
+        assert_eq!(
+            std::fs::metadata(d.path().join("redeliver-launchtest.request"))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(note.unwrap().starts_with("REDELIVER requested"), "logged");
+    }
+
+    #[test]
+    fn an_answer_that_is_not_a_dev_channels_dialog_requests_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let target = SynapseTarget {
+            home: d.path().to_path_buf(),
+            role: "launchtest".into(),
+        };
+        assert_eq!(
+            request_redeliver_after_answer("trust-folder-prefix", Some(&target)),
+            None
+        );
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_unwritable_home_is_a_logged_note_never_a_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        // A "home" below a regular file cannot hold anything.
+        let target = SynapseTarget {
+            home: file.join("home"),
+            role: "launchtest".into(),
+        };
+        let note =
+            request_redeliver_after_answer("synapse-dev-channel-any-lane", Some(&target)).unwrap();
+        assert!(note.starts_with("REDELIVER not requested"), "{note}");
+        let none = request_redeliver_after_answer("synapse-dev-channel-any-lane", None).unwrap();
+        assert!(
+            none.starts_with("REDELIVER not requested") && none.contains("no Synapse home"),
+            "{none}"
+        );
+    }
+
+    #[test]
+    fn a_second_answer_finds_the_request_already_pending() {
+        let d = tempfile::tempdir().unwrap();
+        let target = SynapseTarget {
+            home: d.path().to_path_buf(),
+            role: "launchtest".into(),
+        };
+        let _ = request_redeliver_after_answer("synapse-dev-channel-any-lane", Some(&target));
+        let note =
+            request_redeliver_after_answer("claude-peers-dev-channels", Some(&target)).unwrap();
+        assert!(note.contains("already pending"), "{note}");
+    }
+
+    /// The adapter's own helper (synapse `redeliver_request_path`, branch lane/h1-redeliver d7f0bdf3) keeps
+    /// ASCII alphanumerics, `-` and `_` and turns everything else into `_`: the name must match exactly.
+    #[test]
+    fn the_request_file_name_sanitises_the_role_as_the_adapter_does() {
+        let h = std::path::Path::new("H");
+        assert_eq!(
+            redeliver_request_path(h, "launchtest"),
+            h.join("redeliver-launchtest.request")
+        );
+        assert_eq!(
+            redeliver_request_path(h, "a/b c.d"),
+            h.join("redeliver-a_b_c_d.request")
+        );
+        assert_eq!(
+            redeliver_request_path(h, "agent-loop_2"),
+            h.join("redeliver-agent-loop_2.request")
+        );
+    }
+
+    #[test]
+    fn the_target_is_the_home_and_role_the_mcp_config_gives_the_adapter() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("launchtest.mcp.json");
+        std::fs::write(&cfg, r#"{"mcpServers":{"synapse":{"args":["--role","launchtest","--home","C:/h/launchtest"],"command":"x"}}}"#).unwrap();
+        let argv = vec![
+            "claude".to_string(),
+            "--mcp-config".to_string(),
+            cfg.display().to_string(),
+        ];
+        let t = synapse_target("fallback-role", &argv).unwrap();
+        assert_eq!(
+            (t.home, t.role.as_str()),
+            (std::path::PathBuf::from("C:/h/launchtest"), "launchtest")
+        );
+        // No --mcp-config, or no readable file: no target (the host then logs why).
+        assert!(synapse_target("r", &["claude".to_string()]).is_none());
+        assert!(synapse_target(
+            "r",
+            &[
+                "claude".to_string(),
+                "--mcp-config".to_string(),
+                "Z:/nope.json".to_string()
+            ]
+        )
+        .is_none());
+    }
+
+    // N1: the REDRAW note said the pty "resized once" before the resize thread had acted.
+    #[test]
+    fn the_redraw_request_note_does_not_claim_the_resize_happened() {
+        let text = redraw_request_note(2);
+        assert!(text.contains("REDRAW requested"), "{text}");
+        assert!(!text.contains("resized once"), "{text}");
+        assert!(
+            text.contains("PTY SIZE REDRAW"),
+            "the outcome is the resize thread's line: {text}"
+        );
     }
 
     #[test]

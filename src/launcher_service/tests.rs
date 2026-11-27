@@ -968,3 +968,65 @@ fn the_wake_switch_can_be_turned_off_again_and_the_switched_mechanism_obeys_it()
         "on: it tried the (missing) lane-restart"
     );
 }
+
+// docs/LAUNCHER-CAP-DESIGN.md B: the cap mail goes to the role's cluster PM, read from the portfolio's
+// LANE-REPORTING.md table; a role not in it goes to pm-platform and the mail says so.
+const REPORTING: &str = "| Cluster PM | Lanes |
+|---|---|
+| `pm-kernels` (compute stack) | unpopped, baracuda, kiss |
+| `pm-ants` (developer-facing) | commy, agent-loop, httpant |
+| `pm-platform` (identity and platform) | auth-framework (primary; sub-lanes -ac, -keys), synapse, agentlife |
+| `pm-web` (web applications) | humboldt, thinkersfoundation |
+| `pm` (directly) | `pm-assist` and the four cluster PMs |
+";
+
+#[test]
+fn a_role_is_found_under_its_cluster_pm() {
+    assert_eq!(
+        cluster_pm_of("kiss", REPORTING).as_deref(),
+        Some("pm-kernels")
+    );
+    assert_eq!(
+        cluster_pm_of("httpant", REPORTING).as_deref(),
+        Some("pm-ants")
+    );
+    assert_eq!(
+        cluster_pm_of("humboldt", REPORTING).as_deref(),
+        Some("pm-web")
+    );
+    assert_eq!(
+        cluster_pm_of("agentlife", REPORTING).as_deref(),
+        Some("pm-platform")
+    );
+}
+
+#[test]
+fn a_role_followed_by_a_parenthetical_is_still_found() {
+    assert_eq!(
+        cluster_pm_of("auth-framework", REPORTING).as_deref(),
+        Some("pm-platform")
+    );
+}
+
+#[test]
+fn a_role_not_in_the_table_or_a_sub_string_of_one_is_not_found() {
+    assert_eq!(cluster_pm_of("ghost", REPORTING), None);
+    assert_eq!(cluster_pm_of("kis", REPORTING), None, "whole names only");
+    assert_eq!(
+        cluster_pm_of("pm", REPORTING),
+        None,
+        "the header's own cells are not lanes"
+    );
+}
+
+#[test]
+fn an_unresolved_cluster_pm_falls_back_to_pm_platform_and_says_so() {
+    let (to, text) = cap_mail_target("ghost", "[FINDING] x", Some(REPORTING));
+    assert_eq!(to, CAP_FALLBACK_ROLE);
+    assert!(text.contains("cluster PM not resolved"), "{text}");
+    let (to, text) = cap_mail_target("kiss", "[FINDING] x", Some(REPORTING));
+    assert_eq!(to, "pm-kernels");
+    assert!(!text.contains("not resolved"), "{text}");
+    let (to, _) = cap_mail_target("kiss", "[FINDING] x", None);
+    assert_eq!(to, CAP_FALLBACK_ROLE, "no table at all");
+}

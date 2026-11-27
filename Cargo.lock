@@ -39,12 +39,12 @@ dependencies = [
 
 [[package]]
 name = "agentlife"
-version = "0.30.87"
+version = "0.30.88"
 dependencies = [
  "agentlife-launcher",
  "chrono",
  "lane-restart",
- "lane-state 0.30.87",
+ "lane-state 0.30.88",
  "persistant",
  "serde",
  "serde_json",
@@ -58,9 +58,9 @@ dependencies = [
 
 [[package]]
 name = "agentlife-launcher"
-version = "0.30.87"
+version = "0.30.88"
 dependencies = [
- "lane-state 0.30.87",
+ "lane-state 0.30.88",
  "serde",
  "serde_json",
  "tempfile",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "gpu-run"
-version = "0.30.87"
+version = "0.30.88"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -1632,13 +1632,13 @@ dependencies = [
 
 [[package]]
 name = "lane-restart"
-version = "0.30.87"
+version = "0.30.88"
 dependencies = [
  "chrono",
  "clap",
  "getrandom 0.4.3",
  "hmac",
- "lane-state 0.30.87",
+ "lane-state 0.30.88",
  "portable-pty",
  "rustix",
  "serde",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "lane-state"
-version = "0.30.87"
+version = "0.30.88"
 dependencies = [
  "chrono",
  "rustix",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "pin-plan"
-version = "0.30.87"
+version = "0.30.88"
 
 [[package]]
 name = "pin-project-lite"
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "runner-lint"
-version = "0.30.87"
+version = "0.30.88"
 dependencies = [
  "saphyr",
 ]

@@ -242,6 +242,19 @@ caller's `start` set `spawned: true`; refusals and non-spawns consume nothing. E
 `signal_id`, `result` and `spawned`. `restore.lock` is the file `agentlife restore` takes, so the two
 exclude each other. Not run against a real lane.
 
+**Daily cap and the settle row (PM ruling 2026-11-26, `docs/LAUNCHER-CAP-DESIGN.md`).** The hourly caps and rule 5 count every
+attempt; the per-role DAILY cap (8) counts only sessions that ran. A `start` row carries `ran`: `true` for `started:started`,
+`false` for `failed:spawn-failed`, absent for a start left at the dialog and for rows from before the field (these count as they did).
+A dialog-stuck start spends the daily cap for 10 minutes (`SETTLE_SECS`), then stops spending it unless the launcher wrote a `settle`
+row (kind `settle`, `ran: true`, same `signal_id`) when it saw the role online (once per start, `Source::settle`; a failed write is
+retried next cycle). A start refused by the daily cap is recorded as `refused: rate-daily`, so it spends no hourly budget; the launcher
+then mails a `[FINDING] launch-cap-hit` once per role per UTC day (set only after delivery, `cap_notified_day` in `launcher-store.json`) with
+the cap number and the role's last 8 outcomes to the role's cluster PM, read from the table `AGENTLIFE_LANE_REPORTING` names
+(the portfolio's `LANE-REPORTING.md`; the launcher task's wrapper sets it, `scripts/launcher-task-wrapper.ps1 -LaneReporting`), else to
+`pm-platform` with a note saying so. A launch spec left in `stopping` for over 15 minutes with no process reads as `suspended`
+in `status` (the launcher already refused it as closed-on-purpose). Unit-tested; not run against a real lane.
+
+
 ## Mapping the mechanism to Synapse (OverMind section 3)
 
 The mechanism answers in the `--json` vocabulary of `lane-restart start` (0.15.1) today:

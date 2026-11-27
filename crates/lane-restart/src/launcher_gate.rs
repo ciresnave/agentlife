@@ -28,6 +28,43 @@ pub const MAX_SPAWNS_PER_HOUR: usize = 24;
 /// A per-role daily bound. The policy names none; this number is the lane's proposal, awaiting the
 /// PM's (3 an hour is the burst allowance, this is the "keeps coming back all day" alarm).
 pub const MAX_SPAWNS_PER_ROLE_PER_DAY: usize = 8;
+/// PM ruling 2026-11-26 (jds-kt): a start left at the dialog spends the DAILY cap only while it is younger than this
+/// or a `settle` row says its session ran (`docs/LAUNCHER-CAP-DESIGN.md` A1). The hourly caps always count it.
+pub const SETTLE_SECS: i64 = 10 * 60;
+/// The ledger `kind` of a row saying whether a started session ran (`ran`), keyed by `signal_id`.
+pub const SETTLE_KIND: &str = "settle";
+
+/// Appends the `settle` row for a start left at the dialog whose session the launcher then saw online
+/// (`ran: true`, keyed by `signal_id`; `docs/LAUNCHER-CAP-DESIGN.md` A1) to `<state_dir>/restart.log`.
+/// `true` when the line was written.
+pub fn write_settle_row(state_dir: &Path, role: &str, signal_id: &str) -> bool {
+    let entry = crate::log::Entry {
+        timestamp: Utc::now(),
+        requested_by: crate::start::LAUNCHER_ROLE,
+        role,
+        outcome: "settled: the session was seen online".to_string(),
+        acted: false,
+        kind: Some(SETTLE_KIND),
+        caller_role: None,
+        model: None,
+        reason: None,
+        signal_id: Some(signal_id),
+        result: Some("settled:ran"),
+        spawned: None,
+        ran: Some(true),
+    };
+    crate::log::append(&state_dir.join("restart.log"), &entry).is_ok()
+}
+
+/// What a start's `<outcome>:<reason>` result says about whether its session ran: `Some(true)` reached
+/// progress, `Some(false)` the spawn failed, `None` unknown (left at the dialog) or not a spawn.
+pub fn ran_from_result(result: &str) -> Option<bool> {
+    match result {
+        "started:started" => Some(true),
+        "failed:spawn-failed" => Some(false),
+        _ => None,
+    }
+}
 
 /// `free_ram_floor_gb`'s default, equal to `agentlife`'s own (`Config::default`).
 pub const DEFAULT_FREE_RAM_FLOOR_GB: f64 = 8.0;
@@ -88,12 +125,36 @@ fn is_launcher_spawn(r: &Row) -> bool {
         && r.caller_role.as_deref().is_some_and(is_launcher_caller)
 }
 
+/// Whether a spawn row spends the daily cap: not when its session did not run. A row from before
+/// `ran` (no `ran`, a result other than a dialog wait) counts as it always did.
+fn spends_daily(
+    r: &Row,
+    now: DateTime<Utc>,
+    settled_ran: &std::collections::HashSet<&str>,
+) -> bool {
+    match r.ran {
+        Some(ran) => ran,
+        None if r.result.as_deref() == Some("started:awaiting-dialog") => {
+            now - r.timestamp < Duration::seconds(SETTLE_SECS)
+                || r.signal_id
+                    .as_deref()
+                    .is_some_and(|s| settled_ran.contains(s))
+        }
+        None => true,
+    }
+}
+
 /// Counts launcher spawns in the last hour and day ending at `now`. A row stamped in the future
 /// counts (a skewed clock must not hide spawns).
 pub fn count_spawns(rows: &[Row], role: &str, now: DateTime<Utc>) -> SpawnCounts {
     let hour = now - Duration::hours(1);
     let day = now - Duration::hours(24);
     let mut c = SpawnCounts::default();
+    let settled_ran: std::collections::HashSet<&str> = rows
+        .iter()
+        .filter(|r| r.kind.as_deref() == Some(SETTLE_KIND) && r.ran == Some(true))
+        .filter_map(|r| r.signal_id.as_deref())
+        .collect();
     for r in rows.iter().filter(|r| is_launcher_spawn(r)) {
         let mine = r.role == role;
         if r.timestamp > hour {
@@ -102,7 +163,7 @@ pub fn count_spawns(rows: &[Row], role: &str, now: DateTime<Utc>) -> SpawnCounts
                 c.role_hour += 1;
             }
         }
-        if mine && r.timestamp > day {
+        if mine && r.timestamp > day && spends_daily(r, now, &settled_ran) {
             c.role_day += 1;
         }
     }
@@ -367,7 +428,16 @@ mod tests {
             signal_id: None,
             result: None,
             spawned,
+            ran: None,
         }
+    }
+
+    fn start_row(role: &str, mins_ago: i64, signal: &str, result: &str, ran: Option<bool>) -> Row {
+        let mut r = row(role, mins_ago, Some(L), Some(true));
+        r.signal_id = Some(signal.to_string());
+        r.result = Some(result.to_string());
+        r.ran = ran;
+        r
     }
 
     const L: &str = "launcher:agentlife-launcher";
@@ -393,6 +463,103 @@ mod tests {
                 role_day: 2
             }
         );
+    }
+
+    // docs/LAUNCHER-CAP-DESIGN.md tests 1-3 and 6 (PM ruling jds-kt: 8 a day, 10 min settle).
+    #[test]
+    fn a_dialog_stuck_start_older_than_the_settle_window_is_hourly_but_not_daily() {
+        let r = start_row("a", 11, "s1", "started:awaiting-dialog", None);
+        let c = count_spawns(&[r], "a", now());
+        assert_eq!((c.role_hour, c.all_hour, c.role_day), (1, 1, 0));
+    }
+
+    #[test]
+    fn a_dialog_start_inside_the_settle_window_still_counts_daily() {
+        let r = start_row("a", 9, "s1", "started:awaiting-dialog", None);
+        assert_eq!(count_spawns(&[r], "a", now()).role_day, 1);
+    }
+
+    #[test]
+    fn a_dialog_start_that_a_settle_row_says_ran_counts_daily() {
+        let r = start_row("a", 30, "s1", "started:awaiting-dialog", None);
+        let mut s = row("a", 20, Some(L), None);
+        s.kind = Some("settle".into());
+        s.signal_id = Some("s1".into());
+        s.ran = Some(true);
+        assert_eq!(count_spawns(&[r, s], "a", now()).role_day, 1);
+    }
+
+    #[test]
+    fn a_failed_spawn_is_hourly_but_not_daily() {
+        let r = start_row("a", 5, "s1", "failed:spawn-failed", Some(false));
+        let c = count_spawns(&[r], "a", now());
+        assert_eq!((c.role_hour, c.role_day), (1, 0));
+    }
+
+    #[test]
+    fn eight_sessions_that_ran_refuse_the_ninth_but_eight_stuck_ones_do_not() {
+        let ran: Vec<Row> = (0..8)
+            .map(|i| {
+                start_row(
+                    "a",
+                    100 + i,
+                    &format!("r{i}"),
+                    "started:started",
+                    Some(true),
+                )
+            })
+            .collect();
+        let c = count_spawns(&ran, "a", now());
+        assert_eq!(check_caps(&c), Err(CapHit::RolePerDay));
+        let stuck: Vec<Row> = (0..8)
+            .map(|i| {
+                start_row(
+                    "a",
+                    100 + i,
+                    &format!("d{i}"),
+                    "started:awaiting-dialog",
+                    None,
+                )
+            })
+            .collect();
+        assert_eq!(check_caps(&count_spawns(&stuck, "a", now())), Ok(()));
+    }
+
+    #[test]
+    fn a_row_from_before_the_ran_field_counts_as_it_always_did() {
+        let mut r = row("a", 100, Some(L), Some(true));
+        r.result = Some("started:started".into());
+        assert_eq!(count_spawns(&[r], "a", now()).role_day, 1);
+        let bare = row("a", 100, Some(L), Some(true));
+        assert_eq!(count_spawns(&[bare], "a", now()).role_day, 1);
+    }
+
+    /// The writer and the counter agree: a dialog start older than the window is 0 daily until the settle row
+    /// the launcher writes lands, then 1. Goes through the real file.
+    #[test]
+    fn the_settle_row_the_launcher_writes_makes_the_dialog_start_count_daily() {
+        let d = tempdir().unwrap();
+        let start = start_row("a", 30, "s1", "started:awaiting-dialog", None);
+        assert_eq!(
+            count_spawns(std::slice::from_ref(&start), "a", now()).role_day,
+            0
+        );
+        assert!(write_settle_row(d.path(), "a", "s1"));
+        let read = crate::ledger::read(&d.path().join("restart.log")).unwrap();
+        assert!(read.unreadable.is_empty());
+        let mut rows = vec![start];
+        rows.extend(read.rows);
+        assert_eq!(rows[1].kind.as_deref(), Some(SETTLE_KIND));
+        assert_eq!(rows[1].ran, Some(true));
+        assert_eq!(count_spawns(&rows, "a", now()).role_day, 1);
+    }
+
+    #[test]
+    fn ran_is_read_from_the_result_a_start_writes() {
+        assert_eq!(ran_from_result("started:started"), Some(true));
+        assert_eq!(ran_from_result("started:awaiting-dialog"), None);
+        assert_eq!(ran_from_result("failed:spawn-failed"), Some(false));
+        assert_eq!(ran_from_result("refused:rate"), None);
     }
 
     #[test]

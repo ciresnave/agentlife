@@ -39,5 +39,6 @@ b=collections.Counter()
 for x in v:
     k='<30' if x<30 else '30-110' if x<110 else '110-130 (2min redelivery)' if x<130 else '130-230' if x<230 else '230-250 (4min)' if x<250 else '>250'
     b[k]+=1
-print(dict(b),'of',len(v),'; no channel event:',len(rows)-len(v),'; min',min(v))
-print('first assistant turn after prompt: median',statistics.median([r[3] for r in rows if r[3]]))
+print(dict(b),'of',len(v),'; no channel event:',len(rows)-len(v),'; min',min(v) if v else None)
+a=[r[3] for r in rows if r[3]]
+print('first assistant turn after prompt: median',statistics.median(a) if a else None)

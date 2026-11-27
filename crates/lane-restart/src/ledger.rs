@@ -36,6 +36,10 @@ pub struct Row {
     /// Whether a spawn was attempted: what the launcher's caps count (0.15.13).
     #[serde(default)]
     pub spawned: Option<bool>,
+    /// Whether the started session ran (design `docs/LAUNCHER-CAP-DESIGN.md` A1): `Some(true)` it reached progress,
+    /// `Some(false)` the spawn failed, `None` unknown (a start left at the dialog) or a row from before this field.
+    #[serde(default)]
+    pub ran: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
