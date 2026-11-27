@@ -52,9 +52,67 @@ pub fn note(role: &str, cached: Option<u64>, roster: Option<u64>) -> (String, bo
     }
 }
 
+/// O22(a): the online flag of `role` in `synapse list` output. `Ok(None)`: the role is not listed. `Err`: nothing parsed.
+pub fn online_from_list(out: &str, role: &str) -> Result<Option<bool>, String> {
+    let mut parsed = 0usize;
+    let mut found = None;
+    for line in out.lines().map(str::trim).filter(|l| l.starts_with('{')) {
+        let v: Value = serde_json::from_str(line)
+            .map_err(|e| format!("a roster row does not parse ({e}): {line:?}"))?;
+        let id = v
+            .get("global_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("a roster row has no global_id: {line:?}"))?;
+        parsed += 1;
+        if id.split_once('@').map_or(id, |(s, _)| s) == role {
+            found = v.get("online").and_then(Value::as_bool);
+        }
+    }
+    if parsed == 0 {
+        Err("the roster answer held no role lines".to_string())
+    } else {
+        Ok(found)
+    }
+}
+
+/// O22(a) (PM ruling 2026-11-24): a launcher start may claim the role from the lane home only when the cached epoch
+/// is BEHIND the roster, the role is OFFLINE (a held role is never claimed over) and the answer was read. Anything
+/// unread (`None`) is no claim.
+pub fn should_reclaim(
+    cached: Option<u64>,
+    roster: Option<u64>,
+    online: Option<bool>,
+    launcher: bool,
+) -> bool {
+    launcher && online == Some(false) && matches!((cached, roster), (Some(c), Some(r)) if c < r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn online_is_read_for_the_role_and_an_unlisted_role_is_none() {
+        let out = "{\"epoch\":7,\"global_id\":\"a@x\",\"online\":false}
+{\"epoch\":2,\"global_id\":\"b@x\",\"online\":true}
+";
+        assert_eq!(online_from_list(out, "a"), Ok(Some(false)));
+        assert_eq!(online_from_list(out, "b"), Ok(Some(true)));
+        assert_eq!(online_from_list(out, "c"), Ok(None));
+        assert!(online_from_list("nothing", "a").is_err());
+    }
+
+    #[test]
+    fn only_a_launcher_start_with_the_cache_behind_and_the_role_offline_reclaims() {
+        assert!(should_reclaim(Some(6), Some(7), Some(false), true));
+        assert!(!should_reclaim(Some(6), Some(7), Some(true), true), "an online role is never claimed over");
+        assert!(!should_reclaim(Some(6), Some(7), Some(false), false), "not a launcher start");
+        assert!(!should_reclaim(Some(7), Some(7), Some(false), true), "equal");
+        assert!(!should_reclaim(Some(8), Some(7), Some(false), true), "cache ahead");
+        assert!(!should_reclaim(None, Some(7), Some(false), true), "no cache is not behind");
+        assert!(!should_reclaim(Some(6), Some(7), None, true), "online unread");
+        assert!(!should_reclaim(Some(6), None, Some(false), true), "roster unread");
+    }
 
     #[test]
     fn a_roster_epoch_ahead_of_the_cache_logs_both_and_warns() {
