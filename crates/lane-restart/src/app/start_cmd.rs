@@ -89,7 +89,7 @@ impl Outcome<'_> {
 
 /// O19(a): the roster epoch beside the lane home's cached epoch, printed and returned as a ledger
 /// suffix. Never blocks a start: any part that cannot be read just says so.
-fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan) -> String {
+fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan, launcher: bool) -> String {
     let role = plan.launch.role.to_string();
     let Some(cfg) = crate::spec_synapse::mcp_config_arg(&plan.argv) else {
         return String::new();
@@ -106,7 +106,13 @@ fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan) -> String {
         crate::epoch_check::cached_epoch(&home, &role),
         ctx.roster_epoch(&home, &role),
     ) {
-        (Ok(c), Ok(r)) => crate::epoch_check::note(&role, c, r).0,
+        (Ok(c), Ok(r)) => {
+            let mut m = crate::epoch_check::note(&role, c, r).0;
+            if launcher && matches!((c, r), (Some(c), Some(r)) if c < r) {
+                m.push_str(&reclaim_note(ctx, &home, &role, c, r));
+            }
+            m
+        }
         (c, r) => format!(
             "synapse epoch for {role}: not compared (cached: {}; roster: {})",
             c.map_or_else(|e| e, |_| "ok".to_string()),
@@ -115,6 +121,35 @@ fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan) -> String {
     };
     ctx.errln(&format!("lane-restart start: {msg}"));
     format!(" [{msg}]")
+}
+
+/// O22(a) (PM ruling 2026-11-24): the cache is behind the roster on a launcher start. Claim from the lane home only
+/// when the role is read OFFLINE; an online role is never claimed over. Every outcome is said, never silent.
+fn reclaim_note(
+    ctx: &Ctx,
+    home: &std::path::Path,
+    role: &str,
+    cached: Option<u64>,
+    roster: Option<u64>,
+) -> String {
+    let online = match ctx.roster_online(home, role) {
+        Ok(o) => o,
+        Err(e) => return format!("; not reclaimed: online state unread ({e})"),
+    };
+    if !crate::epoch_check::should_reclaim(cached, roster, online, true) {
+        return match online {
+            Some(true) => {
+                format!("; not reclaimed: {role} is online, an online role is never claimed over")
+            }
+            _ => format!("; not reclaimed: {role} is not read offline"),
+        };
+    }
+    match ctx.claim_role(home, role) {
+        Ok(()) => format!(
+            "; reclaimed {role} from its lane home (it was offline, cache behind the roster)"
+        ),
+        Err(e) => format!("; reclaim of {role} FAILED: {e}"),
+    }
 }
 
 pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
@@ -245,7 +280,7 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     } else {
         None
     };
-    let pin_note = format!("{pin_note}{}", epoch_note(ctx, &plan));
+    let pin_note = format!("{pin_note}{}", epoch_note(ctx, &plan, is_launcher));
     ctx.errln(&format!(
         "lane-restart start: launching {} on {}...",
         args.role, plan.model

@@ -105,13 +105,34 @@ mod tests {
     #[test]
     fn only_a_launcher_start_with_the_cache_behind_and_the_role_offline_reclaims() {
         assert!(should_reclaim(Some(6), Some(7), Some(false), true));
-        assert!(!should_reclaim(Some(6), Some(7), Some(true), true), "an online role is never claimed over");
-        assert!(!should_reclaim(Some(6), Some(7), Some(false), false), "not a launcher start");
-        assert!(!should_reclaim(Some(7), Some(7), Some(false), true), "equal");
-        assert!(!should_reclaim(Some(8), Some(7), Some(false), true), "cache ahead");
-        assert!(!should_reclaim(None, Some(7), Some(false), true), "no cache is not behind");
-        assert!(!should_reclaim(Some(6), Some(7), None, true), "online unread");
-        assert!(!should_reclaim(Some(6), None, Some(false), true), "roster unread");
+        assert!(
+            !should_reclaim(Some(6), Some(7), Some(true), true),
+            "an online role is never claimed over"
+        );
+        assert!(
+            !should_reclaim(Some(6), Some(7), Some(false), false),
+            "not a launcher start"
+        );
+        assert!(
+            !should_reclaim(Some(7), Some(7), Some(false), true),
+            "equal"
+        );
+        assert!(
+            !should_reclaim(Some(8), Some(7), Some(false), true),
+            "cache ahead"
+        );
+        assert!(
+            !should_reclaim(None, Some(7), Some(false), true),
+            "no cache is not behind"
+        );
+        assert!(
+            !should_reclaim(Some(6), Some(7), None, true),
+            "online unread"
+        );
+        assert!(
+            !should_reclaim(Some(6), None, Some(false), true),
+            "roster unread"
+        );
     }
 
     #[test]

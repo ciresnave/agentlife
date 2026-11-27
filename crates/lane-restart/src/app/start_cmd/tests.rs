@@ -524,3 +524,88 @@ fn a_start_logs_the_roster_epoch_beside_the_cached_epoch_and_warns_when_ahead() 
     assert!(err.contains("WARNING"), "{err}");
     assert!(!err.contains("SECRET") && !out.contains("SECRET"));
 }
+
+/// O22(a): a launcher start whose cache is behind the roster, with the role offline, claims from the lane
+/// home and says so; an online role is never claimed; a non-launcher start does not claim.
+fn reclaim_case(caller: &'static str, online: bool) -> (usize, String) {
+    let d = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(
+        d.path(),
+        "alpha",
+        "# h
+",
+    );
+    let home = d.path().join("home");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    std::fs::write(
+        home.join("sessions").join("alpha.json"),
+        r#"{"instance_id":"i","token":"SECRET","global_id":"alpha@a","epoch":6}"#,
+    )
+    .unwrap();
+    let mcp = d.path().join("alpha.mcp.json");
+    let cfg = serde_json::json!({"mcpServers":{"synapse":{"env":{"SYNAPSE_HOME": home.to_string_lossy()}}}});
+    std::fs::write(&mcp, cfg.to_string()).unwrap();
+    let mut spec = crate::spec::read(&state, "alpha").unwrap();
+    spec.launch_args.extend([
+        "--mcp-config".to_string(),
+        mcp.to_string_lossy().into_owned(),
+    ]);
+    crate::spec::write_atomic(&state, &spec).unwrap();
+    let calls = Rc::new(RefCell::new(0));
+    let claims = Rc::new(RefCell::new(Vec::<(std::path::PathBuf, String)>::new()));
+    let seen = Rc::clone(&claims);
+    let ah = d.path().join("agentlife-home");
+    std::fs::create_dir_all(&ah).unwrap();
+    let ah_s = ah.to_string_lossy().into_owned();
+    let mut facts = dead();
+    facts.live_pid = Some((std::process::id(), 100));
+    let launcher = caller.starts_with("launcher:");
+    let mut c = ctx(&state, Some(caller), facts, &calls)
+        .with_env(&[
+            ("AGENTLIFE_HOME", &ah_s),
+            ("AGENTLIFE_FREE_RAM_FLOOR_GB", "8"),
+        ])
+        .with_free_memory_gb(Some(100.0))
+        .with_launch_spawn(coming_up_spawn(&state, &calls))
+        .with_roster_epoch(Box::new(|_, _| Ok(Some(7))))
+        .with_roster_online(Box::new(move |_, _| Ok(Some(online))))
+        .with_role_claim(Box::new(move |h, r| {
+            seen.borrow_mut().push((h.to_path_buf(), r.to_string()));
+            Ok(())
+        }));
+    let mut a = vec!["start", "--role", "alpha", "--reason", "o22a"];
+    if launcher {
+        a.extend(["--signal-id", "alpha:m1"]);
+    }
+    let code = run_with(&mut c, args(&a));
+    let (out, err) = c.captured();
+    assert!(
+        code_is(code, 0) || code_is(code, 2),
+        "{code:?}
+{out}
+{err}"
+    );
+    assert!(!err.contains("SECRET") && !out.contains("SECRET"));
+    let n = claims.borrow().len();
+    if n == 1 {
+        assert_eq!(claims.borrow()[0], (home, "alpha".to_string()));
+    }
+    (n, err)
+}
+
+#[test]
+fn a_launcher_start_with_the_cache_behind_and_the_role_offline_claims_from_the_lane_home_and_logs_it(
+) {
+    let (n, err) = reclaim_case("launcher:agentlife-launcher", false);
+    assert_eq!(n, 1, "{err}");
+    assert!(err.contains("reclaimed alpha"), "{err}");
+}
+
+#[test]
+fn a_launcher_start_never_claims_over_an_online_role_and_a_manual_start_does_not_claim() {
+    let (n, err) = reclaim_case("launcher:agentlife-launcher", true);
+    assert_eq!(n, 0, "{err}");
+    assert!(err.contains("online"), "{err}");
+    let (n, err) = reclaim_case("pm", false);
+    assert_eq!(n, 0, "{err}");
+}
