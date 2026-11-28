@@ -39,7 +39,7 @@ pub const SETTLE_KIND: &str = "settle";
 /// `true` when the line was written.
 pub fn write_settle_row(state_dir: &Path, role: &str, signal_id: &str) -> bool {
     let entry = crate::log::Entry {
-        timestamp: Utc::now(),
+        timestamp: lane_state::timestamp::Timestamp::now(),
         requested_by: crate::start::LAUNCHER_ROLE,
         role,
         outcome: "settled: the session was seen online".to_string(),

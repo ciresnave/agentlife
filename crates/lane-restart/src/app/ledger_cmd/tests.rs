@@ -6,7 +6,6 @@
 use super::*;
 use crate::app::run_with;
 use crate::log::{append, Entry};
-use chrono::TimeZone;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +32,9 @@ fn ctx_in(dir: &Path) -> Ctx {
 #[must_use]
 fn write_log(state: &Path) -> PathBuf {
     let path = state.join("restart.log");
-    let at = |h| chrono::Utc.with_ymd_and_hms(2026, 10, 14, h, 0, 0).unwrap();
+    let at = |h: i64| {
+        lane_state::timestamp::Timestamp::from_unix_secs(1_791_972_000 + (h - 10) * 3600).unwrap()
+    };
     for (h, role, kind, by, acted, outcome) in [
         (10, "alpha", None, "self", true, "killed pid 7"),
         (11, "alpha", Some("start"), "pm", false, "refused: busy"),

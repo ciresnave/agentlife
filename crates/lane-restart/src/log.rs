@@ -8,14 +8,14 @@
 //! only records what happened when the tool acted would hide every refusal,
 //! which is exactly the evidence this portfolio's own culture depends on.
 
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::Serialize;
 use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
 pub struct Entry<'a> {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     /// "self" or "pm"
     pub requested_by: &'a str,
     pub role: &'a str,
@@ -83,7 +83,7 @@ mod tests {
 
     fn sample<'a>(role: &'a str, outcome: &str, acted: bool) -> Entry<'a> {
         Entry {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             requested_by: "self",
             role,
             outcome: outcome.to_string(),
@@ -101,6 +101,17 @@ mod tests {
 
     /// Lines written before the 14.7 fields must not grow them: a reader that treats an unknown
     /// key as an error would otherwise break on every old-style entry.
+    #[test]
+    fn the_timestamp_is_written_as_rfc3339_z() {
+        let mut e = sample("alpha", "ok", true);
+        e.timestamp = lane_state::timestamp::Timestamp::from_unix_secs(1_791_972_000).unwrap();
+        let line = serde_json::to_string(&e).unwrap();
+        assert!(
+            line.contains("\"timestamp\":\"2026-10-14T10:00:00Z\""),
+            "{line}"
+        );
+    }
+
     #[test]
     fn an_entry_without_the_new_fields_serialises_exactly_as_before() {
         let line = serde_json::to_value(sample("overmind", "x", false)).unwrap();

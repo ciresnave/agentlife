@@ -409,7 +409,7 @@ impl Ctx {
         spawned: bool,
     ) {
         let entry = crate::log::Entry {
-            timestamp: chrono::Utc::now(),
+            timestamp: lane_state::timestamp::Timestamp::now(),
             requested_by,
             role,
             outcome: outcome.to_string(),
@@ -445,7 +445,7 @@ impl Ctx {
         acted: bool,
     ) {
         let entry = crate::log::Entry {
-            timestamp: chrono::Utc::now(),
+            timestamp: lane_state::timestamp::Timestamp::now(),
             requested_by,
             role,
             outcome: outcome.to_string(),
