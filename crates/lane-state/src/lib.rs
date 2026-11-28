@@ -21,3 +21,4 @@ pub mod permission_mode;
 pub mod platform;
 pub mod role;
 pub mod state;
+pub mod timestamp;
