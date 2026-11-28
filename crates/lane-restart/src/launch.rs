@@ -151,12 +151,29 @@ pub fn prepare_launch_for(
     permit: Option<&OpusPermit>,
     wake_signal: Option<&str>,
 ) -> Result<PreparedLaunch, RelaunchError> {
+    prepare_launch_noticed(spec, policy_default, permit, wake_signal, None)
+}
+
+/// [`prepare_launch_for`] plus O22(b): `notice`, when `Some`, is appended to a launcher-started lane's first
+/// prompt (the channel is not expected to connect, and the lane is told so before it waits on one).
+pub fn prepare_launch_noticed(
+    spec: &LaunchSpec,
+    policy_default: &str,
+    permit: Option<&OpusPermit>,
+    wake_signal: Option<&str>,
+    notice: Option<&str>,
+) -> Result<PreparedLaunch, RelaunchError> {
     let prompt = match wake_signal {
         Some(sig) if crate::wakes::is_wake_signal(sig, spec.role.as_str()) => {
             wake_startup_prompt(spec.role.as_str(), sig)
         }
         Some(sig) => mail_startup_prompt(spec.role.as_str(), sig),
         None => startup_prompt(spec.role.as_str()),
+    };
+    // Only a launcher-started lane (it carries a signal) is told; `;` is a `wt.exe` command separator.
+    let prompt = match (wake_signal, notice) {
+        (Some(_), Some(n)) => format!("{prompt} {}", n.replace(';', ",")),
+        _ => prompt,
     };
     let model = resolve_launch_model(spec.launch_args.as_ref(), policy_default, permit)?;
     let argv = launch_argv(spec, &prompt, model.as_str());
@@ -314,10 +331,40 @@ pub fn launch_and_wait_with(
     sleep: &mut dyn FnMut(Duration),
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<RelaunchOutcome, RelaunchError> {
+    launch_and_wait_noticed(
+        facts,
+        state_reader,
+        spec,
+        previous_session,
+        timing,
+        policy_default,
+        permit,
+        (wake_signal, None),
+        spawn,
+        sleep,
+        on_awaiting,
+    )
+}
+
+/// [`launch_and_wait_with`] with O22(b)'s channel notice: `wake` is `(signal id, notice)`.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_and_wait_noticed(
+    facts: &dyn SystemFacts,
+    state_reader: &dyn StateReader,
+    spec: &LaunchSpec,
+    previous_session: Option<&str>,
+    timing: &LivenessTiming,
+    policy_default: &str,
+    permit: Option<&OpusPermit>,
+    wake: (Option<&str>, Option<&str>),
+    spawn: &SpawnFn,
+    sleep: &mut dyn FnMut(Duration),
+    on_awaiting: &mut dyn FnMut(),
+) -> Result<RelaunchOutcome, RelaunchError> {
     let PreparedLaunch {
         argv,
         carries_dev_channels_flag,
-    } = prepare_launch_for(spec, policy_default, permit, wake_signal)?;
+    } = prepare_launch_noticed(spec, policy_default, permit, wake.0, wake.1)?;
     let launched_after_secs = crate::stop::launched_after(facts.now());
     spawn(spec, &argv)?;
     wait_for_liveness(
@@ -518,6 +565,29 @@ mod tests {
         pinned.launch_args = Some(strs(&["claude", "--model", "haiku"]));
         let p = prepare_launch(&pinned, "claude-opus-5", None).unwrap();
         assert!(p.argv.contains(&"haiku".to_string()));
+    }
+
+    #[test]
+    fn a_channel_notice_is_appended_to_a_launcher_first_prompt_and_only_there() {
+        let s = spec("alpha");
+        let n = "NOTICE your Synapse channel will not connect: role held elsewhere";
+        let with = prepare_launch_noticed(&s, "sonnet", None, Some("alpha:7"), Some(n)).unwrap();
+        let text = with.argv.hosted().join(" ");
+        assert!(text.contains(n), "{text}");
+        assert!(text.contains("Fetch your inbox FIRST"), "{text}");
+        let plain = prepare_launch_noticed(&s, "sonnet", None, Some("alpha:7"), None).unwrap();
+        assert!(!plain.argv.hosted().join(" ").contains("NOTICE"));
+        let unsignalled = prepare_launch_noticed(&s, "sonnet", None, None, Some(n)).unwrap();
+        assert!(
+            !unsignalled.argv.hosted().join(" ").contains("NOTICE"),
+            "a hand start has no mail prompt"
+        );
+        let semi =
+            prepare_launch_noticed(&s, "sonnet", None, Some("alpha:7"), Some("a;b")).unwrap();
+        assert!(
+            !semi.argv.hosted().join(" ").contains("a;b"),
+            "no wt.exe separator in a prompt"
+        );
     }
 
     #[test]

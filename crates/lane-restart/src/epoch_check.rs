@@ -52,9 +52,143 @@ pub fn note(role: &str, cached: Option<u64>, roster: Option<u64>) -> (String, bo
     }
 }
 
+/// The `global_id` (`role@account`) in `<home>/sessions/<role>.json`, when the cache has one. The token is not touched.
+pub fn cached_global_id(home: &Path, role: &str) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("sessions").join(format!("{role}.json"))).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("global_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// O22(a): the online flag of `role` in `synapse list` output. `Ok(None)`: the role is not listed. `Err`: nothing
+/// parsed, or the answer is ambiguous: FAIL CLOSED (a claim takes a role over) when the role has more than one row, or
+/// when `cached_id` (the lane home's own `global_id`) names a different account than the roster's row.
+pub fn online_from_list(
+    out: &str,
+    role: &str,
+    cached_id: Option<&str>,
+) -> Result<Option<bool>, String> {
+    let mut parsed = 0usize;
+    let mut found = None;
+    let mut rows = 0usize;
+    for line in out.lines().map(str::trim).filter(|l| l.starts_with('{')) {
+        let v: Value = serde_json::from_str(line)
+            .map_err(|e| format!("a roster row does not parse ({e}): {line:?}"))?;
+        let id = v
+            .get("global_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("a roster row has no global_id: {line:?}"))?;
+        parsed += 1;
+        if id.split_once('@').map_or(id, |(s, _)| s) == role {
+            rows += 1;
+            if rows > 1 {
+                return Err(format!(
+                    "the roster lists {role} more than once; not claiming into an ambiguity"
+                ));
+            }
+            if let Some(c) = cached_id.filter(|c| *c != id) {
+                return Err(format!(
+                    "the roster row {id} is not this home's cached identity {c}"
+                ));
+            }
+            found = v.get("online").and_then(Value::as_bool);
+        }
+    }
+    if parsed == 0 {
+        Err("the roster answer held no role lines".to_string())
+    } else {
+        Ok(found)
+    }
+}
+
+/// O22(a) (PM ruling 2026-11-24): a launcher start may claim the role from the lane home only when the cached epoch
+/// is BEHIND the roster, the role is OFFLINE (a held role is never claimed over) and the answer was read. Anything
+/// unread (`None`) is no claim.
+pub fn should_reclaim(
+    cached: Option<u64>,
+    roster: Option<u64>,
+    online: Option<bool>,
+    launcher: bool,
+) -> bool {
+    launcher && online == Some(false) && matches!((cached, roster), (Some(c), Some(r)) if c < r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn online_is_read_for_the_role_and_an_unlisted_role_is_none() {
+        let out = "{\"epoch\":7,\"global_id\":\"a@x\",\"online\":false}
+{\"epoch\":2,\"global_id\":\"b@x\",\"online\":true}
+";
+        assert_eq!(online_from_list(out, "a", None), Ok(Some(false)));
+        assert_eq!(online_from_list(out, "b", None), Ok(Some(true)));
+        assert_eq!(online_from_list(out, "c", None), Ok(None));
+        assert!(online_from_list("nothing", "a", None).is_err());
+    }
+
+    #[test]
+    fn an_ambiguous_or_foreign_roster_row_fails_closed() {
+        // Two rows for one role, an offline one LAST: the last row must not win.
+        let two = "{\"epoch\":3,\"global_id\":\"a@x\",\"online\":true}
+{\"epoch\":4,\"global_id\":\"a@y\",\"online\":false}
+";
+        assert!(online_from_list(two, "a", None).is_err());
+        // The cached identity names another account than the single row.
+        let one = "{\"epoch\":3,\"global_id\":\"a@x\",\"online\":false}
+";
+        assert!(online_from_list(one, "a", Some("a@y")).is_err());
+        assert_eq!(online_from_list(one, "a", Some("a@x")), Ok(Some(false)));
+        assert_eq!(online_from_list(one, "a", None), Ok(Some(false)));
+    }
+
+    #[test]
+    fn the_cached_identity_is_read_without_the_token() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("sessions")).unwrap();
+        std::fs::write(
+            d.path().join("sessions").join("a.json"),
+            r#"{"token":"SECRET","global_id":"a@x","epoch":3}"#,
+        )
+        .unwrap();
+        assert_eq!(cached_global_id(d.path(), "a").as_deref(), Some("a@x"));
+        assert_eq!(cached_global_id(d.path(), "b"), None);
+    }
+
+    #[test]
+    fn only_a_launcher_start_with_the_cache_behind_and_the_role_offline_reclaims() {
+        assert!(should_reclaim(Some(6), Some(7), Some(false), true));
+        assert!(
+            !should_reclaim(Some(6), Some(7), Some(true), true),
+            "an online role is never claimed over"
+        );
+        assert!(
+            !should_reclaim(Some(6), Some(7), Some(false), false),
+            "not a launcher start"
+        );
+        assert!(
+            !should_reclaim(Some(7), Some(7), Some(false), true),
+            "equal"
+        );
+        assert!(
+            !should_reclaim(Some(8), Some(7), Some(false), true),
+            "cache ahead"
+        );
+        assert!(
+            !should_reclaim(None, Some(7), Some(false), true),
+            "no cache is not behind"
+        );
+        assert!(
+            !should_reclaim(Some(6), Some(7), None, true),
+            "online unread"
+        );
+        assert!(
+            !should_reclaim(Some(6), None, Some(false), true),
+            "roster unread"
+        );
+    }
 
     #[test]
     fn a_roster_epoch_ahead_of_the_cache_logs_both_and_warns() {

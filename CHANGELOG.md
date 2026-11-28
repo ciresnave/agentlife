@@ -2,6 +2,12 @@
 
 One version for the whole workspace (`agentlife`, `lane-restart`, `lane-state`).
 
+## 0.31.0 — **Breaking** (`lane-restart`: `StartPlan` gains `channel_notice` and is now `#[non_exhaustive]`), otherwise additive
+
+**Breaking (allocated by pm-assist):** `lane-restart::StartPlan` gains the public field `channel_notice` and is now `#[non_exhaustive]`; `lane-restart` is published (0.30.88 on crates.io), so an external crate that builds a `StartPlan` with a struct literal (or matches it without `..`) no longer compiles: construct it through the crate's own constructor or add `..`.
+
+O22: a launcher-started lane now (a) reclaims its role with `synapse claim --role` from the lane home when the cached epoch is behind the roster and the role is offline (logged; an online role is never claimed over), and (b) gets a NOTICE in its first prompt, in `start --json` (`notice`) and in the launcher log when the role is held, the reclaim failed, or online state was unread. Red-first; mutations (claim call off, notice dropped from plan) each fail the new tests by name. Not run on a real lane.
+
 ## 0.30.88 — launcher daily cap spends only on sessions that ran, one cap mail per role per day, stale `stopping` reads suspended
 
 `docs/LAUNCHER-CAP-DESIGN.md` (PM-approved 2026-11-26, jds-kt), built:

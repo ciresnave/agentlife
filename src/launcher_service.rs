@@ -633,6 +633,8 @@ thread_local! {
     /// What the start path said about a refusal (`held for memory: 3.1 GB free, floor 8 GB`), for the
     /// service log; drained by [`take_start_notes`]. The mechanism returns only a code.
     static NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// O22(b): channel notices given to lanes that started; drained by [`take_start_notices`].
+    static NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The `detail` of a `lane-restart start --json` line (present on a refusal), if any.
@@ -640,6 +642,19 @@ pub fn start_detail(line: &str) -> Option<String> {
     let v = serde_json::from_str::<Value>(line).ok()?;
     let d = v.get("detail")?.as_str()?;
     (!d.is_empty()).then(|| d.to_string())
+}
+
+/// O22(b): the `notice` of a `lane-restart start --json` line, the words the lane was given when its channel was
+/// not expected to connect. Logged by the service so a deaf start is visible there too.
+pub fn start_notice(line: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
+    let n = v.get("notice")?.as_str()?;
+    (!n.is_empty()).then(|| n.to_string())
+}
+
+/// Takes the channel notices given to started lanes since the last call.
+pub fn take_start_notices() -> Vec<String> {
+    NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
 /// Takes the refusal details noted by starts since the last call.
@@ -707,7 +722,17 @@ impl Mechanism for LaneRestartMechanism {
                 if let Some(d) = start_detail(line) {
                     NOTES.with(|n| n.borrow_mut().push(format!("role={role} {d}")));
                 }
-                map_start_json(line)
+                let mapped = map_start_json(line);
+                // Only a start that went through says the lane was GIVEN the notice, and it is logged as a
+                // notice, not as a refusal (the log prefixes `start refused:` on `NOTES`).
+                if matches!(mapped, MechResult::Started | MechResult::AwaitingDialog) {
+                    if let Some(d) = start_notice(line) {
+                        NOTICES.with(|n| {
+                            n.borrow_mut().push(format!("role={role} lane told: {d}"));
+                        });
+                    }
+                }
+                mapped
             }
             None => MechResult::Failed("unparsable-output".into()),
         }

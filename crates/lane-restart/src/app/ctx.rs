@@ -10,6 +10,13 @@
 //! directory of its own.
 
 use crate::approvals::{default_reader, RepoReader};
+
+/// O22(a): each `synapse list` read of a launcher start's preflight. With the claim this keeps the preflight's worst case
+/// (epoch read, online read, re-check, claim, verify) near 47 s, inside the launcher's 110 s child deadline.
+const LIST_TIMEOUT: Duration = Duration::from_secs(8);
+/// O22(a): the one `synapse claim`. `synapse claim` takes the role over from any holder and has no offline-only form,
+/// so the caller re-reads the online flag right before it and verifies the role after it.
+const CLAIM_TIMEOUT: Duration = Duration::from_secs(15);
 use crate::disk::{GuardOk, Refusal};
 use crate::facts::{SysinfoFacts, SystemFacts};
 use crate::host::HostOutcome;
@@ -60,6 +67,8 @@ struct LaneNewWorld {
 }
 
 type RosterEpoch = Box<dyn Fn(&std::path::Path, &str) -> Result<Option<u64>, String>>;
+type RosterOnline = Box<dyn Fn(&std::path::Path, &str) -> Result<Option<bool>, String>>;
+type RoleClaim = Box<dyn Fn(&std::path::Path, &str) -> Result<(), String>>;
 
 pub(crate) struct Ctx {
     /// The lane state directory. For the real `Ctx` this is `lane_restart::state_dir()`.
@@ -107,6 +116,10 @@ pub(crate) struct Ctx {
     presence: Option<Box<dyn Fn() -> crate::spec_audit::PresenceMap>>,
     /// `None`: ask the daemon through `synapse list` under the lane's own home (`epoch_check`).
     roster_epoch: Option<RosterEpoch>,
+    /// `None`: `synapse list` under the lane's own home (O22(a)).
+    roster_online: Option<RosterOnline>,
+    /// `None`: `synapse claim --role <role>` under the lane's own home (O22(a)).
+    role_claim: Option<RoleClaim>,
 }
 
 impl Ctx {
@@ -142,6 +155,8 @@ impl Ctx {
             disk: None,
             presence: None,
             roster_epoch: None,
+            roster_online: None,
+            role_claim: None,
         }
     }
 
@@ -272,10 +287,54 @@ impl Ctx {
             None => {
                 let mut c = std::process::Command::new("synapse");
                 c.arg("list").env("SYNAPSE_HOME", home);
-                let out = crate::lane_new_host::run_limited(c, Duration::from_secs(30))?;
+                let out = crate::lane_new_host::run_limited(c, LIST_TIMEOUT)?;
                 crate::lane_new_host::epoch_from_list(&out, role)
             }
         }
+    }
+
+    /// O22(a): the role's online flag in the roster as seen from `home` (read-only, never `--role`).
+    pub(crate) fn roster_online(
+        &self,
+        home: &std::path::Path,
+        role: &str,
+    ) -> Result<Option<bool>, String> {
+        match &self.roster_online {
+            Some(f) => f(home, role),
+            None => {
+                let mut c = std::process::Command::new("synapse");
+                c.arg("list").env("SYNAPSE_HOME", home);
+                let out = crate::lane_new_host::run_limited(c, LIST_TIMEOUT)?;
+                let cached = crate::epoch_check::cached_global_id(home, role);
+                crate::epoch_check::online_from_list(&out, role, cached.as_deref())
+            }
+        }
+    }
+
+    /// O22(a): claims `role` from the lane's own `home`. One try: the caller logs a failure.
+    pub(crate) fn claim_role(&self, home: &std::path::Path, role: &str) -> Result<(), String> {
+        match &self.role_claim {
+            Some(f) => f(home, role),
+            None => {
+                let mut c = std::process::Command::new("synapse");
+                c.args(["claim", "--role", role]).env("SYNAPSE_HOME", home);
+                crate::lane_new_host::run_limited(c, CLAIM_TIMEOUT).map(|_| ())
+            }
+        }
+    }
+
+    /// Test only: this online reader instead of running `synapse list`.
+    #[cfg(test)]
+    pub(crate) fn with_roster_online(mut self, f: RosterOnline) -> Self {
+        self.roster_online = Some(f);
+        self
+    }
+
+    /// Test only: this claim instead of running `synapse claim`.
+    #[cfg(test)]
+    pub(crate) fn with_role_claim(mut self, f: RoleClaim) -> Self {
+        self.role_claim = Some(f);
+        self
     }
 
     /// Test only: this roster reader instead of running `synapse list`.
@@ -573,6 +632,12 @@ impl Ctx {
             free_memory_gb: None,
             disk: Some(Box::new(|_| Ok(roomy_disk()))),
             roster_epoch: Some(Box::new(|_, _| {
+                Err("no daemon in a capture context".to_string())
+            })),
+            roster_online: Some(Box::new(|_, _| {
+                Err("no daemon in a capture context".to_string())
+            })),
+            role_claim: Some(Box::new(|_, _| {
                 Err("no daemon in a capture context".to_string())
             })),
             presence: Some(Box::new(|| {

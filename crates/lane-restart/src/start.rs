@@ -18,9 +18,7 @@
 
 use crate::duplicate::{self, DuplicateRefusal};
 use crate::facts::SystemFacts;
-use crate::launch::{
-    launch_and_wait_with, prepare_launch_for, LaunchSpec, LivenessTiming, SpawnFn,
-};
+use crate::launch::{prepare_launch_for, LaunchSpec, LivenessTiming, SpawnFn};
 use crate::permission_mode::PermissionMode;
 use crate::relaunch::{valid_identifier, RelaunchError, RelaunchOutcome, StateReader};
 use crate::spec::{
@@ -409,6 +407,7 @@ impl std::fmt::Display for StartRefusal {
 
 /// A start that passed every check: nothing has been spawned yet.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StartPlan {
     /// What a launch reads: model in the argv, permission mode `auto`.
     pub launch: LaunchSpec,
@@ -428,6 +427,9 @@ pub struct StartPlan {
     /// The mail-waiting signal id when the LAUNCHER started this lane: the first prompt then tells the
     /// lane to fetch its inbox first. `None` for a person or a restart (the generic prompt).
     pub wake_signal: Option<String>,
+    /// O22(b): set by `start` when the lane's Synapse channel is not expected to connect; appended to a
+    /// launcher-started lane's first prompt. `None` from `plan_start`.
+    pub channel_notice: Option<String>,
 }
 
 /// Every check, in the order of 14.5; nothing is spawned or written.
@@ -519,6 +521,7 @@ pub fn plan_start(
         spec: effective,
         healed,
         wake_signal,
+        channel_notice: None,
     })
 }
 
@@ -567,7 +570,7 @@ pub fn execute_start(
     on_awaiting: &mut dyn FnMut(),
 ) -> Result<StartResult, RelaunchError> {
     let started = std::time::Instant::now();
-    let outcome = launch_and_wait_with(
+    let outcome = crate::launch::launch_and_wait_noticed(
         facts,
         state_reader,
         &plan.launch,
@@ -575,7 +578,7 @@ pub fn execute_start(
         timing,
         &plan.model,
         None,
-        plan.wake_signal.as_deref(),
+        (plan.wake_signal.as_deref(), plan.channel_notice.as_deref()),
         spawn,
         sleep,
         on_awaiting,

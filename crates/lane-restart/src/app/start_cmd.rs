@@ -24,11 +24,13 @@ struct Outcome<'a> {
     requested_by: String,
     caller_role: Option<String>,
     reason_for_log: String,
+    /// O22(b): the channel notice this start gave the lane, reported in the `--json` line.
+    notice: std::cell::RefCell<Option<String>>,
 }
 
 impl Outcome<'_> {
     /// `spawned` is whether a spawn was attempted: what the launcher caps count. `--json`:
-    /// `{role,outcome,reason[,launch_to_live_secs]}`; the human lines stay on stderr and the exit
+    /// `{role,outcome,reason[,launch_to_live_secs][,detail][,notice]}` (`notice`: O22(b), only when the lane was told its channel may not connect); the human lines stay on stderr and the exit
     /// codes do not change.
     #[allow(clippy::too_many_arguments)]
     fn finish(
@@ -66,6 +68,9 @@ impl Outcome<'_> {
             if let Some(s) = secs {
                 v["launch_to_live_secs"] = s.into();
             }
+            if let Some(n) = self.notice.borrow().as_deref() {
+                v["notice"] = n.into();
+            }
             ctx.outln(&v.to_string());
         }
     }
@@ -89,24 +94,33 @@ impl Outcome<'_> {
 
 /// O19(a): the roster epoch beside the lane home's cached epoch, printed and returned as a ledger
 /// suffix. Never blocks a start: any part that cannot be read just says so.
-fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan) -> String {
+fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan, launcher: bool) -> (String, Option<String>) {
     let role = plan.launch.role.to_string();
     let Some(cfg) = crate::spec_synapse::mcp_config_arg(&plan.argv) else {
-        return String::new();
+        return (String::new(), None);
     };
     let home = std::fs::read_to_string(cfg)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| crate::spec_audit::mcp_home(&v));
     let Some(home) = home else {
-        return String::new();
+        return (String::new(), None);
     };
     let home = std::path::PathBuf::from(home);
+    let mut notice = None;
     let msg = match (
         crate::epoch_check::cached_epoch(&home, &role),
         ctx.roster_epoch(&home, &role),
     ) {
-        (Ok(c), Ok(r)) => crate::epoch_check::note(&role, c, r).0,
+        (Ok(c), Ok(r)) => {
+            let mut m = crate::epoch_check::note(&role, c, r).0;
+            if launcher && matches!((c, r), (Some(c), Some(r)) if c < r) {
+                let (note, n) = reclaim_note(ctx, &home, &role, c, r);
+                m.push_str(&note);
+                notice = n;
+            }
+            m
+        }
         (c, r) => format!(
             "synapse epoch for {role}: not compared (cached: {}; roster: {})",
             c.map_or_else(|e| e, |_| "ok".to_string()),
@@ -114,7 +128,77 @@ fn epoch_note(ctx: &mut Ctx, plan: &start::StartPlan) -> String {
         ),
     };
     ctx.errln(&format!("lane-restart start: {msg}"));
-    format!(" [{msg}]")
+    (format!(" [{msg}]"), notice)
+}
+
+/// O22(a) (PM ruling 2026-11-24): the cache is behind the roster on a launcher start. Claim from the lane home only
+/// when the role is read OFFLINE; an online role is never claimed over. Every outcome is said, never silent.
+fn reclaim_note(
+    ctx: &Ctx,
+    home: &std::path::Path,
+    role: &str,
+    cached: Option<u64>,
+    roster: Option<u64>,
+) -> (String, Option<String>) {
+    let notice = |why: &str| {
+        Some(format!(
+            "NOTICE: your Synapse channel may not connect ({why}). Fetch your inbox with the CLI now and do not wait for a channel event; if the mail names work, do it, and tell your cluster PM that this start had no channel."
+        ))
+    };
+    let online = match ctx.roster_online(home, role) {
+        Ok(o) => o,
+        Err(e) => {
+            return (
+                format!("; not reclaimed: online state unread ({e})"),
+                notice("the launcher could not check whether the role is held"),
+            )
+        }
+    };
+    if !crate::epoch_check::should_reclaim(cached, roster, online, true) {
+        return match online {
+            Some(true) => (
+                format!("; not reclaimed: {role} is online, an online role is never claimed over"),
+                notice("the role is held by another session"),
+            ),
+            _ => (
+                format!("; not reclaimed: {role} is not read offline"),
+                notice("the role was not read offline"),
+            ),
+        };
+    }
+    // `synapse claim` takes a role from any holder and has no offline-only form: re-read the flag right before it, so
+    // the window for another session to come online is one list-to-claim round trip, and say so if it did.
+    match ctx.roster_online(home, role) {
+        Ok(Some(false)) => {}
+        other => {
+            return (
+                format!("; not reclaimed: {role} was offline a moment ago but is now {other:?}"),
+                notice("the role changed state while the launcher was checking it"),
+            )
+        }
+    }
+    let claimed = ctx.claim_role(home, role).and_then(|()| {
+        // A zero exit is not proof: the role must be listed, once, under this home's identity.
+        match ctx.roster_online(home, role) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("claim exited 0 but the roster does not list the role".to_string()),
+            Err(e) => Err(format!(
+                "claim exited 0 but the roster could not confirm it: {e}"
+            )),
+        }
+    });
+    match claimed {
+        Ok(()) => (
+            format!(
+                "; reclaimed {role} from its lane home (it was offline, cache behind the roster)"
+            ),
+            None,
+        ),
+        Err(e) => (
+            format!("; reclaim of {role} FAILED: {e}"),
+            notice("the launcher's claim from the lane home failed"),
+        ),
+    }
 }
 
 pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
@@ -136,6 +220,7 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     .take(start::REASON_MAX_CHARS)
     .collect();
     let out = Outcome {
+        notice: std::cell::RefCell::new(None),
         args: &args,
         requested_by,
         caller_role: caller_role.clone(),
@@ -158,7 +243,7 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
             Err(refusal) => return out.refuse(ctx, &refusal),
         }
     };
-    let plan = match start::plan_start(&state, &req, caller, &*facts) {
+    let mut plan = match start::plan_start(&state, &req, caller, &*facts) {
         Ok(p) => p,
         Err(refusal) => return out.refuse(ctx, &refusal),
     };
@@ -245,7 +330,15 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
     } else {
         None
     };
-    let pin_note = format!("{pin_note}{}", epoch_note(ctx, &plan));
+    let (epoch_text, channel_notice) = epoch_note(ctx, &plan, is_launcher);
+    let pin_note = format!("{pin_note}{epoch_text}");
+    if let Some(n) = &channel_notice {
+        ctx.errln(&format!(
+            "lane-restart start: channel notice given to the lane: {n}"
+        ));
+    }
+    *out.notice.borrow_mut() = channel_notice.clone();
+    plan.channel_notice = channel_notice;
     ctx.errln(&format!(
         "lane-restart start: launching {} on {}...",
         args.role, plan.model
