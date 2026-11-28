@@ -17,7 +17,7 @@ pub(super) fn run(
     by_lane: bool,
 ) -> ExitCode {
     if let Some(s) = since {
-        match ledger::parse_since(&s, chrono::Utc::now()) {
+        match ledger::parse_since(&s, lane_state::timestamp::Timestamp::now()) {
             Ok(t) => f.since = Some(t),
             Err(e) => {
                 ctx.errln(&format!("lane-restart ledger: {e}"));

@@ -320,7 +320,7 @@ pub(super) fn run(ctx: &mut Ctx, args: StartArgs) -> ExitCode {
         if let Err(refusal) = crate::launcher_gate::decide(
             crate::launcher_gate::load_rows(&state.join("restart.log")),
             &args.role,
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             floor,
             ctx.free_memory_gb(),
         ) {

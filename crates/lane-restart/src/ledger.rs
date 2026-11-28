@@ -7,14 +7,14 @@
 //! not the log, not a cache. A line that is not an entry is **counted and reported**, never
 //! skipped silently, and unknown keys are ignored (the log grows fields additively).
 
-use chrono::{DateTime, Duration, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// One line of `restart.log`, as written by [`crate::log::append`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub requested_by: String,
     pub role: String,
     pub outcome: String,
@@ -46,7 +46,7 @@ pub struct Row {
 pub struct Filter {
     pub role: Option<String>,
     pub kind: Option<String>,
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<Timestamp>,
     /// `Some(true)` only entries that acted, `Some(false)` only refusals.
     pub acted: Option<bool>,
     /// Keep only the newest N after the other filters.
@@ -89,25 +89,25 @@ pub fn read(path: &Path) -> Result<Read, String> {
 }
 
 /// `2026-10-14T10:00:00Z` (RFC 3339), or a span back from `now`: `30m`, `2h`, `1d`.
-pub fn parse_since(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
-    if let Ok(t) = DateTime::parse_from_rfc3339(s) {
-        return Ok(t.with_timezone(&Utc));
+pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
+    if let Ok(t) = s.parse::<Timestamp>() {
+        return Ok(t);
     }
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
     let n: i64 = num
         .parse()
         .map_err(|_| format!("--since takes an RFC 3339 time or a span like 30m, 2h, 1d: {s:?}"))?;
     let span = match unit {
-        "m" => Duration::minutes(n),
-        "h" => Duration::hours(n),
-        "d" => Duration::days(n),
+        "m" => n.saturating_mul(60),
+        "h" => n.saturating_mul(3600),
+        "d" => n.saturating_mul(86_400),
         _ => {
             return Err(format!(
                 "--since takes an RFC 3339 time or a span like 30m, 2h, 1d: {s:?}"
             ))
         }
     };
-    Ok(now - span)
+    Ok(now.plus_secs(-span))
 }
 
 /// The rows that pass `f`, oldest first.
@@ -163,8 +163,7 @@ pub fn render(shown: &[&Row], total: usize, unreadable: &[(usize, String)]) -> S
     for r in shown {
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\n",
-            r.timestamp
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            r.timestamp.to_rfc3339(),
             r.role,
             r.kind.as_deref().unwrap_or("restart"),
             match r.caller_role.as_deref() {
@@ -200,7 +199,6 @@ pub fn render(shown: &[&Row], total: usize, unreadable: &[(usize, String)]) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn line(ts: &str, role: &str, kind: Option<&str>, acted: bool, outcome: &str) -> String {
         let kind = kind.map_or(String::new(), |k| format!(r#","kind":"{k}""#));
@@ -287,7 +285,7 @@ mod tests {
             }),
             vec!["b:start"]
         );
-        let since = Utc.with_ymd_and_hms(2026, 10, 14, 10, 0, 0).unwrap();
+        let since = Timestamp::from_unix_secs(1_791_972_000).unwrap();
         assert_eq!(
             ids(Filter {
                 since: Some(since),
@@ -306,17 +304,14 @@ mod tests {
 
     #[test]
     fn since_takes_a_time_or_a_span_and_refuses_anything_else() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 14, 12, 0, 0).unwrap();
+        let now = Timestamp::from_unix_secs(1_791_979_200).unwrap();
         assert_eq!(
             parse_since("2026-10-14T10:00:00Z", now).unwrap(),
-            Utc.with_ymd_and_hms(2026, 10, 14, 10, 0, 0).unwrap()
+            Timestamp::from_unix_secs(1_791_972_000).unwrap()
         );
-        assert_eq!(
-            parse_since("30m", now).unwrap(),
-            now - Duration::minutes(30)
-        );
-        assert_eq!(parse_since("2h", now).unwrap(), now - Duration::hours(2));
-        assert_eq!(parse_since("1d", now).unwrap(), now - Duration::days(1));
+        assert_eq!(parse_since("30m", now).unwrap(), now.plus_secs(-30 * 60));
+        assert_eq!(parse_since("2h", now).unwrap(), now.plus_secs(-2 * 3600));
+        assert_eq!(parse_since("1d", now).unwrap(), now.plus_secs(-86_400));
         for bad in ["", "h", "5", "5x", "yesterday"] {
             assert!(parse_since(bad, now).is_err(), "{bad:?} accepted");
         }

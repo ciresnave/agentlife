@@ -18,7 +18,7 @@
 use crate::facts::SystemFacts;
 use crate::ledger::Row;
 use crate::start::{is_launcher_caller, StartRefusal};
-use chrono::{DateTime, Duration, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::{Path, PathBuf};
 
 /// OverMind policy section 2 rule 6 (proposals, not measurements): spawns per role per hour.
@@ -127,15 +127,11 @@ fn is_launcher_spawn(r: &Row) -> bool {
 
 /// Whether a spawn row spends the daily cap: not when its session did not run. A row from before
 /// `ran` (no `ran`, a result other than a dialog wait) counts as it always did.
-fn spends_daily(
-    r: &Row,
-    now: DateTime<Utc>,
-    settled_ran: &std::collections::HashSet<&str>,
-) -> bool {
+fn spends_daily(r: &Row, now: Timestamp, settled_ran: &std::collections::HashSet<&str>) -> bool {
     match r.ran {
         Some(ran) => ran,
         None if r.result.as_deref() == Some("started:awaiting-dialog") => {
-            now - r.timestamp < Duration::seconds(SETTLE_SECS)
+            now.secs_since(r.timestamp) < SETTLE_SECS
                 || r.signal_id
                     .as_deref()
                     .is_some_and(|s| settled_ran.contains(s))
@@ -146,9 +142,9 @@ fn spends_daily(
 
 /// Counts launcher spawns in the last hour and day ending at `now`. A row stamped in the future
 /// counts (a skewed clock must not hide spawns).
-pub fn count_spawns(rows: &[Row], role: &str, now: DateTime<Utc>) -> SpawnCounts {
-    let hour = now - Duration::hours(1);
-    let day = now - Duration::hours(24);
+pub fn count_spawns(rows: &[Row], role: &str, now: Timestamp) -> SpawnCounts {
+    let hour = now.plus_secs(-3600);
+    let day = now.plus_secs(-86_400);
     let mut c = SpawnCounts::default();
     let settled_ran: std::collections::HashSet<&str> = rows
         .iter()
@@ -384,7 +380,7 @@ pub fn take_restore_lock(
 pub fn decide(
     rows: Result<Vec<Row>, String>,
     role: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
     floor_gb: Result<f64, String>,
     free_gb: Option<f64>,
 ) -> Result<(), StartRefusal> {
@@ -407,16 +403,15 @@ pub fn decide(
 mod tests {
     use super::*;
     use crate::testing::{log, RecordingFacts};
-    use chrono::TimeZone;
     use tempfile::tempdir;
 
-    fn now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 16, 12, 0, 0).unwrap()
+    fn now() -> Timestamp {
+        Timestamp::from_unix_secs(1_792_152_000).unwrap()
     }
 
     fn row(role: &str, mins_ago: i64, caller: Option<&str>, spawned: Option<bool>) -> Row {
         Row {
-            timestamp: now() - Duration::minutes(mins_ago),
+            timestamp: now().plus_secs(-mins_ago * 60),
             requested_by: caller.unwrap_or("pm").to_string(),
             role: role.to_string(),
             outcome: "x".to_string(),
