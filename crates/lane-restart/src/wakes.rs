@@ -8,7 +8,7 @@
 //! entry cannot outlive the line that made it.
 
 use crate::waits::Wait;
-use chrono::{DateTime, Duration, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -25,8 +25,8 @@ pub const SIGNAL_MARK: &str = "wake-";
 pub struct Wake {
     pub role: String,
     pub event: String,
-    pub wake_utc: DateTime<Utc>,
-    pub registered_utc: DateTime<Utc>,
+    pub wake_utc: Timestamp,
+    pub registered_utc: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ impl Registry {
     }
 
     /// Replace every entry of `role` with `waits` (the role's whole truth).
-    pub fn replace_role(&mut self, role: &str, waits: &[Wait], now: DateTime<Utc>) {
+    pub fn replace_role(&mut self, role: &str, waits: &[Wait], now: Timestamp) {
         self.wakes.retain(|w| w.role != role);
         for w in waits {
             let dup = self
@@ -99,13 +99,13 @@ impl Registry {
     }
 
     /// The lane is up: drop its entries whose time has passed.
-    pub fn drop_passed(&mut self, role: &str, now: DateTime<Utc>) {
+    pub fn drop_passed(&mut self, role: &str, now: Timestamp) {
         self.wakes
             .retain(|w| !(w.role == role && w.wake_utc <= now));
     }
 
     /// Remove one entry once the launcher has dealt with it.
-    pub fn consume(&mut self, role: &str, event: &str, wake_utc: DateTime<Utc>) {
+    pub fn consume(&mut self, role: &str, event: &str, wake_utc: Timestamp) {
         self.wakes
             .retain(|w| !(w.role == role && w.event == event && w.wake_utc == wake_utc));
     }
@@ -117,7 +117,7 @@ pub fn register_from_handoff(
     state_dir: &Path,
     role: &str,
     text: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<usize, String> {
     let waits: Vec<Wait> = crate::waits::parse(text)
         .into_iter()
@@ -158,12 +158,12 @@ pub fn jitter_secs(role: &str) -> i64 {
 }
 
 /// When the launcher acts on `w`: its time plus the role's jitter.
-pub fn due_at(w: &Wake) -> DateTime<Utc> {
-    w.wake_utc + Duration::seconds(jitter_secs(&w.role))
+pub fn due_at(w: &Wake) -> Timestamp {
+    w.wake_utc.plus_secs(jitter_secs(&w.role))
 }
 
 /// The wakes due at `now`, earliest due time first (ties by role, then event).
-pub fn due(reg: &Registry, now: DateTime<Utc>) -> Vec<&Wake> {
+pub fn due(reg: &Registry, now: Timestamp) -> Vec<&Wake> {
     let mut v: Vec<&Wake> = reg.wakes.iter().filter(|w| due_at(w) <= now).collect();
     v.sort_by(|a, b| (due_at(a), &a.role, &a.event).cmp(&(due_at(b), &b.role, &b.event)));
     v
@@ -191,13 +191,13 @@ pub fn is_wake_signal(signal_id: &str, role: &str) -> bool {
 pub struct Row {
     pub role: String,
     pub event: String,
-    pub wake_utc: DateTime<Utc>,
-    pub due_utc: DateTime<Utc>,
+    pub wake_utc: Timestamp,
+    pub due_utc: Timestamp,
     pub state: &'static str,
 }
 
 /// Every entry with its state: `role-running`, `due-waiting-for-launcher` or `pending`; soonest first.
-pub fn readout(reg: &Registry, now: DateTime<Utc>, running: &dyn Fn(&str) -> bool) -> Vec<Row> {
+pub fn readout(reg: &Registry, now: Timestamp, running: &dyn Fn(&str) -> bool) -> Vec<Row> {
     let mut rows: Vec<Row> = reg
         .wakes
         .iter()
@@ -223,8 +223,8 @@ pub fn readout(reg: &Registry, now: DateTime<Utc>, running: &dyn Fn(&str) -> boo
 mod tests {
     use super::*;
 
-    fn t(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    fn t(s: &str) -> Timestamp {
+        s.parse::<Timestamp>().unwrap()
     }
 
     fn wait(event: &str, wake: &str) -> Wait {
@@ -354,9 +354,9 @@ WAIT: b | check: true | wake: 2026-11-24T02:00:00Z
         let due_at_ = due_at(&r.wakes[0]);
         assert_eq!(
             due_at_,
-            t("2026-11-24T01:00:00Z") + Duration::seconds(jitter_secs("a"))
+            t("2026-11-24T01:00:00Z").plus_secs(jitter_secs("a"))
         );
-        assert!(due(&r, due_at_ - Duration::seconds(1)).is_empty());
+        assert!(due(&r, due_at_.plus_secs(-1)).is_empty());
         assert_eq!(due(&r, due_at_).len(), 1);
     }
 

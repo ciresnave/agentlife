@@ -75,7 +75,14 @@ fn ctx(roots: &Roots, caller: Option<&'static str>) -> Ctx {
 }
 
 fn lane_spec(r: &Roots, role: &str) {
-    let l = crate::lane_new::build_spec(r, role, "x", "sonnet", chrono::Utc::now()).unwrap();
+    let l = crate::lane_new::build_spec(
+        r,
+        role,
+        "x",
+        "sonnet",
+        lane_state::timestamp::Timestamp::now(),
+    )
+    .unwrap();
     crate::spec::write_atomic(&r.state_dir, &l).unwrap();
 }
 

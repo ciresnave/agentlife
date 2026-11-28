@@ -24,7 +24,7 @@ use crate::spec::{self, find_handoff, SpecFile, SpecState, SpecStore, StopKind, 
 use crate::start::{validate_reason, CallerError, PM_ROLE};
 use crate::state::LaneState;
 use crate::stop::stop_lane;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::Path;
 use std::time::Duration;
 
@@ -60,15 +60,15 @@ pub enum StopRefusal {
     /// The HANDOFF is older than the session being stopped, so it is not this session's.
     HandoffBeforeSession {
         path: String,
-        modified: DateTime<Utc>,
+        modified: Timestamp,
         session_start_secs: u64,
     },
     /// The HANDOFF was written after the lane asserted idle: the lane did more work after
     /// claiming it had none.
     HandoffAfterIdle {
         path: String,
-        modified: DateTime<Utc>,
-        claimed: DateTime<Utc>,
+        modified: Timestamp,
+        claimed: Timestamp,
     },
     /// `--self --hard`: a lane cannot hard-stop itself (216). A hard stop is the PM's or a
     /// person's, because it is the one a launcher must never undo.
@@ -170,12 +170,12 @@ pub fn check_handoff(
     cwd: &str,
     role: &str,
     session_start_secs: u64,
-    idle_claimed_at: Option<DateTime<Utc>>,
+    idle_claimed_at: Option<Timestamp>,
 ) -> Result<String, StopRefusal> {
     let (path, modified) = find_handoff(cwd, role).ok_or_else(|| StopRefusal::NoHandoff {
         cwd: cwd.to_string(),
     })?;
-    if modified.timestamp().max(0) as u64 <= session_start_secs.saturating_sub(1) {
+    if modified.unix_secs().max(0) as u64 <= session_start_secs.saturating_sub(1) {
         // `<=` on (start - 1): a HANDOFF written in the very second the process started is
         // not distinguishable from one written just before it at whole-second precision.
         return Err(StopRefusal::HandoffBeforeSession {
@@ -243,7 +243,7 @@ pub fn plan_stop(
         req.reason,
         req.self_stop,
         req.kind,
-        crate::ts_compat::ToChrono::to_chrono(facts.now()),
+        facts.now(),
         policy_default,
     )
 }
@@ -273,7 +273,7 @@ pub fn build_stop_plan(
     reason: &str,
     self_stop: bool,
     kind: StopKind,
-    now: DateTime<Utc>,
+    now: Timestamp,
     policy_default: &str,
 ) -> Result<StopPlan, StopRefusal> {
     // The recorded spec's launch flags win over the running session's, as for a restart: a
@@ -281,8 +281,7 @@ pub fn build_stop_plan(
     let state = with_recorded_flags(state, dir);
     // Another lane's idle claim is `updated_at` here: the idle gate has already required
     // `no_background_shells`, which only the assert-idle event sets and every later turn clears.
-    let idle_claimed_at =
-        (!self_stop).then_some(crate::ts_compat::ToChrono::to_chrono(state.updated_at));
+    let idle_claimed_at = (!self_stop).then_some(state.updated_at);
     let handoff_path = check_handoff(
         &state.cwd,
         &state.role,
@@ -362,7 +361,7 @@ pub fn execute_stop(
     stop_lane(facts, plan.state.pid, &plan.identity, sleep).map_err(StopError::Kill)?;
     let mut suspended = plan.stopping.clone();
     suspended.state = SpecState::Suspended;
-    suspended.written_at = crate::ts_compat::ToChrono::to_chrono(facts.now());
+    suspended.written_at = facts.now();
     let spec_warning = specs.write(&suspended).err().map(|e| e.to_string());
     Ok(StopDone { spec_warning })
 }
@@ -372,7 +371,6 @@ mod tests {
     use super::*;
     use crate::spec::DirSpecStore;
     use crate::testing::{log, state_at, RecordingFacts};
-    use chrono::TimeZone;
     use std::cell::RefCell;
     use std::rc::Rc;
     use tempfile::tempdir;
@@ -397,13 +395,13 @@ mod tests {
     fn write_handoff(cwd: &Path, secs_after_start: i64) {
         let p = cwd.join("HANDOFF.md");
         std::fs::write(&p, "state\n").unwrap();
-        let when = Utc.timestamp_opt(1_000 + secs_after_start, 0).unwrap();
+        let when = Timestamp::from_unix(1_000 + secs_after_start, 0).unwrap();
         let f = std::fs::File::options().write(true).open(&p).unwrap();
         f.set_modified(when.into()).unwrap();
     }
 
     fn plan_for(state: LaneState, self_stop: bool) -> Result<StopPlan, StopRefusal> {
-        let now = Utc.timestamp_opt(5_000, 0).unwrap();
+        let now = Timestamp::from_unix(5_000, 0).unwrap();
         // the spec directory is the state's cwd in these tests: a test that wants a recorded spec
         // writes it there
         let dir = std::path::PathBuf::from(&state.cwd);
@@ -449,7 +447,7 @@ mod tests {
         let d = tempdir().unwrap();
         let mut s = state_in(d.path());
         // Claimed idle at 1_100; the HANDOFF was touched at 1_500.
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_100, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_100, 0).unwrap();
         write_handoff(d.path(), 500);
         let r = plan_for(s, false);
         assert!(
@@ -462,7 +460,7 @@ mod tests {
     fn a_handoff_between_session_start_and_the_idle_claim_passes() {
         let d = tempdir().unwrap();
         let mut s = state_in(d.path());
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_900, 0).unwrap();
         write_handoff(d.path(), 500);
         let plan = plan_for(s, false).expect("a fresh HANDOFF before the claim is allowed");
         assert_eq!(plan.stopping.state, SpecState::Stopping);
@@ -476,7 +474,7 @@ mod tests {
     fn a_self_stop_has_no_idle_claim_to_compare_but_still_needs_a_fresh_handoff() {
         let d = tempdir().unwrap();
         let mut s = state_in(d.path());
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_100, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_100, 0).unwrap();
         write_handoff(d.path(), 500); // after `updated_at`: fine for --self
         assert!(plan_for(s.clone(), true).is_ok());
         write_handoff(d.path(), -600);
@@ -493,7 +491,7 @@ mod tests {
         let d = tempdir().unwrap();
         write_handoff(d.path(), 100);
         let mut s = state_in(d.path());
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_900, 0).unwrap();
         s.launch_args = Some(vec!["claude".into(), "--model".into(), "opus".into()]);
         let plan = plan_for(s, false).unwrap();
         assert_eq!(plan.stopping.model, "sonnet");
@@ -506,7 +504,7 @@ mod tests {
         let d = tempdir().unwrap();
         write_handoff(d.path(), 100);
         let mut s = state_in(d.path());
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_900, 0).unwrap();
         s.launch_args = Some(vec![
             "claude".into(),
             "--model".into(),
@@ -523,7 +521,7 @@ mod tests {
     fn ready_plan(dir: &Path) -> StopPlan {
         write_handoff(dir, 100);
         let mut s = state_in(dir);
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_900, 0).unwrap();
         plan_for(s, false).unwrap()
     }
 
@@ -809,7 +807,7 @@ mod tests {
         let d = tempdir().unwrap();
         write_handoff(d.path(), 100);
         let mut s = state_in(d.path());
-        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
+        s.updated_at = Timestamp::from_unix(1_900, 0).unwrap();
         s.launch_args = Some(
             [
                 "claude",

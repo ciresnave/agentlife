@@ -20,7 +20,7 @@ fn write_spec(dir: &Path, role: &str, args: &[&str]) {
         handoff_path: None,
         handoff_mtime: None,
         state: spec::SpecState::Running,
-        written_at: Utc::now(),
+        written_at: Timestamp::now(),
         written_by: "test".into(),
         stopped_session_id: None,
         stopped_pid_start_secs: None,
@@ -59,7 +59,7 @@ fn lp(b: &mut Vec<u8>, x: &[u8]) {
 }
 
 /// A certificate in the known shape, expiring at `exp`.
-fn cert_pem(role: &str, exp: DateTime<Utc>) -> String {
+fn cert_pem(role: &str, exp: Timestamp) -> String {
     let mut b = Vec::new();
     lp(&mut b, b"synapse/agent-cert/v1");
     b.extend([0, 0, 0, 1, 1]);
@@ -69,8 +69,8 @@ fn cert_pem(role: &str, exp: DateTime<Utc>) -> String {
     lp(&mut b, format!("{role}@acct").as_bytes());
     lp(&mut b, &[1; 32]);
     lp(&mut b, &[2; 32]);
-    lp(&mut b, &(exp.timestamp_micros() - 1_000_000).to_be_bytes());
-    lp(&mut b, &exp.timestamp_micros().to_be_bytes());
+    lp(&mut b, &(exp.unix_micros() - 1_000_000).to_be_bytes());
+    lp(&mut b, &exp.unix_micros().to_be_bytes());
     format!(
         "-----BEGIN SYNAPSE AGENT CERT-----\n{}\n-----END SYNAPSE AGENT CERT-----\n",
         b64enc(&b)
@@ -78,7 +78,7 @@ fn cert_pem(role: &str, exp: DateTime<Utc>) -> String {
 }
 
 /// A lane with a spec, an mcp.json naming `home`, and (when `exp` is given) a certificate.
-fn lane(dir: &Path, home: &Path, role: &str, args: &[&str], exp: Option<DateTime<Utc>>) {
+fn lane(dir: &Path, home: &Path, role: &str, args: &[&str], exp: Option<Timestamp>) {
     write_spec(dir, role, args);
     std::fs::write(
         dir.join(format!("{role}.mcp.json")),
@@ -103,13 +103,13 @@ fn none() -> PresenceMap {
     Err("not asked".into())
 }
 
-fn sev(rows: &[AuditRow], role: &str, now: DateTime<Utc>) -> Vec<(Severity, String)> {
+fn sev(rows: &[AuditRow], role: &str, now: Timestamp) -> Vec<(Severity, String)> {
     findings(rows.iter().find(|r| r.role == role).unwrap(), now)
 }
 
 #[test]
 fn the_certificate_expiry_is_read_back_exactly_and_a_wrong_role_or_shape_is_unreadable() {
-    let exp = DateTime::from_timestamp_micros(1_790_000_000_123_456).unwrap();
+    let exp = Timestamp::from_unix_micros(1_790_000_000_123_456).unwrap();
     let pem = cert_pem("kiss", exp);
     assert_eq!(cert_expiry(&pem, "kiss"), Some(exp));
     assert_eq!(
@@ -147,7 +147,7 @@ fn the_expiry_field_of_the_real_2026_11_04_certificate_reads_as_one_day_after_is
     }
     let pem = format!("-----BEGIN X-----\n{}\n-----END X-----", b64enc(&b));
     let exp = cert_expiry(&pem, "agentlife").unwrap();
-    assert_eq!(exp.timestamp_micros(), 0x00065f8822a6ce9f_i64);
+    assert_eq!(exp.unix_micros(), 0x00065f8822a6ce9f_i64);
     assert_eq!(exp.format("%Y-%m").to_string(), "2026-11");
     assert_eq!(
         (0x00065f8822a6ce9f_i64 - 0x00065f7404cf6e9f_i64) / 1_000_000 / 3600 / 24,
@@ -158,8 +158,8 @@ fn the_expiry_field_of_the_real_2026_11_04_certificate_reads_as_one_day_after_is
 #[test]
 fn each_launch_shape_is_classified_and_only_peers_only_or_no_channel_fails() {
     let (d, h) = (tempdir().unwrap(), tempdir().unwrap());
-    let now = Utc::now();
-    let ok = Some(now + chrono::Duration::days(10));
+    let now = Timestamp::now();
+    let ok = Some(now.plus_secs(864000));
     lane(d.path(), h.path(), "both", BOTH, ok);
     lane(d.path(), h.path(), "syn", SYN_ONLY, ok);
     lane(d.path(), h.path(), "peers", PEERS_ONLY, ok);
@@ -189,25 +189,13 @@ fn each_launch_shape_is_classified_and_only_peers_only_or_no_channel_fails() {
 #[test]
 fn a_missing_mcp_json_identity_home_or_certificate_fails_and_names_which() {
     let (d, h) = (tempdir().unwrap(), tempdir().unwrap());
-    let now = Utc::now();
+    let now = Timestamp::now();
     write_spec(d.path(), "nomcp", BOTH);
     lane(d.path(), h.path(), "nohome", BOTH, None);
     lane(d.path(), h.path(), "nocert", BOTH, None);
     std::fs::create_dir_all(h.path().join("roles").join("nocert")).unwrap();
-    lane(
-        d.path(),
-        h.path(),
-        "old",
-        BOTH,
-        Some(now - chrono::Duration::hours(1)),
-    );
-    lane(
-        d.path(),
-        h.path(),
-        "soon",
-        BOTH,
-        Some(now + chrono::Duration::hours(5)),
-    );
+    lane(d.path(), h.path(), "old", BOTH, Some(now.plus_secs(-3600)));
+    lane(d.path(), h.path(), "soon", BOTH, Some(now.plus_secs(18000)));
     let rows = audit(d.path(), &[], &none(), now);
     assert!(sev(&rows, "nomcp", now)[0].1.contains("no mcp.json"));
     assert!(sev(&rows, "nohome", now)
@@ -231,14 +219,8 @@ fn a_missing_mcp_json_identity_home_or_certificate_fails_and_names_which() {
 #[test]
 fn a_malformed_mcp_json_or_unreadable_spec_is_a_finding_not_a_crash() {
     let (d, h) = (tempdir().unwrap(), tempdir().unwrap());
-    let now = Utc::now();
-    lane(
-        d.path(),
-        h.path(),
-        "bad",
-        BOTH,
-        Some(now + chrono::Duration::days(9)),
-    );
+    let now = Timestamp::now();
+    lane(d.path(), h.path(), "bad", BOTH, Some(now.plus_secs(777600)));
     std::fs::write(d.path().join("bad.mcp.json"), "{nope").unwrap();
     std::fs::write(d.path().join("junk.launch.json"), "{nope").unwrap();
     let rows = audit(d.path(), &[], &none(), now);
@@ -261,10 +243,8 @@ fn presence_is_parsed_from_the_list_lines_and_stuck_mail_to_an_offline_role_warn
     assert!(!p["a"].online && p["b"].online);
     assert!(parse_presence("not json").is_err());
     let (d, h) = (tempdir().unwrap(), tempdir().unwrap());
-    let now = DateTime::parse_from_rfc3339("2026-11-04T20:00:00+00:00")
-        .unwrap()
-        .with_timezone(&Utc);
-    let e = Some(now + chrono::Duration::days(9));
+    let now = "2026-11-04T20:00:00+00:00".parse::<Timestamp>().unwrap();
+    let e = Some(now.plus_secs(777600));
     lane(d.path(), h.path(), "a", BOTH, e);
     lane(d.path(), h.path(), "b", BOTH, e);
     let rows = audit(d.path(), &[], &Ok(p.clone()), now);
@@ -279,8 +259,8 @@ fn presence_is_parsed_from_the_list_lines_and_stuck_mail_to_an_offline_role_warn
 #[test]
 fn naming_roles_audits_only_those_and_the_common_home_is_the_most_named() {
     let (d, h) = (tempdir().unwrap(), tempdir().unwrap());
-    let now = Utc::now();
-    let e = Some(now + chrono::Duration::days(9));
+    let now = Timestamp::now();
+    let e = Some(now.plus_secs(777600));
     lane(d.path(), h.path(), "x", BOTH, e);
     lane(d.path(), h.path(), "y", BOTH, e);
     let rows = audit(d.path(), &v(&["y"]), &none(), now);
@@ -299,7 +279,7 @@ fn account_key(home: &Path) {
     std::fs::write(d.join("account.key.pem"), "k").unwrap();
 }
 
-fn cert_findings(rows: &[AuditRow], role: &str, now: DateTime<Utc>) -> Vec<(Severity, String)> {
+fn cert_findings(rows: &[AuditRow], role: &str, now: Timestamp) -> Vec<(Severity, String)> {
     sev(rows, role, now)
         .into_iter()
         .filter(|f| f.1.starts_with("certificate"))
@@ -309,10 +289,10 @@ fn cert_findings(rows: &[AuditRow], role: &str, now: DateTime<Utc>) -> Vec<(Seve
 #[test]
 fn an_account_home_role_with_an_aged_certificate_is_info_and_a_role_only_home_still_fails() {
     let (d, full, only) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
-    let now = Utc::now();
+    let now = Timestamp::now();
     account_key(full.path());
-    let old = Some(now - chrono::Duration::hours(7));
-    let soon = Some(now + chrono::Duration::hours(2));
+    let old = Some(now.plus_secs(-25200));
+    let soon = Some(now.plus_secs(7200));
     lane(d.path(), full.path(), "fullold", BOTH, old);
     lane(d.path(), full.path(), "fullsoon", BOTH, soon);
     lane(d.path(), only.path(), "onlyold", BOTH, old);
@@ -337,14 +317,14 @@ fn an_account_home_role_with_an_aged_certificate_is_info_and_a_role_only_home_st
 #[test]
 fn an_info_finding_makes_neither_a_failing_nor_a_warning_row_and_a_missing_cert_still_fails() {
     let (d, full) = (tempdir().unwrap(), tempdir().unwrap());
-    let now = Utc::now();
+    let now = Timestamp::now();
     account_key(full.path());
     lane(
         d.path(),
         full.path(),
         "fullold",
         BOTH,
-        Some(now - chrono::Duration::hours(7)),
+        Some(now.plus_secs(-25200)),
     );
     lane(d.path(), full.path(), "nocert", BOTH, None);
     std::fs::create_dir_all(full.path().join("roles").join("nocert")).unwrap();

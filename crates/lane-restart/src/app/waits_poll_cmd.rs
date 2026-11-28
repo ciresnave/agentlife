@@ -36,7 +36,7 @@ pub(super) fn run(ctx: &mut Ctx, dry_run: bool) -> ExitCode {
             })
         })
         .collect();
-    let now = chrono::Utc::now();
+    let now = lane_state::timestamp::Timestamp::now();
     let due = waits_poll::poll(&subjects, now, ctx.runner());
     let mut ledger = Ledger::load(&state);
     let results = waits_poll::deliver(&due, &mut ledger, dry_run, &mut |role, text| {

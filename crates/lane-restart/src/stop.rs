@@ -43,7 +43,7 @@ pub fn stop_lane(
         .map_err(RelaunchError::Kill)?;
     sleep(SETTLE);
     Ok(Stopped {
-        launched_after_secs: launched_after(crate::ts_compat::ToChrono::to_chrono(facts.now())),
+        launched_after_secs: launched_after(facts.now()),
     })
 }
 
@@ -51,8 +51,8 @@ pub fn stop_lane(
 /// `now` minus the clock margin, never below zero. (The unsigned subtraction
 /// matters: the same expression in signed arithmetic wraps to a huge number
 /// for a clock within the margin of the epoch.)
-pub fn launched_after(now: chrono::DateTime<chrono::Utc>) -> u64 {
-    (now.timestamp().max(0) as u64).saturating_sub(CLOCK_MARGIN_SECS)
+pub fn launched_after(now: lane_state::timestamp::Timestamp) -> u64 {
+    (now.unix_secs().max(0) as u64).saturating_sub(CLOCK_MARGIN_SECS)
 }
 
 #[cfg(test)]
@@ -62,7 +62,6 @@ mod tests {
     use crate::relaunch::kill_and_relaunch_with;
     use crate::relaunch::RelaunchOutcome;
     use crate::testing::{log, state_at, RecordingFacts, ScriptedReader};
-    use chrono::TimeZone;
 
     fn identity() -> ProcessIdentity {
         ProcessIdentity {
@@ -81,7 +80,7 @@ mod tests {
         assert_eq!(slept, vec![SETTLE]);
         assert_eq!(
             stopped.launched_after_secs,
-            facts.now.timestamp() as u64 - CLOCK_MARGIN_SECS
+            facts.now.unix_secs() as u64 - CLOCK_MARGIN_SECS
         );
     }
 
@@ -104,7 +103,7 @@ mod tests {
     fn the_clock_margin_never_goes_below_zero() {
         let l = log();
         let mut facts = RecordingFacts::new(&l);
-        facts.now = chrono::Utc.timestamp_opt(3, 0).unwrap();
+        facts.now = lane_state::timestamp::Timestamp::from_unix(3, 0).unwrap();
         let s = stop_lane(&facts, 1, &identity(), &mut |_| {}).unwrap();
         assert_eq!(s.launched_after_secs, 0);
     }
@@ -521,7 +520,7 @@ mod tests {
             handoff_path: None,
             handoff_mtime: None,
             state: SpecState::Running,
-            written_at: chrono::Utc::now(),
+            written_at: lane_state::timestamp::Timestamp::now(),
             written_by: spec::WrittenBy::Other("specs".into()),
             stopped_session_id: None,
             stopped_pid_start_secs: None,

@@ -295,7 +295,7 @@ pub fn decide(req: &Request, facts: &dyn SystemFacts, state_dir: &Path) -> Resul
 mod tests {
     use super::*;
     use crate::facts::ShellCheckError;
-    use chrono::{Duration as ChronoDuration, Utc};
+    use lane_state::timestamp::Timestamp;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -305,7 +305,7 @@ mod tests {
     /// a test that doesn't set a given fact fails loudly rather than
     /// silently falling back to something that looks safe.
     struct FakeFacts {
-        now: chrono::DateTime<Utc>,
+        now: lane_state::timestamp::Timestamp,
         alive_claude: HashMap<u32, bool>,
         cwds: HashMap<u32, PathBuf>,
         shells: HashMap<u32, Result<bool, ShellCheckError>>,
@@ -320,7 +320,7 @@ mod tests {
     impl FakeFacts {
         fn new() -> Self {
             Self {
-                now: Utc::now(),
+                now: Timestamp::now(),
                 alive_claude: HashMap::new(),
                 cwds: HashMap::new(),
                 shells: HashMap::new(),
@@ -380,7 +380,7 @@ mod tests {
             *self.transcripts_recent.borrow()
         }
         fn now(&self) -> lane_state::timestamp::Timestamp {
-            crate::ts_compat::ToTimestamp::to_ts(self.now)
+            self.now
         }
         fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
             self.identities.borrow().get(&pid).cloned()
@@ -416,7 +416,7 @@ mod tests {
             "busy": false,
             "subagents_running": 0,
             "no_background_shells": true,
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": Timestamp::now().to_rfc3339(),
             "updated_by_event": "Stop"
         });
         edit(&mut v);
@@ -585,7 +585,7 @@ mod tests {
             pid_start_secs: None,
             state: SpecState::Running,
             written_by: WrittenBy::Launch,
-            now: Utc::now(),
+            now: Timestamp::now(),
         })
         .unwrap();
         let myself = |role: &str| Request {
@@ -790,7 +790,7 @@ mod tests {
     fn refuses_a_stale_state_file() {
         let dir = tempdir().unwrap();
         write_state(dir.path(), "overmind", |v| {
-            let old = Utc::now() - ChronoDuration::seconds(300);
+            let old = Timestamp::now().plus_secs(-300);
             v["updated_at"] = serde_json::json!(old.to_rfc3339());
         });
         let req = Request {
@@ -810,7 +810,7 @@ mod tests {
         // future must not read as "very fresh."
         let dir = tempdir().unwrap();
         write_state(dir.path(), "overmind", |v| {
-            let future = Utc::now() + ChronoDuration::seconds(300);
+            let future = Timestamp::now().plus_secs(300);
             v["updated_at"] = serde_json::json!(future.to_rfc3339());
         });
         let req = Request {
@@ -828,9 +828,7 @@ mod tests {
     fn the_age_of_a_state_file_is_judged_against_the_facts_own_clock_in_the_right_direction() {
         // Both neighbours of "now" (the fake clock, not the real one): 60 s old is fresh, 60 s ahead is refused.
         let facts = healthy_facts();
-        let at = |secs: i64| -> String {
-            crate::ts_compat::ToChrono::to_chrono(facts.now().plus_secs(secs)).to_rfc3339()
-        };
+        let at = |secs: i64| -> String { facts.now().plus_secs(secs).to_rfc3339() };
         for (delta, refused) in [(-60, false), (60, true), (-86_400, true)] {
             let dir = tempdir().unwrap();
             write_state(dir.path(), "overmind", |v| {

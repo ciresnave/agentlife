@@ -31,7 +31,7 @@ fn write_spec(dir: &Path, role: &str, args: &[&str]) {
         handoff_path: None,
         handoff_mtime: None,
         state: spec::SpecState::Suspended,
-        written_at: Utc::now(),
+        written_at: Timestamp::now(),
         written_by: "test".into(),
         stopped_session_id: None,
         stopped_pid_start_secs: None,
@@ -123,7 +123,7 @@ fn a_dry_run_plans_every_step_prints_the_hash_and_writes_and_runs_nothing() {
     write_spec(&r.state_dir, "bitman", PEERS_ONLY);
     let host = FakeHost::new(&r);
     let before = listing(&r.state_dir);
-    let rep = run(&r, Some(&host), "bitman", false, Utc::now());
+    let rep = run(&r, Some(&host), "bitman", false, Timestamp::now());
     assert!(
         !rep.failed(),
         "{}",
@@ -146,7 +146,7 @@ fn apply_needs_the_plan_for_exactly_this_role_and_otherwise_does_nothing() {
     let before = listing(&r.state_dir);
     let other = plan_hash(&r, "fmp-rs");
     for plan in [None, Some("0000000000000000"), Some(other.as_str())] {
-        let rep = run_apply(&r, Some(&host), "bitman", plan, Utc::now());
+        let rep = run_apply(&r, Some(&host), "bitman", plan, Timestamp::now());
         assert!(rep.failed(), "{plan:?}");
         assert_eq!(rep.rows[0].name, "plan");
     }
@@ -161,7 +161,7 @@ fn apply_writes_the_config_provisions_once_brings_the_spec_to_the_full_form_and_
     write_spec(&r.state_dir, "bitman", PEERS_ONLY);
     let host = FakeHost::new(&r);
     let plan = plan_hash(&r, "bitman");
-    let rep = run_apply(&r, Some(&host), "bitman", Some(&plan), Utc::now());
+    let rep = run_apply(&r, Some(&host), "bitman", Some(&plan), Timestamp::now());
     assert!(
         !rep.failed(),
         "{}",
@@ -201,8 +201,8 @@ fn rerunning_converges_every_step_is_already_and_nothing_is_provisioned_again() 
     write_spec(&r.state_dir, "bitman", PEERS_ONLY);
     let host = FakeHost::new(&r);
     let plan = plan_hash(&r, "bitman");
-    assert!(!run_apply(&r, Some(&host), "bitman", Some(&plan), Utc::now()).failed());
-    let again = run_apply(&r, Some(&host), "bitman", Some(&plan), Utc::now());
+    assert!(!run_apply(&r, Some(&host), "bitman", Some(&plan), Timestamp::now()).failed());
+    let again = run_apply(&r, Some(&host), "bitman", Some(&plan), Timestamp::now());
     assert!(!again.failed());
     for n in [3, 6, 4] {
         assert_eq!(status(&again, n), Status::Already, "step {n}");
@@ -221,7 +221,7 @@ fn a_role_without_a_spec_the_pm_and_a_bad_name_are_refused_at_step_0() {
     let host = FakeHost::new(&r);
     write_spec(&r.state_dir, "pm", PEERS_ONLY);
     for role in ["nospec", "pm", "../x", ""] {
-        let rep = run(&r, Some(&host), role, false, Utc::now());
+        let rep = run(&r, Some(&host), role, false, Timestamp::now());
         assert!(rep.failed(), "{role:?}");
         assert_eq!(rep.rows.len(), 1, "{role:?}");
         assert_eq!(rep.rows[0].n, 0);
@@ -240,7 +240,7 @@ fn a_conflicting_mcp_json_is_not_overwritten_and_a_working_own_setup_is_kept() {
     write_spec(&r.state_dir, "bitman", PEERS_ONLY);
     let mcp = r.state_dir.join("bitman.mcp.json");
     std::fs::write(&mcp, r#"{"mcpServers":{"other":{}}}"#).unwrap();
-    let rep = run(&r, Some(&host), "bitman", false, Utc::now());
+    let rep = run(&r, Some(&host), "bitman", false, Timestamp::now());
     assert!(rep.failed());
     assert!(
         rep.rows[0].detail.contains("not overwritten"),
@@ -264,7 +264,7 @@ fn a_conflicting_mcp_json_is_not_overwritten_and_a_working_own_setup_is_kept() {
     )
     .unwrap();
     let plan = plan_hash(&r, "kiss");
-    let rep = run_apply(&r, Some(&host), "kiss", Some(&plan), Utc::now());
+    let rep = run_apply(&r, Some(&host), "kiss", Some(&plan), Timestamp::now());
     assert!(
         !rep.failed(),
         "{}",

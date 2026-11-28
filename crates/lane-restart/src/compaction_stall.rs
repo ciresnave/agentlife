@@ -11,7 +11,7 @@
 //! Pure apart from the two readers. A lane is stalled when, after its LAST compact-summary entry, no
 //! `assistant` entry follows. The number is the age of that summary; the caller applies the threshold.
 
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -31,8 +31,8 @@ pub fn project_dir_name(cwd: &str) -> String {
 /// Seconds since the last compact-summary entry in `jsonl`, when no `assistant` entry follows it;
 /// `None` when there is no such entry or the lane has answered since. Lines that are not JSON (a
 /// truncated first line of a tail) are skipped.
-pub fn stalled_secs(jsonl: &str, now: DateTime<Utc>) -> Option<i64> {
-    let mut pending: Option<DateTime<Utc>> = None;
+pub fn stalled_secs(jsonl: &str, now: Timestamp) -> Option<i64> {
+    let mut pending: Option<Timestamp> = None;
     for line in jsonl.lines() {
         // Cheap pre-filters: most lines are neither, and a summary line is large.
         let is_summary = line.contains("\"isCompactSummary\":true");
@@ -48,13 +48,12 @@ pub fn stalled_secs(jsonl: &str, now: DateTime<Utc>) -> Option<i64> {
             pending = v
                 .get("timestamp")
                 .and_then(|t| t.as_str())
-                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-                .map(|t| t.with_timezone(&Utc));
+                .and_then(|t| t.parse::<Timestamp>().ok());
         } else if ty == Some("assistant") {
             pending = None;
         }
     }
-    pending.map(|t| (now - t).num_seconds().max(0))
+    pending.map(|t| now.secs_since(t).max(0))
 }
 
 /// The newest `*.jsonl` directly in `dir` (a lane's transcripts: the live session writes the newest).
@@ -88,7 +87,7 @@ pub fn read_tail(path: &Path) -> std::io::Result<String> {
 
 /// [`stalled_secs`] for the lane whose working directory is `cwd`, under `projects_root`
 /// (`~/.claude/projects`). `None` when it cannot be read: never a guess.
-pub fn check(projects_root: &Path, cwd: &str, now: DateTime<Utc>) -> Option<i64> {
+pub fn check(projects_root: &Path, cwd: &str, now: Timestamp) -> Option<i64> {
     let file = newest_transcript(&projects_root.join(project_dir_name(cwd)))?;
     stalled_secs(&read_tail(&file).ok()?, now)
 }
@@ -98,7 +97,7 @@ pub fn annotate(
     report: &mut crate::spec::StatusReport,
     state_dir: &Path,
     projects_root: &Path,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) {
     for r in &mut report.roles {
         let Some(a) = &mut r.activity else { continue };
@@ -127,8 +126,8 @@ mod tests {
 
     use super::*;
 
-    fn t(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    fn t(s: &str) -> Timestamp {
+        s.parse::<Timestamp>().unwrap()
     }
     const NOW: &str = "2026-11-24T10:00:00Z";
 

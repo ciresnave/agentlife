@@ -36,7 +36,7 @@ pub(super) fn run(ctx: &mut Ctx, role_override: Option<String>) -> ExitCode {
     // must not leave the lane looking idle (waits.rs).
     let mut wait_warnings = Vec::new();
     if let Some(text) = super::handoff_text(&cwd, &role) {
-        match crate::waits::refusal(&text, chrono::Utc::now()) {
+        match crate::waits::refusal(&text, lane_state::timestamp::Timestamp::now()) {
             Ok(w) => wait_warnings = w,
             Err(e) => {
                 ctx.errln(&format!("lane-restart assert-idle: {e}"));
@@ -60,7 +60,7 @@ pub(super) fn run(ctx: &mut Ctx, role_override: Option<String>) -> ExitCode {
                     &ctx.state_dir,
                     &role,
                     text,
-                    chrono::Utc::now(),
+                    lane_state::timestamp::Timestamp::now(),
                 ) {
                     ctx.errln(&format!(
                         "lane-restart assert-idle: WARNING: wake times were not registered ({e}); the launcher will not start this lane at its wake time"

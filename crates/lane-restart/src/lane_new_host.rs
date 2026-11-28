@@ -684,7 +684,7 @@ mod run_tests {
     use super::*;
     use crate::lane_new::{run_full, Report, Roots, Status};
     use crate::spec::{self, SpecState};
-    use chrono::Utc;
+    use lane_state::timestamp::Timestamp;
     use std::cell::RefCell;
 
     /// What the fake gets wrong, one at a time. `Honest` leaves exactly what the real commands leave.
@@ -853,7 +853,7 @@ mod run_tests {
             "zetafish",
             "sonnet",
             apply,
-            Utc::now(),
+            Timestamp::now(),
         )
     }
 
@@ -904,7 +904,16 @@ mod run_tests {
     }
 
     fn apply_with(r: &Roots, h: &FakeHost, role: &str, repo: &str, plan: Option<&str>) -> Report {
-        crate::lane_new::run_apply(r, None, Some(h), role, repo, "sonnet", plan, Utc::now())
+        crate::lane_new::run_apply(
+            r,
+            None,
+            Some(h),
+            role,
+            repo,
+            "sonnet",
+            plan,
+            Timestamp::now(),
+        )
     }
 
     #[test]
@@ -923,7 +932,7 @@ mod run_tests {
                     "zetafish",
                     "sonnet",
                     plan,
-                    Utc::now(),
+                    Timestamp::now(),
                 )
             } else {
                 run_full(
@@ -934,7 +943,7 @@ mod run_tests {
                     "zetafish",
                     "sonnet",
                     false,
-                    Utc::now(),
+                    Timestamp::now(),
                 )
             }
         };
@@ -1027,8 +1036,16 @@ mod run_tests {
             ("zetafish", "zetafish", "sonnet", Some(""), "not the plan"),
         ] {
             let h = FakeHost::new(Lie::Honest, &r);
-            let rep =
-                crate::lane_new::run_apply(&r, None, Some(&h), role, repo, model, plan, Utc::now());
+            let rep = crate::lane_new::run_apply(
+                &r,
+                None,
+                Some(&h),
+                role,
+                repo,
+                model,
+                plan,
+                Timestamp::now(),
+            );
             let (st, detail) = row(&rep, 0);
             let case = format!("{role} {repo} {model} {plan:?}");
             assert!(

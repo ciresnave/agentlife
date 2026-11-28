@@ -111,7 +111,6 @@ fn records_a_stop(dir: &Path, role: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     fn spec_of(role: &str, model: &str) -> spec::SpecFile {
         spec::SpecFile {
@@ -129,7 +128,7 @@ mod tests {
             handoff_path: None,
             handoff_mtime: None,
             state: spec::SpecState::Suspended,
-            written_at: Utc::now(),
+            written_at: lane_state::timestamp::Timestamp::now(),
             written_by: lane_restart::spec::WrittenBy::Other("test".into()),
             stopped_session_id: None,
             stopped_pid_start_secs: None,

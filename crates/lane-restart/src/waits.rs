@@ -25,7 +25,7 @@
 //! restart that follows `assert-idle` ends that session. The lane re-arms from the HANDOFF at its
 //! next start.
 
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 
 const MARK: &str = "WAIT:";
 
@@ -36,7 +36,7 @@ pub struct Wait {
     pub line: usize,
     pub event: String,
     pub check: String,
-    pub wake: DateTime<Utc>,
+    pub wake: Timestamp,
 }
 
 /// A wait line that cannot be used, and why.
@@ -97,13 +97,11 @@ fn parse_line(line: usize, body: &str) -> Result<Wait, Malformed> {
     let wake = wake
         .filter(|w| !w.is_empty())
         .ok_or_else(|| bad("no `wake: <time>`: the lane must choose when it looks again"))?;
-    let wake = DateTime::parse_from_rfc3339(wake)
-        .map_err(|_| {
-            bad(&format!(
-                "`wake: {wake}` is not an absolute RFC3339 time such as 2026-11-01T18:00:00Z"
-            ))
-        })?
-        .with_timezone(&Utc);
+    let wake = wake.parse::<Timestamp>().map_err(|_| {
+        bad(&format!(
+            "`wake: {wake}` is not an absolute RFC3339 time such as 2026-11-01T18:00:00Z"
+        ))
+    })?;
     Ok(Wait {
         line,
         event: event.to_string(),
@@ -114,7 +112,7 @@ fn parse_line(line: usize, body: &str) -> Result<Wait, Malformed> {
 
 /// `assert-idle`'s verdict on a HANDOFF at `now`: `Err` names every malformed wait (a refusal);
 /// `Ok` carries a warning for each wait whose time has already passed.
-pub fn refusal(text: &str, now: DateTime<Utc>) -> Result<Vec<String>, String> {
+pub fn refusal(text: &str, now: Timestamp) -> Result<Vec<String>, String> {
     let parsed = parse(text);
     let bad: Vec<String> = parsed
         .iter()
@@ -145,7 +143,7 @@ pub fn refusal(text: &str, now: DateTime<Utc>) -> Result<Vec<String>, String> {
 
 /// What `lane-restart waits` prints: one block per wait, soonest first, with the time left, and
 /// every malformed line named. Empty text for a HANDOFF with no wait lines.
-pub fn report(text: &str, now: DateTime<Utc>) -> String {
+pub fn report(text: &str, now: Timestamp) -> String {
     let mut waits = Vec::new();
     let mut out = String::new();
     for r in parse(text) {
@@ -156,7 +154,7 @@ pub fn report(text: &str, now: DateTime<Utc>) -> String {
     }
     waits.sort_by_key(|w| w.wake);
     for w in waits {
-        let mins = (w.wake - now).num_minutes();
+        let mins = w.wake.secs_since(now) / 60;
         let when = if mins >= 0 {
             format!("in {mins} min")
         } else {
@@ -177,8 +175,8 @@ pub fn report(text: &str, now: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
 
-    fn t(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    fn t(s: &str) -> Timestamp {
+        s.parse::<Timestamp>().unwrap()
     }
 
     const NOW: &str = "2026-11-01T12:00:00Z";

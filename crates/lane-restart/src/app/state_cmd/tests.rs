@@ -221,7 +221,7 @@ fn the_journal_rotates_at_its_ceiling_keeping_one_generation() {
         "Stop",
         true,
         Duration::from_millis(3),
-        chrono::Utc::now(),
+        lane_state::timestamp::Timestamp::now(),
     );
     assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 1);
     assert!(state.join("alpha.hooks.log.1").exists());

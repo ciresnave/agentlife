@@ -241,7 +241,7 @@ fn reopen_spec(dir: &Path, rec: &AgentRecord) -> Result<bool, String> {
     }
     s.state = SpecState::Crashed;
     s.written_by = lane_restart::spec::WrittenBy::Unpark;
-    s.written_at = chrono::Utc::now();
+    s.written_at = lane_state::timestamp::Timestamp::now();
     spec::write_atomic(dir, &s).map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -644,7 +644,7 @@ mod tests {
             handoff_path: None,
             handoff_mtime: None,
             state,
-            written_at: Utc::now(),
+            written_at: lane_state::timestamp::Timestamp::now(),
             written_by: lane_restart::spec::WrittenBy::Other("test".into()),
             stopped_session_id: None,
             stopped_pid_start_secs: None,

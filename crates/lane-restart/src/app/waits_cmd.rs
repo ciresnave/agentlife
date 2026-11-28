@@ -34,7 +34,7 @@ pub(super) fn run(ctx: &mut Ctx, role_override: Option<String>) -> ExitCode {
         ));
         return ExitCode::SUCCESS;
     };
-    let now = chrono::Utc::now();
+    let now = lane_state::timestamp::Timestamp::now();
     let report = crate::waits::report(&text, now);
     if report.is_empty() {
         ctx.outln(&format!(
@@ -109,7 +109,7 @@ mod tests {
             out.contains("  check: gh pr view 1 --json state,mergedAt\n"),
             "{out}"
         );
-        assert!(out.contains("2099-01-01T00:00:00+00:00"), "{out}");
+        assert!(out.contains("2099-01-01T00:00:00Z"), "{out}");
     }
 
     #[test]

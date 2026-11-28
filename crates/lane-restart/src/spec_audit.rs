@@ -17,7 +17,7 @@
 
 use crate::spec;
 use crate::spec_channels::Channels;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -36,7 +36,7 @@ pub const STUCK_MAIL_SECS: i64 = 30 * 60;
 pub struct Presence {
     pub online: bool,
     pub queued: u64,
-    pub oldest_enqueued_at: Option<DateTime<Utc>>,
+    pub oldest_enqueued_at: Option<Timestamp>,
 }
 
 /// The daemon's view of every role, or why it could not be read.
@@ -47,9 +47,9 @@ pub type PresenceMap = Result<BTreeMap<String, Presence>, String>;
 #[serde(rename_all = "snake_case")]
 pub enum Cert {
     /// Valid until this time.
-    Valid(DateTime<Utc>),
+    Valid(Timestamp),
     /// Expired at this time.
-    Expired(DateTime<Utc>),
+    Expired(Timestamp),
     /// No `cert.pem` in the role's identity directory.
     Missing,
     /// There is a file but its shape is not the one described above.
@@ -92,7 +92,7 @@ pub enum Severity {
 }
 
 /// Everything wrong with one row.
-pub fn findings(row: &AuditRow, now: DateTime<Utc>) -> Vec<(Severity, String)> {
+pub fn findings(row: &AuditRow, now: Timestamp) -> Vec<(Severity, String)> {
     use Severity::{Fail, Info, Warn};
     let mut f = Vec::new();
     match (&row.channels, &row.spec_error) {
@@ -131,7 +131,7 @@ pub fn findings(row: &AuditRow, now: DateTime<Utc>) -> Vec<(Severity, String)> {
                     t.to_rfc3339()
                 ),
             )),
-            Cert::Valid(t) if (*t - now).num_seconds() < NEAR_EXPIRY_SECS => f.push((
+            Cert::Valid(t) if t.secs_since(now) < NEAR_EXPIRY_SECS => f.push((
                 Info,
                 format!(
                     "certificate expires {} (account home: renews on next start)",
@@ -146,14 +146,14 @@ pub fn findings(row: &AuditRow, now: DateTime<Utc>) -> Vec<(Severity, String)> {
         Cert::Missing if row.home_present => f.push((Fail, "no certificate".to_string())),
         Cert::Unreadable => f.push((Warn, "certificate shape not recognised".to_string())),
         Cert::Expired(t) => f.push((Fail, format!("certificate expired {}", t.to_rfc3339()))),
-        Cert::Valid(t) if (*t - now).num_seconds() < NEAR_EXPIRY_SECS => {
+        Cert::Valid(t) if t.secs_since(now) < NEAR_EXPIRY_SECS => {
             f.push((Warn, format!("certificate expires {}", t.to_rfc3339())))
         }
         _ => {}
     }
     if let Some(p) = &row.presence {
         if let (false, Some(t)) = (p.online, p.oldest_enqueued_at) {
-            let age = (now - t).num_seconds();
+            let age = now.secs_since(t);
             if p.queued > 0 && age >= STUCK_MAIL_SECS {
                 f.push((
                     Warn,
@@ -241,7 +241,7 @@ pub(crate) fn read_mcp(dir: &Path, role: &str) -> (Result<(), String>, Option<St
 }
 
 /// The expiry in a certificate's PEM text, or `None` when the shape is not the known one.
-pub fn cert_expiry(pem: &str, role: &str) -> Option<DateTime<Utc>> {
+pub fn cert_expiry(pem: &str, role: &str) -> Option<Timestamp> {
     use std::io::Read;
     let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     let b = b64(&body)?;
@@ -273,7 +273,10 @@ pub fn cert_expiry(pem: &str, role: &str) -> Option<DateTime<Utc>> {
     let _issued = lp(&mut r)?;
     let exp = lp(&mut r)?;
     let micros = i64::from_be_bytes(exp.try_into().ok()?);
-    DateTime::from_timestamp_micros(micros)
+    Timestamp::from_unix(
+        micros.div_euclid(1_000_000),
+        i32::try_from(micros.rem_euclid(1_000_000) * 1000).ok()?,
+    )
 }
 
 /// Standard base64 (padding optional), no dependency for one use.
@@ -300,7 +303,7 @@ fn b64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn cert_state(home: &Path, role: &str, now: DateTime<Utc>) -> Cert {
+fn cert_state(home: &Path, role: &str, now: Timestamp) -> Cert {
     let p = home.join("roles").join(role).join("cert.pem");
     let Ok(text) = std::fs::read_to_string(&p) else {
         return Cert::Missing;
@@ -313,7 +316,7 @@ fn cert_state(home: &Path, role: &str, now: DateTime<Utc>) -> Cert {
 }
 
 /// One row for `role`.
-pub fn audit_role(dir: &Path, role: &str, presence: &PresenceMap, now: DateTime<Utc>) -> AuditRow {
+pub fn audit_role(dir: &Path, role: &str, presence: &PresenceMap, now: Timestamp) -> AuditRow {
     let (channels, spec_error, model, permission_mode, state) = match spec::read(dir, role) {
         Ok(s) => (
             Some(Channels::of(&s.launch_args)),
@@ -354,12 +357,7 @@ pub fn audit_role(dir: &Path, role: &str, presence: &PresenceMap, now: DateTime<
 }
 
 /// The rows for `roles` (every recorded role when empty).
-pub fn audit(
-    dir: &Path,
-    only: &[String],
-    presence: &PresenceMap,
-    now: DateTime<Utc>,
-) -> Vec<AuditRow> {
+pub fn audit(dir: &Path, only: &[String], presence: &PresenceMap, now: Timestamp) -> Vec<AuditRow> {
     let all = if only.is_empty() {
         roles(dir)
     } else {
@@ -393,8 +391,7 @@ pub fn parse_presence(text: &str) -> PresenceMap {
                 oldest_enqueued_at: pending
                     .and_then(|p| p.get("oldest_enqueued_at"))
                     .and_then(Value::as_str)
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                    .map(|t| t.with_timezone(&Utc)),
+                    .and_then(|s| s.parse::<Timestamp>().ok()),
             },
         );
     }
@@ -461,7 +458,7 @@ pub fn common_home(rows: &[AuditRow]) -> Option<PathBuf> {
 }
 
 /// The table, then a summary line. `Ok` is whether no row has a `Fail`.
-pub fn render(rows: &[AuditRow], presence: &PresenceMap, now: DateTime<Utc>) -> (String, bool) {
+pub fn render(rows: &[AuditRow], presence: &PresenceMap, now: Timestamp) -> (String, bool) {
     let mut out = String::from(
         "role\tchannels\tmodel\tmode\tstate\tmcp\thome\tcert\tonline\tqueued\tfindings\n",
     );
@@ -485,7 +482,7 @@ pub fn render(rows: &[AuditRow], presence: &PresenceMap, now: DateTime<Utc>) -> 
                 if p.online { "yes" } else { "no" }.to_string(),
                 match (p.queued, p.oldest_enqueued_at) {
                     (0, _) | (_, None) => p.queued.to_string(),
-                    (n, Some(t)) => format!("{n} ({})", age_text((now - t).num_seconds())),
+                    (n, Some(t)) => format!("{n} ({})", age_text(now.secs_since(t))),
                 },
             ),
             None => ("?".to_string(), "?".to_string()),

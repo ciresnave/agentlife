@@ -19,7 +19,7 @@
 use crate::relaunch::valid_identifier;
 use crate::spec::{self, SpecFile};
 use crate::spec_synapse::{RewriteOutcome, RewriteRow, DEV_CHANNELS, MCP_CONFIG, STRICT};
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::Path;
 
 const BACKUP_SUFFIX: &str = ".pre-set";
@@ -135,7 +135,7 @@ fn set_one(
     role: &str,
     o: &SetOptions,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> RewriteOutcome {
     if !valid_identifier(role) {
         return RewriteOutcome::Refused(format!("not a plain role identifier: {role:?}"));
@@ -194,7 +194,7 @@ pub fn set_roles(
     roles: &[String],
     o: &SetOptions,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<RewriteRow> {
     roles
         .iter()

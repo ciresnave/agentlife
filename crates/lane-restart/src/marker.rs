@@ -233,7 +233,7 @@ mod tests {
             handoff_path: None,
             handoff_mtime: None,
             state: SpecState::Suspended,
-            written_at: chrono::Utc::now(),
+            written_at: lane_state::timestamp::Timestamp::now(),
             written_by: "test".into(),
             stopped_session_id: None,
             stopped_pid_start_secs: None,

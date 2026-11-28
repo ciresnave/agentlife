@@ -10,37 +10,37 @@
 //! Some(true)`); any later busy hook clears it, so [`LaneState::is_idle`] already means "the lane
 //! asserted idle and has done nothing since". Silence never makes a lane idle, it only DELAYS a stop.
 
-use chrono::{DateTime, Duration, Utc};
 use lane_state::state::LaneState;
+use lane_state::timestamp::Timestamp;
 
 /// The five numbers CireSnave has yet to rule on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Params {
-    /// N: minimum quiet time before a soft stop.
-    pub quiet: Duration,
+    /// N: minimum quiet time before a soft stop, in seconds.
+    pub quiet: i64,
     /// N2: the longer quiet time once the flap guard applies.
-    pub quiet_flapping: Duration,
+    pub quiet_flapping: i64,
     /// W: how far back wakes are counted.
-    pub window: Duration,
+    pub window: i64,
     /// K: wakes inside W at which the flap guard applies.
     pub wakes: u32,
     /// M: a WAIT due within this long blocks a stop.
-    pub wait_ahead: Duration,
+    pub wait_ahead: i64,
 }
 
 /// What the caller read about one lane.
 #[derive(Debug, Clone)]
 pub struct Inputs<'a> {
     pub state: &'a LaneState,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
     /// When mail last reached the lane; `None` = none known.
-    pub last_mail: Option<DateTime<Utc>>,
+    pub last_mail: Option<Timestamp>,
     /// Times the lane was woken by mail, inside the last W.
     pub wakes_in_window: u32,
     pub open_pr: bool,
     pub ready_roadmap_row: bool,
     /// The soonest WAIT wake time in its HANDOFF.
-    pub next_wait_due: Option<DateTime<Utc>>,
+    pub next_wait_due: Option<Timestamp>,
     pub handoff_written: bool,
     /// The PM only (CireSnave, board 437, 2026-11-14: no other lane is excluded).
     pub excluded: bool,
@@ -57,7 +57,7 @@ pub enum Keep {
     WaitDueSoon,
     HandoffMissing,
     /// Quiet for less than the required time: `(quiet_for, required)`.
-    TooRecent(Duration, Duration),
+    TooRecent(i64, i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,15 +82,17 @@ pub fn verdict(i: &Inputs<'_>, p: &Params) -> Verdict {
     if i.ready_roadmap_row {
         why.push(Keep::ReadyRoadmapRow);
     }
-    if i.next_wait_due.is_some_and(|d| d - i.now <= p.wait_ahead) {
+    if i.next_wait_due
+        .is_some_and(|d| d.secs_since(i.now) <= p.wait_ahead)
+    {
         why.push(Keep::WaitDueSoon);
     }
     if !i.handoff_written {
         why.push(Keep::HandoffMissing);
     }
-    let updated_at = crate::ts_compat::ToChrono::to_chrono(i.state.updated_at);
+    let updated_at = i.state.updated_at;
     let since = i.last_mail.map_or(updated_at, |m| m.max(updated_at));
-    let quiet_for = i.now - since;
+    let quiet_for = i.now.secs_since(since);
     let required = if i.wakes_in_window >= p.wakes {
         p.quiet_flapping
     } else {
@@ -110,11 +112,11 @@ pub fn verdict(i: &Inputs<'_>, p: &Params) -> Verdict {
 mod tests {
     use super::*;
 
-    fn at(min: i64) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-11-14T12:00:00Z")
+    fn at(min: i64) -> Timestamp {
+        "2026-11-14T12:00:00Z"
+            .parse::<Timestamp>()
             .unwrap()
-            .with_timezone(&Utc)
-            + Duration::minutes(min)
+            .plus_secs(min * 60)
     }
 
     fn state(updated_min: i64) -> LaneState {
@@ -132,18 +134,18 @@ mod tests {
             subagents_running: 0,
             no_background_shells: Some(true),
             launch_args: None,
-            updated_at: crate::ts_compat::ToTimestamp::to_ts(at(updated_min)),
+            updated_at: at(updated_min),
             updated_by_event: "AssertIdle".into(),
         }
     }
 
     fn params() -> Params {
         Params {
-            quiet: Duration::minutes(30),
-            quiet_flapping: Duration::hours(2),
-            window: Duration::hours(3),
+            quiet: 30 * 60,
+            quiet_flapping: 2 * 3600,
+            window: 3 * 3600,
             wakes: 3,
-            wait_ahead: Duration::minutes(60),
+            wait_ahead: 60 * 60,
         }
     }
 
@@ -186,10 +188,7 @@ mod tests {
         i.last_mail = Some(at(25));
         assert_eq!(
             verdict(&i, &params()),
-            Verdict::Keep(vec![Keep::TooRecent(
-                Duration::minutes(15),
-                Duration::minutes(30)
-            )])
+            Verdict::Keep(vec![Keep::TooRecent(15 * 60, 30 * 60)])
         );
     }
 
@@ -200,10 +199,7 @@ mod tests {
         i.wakes_in_window = 3;
         assert_eq!(
             verdict(&i, &params()),
-            Verdict::Keep(vec![Keep::TooRecent(
-                Duration::minutes(40),
-                Duration::hours(2)
-            )])
+            Verdict::Keep(vec![Keep::TooRecent(40 * 60, 2 * 3600)])
         );
         i.wakes_in_window = 2;
         assert_eq!(verdict(&i, &params()), Verdict::WouldStop);

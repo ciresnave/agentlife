@@ -636,6 +636,7 @@ pub fn step_seed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lane_state::timestamp::Timestamp;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, HashMap};
     use tempfile::tempdir;
@@ -1195,7 +1196,6 @@ mod tests {
     // ---- the whole run (steps 0 to 5) against the fake -------------------------------------------
 
     use crate::lane_new::{run_with, Report, Roots, Status};
-    use chrono::Utc;
 
     fn world(d: &tempfile::TempDir) -> Roots {
         let b = d.path();
@@ -1220,7 +1220,7 @@ mod tests {
             "zetafish",
             "sonnet",
             apply,
-            Utc::now(),
+            Timestamp::now(),
         )
     }
 
@@ -1357,8 +1357,14 @@ mod tests {
     fn without_a_vcs_steps_1_and_2_are_listed_as_later() {
         let d = tempdir().unwrap();
         let r = world(&d);
-        let rep =
-            crate::lane_new::run_local(&r, "zetafish", "zetafish", "sonnet", false, Utc::now());
+        let rep = crate::lane_new::run_local(
+            &r,
+            "zetafish",
+            "zetafish",
+            "sonnet",
+            false,
+            Timestamp::now(),
+        );
         assert!(rep
             .rows
             .iter()

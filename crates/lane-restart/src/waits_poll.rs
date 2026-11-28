@@ -24,7 +24,7 @@
 //! not the line number, because a HANDOFF is rewritten at every task boundary and the line moves.
 
 use crate::waits::{self, Wait};
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -304,7 +304,7 @@ fn one_line(s: &str) -> String {
 
 /// Decides every due wait of `subjects` at `now`. Malformed wait lines are skipped here (they are
 /// `assert-idle`'s to refuse). Never runs text that is not allowlisted.
-pub fn poll(subjects: &[Subject], now: DateTime<Utc>, runner: &dyn CheckRunner) -> Vec<Due> {
+pub fn poll(subjects: &[Subject], now: Timestamp, runner: &dyn CheckRunner) -> Vec<Due> {
     let mut out = Vec::new();
     for s in subjects {
         for w in waits::parse(&s.handoff).into_iter().flatten() {
@@ -449,8 +449,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    fn t(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    fn t(s: &str) -> Timestamp {
+        s.parse::<Timestamp>().unwrap()
     }
 
     const NOW: &str = "2026-11-01T12:00:00Z";
@@ -622,7 +622,9 @@ mod tests {
         let due = poll(&[subject(PR, FUTURE)], t(NOW), &f);
         let m = due[0].message();
         assert!(
-            m.starts_with("[NOTICE] wait-due affects=lane when=2026-11-01T13:00:00+00:00 action=check-passed\n"),
+            m.starts_with(
+                "[NOTICE] wait-due affects=lane when=2026-11-01T13:00:00Z action=check-passed\n"
+            ),
             "{m}"
         );
         assert!(m.contains("\nnote: waiting for: build green\n"), "{m}");

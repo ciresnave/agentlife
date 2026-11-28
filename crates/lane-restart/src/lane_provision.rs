@@ -24,7 +24,7 @@ use crate::lane_new_host::Host;
 use crate::spec;
 use crate::spec_channels;
 use crate::spec_synapse::RewriteOutcome;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::PathBuf;
 
 /// Fingerprint of what a run would do, from the arguments alone: the role and the roots every path
@@ -47,7 +47,7 @@ pub fn run_apply(
     host: Option<&dyn Host>,
     role: &str,
     plan: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     let refuse = |why: String| Report {
         rows: vec![StepRow {
@@ -77,7 +77,7 @@ pub fn run(
     host: Option<&dyn Host>,
     role: &str,
     apply: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     let mut rows = Vec::new();
     let paths: Vec<PathBuf> = vec![

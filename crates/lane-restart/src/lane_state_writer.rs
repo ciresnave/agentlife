@@ -12,7 +12,6 @@
 //! `-AsUTC` concern) in the same move.
 
 use crate::state::LaneState;
-use chrono::Utc;
 pub use lane_state::claude_proc::{
     claude_parent_pid, describe_walk, parse_claude_cli_flags, recorded_cwd, transcript_project_dir,
     ClaudeCliFlags, HookInput, ModelField, ParentProcess, PidError,
@@ -180,7 +179,7 @@ fn bootstrap_state(
     cwd: String,
     cli_flags: &ClaudeCliFlags,
     event: &str,
-    now: chrono::DateTime<Utc>,
+    now: lane_state::timestamp::Timestamp,
 ) -> LaneState {
     LaneState {
         role: role.to_string(),
@@ -199,7 +198,7 @@ fn bootstrap_state(
         busy: false,
         subagents_running: 0,
         no_background_shells: None,
-        updated_at: crate::ts_compat::ToTimestamp::to_ts(now),
+        updated_at: now,
         updated_by_event: event.to_string(),
     }
 }
@@ -214,7 +213,7 @@ pub fn apply_event(
     role: &str,
     pid: u32,
     cli_flags: &ClaudeCliFlags,
-    now: chrono::DateTime<Utc>,
+    now: lane_state::timestamp::Timestamp,
 ) -> Option<LaneState> {
     if event == "SessionStart" {
         return Some(LaneState {
@@ -267,7 +266,7 @@ pub fn apply_event(
             busy: false,
             subagents_running: 0,
             no_background_shells: None,
-            updated_at: crate::ts_compat::ToTimestamp::to_ts(now),
+            updated_at: now,
             updated_by_event: event.to_string(),
         });
     }
@@ -310,7 +309,7 @@ pub fn apply_event(
     if state.name.is_none() {
         state.name = recordable_name(cli_flags);
     }
-    state.updated_at = crate::ts_compat::ToTimestamp::to_ts(now);
+    state.updated_at = now;
     state.updated_by_event = event.to_string();
     match event {
         "UserPromptSubmit" | "PreToolUse" => {
@@ -497,7 +496,7 @@ pub fn journal_hook(
     event: &str,
     ok: bool,
     elapsed: Duration,
-    now: chrono::DateTime<Utc>,
+    now: lane_state::timestamp::Timestamp,
 ) {
     use std::io::Write;
     let path = hook_journal_path(state_dir, role);
@@ -508,7 +507,7 @@ pub fn journal_hook(
     let line = format!(
         "{} {event} {} {}ms
 ",
-        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        now.format("%Y-%m-%dT%H:%M:%SZ"),
         if ok { "ok" } else { "err" },
         elapsed.as_millis()
     );
@@ -593,8 +592,16 @@ fn write_event(
     .map_err(|e| e.to_string())?;
 
     let existing = crate::state::load(state_dir, role).ok();
-    let next = apply_event(existing, event, input, role, pid, cli_flags, Utc::now())
-        .map(|state| with_start_time(state, pid, started));
+    let next = apply_event(
+        existing,
+        event,
+        input,
+        role,
+        pid,
+        cli_flags,
+        lane_state::timestamp::Timestamp::now(),
+    )
+    .map(|state| with_start_time(state, pid, started));
 
     let result = match next {
         Some(state) => write_atomic(&path, &state).map_err(|e| e.to_string()),
@@ -689,7 +696,7 @@ pub fn run_assert_idle(
         &role,
         pid,
         &cli_flags,
-        Utc::now(),
+        lane_state::timestamp::Timestamp::now(),
     );
     let result = match next.map(|state| with_start_time(state, pid, started)) {
         Some(state) => write_atomic(&path, &state).map_err(|e| e.to_string()),
@@ -879,8 +886,8 @@ mod tests {
 
     // -- apply_event ---------------------------------------------------------- //
 
-    fn now() -> chrono::DateTime<Utc> {
-        Utc::now()
+    fn now() -> lane_state::timestamp::Timestamp {
+        lane_state::timestamp::Timestamp::now()
     }
 
     #[test]

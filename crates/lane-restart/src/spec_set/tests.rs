@@ -24,7 +24,7 @@ fn write_spec(dir: &Path, role: &str, args: &[&str], soft: bool) {
         } else {
             SpecState::Running
         },
-        written_at: Utc::now(),
+        written_at: Timestamp::now(),
         written_by: "test".into(),
         stopped_session_id: None,
         stopped_pid_start_secs: None,
@@ -43,7 +43,7 @@ fn opts() -> SetOptions {
 }
 
 fn one(d: &Path, role: &str, o: &SetOptions, dry: bool) -> RewriteOutcome {
-    set_roles(d, &[role.to_string()], o, dry, Utc::now())
+    set_roles(d, &[role.to_string()], o, dry, Timestamp::now())
         .pop()
         .unwrap()
         .outcome
@@ -225,13 +225,19 @@ fn the_report_says_first_and_last_whether_anything_was_written() {
         ..opts()
     };
     let roles = v(&["a", "b", "nope"]);
-    let dry = render(&set_roles(d.path(), &roles, &o, true, Utc::now()), true);
+    let dry = render(
+        &set_roles(d.path(), &roles, &o, true, Timestamp::now()),
+        true,
+    );
     assert!(dry.starts_with("DRY RUN - nothing written\n"), "{dry}");
     assert!(
         dry.ends_with("(2 would change, 0 unchanged, 1 refused)\n"),
         "{dry}"
     );
-    let real = render(&set_roles(d.path(), &roles, &o, false, Utc::now()), false);
+    let real = render(
+        &set_roles(d.path(), &roles, &o, false, Timestamp::now()),
+        false,
+    );
     assert!(real.contains("a\tset\tmodel sonnet -> haiku"), "{real}");
     assert!(
         real.ends_with(

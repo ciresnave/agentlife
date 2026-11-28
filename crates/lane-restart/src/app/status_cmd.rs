@@ -90,7 +90,7 @@ pub(super) fn run(
             &mut report,
             &state,
             &home.join(".claude").join("projects"),
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
         );
     }
     let peers_moved = with_peers && ctx.transport() == crate::notify::Transport::Synapse;

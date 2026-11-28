@@ -7,7 +7,7 @@
 use crate::facts::{KillError, ProcEntry, ProcessIdentity, ShellCheckError, SystemFacts};
 use crate::relaunch::StateReader;
 use crate::state::LaneState;
-use chrono::{DateTime, TimeZone, Utc};
+use lane_state::timestamp::Timestamp;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -24,7 +24,7 @@ pub fn log() -> Log {
 /// `alive`. Every call is logged. Nothing else is allowed.
 pub struct RecordingFacts {
     pub log: Log,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
     /// `kill_verified` refuses with `IdentityChanged` when true.
     pub kill_refuses: bool,
     pub alive: bool,
@@ -42,7 +42,7 @@ impl RecordingFacts {
     pub fn new(log: &Log) -> Self {
         RecordingFacts {
             log: Rc::clone(log),
-            now: Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap(),
+            now: Timestamp::from_utc(2026, 10, 8, 12, 0, 0).unwrap(),
             kill_refuses: false,
             alive: true,
             live_pid: None,
@@ -67,7 +67,7 @@ impl SystemFacts for RecordingFacts {
     }
     fn now(&self) -> lane_state::timestamp::Timestamp {
         self.log.borrow_mut().push("now".into());
-        crate::ts_compat::ToTimestamp::to_ts(self.now)
+        self.now
     }
     fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
         self.live_pid
