@@ -734,19 +734,20 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 busy: st.busy,
                 subagents_running: st.subagents_running,
                 no_background_shells: st.no_background_shells,
-                updated_at: st.updated_at,
+                updated_at: crate::ts_compat::ToChrono::to_chrono(st.updated_at),
                 updated_by_event: st.updated_by_event.clone(),
                 idle: st.is_idle(),
                 idle_blockers: st.idle_blockers(),
-                quiet_secs: (facts.now() - st.updated_at).num_seconds().max(0),
+                quiet_secs: facts.now().secs_since(st.updated_at).max(0),
                 last_hook_secs: crate::lane_state_writer::hook_journal_path(dir, role)
                     .metadata()
                     .and_then(|m| m.modified())
                     .ok()
                     .map(|t| {
-                        (facts.now() - chrono::DateTime::<chrono::Utc>::from(t))
-                            .num_seconds()
-                            .max(0)
+                        (crate::ts_compat::ToChrono::to_chrono(facts.now())
+                            - chrono::DateTime::<chrono::Utc>::from(t))
+                        .num_seconds()
+                        .max(0)
                     }),
                 quiet_over: None,
                 compaction_stall_secs: None,
@@ -801,7 +802,11 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
     match (spec_state, &lane_state) {
         (Some(SpecState::Suspended), _) => out.state = Lifecycle::Suspended,
         (Some(SpecState::Stopping), _)
-            if (facts.now() - out.since.unwrap_or_else(|| facts.now())).num_seconds()
+            if (crate::ts_compat::ToChrono::to_chrono(facts.now())
+                - out
+                    .since
+                    .unwrap_or_else(|| crate::ts_compat::ToChrono::to_chrono(facts.now())))
+            .num_seconds()
                 >= STOPPING_STALE_SECS =>
         {
             out.state = Lifecycle::Suspended;
@@ -816,7 +821,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         (Some(SpecState::FailedRelaunch), _) => out.state = Lifecycle::FailedRelaunch,
         (None, Ok(st)) => {
             out.state = Lifecycle::Crashed;
-            out.since = Some(st.updated_at);
+            out.since = Some(crate::ts_compat::ToChrono::to_chrono(st.updated_at));
             out.detail = Some(
                 "no launch spec: it is written at the next launch by lane-restart".to_string(),
             );
@@ -1636,7 +1641,8 @@ mod tests {
         let d = tempdir().unwrap();
         let facts = dead_facts();
         let mut s = built("baracuda", SpecState::Stopping);
-        s.written_at = facts.now() - chrono::Duration::minutes(mins);
+        s.written_at =
+            crate::ts_compat::ToChrono::to_chrono(facts.now()) - chrono::Duration::minutes(mins);
         write_atomic(d.path(), &s).unwrap();
         role_status(d.path(), "baracuda", &facts).state
     }
@@ -1657,7 +1663,8 @@ mod tests {
         let d = tempdir().unwrap();
         let facts = dead_facts();
         let mut s = built("baracuda", SpecState::Stopping);
-        s.written_at = facts.now() - chrono::Duration::minutes(20);
+        s.written_at =
+            crate::ts_compat::ToChrono::to_chrono(facts.now()) - chrono::Duration::minutes(20);
         write_atomic(d.path(), &s).unwrap();
         let st = role_status(d.path(), "baracuda", &facts);
         assert!(st.detail.unwrap().contains("stop did not finish"));
@@ -1683,7 +1690,7 @@ mod tests {
         let mut st = crate::testing::state_at("baracuda", "s", "PreToolUse");
         st.busy = true;
         st.pid = 19184;
-        st.updated_at = Utc::now() - chrono::Duration::seconds(4775);
+        st.updated_at = lane_state::timestamp::Timestamp::now().plus_secs(-4775);
         std::fs::write(
             d.path().join("baracuda.json"),
             serde_json::to_string(&st).unwrap(),
@@ -1825,7 +1832,7 @@ mod tests {
         st.pid = 55;
         st.pid_start_secs = Some(100);
         st.no_background_shells = None;
-        st.updated_at = Utc::now() - chrono::Duration::seconds(7200);
+        st.updated_at = lane_state::timestamp::Timestamp::now().plus_secs(-7200);
         std::fs::write(
             d.path().join("baracuda.json"),
             serde_json::to_string(&st).unwrap(),
@@ -1849,7 +1856,7 @@ mod tests {
         st.pid = 55;
         st.pid_start_secs = Some(100);
         // the fake clock is fixed, so the write is placed relative to it, not to the wall clock
-        st.updated_at = facts.now() - chrono::Duration::seconds(7200);
+        st.updated_at = facts.now().plus_secs(-7200);
         std::fs::write(
             d.path().join("baracuda.json"),
             serde_json::to_string(&st).unwrap(),

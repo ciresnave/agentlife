@@ -587,7 +587,7 @@ pub fn execute_start(
     let mut running = plan.spec.clone();
     running.state = SpecState::Running;
     running.written_by = WrittenBy::Launch;
-    running.written_at = facts.now();
+    running.written_at = crate::ts_compat::ToChrono::to_chrono(facts.now());
     // A launch is not a stop: the kind described the stop that ended the previous session.
     running.stop_kind = None;
     running.stopped_session_id = None;
@@ -1375,7 +1375,7 @@ mod tests {
         let mut st = state_at("baracuda", "dead-session", "PreToolUse");
         st.pid = 19184;
         st.busy = true;
-        st.updated_at = Utc::now() - chrono::Duration::seconds(4775);
+        st.updated_at = lane_state::timestamp::Timestamp::now().plus_secs(-4775);
         std::fs::write(
             d.path().join("baracuda.json"),
             serde_json::to_string(&st).unwrap(),

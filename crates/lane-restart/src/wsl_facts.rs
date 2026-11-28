@@ -11,7 +11,6 @@
 //! gone says so.
 
 use crate::wsl::WslTarget;
-use chrono::{DateTime, Utc};
 use lane_state::facts::{KillError, ProcEntry, ProcessIdentity, ShellCheckError, SystemFacts};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -211,7 +210,7 @@ impl<I: SystemFacts, R: DistroRunner> WslFacts<I, R> {
     }
 
     fn now_secs(&self) -> u64 {
-        u64::try_from(self.inner.now().timestamp()).unwrap_or(0)
+        u64::try_from(self.inner.now().unix_secs()).unwrap_or(0)
     }
 
     /// `pid` is the host's `wsl.exe`: alive, and its image really is `wsl.exe`. Returns its
@@ -279,7 +278,7 @@ impl<I: SystemFacts, R: DistroRunner> SystemFacts for WslFacts<I, R> {
         modified.elapsed().is_ok_and(|age| age <= max_age)
     }
 
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> lane_state::timestamp::Timestamp {
         self.inner.now()
     }
 
@@ -337,7 +336,6 @@ impl<I: SystemFacts, R: DistroRunner> SystemFacts for WslFacts<I, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -434,8 +432,8 @@ mod tests {
         fn transcript_is_recent(&self, _: &str, _: &str, _: Duration) -> bool {
             unreachable!()
         }
-        fn now(&self) -> DateTime<Utc> {
-            Utc.timestamp_opt(NOW, 0).unwrap()
+        fn now(&self) -> lane_state::timestamp::Timestamp {
+            lane_state::timestamp::Timestamp::from_unix_secs(NOW).unwrap()
         }
         fn process_identity(&self, _: u32) -> Option<ProcessIdentity> {
             self.host.clone()

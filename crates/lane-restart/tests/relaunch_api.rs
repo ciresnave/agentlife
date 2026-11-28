@@ -30,7 +30,7 @@ fn state(role: &str) -> LaneState {
         subagents_running: 0,
         no_background_shells: Some(true),
         launch_args: None,
-        updated_at: chrono::Utc::now(),
+        updated_at: lane_state::timestamp::Timestamp::now(),
         updated_by_event: "Stop".to_string(),
     }
 }

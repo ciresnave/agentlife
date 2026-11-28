@@ -65,9 +65,9 @@ impl SystemFacts for RecordingFacts {
     fn transcript_is_recent(&self, _: &str, _: &str, _: Duration) -> bool {
         unreachable!("not asked")
     }
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> lane_state::timestamp::Timestamp {
         self.log.borrow_mut().push("now".into());
-        self.now
+        crate::ts_compat::ToTimestamp::to_ts(self.now)
     }
     fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
         self.live_pid
@@ -146,7 +146,7 @@ pub fn state_at(role: &str, session: &str, event: &str) -> LaneState {
         subagents_running: 0,
         no_background_shells: Some(true),
         launch_args: None,
-        updated_at: Utc::now(),
+        updated_at: lane_state::timestamp::Timestamp::now(),
         updated_by_event: event.to_string(),
     }
 }

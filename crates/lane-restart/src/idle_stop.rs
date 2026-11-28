@@ -88,9 +88,8 @@ pub fn verdict(i: &Inputs<'_>, p: &Params) -> Verdict {
     if !i.handoff_written {
         why.push(Keep::HandoffMissing);
     }
-    let since = i
-        .last_mail
-        .map_or(i.state.updated_at, |m| m.max(i.state.updated_at));
+    let updated_at = crate::ts_compat::ToChrono::to_chrono(i.state.updated_at);
+    let since = i.last_mail.map_or(updated_at, |m| m.max(updated_at));
     let quiet_for = i.now - since;
     let required = if i.wakes_in_window >= p.wakes {
         p.quiet_flapping
@@ -133,7 +132,7 @@ mod tests {
             subagents_running: 0,
             no_background_shells: Some(true),
             launch_args: None,
-            updated_at: at(updated_min),
+            updated_at: crate::ts_compat::ToTimestamp::to_ts(at(updated_min)),
             updated_by_event: "AssertIdle".into(),
         }
     }

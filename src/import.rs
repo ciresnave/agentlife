@@ -17,7 +17,19 @@ use crate::identity::{path_is_under, paths_equal};
 use crate::registry::{
     AgentId, AgentRecord, ClosedHow, Intent, Origin, Registry, RegistryError, Session,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
+
+/// lane-state's instant as `chrono`, for the agent store (O10: the store leaves chrono in a later stage).
+fn chrono_of(t: lane_state::timestamp::Timestamp) -> DateTime<Utc> {
+    let (mut secs, mut nanos) = (t.unix_secs(), t.subsec_nanos());
+    if nanos < 0 {
+        secs -= 1;
+        nanos += 1_000_000_000;
+    }
+    Utc.timestamp_opt(secs, nanos.unsigned_abs())
+        .single()
+        .unwrap_or_default()
+}
 use lane_state::state::LaneState;
 use serde::Serialize;
 use std::path::Path;
@@ -149,12 +161,12 @@ pub fn decide(i: &Inputs) -> Outcome {
                 SkipReason::Denied,
                 format!("{name:?} is a test fixture name"),
             );
-        } else if i.now - st.updated_at > i.since {
+        } else if i.now - chrono_of(st.updated_at) > i.since {
             skip(
                 SkipReason::TooOld,
                 format!(
                     "last written {}, older than {}h",
-                    st.updated_at.format("%Y-%m-%d %H:%MZ"),
+                    chrono_of(st.updated_at).format("%Y-%m-%d %H:%MZ"),
                     i.since.num_hours()
                 ),
             );
@@ -218,7 +230,11 @@ pub fn decide(i: &Inputs) -> Outcome {
             });
             continue;
         }
-        let mut rec = AgentRecord::new(AgentId::generate(), st.cwd.clone(), st.updated_at);
+        let mut rec = AgentRecord::new(
+            AgentId::generate(),
+            st.cwd.clone(),
+            chrono_of(st.updated_at),
+        );
         rec.name = Some(name.clone());
         rec.role = Some(st.role.clone());
         rec.launch_args = st.launch_args.clone();
@@ -235,7 +251,7 @@ pub fn decide(i: &Inputs) -> Outcome {
                 session_id: st.session_id.clone(),
                 pid: st.pid,
                 process_start_secs: st.pid_start_secs,
-                started_at: st.updated_at,
+                started_at: chrono_of(st.updated_at),
                 ended_at: None,
                 end_reason: None,
             });

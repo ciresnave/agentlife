@@ -30,6 +30,18 @@ impl Timestamp {
         jiff::Timestamp::from_second(secs).ok().map(Self)
     }
 
+    /// The instant `secs` seconds and `nanos` nanoseconds after the Unix epoch. `None` when out of range.
+    #[must_use]
+    pub fn from_unix(secs: i64, nanos: i32) -> Option<Self> {
+        jiff::Timestamp::new(secs, nanos).ok().map(Self)
+    }
+
+    /// The nanoseconds past the whole second (see [`Timestamp::unix_secs`]).
+    #[must_use]
+    pub fn subsec_nanos(self) -> i32 {
+        self.0.subsec_nanosecond()
+    }
+
     /// Whole seconds since the Unix epoch, rounded toward zero for a fractional instant.
     #[must_use]
     pub fn unix_secs(self) -> i64 {
@@ -92,7 +104,10 @@ mod tests {
     #[test]
     fn writes_rfc3339_z() {
         let t = Timestamp::from_unix_secs(1_793_401_200).unwrap();
-        assert_eq!(serde_json::to_string(&t).unwrap(), "\"2026-10-30T23:00:00Z\"");
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            "\"2026-10-30T23:00:00Z\""
+        );
         assert_eq!(t.to_rfc3339(), "2026-10-30T23:00:00Z");
     }
 

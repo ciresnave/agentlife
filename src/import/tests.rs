@@ -31,7 +31,11 @@ fn state(role: &str, cwd: &str, mode: Option<&str>, age_h: i64) -> LaneState {
                 .map(String::from)
                 .to_vec(),
         ),
-        updated_at: hours_ago(age_h),
+        updated_at: lane_state::timestamp::Timestamp::from_unix(
+            hours_ago(age_h).timestamp(),
+            i32::try_from(hours_ago(age_h).timestamp_subsec_nanos()).unwrap(),
+        )
+        .unwrap(),
         updated_by_event: "Stop".into(),
     }
 }

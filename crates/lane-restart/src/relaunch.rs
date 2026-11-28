@@ -1234,7 +1234,7 @@ mod tests {
         fn transcript_is_recent(&self, _: &str, _: &str, _: std::time::Duration) -> bool {
             panic!("must not be reached")
         }
-        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        fn now(&self) -> lane_state::timestamp::Timestamp {
             panic!("must not be reached")
         }
         fn process_identity(&self, _: u32) -> Option<ProcessIdentity> {
@@ -1278,7 +1278,7 @@ mod tests {
             subagents_running: 0,
             no_background_shells: Some(true),
             launch_args: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: lane_state::timestamp::Timestamp::now(),
             updated_by_event: "Stop".to_string(),
         }
     }
@@ -2287,7 +2287,7 @@ mod tests {
         fn transcript_is_recent(&self, _: &str, _: &str, _: std::time::Duration) -> bool {
             panic!("must not be reached")
         }
-        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        fn now(&self) -> lane_state::timestamp::Timestamp {
             panic!("must not be reached")
         }
         fn process_identity(&self, _: u32) -> Option<ProcessIdentity> {

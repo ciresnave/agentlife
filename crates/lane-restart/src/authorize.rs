@@ -170,8 +170,7 @@ fn identify(
     facts: &dyn SystemFacts,
     check_cwd: bool,
 ) -> Result<ProcessIdentity, Refusal> {
-    let age = facts.now().signed_duration_since(state.updated_at);
-    let age_secs = age.num_seconds();
+    let age_secs = facts.now().secs_since(state.updated_at);
     if age_secs < 0 || age_secs as u64 > STALE_STATE_AFTER.as_secs() {
         return Err(Refusal::StaleStateFile {
             role: state.role.clone(),
@@ -380,8 +379,8 @@ mod tests {
         fn transcript_is_recent(&self, _cwd: &str, _session_id: &str, _max_age: Duration) -> bool {
             *self.transcripts_recent.borrow()
         }
-        fn now(&self) -> chrono::DateTime<Utc> {
-            self.now
+        fn now(&self) -> lane_state::timestamp::Timestamp {
+            crate::ts_compat::ToTimestamp::to_ts(self.now)
         }
         fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {
             self.identities.borrow().get(&pid).cloned()
@@ -823,6 +822,32 @@ mod tests {
             decide(&req, &healthy_facts(), dir.path()),
             Err(Refusal::StaleStateFile { .. })
         ));
+    }
+
+    #[test]
+    fn the_age_of_a_state_file_is_judged_against_the_facts_own_clock_in_the_right_direction() {
+        // Both neighbours of "now" (the fake clock, not the real one): 60 s old is fresh, 60 s ahead is refused.
+        let facts = healthy_facts();
+        let at = |secs: i64| -> String {
+            crate::ts_compat::ToChrono::to_chrono(facts.now().plus_secs(secs)).to_rfc3339()
+        };
+        for (delta, refused) in [(-60, false), (60, true), (-86_400, true)] {
+            let dir = tempdir().unwrap();
+            write_state(dir.path(), "overmind", |v| {
+                v["updated_at"] = serde_json::json!(at(delta));
+            });
+            let req = Request {
+                target: myself("overmind"),
+                confirmed: false,
+                dry_run: false,
+            };
+            let got = decide(&req, &facts, dir.path());
+            assert_eq!(
+                matches!(got, Err(Refusal::StaleStateFile { .. })),
+                refused,
+                "delta {delta}: {got:?}"
+            );
+        }
     }
 
     #[test]

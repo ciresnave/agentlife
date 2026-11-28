@@ -365,7 +365,8 @@ pub fn launch_and_wait_noticed(
         argv,
         carries_dev_channels_flag,
     } = prepare_launch_noticed(spec, policy_default, permit, wake.0, wake.1)?;
-    let launched_after_secs = crate::stop::launched_after(facts.now());
+    let launched_after_secs =
+        crate::stop::launched_after(crate::ts_compat::ToChrono::to_chrono(facts.now()));
     spawn(spec, &argv)?;
     wait_for_liveness(
         facts,
@@ -432,7 +433,7 @@ mod tests {
             subagents_running: 0,
             no_background_shells: Some(true),
             launch_args: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: lane_state::timestamp::Timestamp::now(),
             updated_by_event: "Stop".to_string(),
         }
     }
@@ -643,7 +644,7 @@ mod tests {
         fn transcript_is_recent(&self, _: &str, _: &str, _: Duration) -> bool {
             unreachable!()
         }
-        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        fn now(&self) -> lane_state::timestamp::Timestamp {
             unreachable!()
         }
         fn process_identity(&self, _: u32) -> Option<crate::facts::ProcessIdentity> {
@@ -716,7 +717,7 @@ mod tests {
         fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
             unreachable!()
         }
-        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        fn now(&self) -> lane_state::timestamp::Timestamp {
             unreachable!()
         }
         fn process_identity(&self, _: u32) -> Option<crate::facts::ProcessIdentity> {
@@ -889,7 +890,7 @@ mod tests {
             fn cwd_of(&self, _: u32) -> Option<std::path::PathBuf> {
                 unreachable!()
             }
-            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            fn now(&self) -> lane_state::timestamp::Timestamp {
                 unreachable!()
             }
             fn process_identity(&self, _: u32) -> Option<crate::facts::ProcessIdentity> {

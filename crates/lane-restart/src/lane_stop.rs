@@ -243,7 +243,7 @@ pub fn plan_stop(
         req.reason,
         req.self_stop,
         req.kind,
-        facts.now(),
+        crate::ts_compat::ToChrono::to_chrono(facts.now()),
         policy_default,
     )
 }
@@ -281,7 +281,8 @@ pub fn build_stop_plan(
     let state = with_recorded_flags(state, dir);
     // Another lane's idle claim is `updated_at` here: the idle gate has already required
     // `no_background_shells`, which only the assert-idle event sets and every later turn clears.
-    let idle_claimed_at = (!self_stop).then_some(state.updated_at);
+    let idle_claimed_at =
+        (!self_stop).then_some(crate::ts_compat::ToChrono::to_chrono(state.updated_at));
     let handoff_path = check_handoff(
         &state.cwd,
         &state.role,
@@ -361,7 +362,7 @@ pub fn execute_stop(
     stop_lane(facts, plan.state.pid, &plan.identity, sleep).map_err(StopError::Kill)?;
     let mut suspended = plan.stopping.clone();
     suspended.state = SpecState::Suspended;
-    suspended.written_at = facts.now();
+    suspended.written_at = crate::ts_compat::ToChrono::to_chrono(facts.now());
     let spec_warning = specs.write(&suspended).err().map(|e| e.to_string());
     Ok(StopDone { spec_warning })
 }
@@ -448,7 +449,7 @@ mod tests {
         let d = tempdir().unwrap();
         let mut s = state_in(d.path());
         // Claimed idle at 1_100; the HANDOFF was touched at 1_500.
-        s.updated_at = Utc.timestamp_opt(1_100, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_100, 0).unwrap());
         write_handoff(d.path(), 500);
         let r = plan_for(s, false);
         assert!(
@@ -461,7 +462,7 @@ mod tests {
     fn a_handoff_between_session_start_and_the_idle_claim_passes() {
         let d = tempdir().unwrap();
         let mut s = state_in(d.path());
-        s.updated_at = Utc.timestamp_opt(1_900, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
         write_handoff(d.path(), 500);
         let plan = plan_for(s, false).expect("a fresh HANDOFF before the claim is allowed");
         assert_eq!(plan.stopping.state, SpecState::Stopping);
@@ -475,7 +476,7 @@ mod tests {
     fn a_self_stop_has_no_idle_claim_to_compare_but_still_needs_a_fresh_handoff() {
         let d = tempdir().unwrap();
         let mut s = state_in(d.path());
-        s.updated_at = Utc.timestamp_opt(1_100, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_100, 0).unwrap());
         write_handoff(d.path(), 500); // after `updated_at`: fine for --self
         assert!(plan_for(s.clone(), true).is_ok());
         write_handoff(d.path(), -600);
@@ -492,7 +493,7 @@ mod tests {
         let d = tempdir().unwrap();
         write_handoff(d.path(), 100);
         let mut s = state_in(d.path());
-        s.updated_at = Utc.timestamp_opt(1_900, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
         s.launch_args = Some(vec!["claude".into(), "--model".into(), "opus".into()]);
         let plan = plan_for(s, false).unwrap();
         assert_eq!(plan.stopping.model, "sonnet");
@@ -505,7 +506,7 @@ mod tests {
         let d = tempdir().unwrap();
         write_handoff(d.path(), 100);
         let mut s = state_in(d.path());
-        s.updated_at = Utc.timestamp_opt(1_900, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
         s.launch_args = Some(vec![
             "claude".into(),
             "--model".into(),
@@ -522,7 +523,7 @@ mod tests {
     fn ready_plan(dir: &Path) -> StopPlan {
         write_handoff(dir, 100);
         let mut s = state_in(dir);
-        s.updated_at = Utc.timestamp_opt(1_900, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
         plan_for(s, false).unwrap()
     }
 
@@ -808,7 +809,7 @@ mod tests {
         let d = tempdir().unwrap();
         write_handoff(d.path(), 100);
         let mut s = state_in(d.path());
-        s.updated_at = Utc.timestamp_opt(1_900, 0).unwrap();
+        s.updated_at = crate::ts_compat::ToTimestamp::to_ts(Utc.timestamp_opt(1_900, 0).unwrap());
         s.launch_args = Some(
             [
                 "claude",

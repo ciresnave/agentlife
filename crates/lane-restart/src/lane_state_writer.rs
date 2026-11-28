@@ -199,7 +199,7 @@ fn bootstrap_state(
         busy: false,
         subagents_running: 0,
         no_background_shells: None,
-        updated_at: now,
+        updated_at: crate::ts_compat::ToTimestamp::to_ts(now),
         updated_by_event: event.to_string(),
     }
 }
@@ -267,7 +267,7 @@ pub fn apply_event(
             busy: false,
             subagents_running: 0,
             no_background_shells: None,
-            updated_at: now,
+            updated_at: crate::ts_compat::ToTimestamp::to_ts(now),
             updated_by_event: event.to_string(),
         });
     }
@@ -310,7 +310,7 @@ pub fn apply_event(
     if state.name.is_none() {
         state.name = recordable_name(cli_flags);
     }
-    state.updated_at = now;
+    state.updated_at = crate::ts_compat::ToTimestamp::to_ts(now);
     state.updated_by_event = event.to_string();
     match event {
         "UserPromptSubmit" | "PreToolUse" => {
@@ -2029,8 +2029,8 @@ mod tests {
                 // exactly as it did live on 2026-09-27.
                 session_id == "e2e-session"
             }
-            fn now(&self) -> chrono::DateTime<Utc> {
-                Utc::now()
+            fn now(&self) -> lane_state::timestamp::Timestamp {
+                lane_state::timestamp::Timestamp::now()
             }
             fn process_identity(&self, pid: u32) -> Option<crate::facts::ProcessIdentity> {
                 (pid == 99).then_some(crate::facts::ProcessIdentity {
@@ -2137,8 +2137,8 @@ mod tests {
                 // The transcript lives under the LAUNCH directory only.
                 crate::paths::paths_match(cwd, r"C:\Projects") && session_id == "pm-session"
             }
-            fn now(&self) -> chrono::DateTime<Utc> {
-                Utc::now()
+            fn now(&self) -> lane_state::timestamp::Timestamp {
+                lane_state::timestamp::Timestamp::now()
             }
             fn process_identity(&self, pid: u32) -> Option<crate::facts::ProcessIdentity> {
                 (pid == 99).then_some(crate::facts::ProcessIdentity {

@@ -118,7 +118,7 @@ impl crate::facts::SystemFacts for LiveLaneFacts {
     fn transcript_is_recent(&self, _: &str, _: &str, _: std::time::Duration) -> bool {
         true
     }
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+    fn now(&self) -> lane_state::timestamp::Timestamp {
         self.inner.now()
     }
     fn process_identity(&self, pid: u32) -> Option<crate::facts::ProcessIdentity> {

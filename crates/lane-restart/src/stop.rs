@@ -43,7 +43,7 @@ pub fn stop_lane(
         .map_err(RelaunchError::Kill)?;
     sleep(SETTLE);
     Ok(Stopped {
-        launched_after_secs: launched_after(facts.now()),
+        launched_after_secs: launched_after(crate::ts_compat::ToChrono::to_chrono(facts.now())),
     })
 }
 

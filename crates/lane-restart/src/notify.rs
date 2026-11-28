@@ -281,8 +281,10 @@ pub fn lane_progressed_since(
     role: &str,
     since: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    state::load(state_dir, role)
-        .is_ok_and(|s| s.updated_at > since && s.updated_by_event != "SessionStart")
+    state::load(state_dir, role).is_ok_and(|s| {
+        crate::ts_compat::ToChrono::to_chrono(s.updated_at) > since
+            && s.updated_by_event != "SessionStart"
+    })
 }
 
 /// The `[ASK]` message (`C:/Projects/CLAUDE.md` §10 compact format).
