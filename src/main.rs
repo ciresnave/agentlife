@@ -161,7 +161,7 @@ fn run_hook(event: &str, reason: Option<&str>) -> ExitCode {
         "{} [stdin {read_ms} ms, +snapshot to {snapshot_ms} ms, total {} ms]{steps}",
         outcome.log_line_for(
             event,
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             std::env::var("AGENTLIFE_AGENT_ID").ok().as_deref()
         ),
         began.elapsed().as_millis()
@@ -794,7 +794,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
     let log = |text: &str| {
         let line = format!(
             "{} agentlife launcher: {text}",
-            chrono::Utc::now().to_rfc3339()
+            lane_state::timestamp::Timestamp::now().to_rfc3339()
         );
         eprintln!("{line}");
         if let Some(p) = &log_file {
@@ -905,7 +905,7 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
             ))
         }
     };
-    let now = || chrono::Utc::now().timestamp();
+    let now = || lane_state::timestamp::Timestamp::now().unix_secs();
     match engine.recover(now()) {
         Ok(0) => {}
         Ok(n) => log(&format!(
@@ -1342,7 +1342,7 @@ fn run_list(json: bool, all: bool) -> ExitCode {
         &SnapshotTable::capture(),
         all,
         &app.cfg,
-        chrono::Utc::now(),
+        lane_state::timestamp::Timestamp::now(),
     );
     if json {
         println!("{}", list::render_json(&rows));
@@ -1369,7 +1369,7 @@ fn run_import(write: bool, json: bool, since: Option<String>, park: Vec<String>)
     let since = match since.as_deref().map(import::parse_since) {
         Some(Ok(d)) => d,
         Some(Err(e)) => return fail(e),
-        None => chrono::Duration::hours(import::DEFAULT_SINCE_HOURS),
+        None => import::DEFAULT_SINCE_HOURS * 3600,
     };
     let dir = std::path::Path::new(&app.cfg.lane_state_dir);
     let (states, unparsed) = match import::read_states(dir) {
@@ -1385,7 +1385,7 @@ fn run_import(write: bool, json: bool, since: Option<String>, park: Vec<String>)
         unparsed: &unparsed,
         existing: &existing,
         cfg: &app.cfg,
-        now: chrono::Utc::now(),
+        now: lane_state::timestamp::Timestamp::now(),
         since,
         park: &park,
         cwd_exists: &|p| std::path::Path::new(p).is_dir(),
@@ -1417,7 +1417,7 @@ fn run_import(write: bool, json: bool, since: Option<String>, park: Vec<String>)
         let v = serde_json::json!({
             "wrote": write,
             "written": written,
-            "since_hours": since.num_hours(),
+            "since_hours": since / 3600,
             "imports": outcome.imports.iter().map(|i| serde_json::json!({
                 "role": i.role,
                 "agent_id": i.record.agent_id,
@@ -1572,7 +1572,7 @@ fn run_mark(selector: &str, mark: Mark) -> ExitCode {
             &app.journal,
             &target.agent_id,
             &caller,
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
         ),
         Mark::Unpin => marks::unpin(&app.registry, &app.journal, &target.agent_id, &caller),
     };
@@ -1620,7 +1620,7 @@ fn run_waiting(selector: Option<&str>, note: Option<String>, clear: bool) -> Exi
             &target_id,
             note,
             &caller,
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
         )
     };
     report("waiting", &target_id.to_string(), result)
@@ -1686,7 +1686,7 @@ fn run_close(
         &target.agent_id,
         how,
         confirm,
-        chrono::Utc::now(),
+        lane_state::timestamp::Timestamp::now(),
     );
     control_report(name, &target.agent_id.to_string(), result)
 }

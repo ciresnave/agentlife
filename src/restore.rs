@@ -35,7 +35,7 @@ use crate::launch::{build_tab, Programs, SpawnVia, Spawner};
 use crate::plan::{Entry, Plan};
 use crate::readiness::read_lane_state;
 use crate::registry::Registry;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -80,7 +80,7 @@ pub struct EntryReport {
     pub tab: u32,
     pub outcome: Outcome,
     pub spawned_via: Option<SpawnVia>,
-    pub launched_at: Option<DateTime<Utc>>,
+    pub launched_at: Option<Timestamp>,
     pub seconds_to_settle: Option<u64>,
     pub session_id: Option<String>,
 }
@@ -153,8 +153,8 @@ pub struct Summary {
 pub struct Report {
     pub schema: u32,
     pub plan_hash: String,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: DateTime<Utc>,
+    pub started_at: Timestamp,
+    pub finished_at: Timestamp,
     /// Why the run stopped starting agents, if it did (repeated failures).
     pub halted: Option<String>,
     /// Set when free memory held the rest of the run.
@@ -246,12 +246,7 @@ pub trait Observer {
     /// The agent's newest session id before the launch (`None` if it has none).
     fn latest_session(&self, agent_id: &str) -> Option<String>;
     /// Progress of the session that began after the launch (not `before`).
-    fn progress(
-        &self,
-        agent_id: &str,
-        before: Option<&str>,
-        launched_at: DateTime<Utc>,
-    ) -> Progress;
+    fn progress(&self, agent_id: &str, before: Option<&str>, launched_at: Timestamp) -> Progress;
 }
 
 /// Judges by the registry (written by the hook of the **new** session), the process table, and
@@ -267,12 +262,12 @@ pub struct RegistryObserver<'a> {
 
 /// The newest `... skipped: <why> [agent <id>]` line for `agent_id` stamped at or after `since`
 /// (the `Outcome::log_line_for` format). Pure over the log text.
-pub fn skip_for_agent(log_text: &str, agent_id: &str, since: DateTime<Utc>) -> Option<String> {
+pub fn skip_for_agent(log_text: &str, agent_id: &str, since: Timestamp) -> Option<String> {
     let tag = format!(" [agent {agent_id}]");
     log_text.lines().rev().find_map(|line| {
         let (stamp, rest) = line.split_once(' ')?;
-        let at = DateTime::parse_from_rfc3339(stamp).ok()?;
-        if at.with_timezone(&Utc) < since {
+        let at = stamp.parse::<Timestamp>().ok()?;
+        if at < since {
             return None;
         }
         let (_, tail) = rest.split_once(" skipped: ")?;
@@ -283,14 +278,10 @@ pub fn skip_for_agent(log_text: &str, agent_id: &str, since: DateTime<Utc>) -> O
 
 impl RegistryObserver<'_> {
     /// What an agent with no new session looks like: nothing, unless its hook said why.
-    fn without_session(&self, agent_id: &str, launched_at: DateTime<Utc>) -> Progress {
+    fn without_session(&self, agent_id: &str, launched_at: Timestamp) -> Progress {
         let skipped = self.hook_log.as_ref().and_then(|p| {
             let text = std::fs::read_to_string(p).ok()?;
-            skip_for_agent(
-                &text,
-                agent_id,
-                launched_at - ChronoDuration::seconds(START_SLACK_SECS),
-            )
+            skip_for_agent(&text, agent_id, launched_at.plus_secs(-START_SLACK_SECS))
         });
         Progress {
             skipped,
@@ -316,19 +307,14 @@ impl Observer for RegistryObserver<'_> {
         rec.sessions.last().map(|s| s.session_id.clone())
     }
 
-    fn progress(
-        &self,
-        agent_id: &str,
-        before: Option<&str>,
-        launched_at: DateTime<Utc>,
-    ) -> Progress {
+    fn progress(&self, agent_id: &str, before: Option<&str>, launched_at: Timestamp) -> Progress {
         let Some(rec) = crate::registry::AgentId::new(agent_id)
             .ok()
             .and_then(|id| self.registry.get(&id).ok().flatten())
         else {
             return self.without_session(agent_id, launched_at);
         };
-        let earliest = launched_at - ChronoDuration::seconds(START_SLACK_SECS);
+        let earliest = launched_at.plus_secs(-START_SLACK_SECS);
         let Some(s) = rec
             .sessions
             .iter()
@@ -473,7 +459,7 @@ pub fn disk_preflight(
 
 struct Live {
     idx: usize,
-    launched_at: DateTime<Utc>,
+    launched_at: Timestamp,
     before: Option<String>,
     carries_channel: bool,
 }
@@ -703,7 +689,7 @@ fn settle(plan: &Plan, d: &Deps, reports: &mut [EntryReport], mut live: Vec<Live
         let mut still = Vec::new();
         for l in live {
             let e = &plan.entries[l.idx];
-            let elapsed = (now - l.launched_at).to_std().unwrap_or_default();
+            let elapsed = now.duration_since(l.launched_at);
             let p = d
                 .observer
                 .progress(&e.agent_id, l.before.as_deref(), l.launched_at);
@@ -874,13 +860,12 @@ mod tests {
     use crate::launch::{SpawnError, TabLaunch};
     use crate::plan::{Params, PLAN_SCHEMA};
     use crate::registry::{AgentId, AgentRecord, Session};
-    use chrono::TimeZone;
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    fn t0() -> DateTime<Utc> {
-        Utc.timestamp_opt(1_800_000_000, 0).unwrap()
+    fn t0() -> Timestamp {
+        Timestamp::from_unix(1_800_000_000, 0).unwrap()
     }
 
     #[derive(Clone, Copy)]
@@ -906,7 +891,7 @@ mod tests {
         clock: Arc<ManualClock>,
         behavior: RefCell<HashMap<String, Behavior>>,
         default: Behavior,
-        launched: RefCell<HashMap<String, DateTime<Utc>>>,
+        launched: RefCell<HashMap<String, Timestamp>>,
         order: RefCell<Vec<String>>,
         running_before: HashSet<String>,
         spawn_fails: HashSet<String>,
@@ -962,11 +947,11 @@ mod tests {
         fn latest_session(&self, _: &str) -> Option<String> {
             None
         }
-        fn progress(&self, id: &str, _: Option<&str>, _: DateTime<Utc>) -> Progress {
+        fn progress(&self, id: &str, _: Option<&str>, _: Timestamp) -> Progress {
             let Some(at) = self.launched.borrow().get(id).copied() else {
                 return Progress::default();
             };
-            let secs = (self.clock.now() - at).num_seconds().max(0) as u64;
+            let secs = self.clock.now().secs_since(at).max(0) as u64;
             let b = self.behavior_of(id);
             let Some(a) = b.appears.filter(|a| secs >= *a) else {
                 return Progress {
@@ -1078,7 +1063,7 @@ mod tests {
         let journal = Journal::new(dir.path(), fleet.clock.clone());
         let clock = fleet.clock.clone();
         let sleep = move |d: Duration| {
-            clock.set(clock.now() + ChronoDuration::from_std(d).unwrap());
+            clock.set(clock.now().plus_duration(d));
         };
         let report = {
             let progs = programs();
@@ -1130,10 +1115,10 @@ mod tests {
         };
         // The PM is the earliest and nothing else was launched until it was Working (8 s) + 45 s.
         assert_eq!(r.fleet.order.borrow()[0], "a-0");
-        assert!((at("a-1") - at("a-0")).num_seconds() >= 8 + 45);
+        assert!(at("a-1").secs_since(at("a-0")) >= 8 + 45);
         // Batch members launch together; the next batch waits for them and the delay.
         assert_eq!(at("a-1"), at("a-3"));
-        assert!((at("a-4") - at("a-1")).num_seconds() >= 8 + 45);
+        assert!(at("a-4").secs_since(at("a-1")) >= 8 + 45);
         // No batch ever has more than batch_size agents launched-but-unsettled at once.
         let mut peak = 0;
         for probe in &r.report.entries {
@@ -1144,7 +1129,7 @@ mod tests {
                 .iter()
                 .filter(|e| {
                     let l = e.launched_at.unwrap();
-                    l <= p && p < l + ChronoDuration::seconds(e.seconds_to_settle.unwrap() as i64)
+                    l <= p && p < l.plus_secs(e.seconds_to_settle.unwrap() as i64)
                 })
                 .count();
             peak = peak.max(live);
@@ -1199,7 +1184,7 @@ mod tests {
 
     #[test]
     fn skip_for_agent_reads_only_this_agents_newer_skip_lines() {
-        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let t = |s: &str| s.parse::<Timestamp>().unwrap();
         let log = "2026-10-31T10:00:00+00:00 SessionStart skipped: old [agent a1] [stdin 1 ms]
 2026-10-31T10:05:00+00:00 SessionStart skipped: other [agent a2] [stdin 1 ms]
 2026-10-31T10:05:01+00:00 SessionStart ok registered a1
@@ -1496,8 +1481,7 @@ mod tests {
         let fleet = Fleet::new(GOOD);
         let journal = Journal::new(dir.path().join("registry"), fleet.clock.clone());
         let clock = fleet.clock.clone();
-        let sleep =
-            move |d: Duration| clock.set(clock.now() + ChronoDuration::from_std(d).unwrap());
+        let sleep = move |d: Duration| clock.set(clock.now().plus_duration(d));
         let progs = programs();
         let report = execute(
             &plan,
@@ -1542,8 +1526,7 @@ mod tests {
         let fleet = Fleet::new(GOOD);
         let journal = Journal::new(dir.path(), fleet.clock.clone());
         let clock = fleet.clock.clone();
-        let sleep =
-            move |d: Duration| clock.set(clock.now() + ChronoDuration::from_std(d).unwrap());
+        let sleep = move |d: Duration| clock.set(clock.now().plus_duration(d));
         let progs = programs();
         let report = execute(
             &plan,
@@ -1576,8 +1559,8 @@ mod tests {
         assert_eq!(at("a-0"), report.started_at);
         // The next batch: the first spawn is not delayed by the gap, the others each wait for it.
         let first = at("a-1");
-        assert_eq!((at("a-2") - first).num_seconds(), 2);
-        assert_eq!((at("a-3") - first).num_seconds(), 4);
+        assert_eq!(at("a-2").secs_since(first), 2);
+        assert_eq!(at("a-3").secs_since(first), 4);
         assert!(report.entries.iter().all(|e| e.outcome == Outcome::Working));
         // Each agent's settle time is counted from its own launch, not from the batch's start.
         assert!(report
@@ -1594,7 +1577,7 @@ mod tests {
         assert_eq!(r.fleet.order.borrow()[0], "a-0", "the PM is first");
         // Fake time: each batch costs its settle time (8 s) plus the delay, except the last.
         let batches = plan.batch_count() as i64;
-        let elapsed = (r.report.finished_at - r.report.started_at).num_seconds();
+        let elapsed = r.report.finished_at.secs_since(r.report.started_at);
         assert_eq!(elapsed, batches * 8 + (batches - 1) * 45, "{n} agents");
         assert!(r.report.halted.is_none());
     }
@@ -1628,7 +1611,7 @@ mod tests {
         }
     }
 
-    fn session(id: &str, pid: u32, start: Option<u64>, at: DateTime<Utc>) -> Session {
+    fn session(id: &str, pid: u32, start: Option<u64>, at: Timestamp) -> Session {
         Session {
             session_id: id.into(),
             pid,
@@ -1655,7 +1638,7 @@ mod tests {
             lane_state_dir: &lane_state,
             hook_log: None,
         };
-        let launched = t0() + ChronoDuration::seconds(1000);
+        let launched = t0().plus_secs(1000);
         assert_eq!(obs.latest_session("a-x").as_deref(), Some("old"));
         assert!(
             obs.is_running("a-x"),
@@ -1671,12 +1654,8 @@ mod tests {
             &id,
             || rec.clone(),
             |r| {
-                r.sessions.push(session(
-                    "new",
-                    20,
-                    Some(200),
-                    launched + ChronoDuration::seconds(3),
-                ));
+                r.sessions
+                    .push(session("new", 20, Some(200), launched.plus_secs(3)));
             },
         )
         .unwrap();
@@ -1729,14 +1708,10 @@ mod tests {
         // it from being mistaken for the launched one.
         let (dir, reg) = observer_world();
         let id = AgentId::new("a-x").unwrap();
-        let launched = t0() + ChronoDuration::seconds(1000);
+        let launched = t0().plus_secs(1000);
         let mut rec = AgentRecord::new(id.clone(), "C:/Projects/x", t0());
-        rec.sessions.push(session(
-            "old",
-            40,
-            Some(7),
-            launched - ChronoDuration::seconds(2),
-        ));
+        rec.sessions
+            .push(session("old", 40, Some(7), launched.plus_secs(-2)));
         reg.upsert(&id, || rec.clone(), |_| {}).unwrap();
         let table = Alive(HashMap::from([(40, 7)]));
         let obs = RegistryObserver {
@@ -1764,15 +1739,11 @@ mod tests {
     fn a_session_that_started_long_before_the_launch_is_not_the_launched_one() {
         let (dir, reg) = observer_world();
         let id = AgentId::new("a-x").unwrap();
-        let launched = t0() + ChronoDuration::seconds(1000);
+        let launched = t0().plus_secs(1000);
         let mut rec = AgentRecord::new(id.clone(), "C:/Projects/x", t0());
         // A different session id, but it began 100 s BEFORE the launch: not ours.
-        rec.sessions.push(session(
-            "other",
-            30,
-            Some(5),
-            launched - ChronoDuration::seconds(100),
-        ));
+        rec.sessions
+            .push(session("other", 30, Some(5), launched.plus_secs(-100)));
         reg.upsert(&id, || rec.clone(), |_| {}).unwrap();
         let table = Alive(HashMap::from([(30, 5)]));
         let obs = RegistryObserver {
@@ -1787,12 +1758,8 @@ mod tests {
             &id,
             || rec.clone(),
             |r| {
-                r.sessions.push(session(
-                    "near",
-                    31,
-                    Some(6),
-                    launched - ChronoDuration::seconds(4),
-                ));
+                r.sessions
+                    .push(session("near", 31, Some(6), launched.plus_secs(-4)));
             },
         )
         .unwrap();

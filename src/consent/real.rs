@@ -25,9 +25,35 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use user_request as ur;
 use user_request::store::{AuditOnly, Protector, Reservation, Store};
+
+/// `user_request` still speaks `chrono` (O10: its own repo moves later). These two conversions are the
+/// only place this crate names `chrono`; both keep every nanosecond, because a stored approval is
+/// compared by its `approved_at`.
+fn to_ur_time(t: Timestamp) -> chrono::DateTime<chrono::Utc> {
+    // `Timestamp` truncates toward zero (negative seconds carry negative nanoseconds); chrono floors.
+    let (mut secs, mut nanos) = (t.unix_secs(), t.subsec_nanos());
+    if nanos < 0 {
+        secs -= 1;
+        nanos += 1_000_000_000;
+    }
+    chrono::DateTime::from_timestamp(secs, nanos.unsigned_abs()).unwrap_or_default()
+}
+
+/// The reverse of [`to_ur_time`].
+fn from_ur_time(d: chrono::DateTime<chrono::Utc>) -> Timestamp {
+    let (secs, nanos) = (d.timestamp(), i64::from(d.timestamp_subsec_nanos()));
+    let (secs, nanos) = if secs < 0 && nanos > 0 {
+        (secs + 1, nanos - 1_000_000_000)
+    } else {
+        (secs, nanos)
+    };
+    Timestamp::from_unix(secs, i32::try_from(nanos).unwrap_or(0))
+        .or_else(|| Timestamp::from_unix_secs(0))
+        .expect("the epoch is in range")
+}
 
 use super::{
     Answer, AnswerError, Asking, Consent, Grant, Kind, Outcome, Prompt, Request, Requester,
@@ -83,7 +109,7 @@ fn to_ur_grant(g: &Grant) -> ur::Grant {
     match g {
         Grant::OneUse => ur::Grant::OneUse,
         Grant::For { secs } => ur::Grant::For { secs: *secs },
-        Grant::Until(t) => ur::Grant::Until(*t),
+        Grant::Until(t) => ur::Grant::Until(to_ur_time(*t)),
         Grant::Forever => ur::Grant::Forever,
     }
 }
@@ -92,7 +118,7 @@ fn from_ur_grant(g: &ur::Grant) -> Grant {
     match g {
         ur::Grant::OneUse => Grant::OneUse,
         ur::Grant::For { secs } => Grant::For { secs: *secs },
-        ur::Grant::Until(t) => Grant::Until(*t),
+        ur::Grant::Until(t) => Grant::Until(from_ur_time(*t)),
         ur::Grant::Forever => Grant::Forever,
     }
 }
@@ -337,11 +363,11 @@ impl Consent for UserRequestBackend {
         kind: Kind,
         subject: &str,
         requester: &Requester,
-    ) -> Result<DateTime<Utc>, String> {
+    ) -> Result<Timestamp, String> {
         let none = || format!("no unspent approval for {kind:?} '{subject}'");
         let store = self.inspect()?.ok_or_else(none)?;
         match store.find(to_ur_kind(kind), subject, &to_ur_requester(requester)) {
-            Some(g) => Ok(g.approval.approved_at),
+            Some(g) => Ok(from_ur_time(g.approval.approved_at)),
             None => Err(match store.trustworthy() {
                 Err(why) => format!("{}: the store cannot be trusted: {why}", none()),
                 Ok(()) => none(),

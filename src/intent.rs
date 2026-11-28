@@ -31,7 +31,7 @@ use crate::identity::ProcessTable;
 use crate::journal::Journal;
 use crate::list::{liveness, Liveness};
 use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
-use chrono::{DateTime, TimeZone, Utc};
+use lane_state::timestamp::Timestamp;
 use serde_json::json;
 
 /// The `SessionEnd` reasons that mean a person ended the session from the prompt.
@@ -40,15 +40,15 @@ pub const INTENTIONAL_END_REASONS: &[&str] = &["prompt_input_exit", "logout"];
 /// When the last shutdown began, if it can be known.
 pub trait ShutdownMarker {
     /// The latest shutdown-initiated moment at or before `boot`.
-    fn latest_before(&self, boot: DateTime<Utc>) -> Option<DateTime<Utc>>;
+    fn latest_before(&self, boot: Timestamp) -> Option<Timestamp>;
 }
 
 pub struct Facts<'a> {
     pub table: &'a dyn ProcessTable,
     /// When this boot began.
-    pub boot: DateTime<Utc>,
+    pub boot: Timestamp,
     /// When the shutdown that preceded this boot began, if known.
-    pub shutdown_start: Option<DateTime<Utc>>,
+    pub shutdown_start: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,16 +75,16 @@ pub enum Verdict {
     NoSession,
     ClosedOnPurpose {
         reason: String,
-        at: DateTime<Utc>,
+        at: Timestamp,
     },
     Candidate(CandidateWhy),
 }
 
-fn process_started(rec: &AgentRecord) -> Option<DateTime<Utc>> {
+fn process_started(rec: &AgentRecord) -> Option<Timestamp> {
     let last = rec.sessions.last()?;
     Some(
         last.process_start_secs
-            .and_then(|s| Utc.timestamp_opt(s as i64, 0).single())
+            .and_then(|s| Timestamp::from_unix_secs(s as i64))
             .unwrap_or(last.started_at),
     )
 }
@@ -230,7 +230,7 @@ pub fn reconcile(
 pub struct EventLogMarker;
 
 /// `(event id, time)` for every `<Event>` in `wevtutil qe ... /f:xml` output.
-pub fn parse_events(xml: &str) -> Vec<(u32, DateTime<Utc>)> {
+pub fn parse_events(xml: &str) -> Vec<(u32, Timestamp)> {
     xml.split("<Event ")
         .skip(1)
         .filter_map(|chunk| {
@@ -241,17 +241,14 @@ pub fn parse_events(xml: &str) -> Vec<(u32, DateTime<Utc>)> {
             let id: u32 = after.get(gt + 1..end)?.trim().parse().ok()?;
             let t = chunk.find("SystemTime='")? + "SystemTime='".len();
             let t_end = chunk[t..].find('\'')? + t;
-            let time = DateTime::parse_from_rfc3339(&chunk[t..t_end]).ok()?;
-            Some((id, time.with_timezone(&Utc)))
+            let time = chunk[t..t_end].parse::<Timestamp>().ok()?;
+            Some((id, time))
         })
         .collect()
 }
 
 /// The latest 1074 at or before `boot`, else the latest 6006 at or before it.
-pub fn pick_shutdown(
-    events: &[(u32, DateTime<Utc>)],
-    boot: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+pub fn pick_shutdown(events: &[(u32, Timestamp)], boot: Timestamp) -> Option<Timestamp> {
     let latest = |id: u32| {
         events
             .iter()
@@ -268,7 +265,7 @@ pub fn pick_shutdown(
 ///
 /// Recognised, because systemd writes them on an orderly shutdown: PID 1's `Shutting down.`, anything
 /// from `systemd-shutdown`, and journald's `Journal stopped`.
-pub fn pick_journal_shutdown(text: &str, boot: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn pick_journal_shutdown(text: &str, boot: Timestamp) -> Option<Timestamp> {
     text.lines().find_map(|line| {
         // `<secs>.<micros> <host> <ident>[<pid>]: <message>`
         let mut parts = line.splitn(4, ' ');
@@ -287,13 +284,13 @@ pub fn pick_journal_shutdown(text: &str, boot: DateTime<Utc>) -> Option<DateTime
         let secs: i64 = secs.parse().ok()?;
         let digits: String = frac.chars().take(6).collect();
         let micros: u32 = format!("{digits:0<6}").parse().ok()?;
-        let when = Utc.timestamp_opt(secs, micros * 1000).single()?;
+        let when = Timestamp::from_unix(secs, i32::try_from(micros * 1000).ok()?)?;
         (when <= boot).then_some(when)
     })
 }
 
 impl ShutdownMarker for EventLogMarker {
-    fn latest_before(&self, boot: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn latest_before(&self, boot: Timestamp) -> Option<Timestamp> {
         #[cfg(windows)]
         {
             let out = std::process::Command::new("wevtutil")
@@ -340,11 +337,11 @@ impl ShutdownMarker for EventLogMarker {
 }
 
 /// When this boot began, from the OS.
-pub fn boot_time() -> DateTime<Utc> {
+pub fn boot_time() -> Timestamp {
     sysinfo::System::boot_time()
         .ok()
-        .and_then(|secs| Utc.timestamp_opt(secs as i64, 0).single())
-        .unwrap_or_else(Utc::now)
+        .and_then(|secs| Timestamp::from_unix_secs(secs as i64))
+        .unwrap_or_else(Timestamp::now)
 }
 
 #[cfg(test)]
@@ -355,8 +352,8 @@ mod tests {
     use crate::registry::Session;
     use std::sync::Arc;
 
-    fn t(day: u32, h: u32, m: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, day, h, m, 0).unwrap()
+    fn t(day: u32, h: u32, m: u32) -> Timestamp {
+        Timestamp::from_utc(2026, 10, day as i8, h as i8, m as i8, 0).unwrap()
     }
 
     struct Alive(Vec<(u32, u64)>);
@@ -374,17 +371,13 @@ mod tests {
     }
 
     /// One agent with one session. `started` is the process start; `ended` is `(when, reason)`.
-    fn agent(
-        name: &str,
-        started: DateTime<Utc>,
-        ended: Option<(DateTime<Utc>, &str)>,
-    ) -> AgentRecord {
+    fn agent(name: &str, started: Timestamp, ended: Option<(Timestamp, &str)>) -> AgentRecord {
         let mut r = AgentRecord::new(AgentId::new(name).unwrap(), "C:/Projects/x", started);
         r.name = Some(name.to_string());
         r.sessions.push(Session {
             session_id: format!("s-{name}"),
             pid: 100,
-            process_start_secs: Some(started.timestamp() as u64),
+            process_start_secs: Some(started.unix_secs() as u64),
             started_at: started,
             ended_at: ended.map(|(at, _)| at),
             end_reason: ended.map(|(_, r)| r.to_string()),
@@ -393,7 +386,7 @@ mod tests {
     }
 
     const BOOT_DAY: u32 = 7;
-    fn facts<'a>(table: &'a dyn ProcessTable, shutdown: Option<DateTime<Utc>>) -> Facts<'a> {
+    fn facts<'a>(table: &'a dyn ProcessTable, shutdown: Option<Timestamp>) -> Facts<'a> {
         // Boot at 7th 12:00; the shutdown before it began at 6th 23:00.
         Facts {
             table,
@@ -411,7 +404,7 @@ mod tests {
         let this_boot = t(BOOT_DAY, 13, 0); // a process that started after it
 
         // (name, record, shutdown marker, expected)
-        let cases: Vec<(&str, AgentRecord, Option<DateTime<Utc>>, Verdict)> = vec![
+        let cases: Vec<(&str, AgentRecord, Option<Timestamp>, Verdict)> = vec![
             // /exit before the shutdown began: closed on purpose.
             (
                 "exit-before-shutdown",
@@ -544,7 +537,7 @@ mod tests {
     fn a_running_agent_is_running_whatever_it_once_did() {
         let started = t(5, 9, 0);
         let rec = agent("alive", started, None);
-        let table = Alive(vec![(100, started.timestamp() as u64)]);
+        let table = Alive(vec![(100, started.unix_secs() as u64)]);
         assert_eq!(
             judge(&rec, &facts(&table, Some(t(6, 23, 0)))),
             Verdict::Running
@@ -556,7 +549,7 @@ mod tests {
         let started = t(5, 9, 0);
         let rec = agent("recycled", started, None);
         // Something else now holds pid 100, started later.
-        let table = Alive(vec![(100, t(7, 13, 0).timestamp() as u64)]);
+        let table = Alive(vec![(100, t(7, 13, 0).unix_secs() as u64)]);
         assert!(matches!(
             judge(&rec, &facts(&table, Some(t(6, 23, 0)))),
             Verdict::Candidate(CandidateWhy::KilledByShutdown)
@@ -739,7 +732,9 @@ mod tests {
     #[test]
     fn the_shutdown_is_the_latest_1074_before_the_boot_else_the_latest_6006() {
         let ev = parse_events(SAMPLE);
-        let boot = |d: (u32, u32), h: u32| Utc.with_ymd_and_hms(2026, d.0, d.1, h, 0, 0).unwrap();
+        let boot = |d: (u32, u32), h: u32| {
+            Timestamp::from_utc(2026, d.0 as i8, d.1 as i8, h as i8, 0, 0).unwrap()
+        };
         // Boot on 17 Sept: the 16 Sept 1074 is the latest before it.
         assert_eq!(
             pick_shutdown(&ev, boot((9, 17), 0))
@@ -759,7 +754,7 @@ mod tests {
         // An event AFTER the boot is not a shutdown that preceded it.
         assert!(pick_shutdown(&ev, boot((9, 1), 0)).is_none());
         // With only a 6006 available, it is used.
-        let only_6006 = vec![(6006, Utc.with_ymd_and_hms(2026, 9, 16, 8, 48, 38).unwrap())];
+        let only_6006 = vec![(6006, Timestamp::from_utc(2026, 9, 16, 8, 48, 38).unwrap())];
         assert!(pick_shutdown(&only_6006, boot((9, 17), 0)).is_some());
         assert!(pick_shutdown(&[], boot((9, 17), 0)).is_none());
     }
@@ -816,18 +811,18 @@ mod tests {
 
     #[test]
     fn a_clean_shutdown_is_read_from_the_previous_boots_closing_entries() {
-        let boot = Utc.timestamp_opt(1791631200, 0).unwrap();
+        let boot = Timestamp::from_unix(1791631200, 0).unwrap();
         // the newest recognised line wins (the journal text is newest-first)
         assert_eq!(
             pick_journal_shutdown(JOURNAL, boot),
-            Some(Utc.timestamp_opt(1791631069, 500_000_000).unwrap())
+            Some(Timestamp::from_unix(1791631069, 500_000_000).unwrap())
         );
     }
 
     /// A crash leaves the previous boot's journal ending in ordinary entries: no marker.
     #[test]
     fn a_boot_that_ended_in_ordinary_entries_has_no_shutdown_marker() {
-        let boot = Utc.timestamp_opt(1791631200, 0).unwrap();
+        let boot = Timestamp::from_unix(1791631200, 0).unwrap();
         let crash = "1791631060.000000 box sshd[900]: Received disconnect
                      1791631050.000000 box kernel: eth0: link up
 ";
@@ -839,13 +834,13 @@ mod tests {
     /// A marker after this boot began is not a shutdown that preceded it.
     #[test]
     fn a_marker_after_the_boot_is_ignored() {
-        let early = Utc.timestamp_opt(1791631000, 0).unwrap();
+        let early = Timestamp::from_unix(1791631000, 0).unwrap();
         assert_eq!(pick_journal_shutdown(JOURNAL, early), None);
     }
 
     #[test]
     fn garbage_lines_are_skipped_not_fatal() {
-        let boot = Utc.timestamp_opt(1791631200, 0).unwrap();
+        let boot = Timestamp::from_unix(1791631200, 0).unwrap();
         let text = "-- Journal begins --
 not a line
 
@@ -853,12 +848,12 @@ not a line
 ";
         assert_eq!(
             pick_journal_shutdown(text, boot),
-            Some(Utc.timestamp_opt(1791631068, 900_000_000).unwrap())
+            Some(Timestamp::from_unix(1791631068, 900_000_000).unwrap())
         );
     }
 
     #[test]
     fn the_boot_time_is_in_the_past() {
-        assert!(boot_time() < Utc::now());
+        assert!(boot_time() < Timestamp::now());
     }
 }

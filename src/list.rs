@@ -9,8 +9,8 @@ use crate::config::Config;
 use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
 use crate::marks::{is_waiting, pin_kind, PinKind};
 use crate::registry::{AgentRecord, ClosedHow, Intent};
-use chrono::{DateTime, Utc};
 use lane_state::permission_mode::PermissionMode;
+use lane_state::timestamp::Timestamp;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -39,7 +39,7 @@ pub struct Row {
     pub waiting: bool,
     pub sessions: usize,
     /// The latest of the last session's start and end.
-    pub last_activity: Option<DateTime<Utc>>,
+    pub last_activity: Option<Timestamp>,
 }
 
 fn intent_label(i: &Intent) -> &'static str {
@@ -95,7 +95,7 @@ pub fn rows(
     table: &dyn ProcessTable,
     include_closed: bool,
     cfg: &Config,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<Row> {
     let mut out: Vec<Row> = records
         .iter()
@@ -217,10 +217,9 @@ pub fn render_json(rows: &[Row]) -> String {
 mod tests {
     use super::*;
     use crate::registry::{AgentId, Origin, Session};
-    use chrono::TimeZone;
 
-    fn t(min: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, 1, min, 0).unwrap()
+    fn t(min: u32) -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, 1, min as i8, 0).unwrap()
     }
 
     struct Alive(Vec<(u32, u64)>);

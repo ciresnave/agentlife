@@ -125,6 +125,24 @@ fn approve(b: &mut UserRequestBackend, id: &str, h: &str) {
 }
 
 #[test]
+fn a_time_crosses_the_user_request_boundary_to_the_nanosecond_and_back() {
+    for (secs, nanos) in [
+        (1_793_401_200, 123_456_789),
+        (0, 0),
+        (-5, -250_000_000),
+        (-1, -999_999_999),
+    ] {
+        let t = Timestamp::from_unix(secs, nanos).unwrap();
+        assert_eq!(from_ur_time(to_ur_time(t)), t, "{secs} {nanos}");
+    }
+    let c = to_ur_time(Timestamp::from_unix(1_793_401_200, 1).unwrap());
+    assert_eq!(
+        (c.timestamp(), c.timestamp_subsec_nanos()),
+        (1_793_401_200, 1)
+    );
+}
+
+#[test]
 fn a_request_records_nothing_that_can_be_spent_until_a_person_approves_it() {
     let mut r = rig();
     let h = hash('a');
@@ -166,7 +184,7 @@ fn an_approval_is_found_read_before_the_spend_and_spent_exactly_once() {
         .backend
         .approved_at(Kind::RestorePlan, &subject, &me())
         .unwrap();
-    assert!((Utc::now() - at).num_seconds().abs() < 60, "{at}");
+    assert!(Timestamp::now().secs_since(at).abs() < 60, "{at}");
     // Reading it spends nothing.
     assert!(r
         .backend
@@ -410,7 +428,7 @@ fn what_the_person_is_shown_names_agentlife_as_not_a_registered_lane() {
     let shown = ur::prompt_text(
         &to_ur_request(&asking.request, &me()),
         &to_ur_grant(&asking.grant),
-        Utc::now(),
+        to_ur_time(Timestamp::now()),
     );
     assert!(
         shown.contains("agentlife (pid 4242) - NOT a registered lane"),
@@ -823,13 +841,13 @@ mod through_pending {
     fn a_restore_that_was_never_approved_spends_nothing_and_returns_no_plan() {
         let mut w = world();
         let p = plan_of(&["a"]);
-        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Utc::now()).unwrap();
+        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Timestamp::now()).unwrap();
         let e = pending::spend_approval(
             &w.home,
             &mut w.r.backend,
             &me(),
             &rec.pending_id,
-            Utc::now(),
+            Timestamp::now(),
         )
         .unwrap_err();
         assert!(e.contains("has not been approved"), "{e}");
@@ -846,7 +864,7 @@ mod through_pending {
     fn approve_then_spend_runs_once_and_a_second_run_gets_nothing() {
         let mut w = world();
         let p = plan_of(&["a", "b"]);
-        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Utc::now()).unwrap();
+        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Timestamp::now()).unwrap();
         let prompt = Scripted::new(Outcome::Approved);
         let got = pending::answer(
             &w.home,
@@ -854,7 +872,7 @@ mod through_pending {
             &prompt,
             &rec.pending_id,
             &p,
-            Utc::now(),
+            Timestamp::now(),
         )
         .unwrap();
         assert!(matches!(got, Answered::Approved(_)), "{got:?}");
@@ -863,7 +881,7 @@ mod through_pending {
             &mut w.r.backend,
             &me(),
             &rec.pending_id,
-            Utc::now(),
+            Timestamp::now(),
         )
         .unwrap();
         assert_eq!(frozen.plan.hash, p.hash);
@@ -872,7 +890,7 @@ mod through_pending {
             &mut w.r.backend,
             &me(),
             &rec.pending_id,
-            Utc::now(),
+            Timestamp::now(),
         )
         .unwrap_err();
         assert!(again.contains("not spending"), "{again}");
@@ -882,7 +900,7 @@ mod through_pending {
     fn an_approval_older_than_five_minutes_is_spent_and_refused() {
         let mut w = world();
         let p = plan_of(&["a"]);
-        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Utc::now()).unwrap();
+        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Timestamp::now()).unwrap();
         let prompt = Scripted::new(Outcome::Approved);
         pending::answer(
             &w.home,
@@ -890,10 +908,10 @@ mod through_pending {
             &prompt,
             &rec.pending_id,
             &p,
-            Utc::now(),
+            Timestamp::now(),
         )
         .unwrap();
-        let later = Utc::now() + chrono::Duration::seconds(pending::APPROVAL_FRESH_SECS + 30);
+        let later = Timestamp::now().plus_secs(pending::APPROVAL_FRESH_SECS + 30);
         let e = pending::spend_approval(&w.home, &mut w.r.backend, &me(), &rec.pending_id, later)
             .unwrap_err();
         assert!(e.contains("freshness"), "{e}");
@@ -910,12 +928,12 @@ mod through_pending {
     fn discard_withdraws_from_the_real_store() {
         let mut w = world();
         let p = plan_of(&["a"]);
-        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Utc::now()).unwrap();
+        let rec = pending::create(&w.home, &mut w.r.backend, &p, "x", Timestamp::now()).unwrap();
         assert_eq!(
             w.r.backend.pending_ids().unwrap(),
             vec![rec.pending_id.clone()]
         );
-        pending::discard(&w.home, &mut w.r.backend, &rec.pending_id, Utc::now()).unwrap();
+        pending::discard(&w.home, &mut w.r.backend, &rec.pending_id, Timestamp::now()).unwrap();
         assert!(w.r.backend.pending_ids().unwrap().is_empty());
     }
 }

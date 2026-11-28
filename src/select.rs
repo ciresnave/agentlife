@@ -62,13 +62,13 @@ pub fn resolve<'a>(
 mod tests {
     use super::*;
     use crate::registry::AgentId;
-    use chrono::{TimeZone, Utc};
+    use lane_state::timestamp::Timestamp;
 
     fn rec(id: &str, name: Option<&str>) -> AgentRecord {
         let mut r = AgentRecord::new(
             AgentId::new(id).unwrap(),
             "C:/x",
-            Utc.with_ymd_and_hms(2026, 10, 7, 1, 0, 0).unwrap(),
+            Timestamp::from_utc(2026, 10, 7, 1, 0, 0).unwrap(),
         );
         r.name = name.map(String::from);
         r

@@ -17,19 +17,8 @@ use crate::identity::{path_is_under, paths_equal};
 use crate::registry::{
     AgentId, AgentRecord, ClosedHow, Intent, Origin, Registry, RegistryError, Session,
 };
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use lane_state::timestamp::Timestamp;
 
-/// lane-state's instant as `chrono`, for the agent store (O10: the store leaves chrono in a later stage).
-fn chrono_of(t: lane_state::timestamp::Timestamp) -> DateTime<Utc> {
-    let (mut secs, mut nanos) = (t.unix_secs(), t.subsec_nanos());
-    if nanos < 0 {
-        secs -= 1;
-        nanos += 1_000_000_000;
-    }
-    Utc.timestamp_opt(secs, nanos.unsigned_abs())
-        .single()
-        .unwrap_or_default()
-}
 use lane_state::state::LaneState;
 use serde::Serialize;
 use std::path::Path;
@@ -44,8 +33,8 @@ const DENIED_SUBSTRINGS: &[&str] = &["restarttest"];
 /// Who `by` names on a record this importer closed.
 pub const IMPORT_ACTOR: &str = "import-lane-state";
 
-/// Parses `48h`, `30m`, `2d` (a positive whole number and one unit).
-pub fn parse_since(s: &str) -> Result<Duration, String> {
+/// Parses `48h`, `30m`, `2d` (a positive whole number and one unit) into whole seconds.
+pub fn parse_since(s: &str) -> Result<i64, String> {
     let bad =
         || format!("{s:?} is not a duration: use a whole number and h, m or d (48h, 30m, 2d)");
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
@@ -54,9 +43,9 @@ pub fn parse_since(s: &str) -> Result<Duration, String> {
         return Err(bad());
     }
     match unit {
-        "m" => Ok(Duration::minutes(n)),
-        "h" => Ok(Duration::hours(n)),
-        "d" => Ok(Duration::days(n)),
+        "m" => Ok(n.saturating_mul(60)),
+        "h" => Ok(n.saturating_mul(3600)),
+        "d" => Ok(n.saturating_mul(86_400)),
         _ => Err(bad()),
     }
 }
@@ -110,8 +99,8 @@ pub struct Inputs<'a> {
     pub unparsed: &'a [(String, String)],
     pub existing: &'a [AgentRecord],
     pub cfg: &'a Config,
-    pub now: DateTime<Utc>,
-    pub since: Duration,
+    pub now: Timestamp,
+    pub since: i64,
     /// Names (role or name, any case) to import as parked.
     pub park: &'a [String],
     pub cwd_exists: &'a dyn Fn(&str) -> bool,
@@ -161,13 +150,13 @@ pub fn decide(i: &Inputs) -> Outcome {
                 SkipReason::Denied,
                 format!("{name:?} is a test fixture name"),
             );
-        } else if i.now - chrono_of(st.updated_at) > i.since {
+        } else if i.now.secs_since(st.updated_at) > i.since {
             skip(
                 SkipReason::TooOld,
                 format!(
                     "last written {}, older than {}h",
-                    chrono_of(st.updated_at).format("%Y-%m-%d %H:%MZ"),
-                    i.since.num_hours()
+                    st.updated_at.format("%Y-%m-%d %H:%MZ"),
+                    i.since / 3600
                 ),
             );
         } else if !path_is_under(&st.cwd, &i.cfg.portfolio_root) {
@@ -230,11 +219,7 @@ pub fn decide(i: &Inputs) -> Outcome {
             });
             continue;
         }
-        let mut rec = AgentRecord::new(
-            AgentId::generate(),
-            st.cwd.clone(),
-            chrono_of(st.updated_at),
-        );
+        let mut rec = AgentRecord::new(AgentId::generate(), st.cwd.clone(), st.updated_at);
         rec.name = Some(name.clone());
         rec.role = Some(st.role.clone());
         rec.launch_args = st.launch_args.clone();
@@ -251,7 +236,7 @@ pub fn decide(i: &Inputs) -> Outcome {
                 session_id: st.session_id.clone(),
                 pid: st.pid,
                 process_start_secs: st.pid_start_secs,
-                started_at: chrono_of(st.updated_at),
+                started_at: st.updated_at,
                 ended_at: None,
                 end_reason: None,
             });

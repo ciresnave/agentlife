@@ -2,8 +2,8 @@
 use super::*;
 use crate::identity::ProcessIdentity;
 use crate::registry::{AgentId, AgentRecord, ClosedHow};
-use chrono::Utc;
 use lane_restart::spec;
+use lane_state::timestamp::Timestamp;
 use serde_json::json;
 
 struct Nothing;
@@ -271,7 +271,7 @@ fn record(role: &str, intent: Intent) -> AgentRecord {
     let mut r = AgentRecord::new(
         AgentId::generate(),
         format!("C:/Projects/{role}"),
-        Utc::now(),
+        Timestamp::now(),
     );
     r.role = Some(role.into());
     r.intent = intent;
@@ -317,7 +317,7 @@ fn the_launcher_rule_reads_registry_intent_and_spec_state_together() {
     let closed = Intent::Closed {
         how: ClosedHow::Parked,
         by: "test".into(),
-        at: Utc::now(),
+        at: Timestamp::now(),
     };
     for (role, intent) in [
         ("wanted", Intent::Wanted),
@@ -557,9 +557,9 @@ fn the_current_record_decides_intent_not_an_older_parked_one() {
     let closed = || Intent::Closed {
         how: ClosedHow::Parked,
         by: "test".into(),
-        at: Utc::now(),
+        at: Timestamp::now(),
     };
-    let long_ago = Utc::now() - chrono::Duration::days(3);
+    let long_ago = Timestamp::now().plus_secs(-259200);
     // an old parked agent, then a newer wanted one: the role is wanted
     let mut old = record("revived", closed());
     old.first_seen = long_ago;
@@ -659,7 +659,7 @@ fn grant_fixture(reg: &Registry, state: &Path) {
     let exited = Intent::Closed {
         how: ClosedHow::Exited,
         by: "test".into(),
-        at: Utc::now(),
+        at: Timestamp::now(),
     };
     for (role, intent, st, kind) in [
         (

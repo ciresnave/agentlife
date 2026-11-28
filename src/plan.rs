@@ -32,8 +32,8 @@ use crate::identity::{path_is_under, ProcessTable};
 use crate::list::{liveness, Liveness};
 use crate::marks::{pin_kind, PinKind};
 use crate::registry::{AgentRecord, Intent};
-use chrono::{DateTime, Utc};
 use lane_state::permission_mode::PermissionMode;
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -207,7 +207,7 @@ fn matches_any(rec: &AgentRecord, list: &[String]) -> Option<usize> {
     })
 }
 
-fn last_activity(rec: &AgentRecord) -> DateTime<Utc> {
+fn last_activity(rec: &AgentRecord) -> Timestamp {
     rec.sessions
         .last()
         .map(|s| s.ended_at.unwrap_or(s.started_at).max(s.started_at))
@@ -391,7 +391,7 @@ struct Candidate {
     rebuilt: Rebuilt,
     pm: bool,
     priority: usize,
-    activity: DateTime<Utc>,
+    activity: Timestamp,
 }
 
 /// Builds the plan. Pure given its inputs; never starts or writes anything.
@@ -676,7 +676,7 @@ impl Plan {
 /// The frozen form on disk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Frozen {
-    pub built_at: DateTime<Utc>,
+    pub built_at: Timestamp,
     pub plan: Plan,
 }
 
@@ -710,7 +710,7 @@ impl std::error::Error for FrozenError {}
 
 /// Writes the plan to `<home>/plans/<UTC>-<hash prefix>.json` atomically and returns the path.
 /// Nothing in M3a calls this from a command: freezing belongs to the consent step (M4).
-pub fn freeze(home: &Home, plan: &Plan, now: DateTime<Utc>) -> std::io::Result<PathBuf> {
+pub fn freeze(home: &Home, plan: &Plan, now: Timestamp) -> std::io::Result<PathBuf> {
     let dir = home.plans_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!(
@@ -872,11 +872,10 @@ mod tests {
     use super::*;
     use crate::identity::{ProcessIdentity, ProcessTable};
     use crate::registry::{AgentId, ClosedHow, Session};
-    use chrono::TimeZone;
     use std::collections::HashMap;
 
-    fn t(secs: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
+    fn t(secs: i64) -> Timestamp {
+        Timestamp::from_unix(1_800_000_000 + secs, 0).unwrap()
     }
 
     /// Which `(pid, start)` pairs are alive.

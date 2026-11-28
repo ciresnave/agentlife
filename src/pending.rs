@@ -22,7 +22,7 @@ use crate::consent::{
 use crate::home::Home;
 use crate::lock::{FileLock, DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_STALE_AFTER};
 use crate::plan::{self, Frozen, Plan};
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -59,7 +59,7 @@ pub enum Closure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Closed {
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
     pub how: Closure,
     pub detail: String,
 }
@@ -78,7 +78,7 @@ pub struct PendingRestore {
     pub plan_hash: String,
     /// The frozen plan's file name inside `<home>/plans`.
     pub plan_file: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub reason: String,
     pub agents: Vec<AgentLine>,
     /// `None` while the request is open.
@@ -188,7 +188,7 @@ fn close(
     rec: &mut PendingRestore,
     how: Closure,
     detail: String,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), String> {
     rec.closed = Some(Closed {
         at: now,
@@ -285,7 +285,7 @@ pub fn create(
     consent: &mut dyn Consent,
     plan: &Plan,
     reason: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<PendingRestore, String> {
     if plan.entries.is_empty() {
         return Err("the plan starts nothing; there is nothing to ask about".into());
@@ -382,7 +382,7 @@ fn supersede_older(
     home: &Home,
     consent: &mut dyn Consent,
     newer: &PendingRestore,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), String> {
     let (records, problems) = list(home);
     if let Some((path, why)) = problems.first() {
@@ -434,7 +434,7 @@ pub fn answer(
     prompt: &dyn Prompt,
     id: &str,
     rebuilt: &Plan,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<Answered, String> {
     let mut rec = load(home, id)?;
     if let Some(c) = &rec.closed {
@@ -521,7 +521,7 @@ pub fn spend_approval(
     consent: &mut dyn Consent,
     requester: &Requester,
     id: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<Frozen, String> {
     let rec = load(home, id)?;
     match &rec.closed {
@@ -549,7 +549,7 @@ pub fn spend_approval(
     consent
         .spend_one_use(Kind::RestorePlan, &subject, requester)
         .map_err(|e| format!("not spending {id}: {e}"))?;
-    let age = (now - approved_at).num_seconds();
+    let age = now.secs_since(approved_at);
     if !(-60..=APPROVAL_FRESH_SECS).contains(&age) {
         return Err(format!(
             "the approval of {id} is {age} s old, outside the {APPROVAL_FRESH_SECS} s freshness window; it was spent and refused: ask again"
@@ -564,7 +564,7 @@ pub fn discard(
     home: &Home,
     consent: &mut dyn Consent,
     id: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), String> {
     let mut rec = load(home, id)?;
     if let Some(c) = &rec.closed {

@@ -23,7 +23,10 @@ fn queued(state: &Path) -> Vec<String> {
 fn main() {
     let state = std::path::PathBuf::from(std::env::args().nth(1).expect("scratch state dir"));
     let home = synapse::keystore::default_home().expect("SYNAPSE_HOME");
-    let text = format!("g6 scratch check {}", chrono::Utc::now().timestamp());
+    let text = format!(
+        "g6 scratch check {}",
+        lane_state::timestamp::Timestamp::now().unix_secs()
+    );
     lane_restart::notify::enqueue(&state, "pm", &text).unwrap();
     lane_restart::notify::enqueue(&state, "unclaimed-role", "should stay queued").unwrap();
     println!("queued before: {:?}", queued(&state));

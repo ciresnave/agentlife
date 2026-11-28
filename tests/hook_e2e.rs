@@ -1158,7 +1158,7 @@ fn play_the_lane(d: &Down) -> std::thread::JoinHandle<()> {
             serde_json::json!({
                 "role": "target", "session_id": "sess-t", "pid": 1,
                 "busy": false, "subagents_running": 0, "no_background_shells": true,
-                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "updated_at": lane_state::timestamp::Timestamp::now().to_rfc3339(),
                 "updated_by_event": "Stop"
             })
             .to_string(),

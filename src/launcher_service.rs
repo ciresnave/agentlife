@@ -853,7 +853,7 @@ impl Notify for SynapseNotify<'_> {
     fn alarm(&self, text: &str) -> bool {
         let id = format!(
             "launcher-alarm-{}-{}",
-            chrono::Utc::now().timestamp_millis(),
+            lane_state::timestamp::Timestamp::now().unix_millis(),
             std::process::id()
         );
         self.source.send(ALARM_ROLE, &id, text).is_ok()
@@ -864,7 +864,7 @@ impl Notify for SynapseNotify<'_> {
         // One id per role per UTC day: a resend of a delivered mail is a duplicate at the daemon, not a second copy.
         let id = format!(
             "launcher-cap-{role}-{}",
-            chrono::Utc::now().format("%Y%m%d")
+            lane_state::timestamp::Timestamp::now().format("%Y%m%d")
         );
         self.source.send(&to, &id, &body).is_ok()
     }

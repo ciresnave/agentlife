@@ -41,9 +41,9 @@ use crate::marks::pin_kind;
 use crate::peers::{Messenger, Peer};
 use crate::readiness::{self, Evidence, LaneStateView, ProcTree};
 use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
-use chrono::{DateTime, Utc};
 use lane_restart::spec::StopKind;
 use lane_state::claude_proc::ParentProcess;
+use lane_state::timestamp::Timestamp;
 use serde_json::json;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ pub trait Terminator {
 pub trait Facts {
     fn lane_state(&self, session_id: &str) -> Option<LaneStateView>;
     /// The candidate HANDOFF paths, and the newest one that exists.
-    fn handoff(&self, rec: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, DateTime<Utc>)>);
+    fn handoff(&self, rec: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, Timestamp)>);
     /// `Ok` only if `role` has a complete launch spec on disk, one a `lane-restart start` would
     /// accept. The `Err` says why not.
     fn launch_spec(&self, role: &str) -> Result<(), String>;
@@ -88,7 +88,7 @@ impl Facts for FsFacts<'_> {
         readiness::read_lane_state(self.lane_state_dir, session_id)
     }
 
-    fn handoff(&self, rec: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, DateTime<Utc>)>) {
+    fn handoff(&self, rec: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, Timestamp)>) {
         let candidates = readiness::handoff_candidates(rec);
         let newest = readiness::newest_mtime(&candidates);
         (candidates, newest)
@@ -455,7 +455,7 @@ pub fn stop_running(d: &Deps, r: &Request) -> Result<Outcome, DownError> {
 
     // 5. Wait until it is provably ready.
     let waited = loop {
-        let waited = (d.clock.now() - asked_at).to_std().unwrap_or_default();
+        let waited = d.clock.now().duration_since(asked_at);
         let state = d.facts.lane_state(&session_id);
         let (looked_in, handoff) = d.facts.handoff(&rec);
         let shells = readiness::shells_below(d.tree, identity.pid);
@@ -611,25 +611,24 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use crate::registry::Session;
-    use chrono::{Duration as CDuration, TimeZone};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    fn t0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, 3, 0, 0).unwrap()
+    fn t0() -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, 3, 0, 0).unwrap()
     }
 
-    struct TClock(Mutex<DateTime<Utc>>);
+    struct TClock(Mutex<Timestamp>);
     impl Clock for TClock {
-        fn now(&self) -> DateTime<Utc> {
+        fn now(&self) -> Timestamp {
             *self.0.lock().unwrap()
         }
     }
     impl TClock {
         fn advance(&self, d: Duration) {
             let mut g = self.0.lock().unwrap();
-            *g += CDuration::from_std(d).unwrap();
+            *g = g.plus_duration(d);
         }
     }
 
@@ -710,7 +709,7 @@ mod tests {
                 updated_by_event: None,
             })
         }
-        fn handoff(&self, _: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, DateTime<Utc>)>) {
+        fn handoff(&self, _: &AgentRecord) -> (Vec<PathBuf>, Option<(PathBuf, Timestamp)>) {
             let ready = self
                 .ready_after_polls
                 .is_some_and(|n| *self.polls.borrow() > n);
@@ -788,7 +787,7 @@ mod tests {
         let rig = Rig {
             registry: Registry::new(d.path().join("agents")),
             journal: Journal::new(d.path().join("journal"), Arc::new(SystemClock)),
-            clock: Arc::new(TClock(Mutex::new(t0() + CDuration::minutes(5)))),
+            clock: Arc::new(TClock(Mutex::new(t0().plus_secs(300)))),
             log: Arc::new(Mutex::new(Vec::new())),
             _d: d,
         };

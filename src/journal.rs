@@ -12,7 +12,7 @@
 
 use crate::clock::Clock;
 use crate::lock::{FileLock, LockError, DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_STALE_AFTER};
-use chrono::{DateTime, Datelike, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -79,8 +79,8 @@ fn valid_kind(kind: &str) -> bool {
 }
 
 /// The segment file a moment belongs to.
-pub fn segment_name(at: DateTime<Utc>) -> String {
-    format!("journal-{:04}-{:02}.jsonl", at.year(), at.month())
+pub fn segment_name(at: Timestamp) -> String {
+    format!("journal-{}.jsonl", at.format("%Y-%m"))
 }
 
 fn is_segment_name(name: &str) -> bool {
@@ -212,11 +212,10 @@ impl Journal {
 mod tests {
     use super::*;
     use crate::clock::{ManualClock, SystemClock};
-    use chrono::TimeZone;
     use serde_json::json;
 
-    fn at(y: i32, m: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, h, mi, 0).unwrap()
+    fn at(y: i32, m: u32, d: u32, h: u32, mi: u32) -> Timestamp {
+        Timestamp::from_utc(y as i16, m as i8, d as i8, h as i8, mi as i8, 0).unwrap()
     }
 
     #[test]

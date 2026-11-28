@@ -4,12 +4,12 @@ use crate::clock::{Clock, ManualClock};
 use crate::consent::fake::{FakeConsent, COOLDOWN_SECS};
 use crate::consent::{Answer, Asking, NoBackend, Outcome};
 use crate::plan::{Entry, Params, PLAN_SCHEMA};
-use chrono::TimeZone;
+use lane_state::timestamp::Timestamp;
 use std::cell::Cell;
 use std::sync::Arc;
 
-fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap()
+fn t0() -> Timestamp {
+    Timestamp::from_utc(2026, 10, 8, 12, 0, 0).unwrap()
 }
 
 fn agentlife() -> Requester {
@@ -110,7 +110,7 @@ impl Consent for ForwardConsent<'_> {
         kind: crate::consent::Kind,
         subject: &str,
         requester: &Requester,
-    ) -> Result<DateTime<Utc>, String> {
+    ) -> Result<Timestamp, String> {
         self.0.lock().unwrap().approved_at(kind, subject, requester)
     }
     fn spend_one_use(
@@ -290,8 +290,7 @@ fn a_timeout_or_an_unavailable_channel_leaves_it_pending_and_a_timeout_starts_a_
     assert!(why.contains("cooling down"), "{why}");
     assert!(load(&r.home, &rec.pending_id).unwrap().is_open());
 
-    r.clock
-        .set(t0() + chrono::Duration::seconds(COOLDOWN_SECS + 1));
+    r.clock.set(t0().plus_secs(COOLDOWN_SECS + 1));
     let later = answer(
         &r.home,
         &mut r.consent,
@@ -642,7 +641,7 @@ fn an_approval_older_than_five_minutes_is_refused_and_spent() {
     let mut r = rig();
     let p = plan_with(&["a"], "default");
     let rec = approved(&mut r, &p);
-    let late = t0() + chrono::Duration::seconds(APPROVAL_FRESH_SECS + 1);
+    let late = t0().plus_secs(APPROVAL_FRESH_SECS + 1);
     let e =
         spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, late).unwrap_err();
     assert!(e.contains("freshness"), "{e}");
@@ -657,7 +656,7 @@ fn an_approval_exactly_five_minutes_old_is_still_good() {
     let mut r = rig();
     let p = plan_with(&["a"], "default");
     let rec = approved(&mut r, &p);
-    let edge = t0() + chrono::Duration::seconds(APPROVAL_FRESH_SECS);
+    let edge = t0().plus_secs(APPROVAL_FRESH_SECS);
     assert!(spend_approval(&r.home, &mut r.consent, &agentlife(), &rec.pending_id, edge).is_ok());
 }
 

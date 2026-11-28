@@ -203,7 +203,7 @@ impl Messenger for SynapseMessenger {
     fn send(&self, to_id: &str, text: &str) -> Result<(), String> {
         let id = format!(
             "agentlife-down-{}-{}",
-            chrono::Utc::now().timestamp_millis(),
+            lane_state::timestamp::Timestamp::now().unix_millis(),
             std::process::id()
         );
         self.daemon

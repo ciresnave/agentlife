@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::identity::paths_equal;
 use crate::journal::Journal;
 use crate::registry::{AgentId, AgentRecord, Pin, Registry, WaitingMark};
-use chrono::{DateTime, Duration, Utc};
+use lane_state::timestamp::Timestamp;
 use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +44,10 @@ pub fn pin_kind(rec: &AgentRecord, cfg: &Config) -> Option<PinKind> {
 }
 
 /// Whether the mark is still in force: present and younger than the time-to-live.
-pub fn is_waiting(rec: &AgentRecord, now: DateTime<Utc>, ttl_hours: u32) -> bool {
+pub fn is_waiting(rec: &AgentRecord, now: Timestamp, ttl_hours: u32) -> bool {
     rec.waiting
         .as_ref()
-        .is_some_and(|w| now - w.since < Duration::hours(i64::from(ttl_hours)))
+        .is_some_and(|w| now.secs_since(w.since) < i64::from(ttl_hours) * 3600)
 }
 
 /// May `caller` mark `target`? `caller_rec` is the caller's own record when it is an agent.
@@ -94,7 +94,7 @@ pub fn pin(
     journal: &Journal,
     id: &AgentId,
     caller: &Caller,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), String> {
     let by = who(caller);
     registry
@@ -129,7 +129,7 @@ pub fn set_waiting(
     id: &AgentId,
     note: Option<String>,
     caller: &Caller,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), String> {
     let by = who(caller);
     registry
@@ -167,11 +167,10 @@ pub fn clear_waiting(
 mod tests {
     use super::*;
     use crate::clock::SystemClock;
-    use chrono::TimeZone;
     use std::sync::Arc;
 
-    fn t(h: u32, m: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, h, m, 0).unwrap()
+    fn t(h: u32, m: u32) -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, h as i8, m as i8, 0).unwrap()
     }
 
     fn rec(id: &str, name: &str, role: Option<&str>, cwd: &str) -> AgentRecord {

@@ -23,7 +23,7 @@ use crate::journal::Journal;
 use crate::list::{liveness, Liveness};
 use crate::marks::{pin_kind, PinKind};
 use crate::registry::{AgentId, AgentRecord, ClosedHow, Intent, Registry};
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde_json::json;
 use std::fmt;
 use std::path::Path;
@@ -134,7 +134,7 @@ pub fn close(
     id: &AgentId,
     how: ClosedHow,
     confirm: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<(), ControlError> {
     let rec = load(registry, id)?;
     let action = if how == ClosedHow::Parked {
@@ -252,11 +252,10 @@ mod tests {
     use crate::clock::SystemClock;
     use crate::identity::ProcessIdentity;
     use crate::registry::Session;
-    use chrono::TimeZone;
     use std::sync::Arc;
 
-    fn t(h: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, h, 0, 0).unwrap()
+    fn t(h: u32) -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, h as i8, 0, 0).unwrap()
     }
     fn id(s: &str) -> AgentId {
         AgentId::new(s).unwrap()

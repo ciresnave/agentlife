@@ -26,7 +26,7 @@
 //!   [`Kind::RestorePlan`] the requester does **not** narrow it (`Scope::AnyRequester`): the plan hash
 //!   in the subject is the binding, because a restore after a reboot is asked for by a new process.
 
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 
 pub mod real;
@@ -95,7 +95,7 @@ pub enum Grant {
     For {
         secs: i64,
     },
-    Until(DateTime<Utc>),
+    Until(Timestamp),
     Forever,
 }
 
@@ -135,7 +135,7 @@ pub enum Outcome {
 /// let who = Requester { role: "r".into(), session_id: "s".into(), claude_pid: 1,
 ///     claude_start_secs: 1, managed: true };
 /// let _forged = Approval { kind: KindId::RestorePlan, subject: "plan x".into(), requester: who,
-///     approved_at: chrono::Utc::now(), expires_at: None };
+///     approved_at: lane_state::timestamp::Timestamp::now(), expires_at: None };
 /// ```
 ///
 /// **What stops a replay, in two layers (PM, 2026-10-31):**
@@ -301,7 +301,7 @@ pub trait Consent {
         kind: Kind,
         subject: &str,
         requester: &Requester,
-    ) -> Result<DateTime<Utc>, String>;
+    ) -> Result<Timestamp, String>;
     /// Spends the one-use approval for `(kind, subject, requester)` **before** the action it covers,
     /// and returns the id it spent. `Err` means nothing was spent and the action must not run. Spent
     /// is durable (and audited, in the real store).
@@ -352,7 +352,7 @@ impl Consent for NoBackend {
     fn resolve(&mut self, _: &Asking, _: Answer) -> Result<Resolved, String> {
         Err(NO_BACKEND.into())
     }
-    fn approved_at(&mut self, _: Kind, _: &str, _: &Requester) -> Result<DateTime<Utc>, String> {
+    fn approved_at(&mut self, _: Kind, _: &str, _: &Requester) -> Result<Timestamp, String> {
         Err(NO_BACKEND.into())
     }
     fn spend_one_use(&mut self, _: Kind, _: &str, _: &Requester) -> Result<String, String> {
@@ -391,7 +391,7 @@ pub mod fake {
 
     struct Record {
         id: String,
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         request: Request,
         grant: Grant,
         bound_hash: String,
@@ -403,7 +403,7 @@ pub mod fake {
         kind: Kind,
         subject: String,
         bound_hash: String,
-        approved_at: DateTime<Utc>,
+        approved_at: Timestamp,
         spent: bool,
     }
 
@@ -411,20 +411,14 @@ pub mod fake {
         clock: Arc<dyn Clock>,
         records: BTreeMap<String, Record>,
         approvals: BTreeMap<String, Approval>,
-        cooldowns: BTreeMap<(String, String), DateTime<Utc>>,
+        cooldowns: BTreeMap<(String, String), Timestamp>,
         next: u64,
         /// Every id ever approved, to prove an approval spends a request exactly once.
         pub granted: Vec<String>,
         pub prompts_begun: u32,
     }
 
-    fn seal_of(
-        id: &str,
-        at: DateTime<Utc>,
-        req: &Request,
-        grant: &Grant,
-        bound_hash: &str,
-    ) -> String {
+    fn seal_of(id: &str, at: Timestamp, req: &Request, grant: &Grant, bound_hash: &str) -> String {
         let bytes = serde_json::to_vec(&("fake-seal", id, at, req, grant, bound_hash))
             .expect("plain data serialises");
         let mut out = String::new();
@@ -623,14 +617,12 @@ pub mod fake {
                 }
                 Outcome::Cancelled => {
                     self.records.remove(&asking.pending_id);
-                    self.cooldowns
-                        .insert(key, now + chrono::Duration::seconds(COOLDOWN_SECS));
+                    self.cooldowns.insert(key, now.plus_secs(COOLDOWN_SECS));
                     Ok(Resolved::Closed)
                 }
                 Outcome::TimedOut | Outcome::Unavailable => {
                     if outcome == Outcome::TimedOut {
-                        self.cooldowns
-                            .insert(key, now + chrono::Duration::seconds(COOLDOWN_SECS));
+                        self.cooldowns.insert(key, now.plus_secs(COOLDOWN_SECS));
                     }
                     if let Some(r) = self.records.get_mut(&asking.pending_id) {
                         r.asking = None;
@@ -645,7 +637,7 @@ pub mod fake {
             kind: Kind,
             subject: &str,
             _requester: &Requester,
-        ) -> Result<DateTime<Utc>, String> {
+        ) -> Result<Timestamp, String> {
             let id = self.unspent_for(kind, subject)?;
             Ok(self.approvals[&id].approved_at)
         }

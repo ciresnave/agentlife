@@ -23,10 +23,10 @@ use crate::identity::{self, Match, ProcessIdentity, ProcessTable};
 use crate::journal::Journal;
 use crate::procindex::ProcIndex;
 use crate::registry::{AgentId, AgentRecord, Intent, Origin, Registry, Session};
-use chrono::{DateTime, Utc};
 use lane_state::claude_proc::{
     claude_parent_pid, parse_claude_cli_flags, recorded_cwd, HookInput, ModelField, ParentProcess,
 };
+use lane_state::timestamp::Timestamp;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -52,7 +52,7 @@ pub trait HookEnv {
     /// Image names above `pid`, nearest first, lower-case and without `.exe`.
     fn ancestor_images(&self, pid: u32) -> Vec<String>;
     fn var(&self, name: &str) -> Option<String>;
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> Timestamp;
 }
 
 pub struct Ctx<'a> {
@@ -79,13 +79,13 @@ pub enum Outcome {
 
 impl Outcome {
     /// The one line `hook.log` gets.
-    pub fn log_line(&self, event: &str, at: DateTime<Utc>) -> String {
+    pub fn log_line(&self, event: &str, at: Timestamp) -> String {
         self.log_line_for(event, at, None)
     }
 
     /// As `log_line`, naming the agent a launch gave this hook (`AGENTLIFE_AGENT_ID`) on a skip or
     /// error, so a restore can tell which of its agents the hook declined to register.
-    pub fn log_line_for(&self, event: &str, at: DateTime<Utc>, agent: Option<&str>) -> String {
+    pub fn log_line_for(&self, event: &str, at: Timestamp, agent: Option<&str>) -> String {
         let what = match self {
             Outcome::Registered { agent_id, created } => {
                 format!(
@@ -223,7 +223,7 @@ struct StartFacts<'a> {
     session_id: &'a str,
     pid: u32,
     start: Option<u64>,
-    now: DateTime<Utc>,
+    now: Timestamp,
     source: Option<&'a str>,
 }
 
@@ -693,8 +693,8 @@ impl HookEnv for RealEnv {
         std::env::var(name).ok()
     }
 
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> Timestamp {
+        Timestamp::now()
     }
 }
 
@@ -703,12 +703,11 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use crate::registry::{Intent, Registry};
-    use chrono::TimeZone;
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn t(min: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, 1, min, 0).unwrap()
+    fn t(min: u32) -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, 1, min as i8, 0).unwrap()
     }
 
     #[test]
@@ -732,7 +731,7 @@ mod tests {
         start: Option<u64>,
         ancestors: Vec<String>,
         vars: HashMap<String, String>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     }
 
     impl FakeEnv {
@@ -768,7 +767,7 @@ mod tests {
         fn var(&self, name: &str) -> Option<String> {
             self.vars.get(name).cloned()
         }
-        fn now(&self) -> DateTime<Utc> {
+        fn now(&self) -> Timestamp {
             self.now
         }
     }

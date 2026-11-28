@@ -8,13 +8,13 @@ use crate::consent::{
 use crate::identity::SysinfoTable;
 use crate::plan::{Entry, Params, PLAN_SCHEMA};
 use crate::restore::{Summary, REPORT_SCHEMA};
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use lane_state::timestamp::Timestamp;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, 10, 12, 0, 0).unwrap()
+fn t0() -> Timestamp {
+    Timestamp::from_utc(2026, 10, 10, 12, 0, 0).unwrap()
 }
 
 fn agentlife() -> Requester {
@@ -101,7 +101,7 @@ impl Consent for Shared {
         kind: Kind,
         subject: &str,
         requester: &Requester,
-    ) -> Result<DateTime<Utc>, String> {
+    ) -> Result<Timestamp, String> {
         self.0.borrow_mut().approved_at(kind, subject, requester)
     }
     fn spend_one_use(
@@ -394,7 +394,7 @@ fn an_approval_older_than_the_window_is_spent_and_refused_and_nothing_runs() {
         let events = r.events.clone();
         let show = move |_: &str| events.borrow_mut().push("show".into());
         let rebuild = || {
-            clock2.set(t0() + Duration::seconds(pending::APPROVAL_FRESH_SECS + 60));
+            clock2.set(t0().plus_secs(pending::APPROVAL_FRESH_SECS + 60));
             Ok(now.borrow().clone())
         };
         let executed = r.executed.clone();

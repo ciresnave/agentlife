@@ -155,7 +155,7 @@ impl Rig {
                         s.session_id,
                         s.pid,
                         s.started_at.format("%H:%M:%S%.3f"),
-                        s.started_at.timestamp_millis()
+                        s.started_at.unix_millis()
                     ))
                     .collect::<Vec<_>>()
                     .join("; ")
@@ -347,7 +347,7 @@ fn play_state_writer(
                 if let Some(s) = rec.sessions.iter().find(|s| !old.contains(&s.session_id)) {
                     let body = serde_json::json!({
                         "session_id": s.session_id,
-                        "updated_at": chrono::Utc::now(),
+                        "updated_at": lane_state::timestamp::Timestamp::now(),
                         "updated_by_event": "UserPromptSubmit",
                     });
                     let _ = std::fs::write(lane_state.join(format!("{n}.json")), body.to_string());
@@ -700,7 +700,7 @@ fn twelve_real_stand_ins_are_paced_pm_first_and_never_more_than_a_batch_at_once(
             .iter()
             .filter(|e| {
                 let l = e.launched_at.unwrap();
-                l <= p && p < l + chrono::Duration::seconds(e.seconds_to_settle.unwrap() as i64)
+                l <= p && p < l.plus_secs(e.seconds_to_settle.unwrap() as i64)
             })
             .count();
         peak = peak.max(live);

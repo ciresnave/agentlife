@@ -46,7 +46,7 @@ pub fn detect(env: &dyn HookEnv, procs: &ProcIndex) -> Caller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
+    use lane_state::timestamp::Timestamp;
 
     struct Env {
         claude: Result<u32, String>,
@@ -70,8 +70,8 @@ mod tests {
         fn var(&self, _: &str) -> Option<String> {
             None
         }
-        fn now(&self) -> DateTime<Utc> {
-            Utc::now()
+        fn now(&self) -> Timestamp {
+            Timestamp::now()
         }
     }
 

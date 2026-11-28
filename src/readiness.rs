@@ -18,7 +18,7 @@
 
 use crate::hook::SHELLS;
 use crate::registry::AgentRecord;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,7 @@ pub struct LaneStateView {
     pub subagents_running: Option<u32>,
     #[serde(default)]
     pub no_background_shells: Option<bool>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
     /// The hook event that last wrote the record (`SessionStart` until the session does anything).
     #[serde(default)]
     pub updated_by_event: Option<String>,
@@ -71,12 +71,12 @@ pub fn handoff_candidates(rec: &AgentRecord) -> Vec<PathBuf> {
 }
 
 /// The most recently modified of `paths` that exists.
-pub fn newest_mtime(paths: &[PathBuf]) -> Option<(PathBuf, DateTime<Utc>)> {
+pub fn newest_mtime(paths: &[PathBuf]) -> Option<(PathBuf, Timestamp)> {
     paths
         .iter()
         .filter_map(|p| {
             let t = std::fs::metadata(p).ok()?.modified().ok()?;
-            Some((p.clone(), DateTime::<Utc>::from(t)))
+            Some((p.clone(), Timestamp::from(t)))
         })
         .max_by_key(|(_, t)| *t)
 }
@@ -98,11 +98,11 @@ pub fn shells_below(tree: &dyn ProcTree, pid: u32) -> Vec<(u32, String)> {
 pub struct Evidence<'a> {
     pub state: Option<&'a LaneStateView>,
     /// The newest HANDOFF found, and when it was written.
-    pub handoff: Option<&'a (PathBuf, DateTime<Utc>)>,
+    pub handoff: Option<&'a (PathBuf, Timestamp)>,
     pub handoff_looked_in: &'a [PathBuf],
     pub shells: &'a [(u32, String)],
     /// When agentlife asked the agent to wrap up.
-    pub asked_at: DateTime<Utc>,
+    pub asked_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,18 +172,17 @@ pub fn check(e: &Evidence) -> Readiness {
 mod tests {
     use super::*;
     use crate::registry::AgentId;
-    use chrono::TimeZone;
     use std::collections::HashMap;
 
-    fn t(m: u32, s: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, 3, m, s).unwrap()
+    fn t(m: u32, s: u32) -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, 3, m as i8, s as i8).unwrap()
     }
 
     fn state(
         busy: Option<bool>,
         subs: Option<u32>,
         claim: Option<bool>,
-        at: DateTime<Utc>,
+        at: Timestamp,
     ) -> LaneStateView {
         LaneStateView {
             session_id: "s1".into(),
@@ -195,13 +194,13 @@ mod tests {
         }
     }
 
-    fn handoff(at: DateTime<Utc>) -> (PathBuf, DateTime<Utc>) {
+    fn handoff(at: Timestamp) -> (PathBuf, Timestamp) {
         (PathBuf::from("C:/x/HANDOFF.md"), at)
     }
 
     fn run(
         state: Option<&LaneStateView>,
-        handoff: Option<&(PathBuf, DateTime<Utc>)>,
+        handoff: Option<&(PathBuf, Timestamp)>,
         shells: &[(u32, String)],
     ) -> Readiness {
         let looked = [PathBuf::from("C:/x/HANDOFF.md")];
@@ -233,7 +232,7 @@ mod tests {
         type Case<'a> = (
             &'a str,
             Option<LaneStateView>,
-            Option<(PathBuf, DateTime<Utc>)>,
+            Option<(PathBuf, Timestamp)>,
             &'a [(u32, String)],
             &'a str,
         );
@@ -407,7 +406,7 @@ mod tests {
         assert_eq!(got.busy, Some(false), "the NEWEST record of that session");
         assert_eq!(
             got.updated_at,
-            Utc.with_ymd_and_hms(2026, 10, 7, 3, 11, 0).unwrap()
+            Timestamp::from_utc(2026, 10, 7, 3, 11, 0).unwrap()
         );
         assert!(read_lane_state(d.path(), "nobody").is_none());
         assert!(read_lane_state(&d.path().join("missing"), "s1").is_none());

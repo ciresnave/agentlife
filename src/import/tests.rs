@@ -2,14 +2,14 @@
 use super::*;
 use crate::identity::{ProcessIdentity, ProcessTable};
 use crate::plan::{self, Reason};
-use chrono::TimeZone;
+use lane_state::timestamp::Timestamp;
 
-fn now() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 10, 10, 15, 0, 0).unwrap()
+fn now() -> Timestamp {
+    Timestamp::from_utc(2026, 10, 10, 15, 0, 0).unwrap()
 }
 
-fn hours_ago(h: i64) -> DateTime<Utc> {
-    now() - Duration::hours(h)
+fn hours_ago(h: i64) -> Timestamp {
+    now().plus_secs(-(h) * 3600)
 }
 
 fn state(role: &str, cwd: &str, mode: Option<&str>, age_h: i64) -> LaneState {
@@ -31,11 +31,7 @@ fn state(role: &str, cwd: &str, mode: Option<&str>, age_h: i64) -> LaneState {
                 .map(String::from)
                 .to_vec(),
         ),
-        updated_at: lane_state::timestamp::Timestamp::from_unix(
-            hours_ago(age_h).timestamp(),
-            i32::try_from(hours_ago(age_h).timestamp_subsec_nanos()).unwrap(),
-        )
-        .unwrap(),
+        updated_at: hours_ago(age_h),
         updated_by_event: "Stop".into(),
     }
 }
@@ -61,7 +57,7 @@ fn run_with(
         existing,
         cfg: &cfg,
         now: now(),
-        since: Duration::hours(DEFAULT_SINCE_HOURS),
+        since: DEFAULT_SINCE_HOURS * 3600,
         park: &park,
         cwd_exists: exists,
     });
@@ -250,9 +246,9 @@ fn park_closes_the_named_agents_only_and_reports_names_that_matched_nothing() {
 
 #[test]
 fn since_parses_one_whole_number_and_one_unit() {
-    assert_eq!(parse_since("48h").unwrap(), Duration::hours(48));
-    assert_eq!(parse_since("30m").unwrap(), Duration::minutes(30));
-    assert_eq!(parse_since("2d").unwrap(), Duration::days(2));
+    assert_eq!(parse_since("48h").unwrap(), 48 * 3600);
+    assert_eq!(parse_since("30m").unwrap(), 30 * 60);
+    assert_eq!(parse_since("2d").unwrap(), 2 * 86_400);
     for bad in ["", "h", "0h", "-1h", "1.5h", "48", "48x", "1 h"] {
         assert!(parse_since(bad).is_err(), "{bad:?}");
     }

@@ -9,7 +9,7 @@ use agentlife::config::Config;
 use agentlife::identity::{ProcessIdentity, ProcessTable};
 use agentlife::plan::{build, Inputs, Plan};
 use agentlife::registry::{AgentId, AgentRecord, ClosedHow, Intent, Session};
-use chrono::{DateTime, TimeZone, Utc};
+use lane_state::timestamp::Timestamp;
 use std::collections::{BTreeSet, HashMap};
 
 struct Rng(u64);
@@ -30,8 +30,8 @@ impl Rng {
     }
 }
 
-fn t(secs: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
+fn t(secs: i64) -> Timestamp {
+    Timestamp::from_unix(1_800_000_000 + secs, 0).unwrap()
 }
 
 struct Table(HashMap<u32, u64>);

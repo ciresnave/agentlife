@@ -99,6 +99,31 @@ impl Timestamp {
         self.0.strftime(fmt).to_string()
     }
 
+    /// How long after `earlier` this instant is, to the nanosecond; zero when `earlier` is not earlier.
+    #[must_use]
+    pub fn duration_since(self, earlier: Self) -> std::time::Duration {
+        let nanos = self
+            .0
+            .as_nanosecond()
+            .saturating_sub(earlier.0.as_nanosecond())
+            .max(0);
+        // The difference of two in-range instants is far below `u64::MAX` seconds.
+        std::time::Duration::new(
+            u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX),
+            u32::try_from(nanos % 1_000_000_000).unwrap_or(0),
+        )
+    }
+
+    /// `self` moved `d` later; saturates at the range end.
+    #[must_use]
+    pub fn plus_duration(self, d: std::time::Duration) -> Self {
+        let nanos = self
+            .0
+            .as_nanosecond()
+            .saturating_add(i128::try_from(d.as_nanos()).unwrap_or(i128::MAX));
+        jiff::Timestamp::from_nanosecond(nanos).map_or(self, Self)
+    }
+
     /// RFC 3339 in UTC, e.g. `2026-10-30T23:00:00Z`.
     #[must_use]
     pub fn to_rfc3339(self) -> String {
@@ -192,6 +217,16 @@ mod tests {
         assert!(serde_json::from_str::<Date>("\"2026-02-30\"").is_err());
         assert!(serde_json::from_str::<Date>("\"2026-09-18T00:00:00Z\"").is_err());
         assert!(serde_json::from_str::<Date>("\"yesterday\"").is_err());
+    }
+
+    #[test]
+    fn durations_keep_the_sub_second_part_and_never_go_negative() {
+        let a: Timestamp = "2026-10-30T23:00:00.250Z".parse().unwrap();
+        let b: Timestamp = "2026-10-30T23:00:02.750Z".parse().unwrap();
+        assert_eq!(b.duration_since(a), std::time::Duration::from_millis(2_500));
+        assert_eq!(a.duration_since(b), std::time::Duration::ZERO);
+        assert_eq!(a.plus_duration(std::time::Duration::from_millis(2_500)), b);
+        assert_eq!(a.plus_duration(std::time::Duration::ZERO), a);
     }
 
     #[test]

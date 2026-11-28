@@ -11,8 +11,8 @@
 
 use crate::atomic::{is_temp_name, write_atomic};
 use crate::lock::{FileLock, LockError, DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_STALE_AFTER};
-use chrono::{DateTime, Utc};
 use lane_state::permission_mode::PermissionMode;
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -104,7 +104,7 @@ pub enum Intent {
     Closed {
         how: ClosedHow,
         by: String,
-        at: DateTime<Utc>,
+        at: Timestamp,
     },
 }
 
@@ -129,9 +129,9 @@ pub struct Session {
     /// Seconds since the epoch; with `pid` this is the process identity.
     #[serde(default)]
     pub process_start_secs: Option<u64>,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     #[serde(default)]
-    pub ended_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<Timestamp>,
     #[serde(default)]
     pub end_reason: Option<String>,
 }
@@ -140,7 +140,7 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pin {
     pub by: String,
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
 }
 
 /// "This agent is waiting on the user" (DESIGN-REVISION-3 §5, S2): written by the agent itself, so
@@ -149,7 +149,7 @@ pub struct Pin {
 pub struct WaitingMark {
     /// What it waits on; `"user"` today.
     pub on: String,
-    pub since: DateTime<Utc>,
+    pub since: Timestamp,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -165,7 +165,7 @@ pub struct AgentRecord {
     /// Self-claimed and advisory (`LANE_ROLE`); never an authority.
     #[serde(default)]
     pub role: Option<String>,
-    pub first_seen: DateTime<Utc>,
+    pub first_seen: Timestamp,
     #[serde(default)]
     pub sessions: Vec<Session>,
     /// The argv exactly as launched; a restore rebuilds from it through an allowlist.
@@ -210,11 +210,7 @@ impl AgentRecord {
     }
 
     /// A new record with no sessions, `Wanted`, schema [`SCHEMA`].
-    pub fn new(
-        agent_id: AgentId,
-        launch_cwd: impl Into<String>,
-        first_seen: DateTime<Utc>,
-    ) -> Self {
+    pub fn new(agent_id: AgentId, launch_cwd: impl Into<String>, first_seen: Timestamp) -> Self {
         Self {
             schema: SCHEMA,
             agent_id,
@@ -467,11 +463,10 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use std::sync::{Arc, Barrier};
 
-    fn t0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 7, 1, 0, 0).unwrap()
+    fn t0() -> Timestamp {
+        Timestamp::from_utc(2026, 10, 7, 1, 0, 0).unwrap()
     }
 
     fn rec(id: &str) -> AgentRecord {
