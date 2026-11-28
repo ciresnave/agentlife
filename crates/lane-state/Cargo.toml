@@ -13,7 +13,6 @@ rust-version = "1.95"
 description = "Reads what a Claude Code lane wrote about itself (its state file), and the pure rules for finding a lane's claude process, launch flags and home directory. Shared by lane-restart, with-secret and agentlife."
 
 [dependencies]
-chrono = { version = "0.4.45", features = ["serde"] }
 jiff = { version = "1.0.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

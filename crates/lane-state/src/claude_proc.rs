@@ -784,7 +784,7 @@ mod tests {
             subagents_running: 0,
             no_background_shells: None,
             launch_args: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: crate::timestamp::Timestamp::now(),
             updated_by_event: "SessionStart".to_string(),
         }
     }

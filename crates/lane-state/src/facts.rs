@@ -10,7 +10,7 @@
 //! CALLERS do with what it returns - the actual refusal logic - is fully
 //! tested in `authorize.rs`.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::Timestamp;
 use std::path::PathBuf;
 use std::time::Duration;
 use sysinfo::{Pid, ProcessRefreshKind, System, UpdateKind};
@@ -111,7 +111,7 @@ pub trait SystemFacts {
     /// that got reused?
     fn transcript_is_recent(&self, cwd: &str, session_id: &str, max_age: Duration) -> bool;
 
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> Timestamp;
 
     /// The identity to record at `decide()` time, for `kill_verified` to
     /// re-check right before acting. `None` if the pid isn't alive.
@@ -240,8 +240,8 @@ impl SystemFacts for SysinfoFacts {
         }
     }
 
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> Timestamp {
+        Timestamp::now()
     }
 
     fn process_identity(&self, pid: u32) -> Option<ProcessIdentity> {

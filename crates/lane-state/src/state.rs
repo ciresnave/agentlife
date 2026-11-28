@@ -9,7 +9,7 @@
 //! trusting this file alone - see RESTART-TOOL-DESIGN.md §2.
 
 use crate::permission_mode::PermissionMode;
-use chrono::{DateTime, Utc};
+use crate::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -60,7 +60,7 @@ pub struct LaneState {
     /// from an ALLOWLIST of flags parsed out of this, never passed
     /// through blindly - see `main.rs`'s `relaunch` module.
     pub launch_args: Option<Vec<String>>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
     pub updated_by_event: String,
 }
 
@@ -145,6 +145,26 @@ mod tests {
             "updated_by_event": "Stop"
         }"#
         .to_string()
+    }
+
+    #[test]
+    fn an_existing_state_file_reads_back_and_rewrites_with_the_same_instant() {
+        // O10: the instant type changed from chrono to jiff; the file a lane wrote yesterday must still load,
+        // and what we write must load again as the same instant.
+        let dir = tempdir().unwrap();
+        for stamp in [
+            "2026-09-18T09:14:03Z",
+            "2026-09-18T09:14:03.123456789Z",
+            "2026-09-18T11:14:03+02:00",
+        ] {
+            let text = sample_json().replace("2026-09-18T09:14:03Z", stamp);
+            std::fs::write(dir.path().join("overmind.json"), text).unwrap();
+            let s = load(dir.path(), "overmind").unwrap();
+            assert_eq!(s.updated_at.unix_secs(), 1_789_722_843, "{stamp}");
+            let again: LaneState =
+                serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+            assert_eq!(again.updated_at, s.updated_at, "{stamp}");
+        }
     }
 
     #[test]
