@@ -1014,6 +1014,9 @@ fn run_launcher(init_store: bool, once: bool, clear: Vec<String>) -> ExitCode {
         for note in svc::take_start_notes() {
             log(&format!("start refused: {note}"));
         }
+        for notice in svc::take_start_notices() {
+            log(&format!("start notice: {notice}"));
+        }
         for line in rep.log_lines() {
             log(&line);
         }

@@ -10,6 +10,13 @@
 //! directory of its own.
 
 use crate::approvals::{default_reader, RepoReader};
+
+/// O22(a): each `synapse list` read of a launcher start's preflight. With the claim this keeps the preflight's worst case
+/// (epoch read, online read, re-check, claim, verify) near 47 s, inside the launcher's 110 s child deadline.
+const LIST_TIMEOUT: Duration = Duration::from_secs(8);
+/// O22(a): the one `synapse claim`. `synapse claim` takes the role over from any holder and has no offline-only form,
+/// so the caller re-reads the online flag right before it and verifies the role after it.
+const CLAIM_TIMEOUT: Duration = Duration::from_secs(15);
 use crate::disk::{GuardOk, Refusal};
 use crate::facts::{SysinfoFacts, SystemFacts};
 use crate::host::HostOutcome;
@@ -280,7 +287,7 @@ impl Ctx {
             None => {
                 let mut c = std::process::Command::new("synapse");
                 c.arg("list").env("SYNAPSE_HOME", home);
-                let out = crate::lane_new_host::run_limited(c, Duration::from_secs(30))?;
+                let out = crate::lane_new_host::run_limited(c, LIST_TIMEOUT)?;
                 crate::lane_new_host::epoch_from_list(&out, role)
             }
         }
@@ -297,8 +304,9 @@ impl Ctx {
             None => {
                 let mut c = std::process::Command::new("synapse");
                 c.arg("list").env("SYNAPSE_HOME", home);
-                let out = crate::lane_new_host::run_limited(c, Duration::from_secs(30))?;
-                crate::epoch_check::online_from_list(&out, role)
+                let out = crate::lane_new_host::run_limited(c, LIST_TIMEOUT)?;
+                let cached = crate::epoch_check::cached_global_id(home, role);
+                crate::epoch_check::online_from_list(&out, role, cached.as_deref())
             }
         }
     }
@@ -310,7 +318,7 @@ impl Ctx {
             None => {
                 let mut c = std::process::Command::new("synapse");
                 c.args(["claim", "--role", role]).env("SYNAPSE_HOME", home);
-                crate::lane_new_host::run_limited(c, Duration::from_secs(60)).map(|_| ())
+                crate::lane_new_host::run_limited(c, CLAIM_TIMEOUT).map(|_| ())
             }
         }
     }

@@ -52,10 +52,26 @@ pub fn note(role: &str, cached: Option<u64>, roster: Option<u64>) -> (String, bo
     }
 }
 
-/// O22(a): the online flag of `role` in `synapse list` output. `Ok(None)`: the role is not listed. `Err`: nothing parsed.
-pub fn online_from_list(out: &str, role: &str) -> Result<Option<bool>, String> {
+/// The `global_id` (`role@account`) in `<home>/sessions/<role>.json`, when the cache has one. The token is not touched.
+pub fn cached_global_id(home: &Path, role: &str) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("sessions").join(format!("{role}.json"))).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("global_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// O22(a): the online flag of `role` in `synapse list` output. `Ok(None)`: the role is not listed. `Err`: nothing
+/// parsed, or the answer is ambiguous: FAIL CLOSED (a claim takes a role over) when the role has more than one row, or
+/// when `cached_id` (the lane home's own `global_id`) names a different account than the roster's row.
+pub fn online_from_list(
+    out: &str,
+    role: &str,
+    cached_id: Option<&str>,
+) -> Result<Option<bool>, String> {
     let mut parsed = 0usize;
     let mut found = None;
+    let mut rows = 0usize;
     for line in out.lines().map(str::trim).filter(|l| l.starts_with('{')) {
         let v: Value = serde_json::from_str(line)
             .map_err(|e| format!("a roster row does not parse ({e}): {line:?}"))?;
@@ -65,6 +81,17 @@ pub fn online_from_list(out: &str, role: &str) -> Result<Option<bool>, String> {
             .ok_or_else(|| format!("a roster row has no global_id: {line:?}"))?;
         parsed += 1;
         if id.split_once('@').map_or(id, |(s, _)| s) == role {
+            rows += 1;
+            if rows > 1 {
+                return Err(format!(
+                    "the roster lists {role} more than once; not claiming into an ambiguity"
+                ));
+            }
+            if let Some(c) = cached_id.filter(|c| *c != id) {
+                return Err(format!(
+                    "the roster row {id} is not this home's cached identity {c}"
+                ));
+            }
             found = v.get("online").and_then(Value::as_bool);
         }
     }
@@ -96,10 +123,38 @@ mod tests {
         let out = "{\"epoch\":7,\"global_id\":\"a@x\",\"online\":false}
 {\"epoch\":2,\"global_id\":\"b@x\",\"online\":true}
 ";
-        assert_eq!(online_from_list(out, "a"), Ok(Some(false)));
-        assert_eq!(online_from_list(out, "b"), Ok(Some(true)));
-        assert_eq!(online_from_list(out, "c"), Ok(None));
-        assert!(online_from_list("nothing", "a").is_err());
+        assert_eq!(online_from_list(out, "a", None), Ok(Some(false)));
+        assert_eq!(online_from_list(out, "b", None), Ok(Some(true)));
+        assert_eq!(online_from_list(out, "c", None), Ok(None));
+        assert!(online_from_list("nothing", "a", None).is_err());
+    }
+
+    #[test]
+    fn an_ambiguous_or_foreign_roster_row_fails_closed() {
+        // Two rows for one role, an offline one LAST: the last row must not win.
+        let two = "{\"epoch\":3,\"global_id\":\"a@x\",\"online\":true}
+{\"epoch\":4,\"global_id\":\"a@y\",\"online\":false}
+";
+        assert!(online_from_list(two, "a", None).is_err());
+        // The cached identity names another account than the single row.
+        let one = "{\"epoch\":3,\"global_id\":\"a@x\",\"online\":false}
+";
+        assert!(online_from_list(one, "a", Some("a@y")).is_err());
+        assert_eq!(online_from_list(one, "a", Some("a@x")), Ok(Some(false)));
+        assert_eq!(online_from_list(one, "a", None), Ok(Some(false)));
+    }
+
+    #[test]
+    fn the_cached_identity_is_read_without_the_token() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("sessions")).unwrap();
+        std::fs::write(
+            d.path().join("sessions").join("a.json"),
+            r#"{"token":"SECRET","global_id":"a@x","epoch":3}"#,
+        )
+        .unwrap();
+        assert_eq!(cached_global_id(d.path(), "a").as_deref(), Some("a@x"));
+        assert_eq!(cached_global_id(d.path(), "b"), None);
     }
 
     #[test]

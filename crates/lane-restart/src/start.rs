@@ -407,6 +407,7 @@ impl std::fmt::Display for StartRefusal {
 
 /// A start that passed every check: nothing has been spawned yet.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StartPlan {
     /// What a launch reads: model in the argv, permission mode `auto`.
     pub launch: LaunchSpec,

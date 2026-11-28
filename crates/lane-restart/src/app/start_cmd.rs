@@ -30,7 +30,7 @@ struct Outcome<'a> {
 
 impl Outcome<'_> {
     /// `spawned` is whether a spawn was attempted: what the launcher caps count. `--json`:
-    /// `{role,outcome,reason[,launch_to_live_secs]}`; the human lines stay on stderr and the exit
+    /// `{role,outcome,reason[,launch_to_live_secs][,detail][,notice]}` (`notice`: O22(b), only when the lane was told its channel may not connect); the human lines stay on stderr and the exit
     /// codes do not change.
     #[allow(clippy::too_many_arguments)]
     fn finish(
@@ -166,7 +166,28 @@ fn reclaim_note(
             ),
         };
     }
-    match ctx.claim_role(home, role) {
+    // `synapse claim` takes a role from any holder and has no offline-only form: re-read the flag right before it, so
+    // the window for another session to come online is one list-to-claim round trip, and say so if it did.
+    match ctx.roster_online(home, role) {
+        Ok(Some(false)) => {}
+        other => {
+            return (
+                format!("; not reclaimed: {role} was offline a moment ago but is now {other:?}"),
+                notice("the role changed state while the launcher was checking it"),
+            )
+        }
+    }
+    let claimed = ctx.claim_role(home, role).and_then(|()| {
+        // A zero exit is not proof: the role must be listed, once, under this home's identity.
+        match ctx.roster_online(home, role) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("claim exited 0 but the roster does not list the role".to_string()),
+            Err(e) => Err(format!(
+                "claim exited 0 but the roster could not confirm it: {e}"
+            )),
+        }
+    });
+    match claimed {
         Ok(()) => (
             format!(
                 "; reclaimed {role} from its lane home (it was offline, cache behind the roster)"

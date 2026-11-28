@@ -614,7 +614,7 @@ fn a_launcher_start_never_claims_over_an_online_role_and_a_manual_start_does_not
 /// to connect. Returns (the spawned command line, the JSON line on stdout).
 fn notice_case(
     caller: &'static str,
-    online: Result<Option<bool>, String>,
+    online: Vec<Result<Option<bool>, String>>,
     claim_ok: bool,
 ) -> (String, String) {
     let d = tempfile::tempdir().unwrap();
@@ -653,6 +653,7 @@ fn notice_case(
         *seen.borrow_mut() = a.hosted().join(" ");
         inner(s, a)
     });
+    let reads = RefCell::new(0usize);
     let mut c = ctx(&state, Some(caller), facts, &calls)
         .with_env(&[
             ("AGENTLIFE_HOME", &ah_s),
@@ -661,7 +662,11 @@ fn notice_case(
         .with_free_memory_gb(Some(100.0))
         .with_launch_spawn(spawn)
         .with_roster_epoch(Box::new(|_, _| Ok(Some(7))))
-        .with_roster_online(Box::new(move |_, _| online.clone()))
+        .with_roster_online(Box::new(move |_, _| {
+            // The n-th read answers `online[n]`; the last answer repeats.
+            let n = reads.replace_with(|n| *n + 1);
+            online[n.min(online.len() - 1)].clone()
+        }))
         .with_role_claim(Box::new(move |_, _| {
             if claim_ok {
                 Ok(())
@@ -690,9 +695,17 @@ fn a_launcher_start_whose_channel_will_not_connect_says_so_in_the_first_prompt_a
     const L: &str = "launcher:agentlife-launcher";
     // online elsewhere, a claim that fails, and an online state that cannot be read: each is told.
     for (online, claim_ok, why) in [
-        (Ok(Some(true)), true, "held"),
-        (Ok(Some(false)), false, "claim"),
-        (Err("synapse down".to_string()), true, "unread"),
+        (vec![Ok(Some(true))], true, "held"),
+        (vec![Ok(Some(false))], false, "claim"),
+        (vec![Err("synapse down".to_string())], true, "unread"),
+        // went online between the first read and the claim
+        (vec![Ok(Some(false)), Ok(Some(true))], true, "raced"),
+        // a zero-exit claim after which the roster does not list the role
+        (
+            vec![Ok(Some(false)), Ok(Some(false)), Ok(None)],
+            true,
+            "unlisted",
+        ),
     ] {
         let (argv, out) = notice_case(L, online, claim_ok);
         assert!(
@@ -709,13 +722,13 @@ fn a_launcher_start_whose_channel_will_not_connect_says_so_in_the_first_prompt_a
         );
     }
     // controls: a reclaimed role, a manual start, and an unchanged cache carry no notice.
-    let (argv, out) = notice_case(L, Ok(Some(false)), true);
+    let (argv, out) = notice_case(L, vec![Ok(Some(false))], true);
     assert!(
         !argv.contains("NOTICE") && !out.contains("notice"),
         "{argv}
 {out}"
     );
-    let (argv, out) = notice_case("pm", Ok(Some(true)), true);
+    let (argv, out) = notice_case("pm", vec![Ok(Some(true))], true);
     assert!(
         !argv.contains("NOTICE") && !out.contains("notice"),
         "{argv}

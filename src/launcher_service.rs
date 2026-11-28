@@ -633,6 +633,8 @@ thread_local! {
     /// What the start path said about a refusal (`held for memory: 3.1 GB free, floor 8 GB`), for the
     /// service log; drained by [`take_start_notes`]. The mechanism returns only a code.
     static NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// O22(b): channel notices given to lanes that started; drained by [`take_start_notices`].
+    static NOTICES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The `detail` of a `lane-restart start --json` line (present on a refusal), if any.
@@ -648,6 +650,11 @@ pub fn start_notice(line: &str) -> Option<String> {
     let v = serde_json::from_str::<Value>(line).ok()?;
     let n = v.get("notice")?.as_str()?;
     (!n.is_empty()).then(|| n.to_string())
+}
+
+/// Takes the channel notices given to started lanes since the last call.
+pub fn take_start_notices() -> Vec<String> {
+    NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
 }
 
 /// Takes the refusal details noted by starts since the last call.
@@ -715,14 +722,17 @@ impl Mechanism for LaneRestartMechanism {
                 if let Some(d) = start_detail(line) {
                     NOTES.with(|n| n.borrow_mut().push(format!("role={role} {d}")));
                 }
-                if let Some(d) = start_notice(line) {
-                    NOTES.with(|n| {
-                        n.borrow_mut().push(format!(
-                            "role={role} started without a channel expected: {d}"
-                        ))
-                    });
+                let mapped = map_start_json(line);
+                // Only a start that went through says the lane was GIVEN the notice, and it is logged as a
+                // notice, not as a refusal (the log prefixes `start refused:` on `NOTES`).
+                if matches!(mapped, MechResult::Started | MechResult::AwaitingDialog) {
+                    if let Some(d) = start_notice(line) {
+                        NOTICES.with(|n| {
+                            n.borrow_mut().push(format!("role={role} lane told: {d}"));
+                        });
+                    }
                 }
-                map_start_json(line)
+                mapped
             }
             None => MechResult::Failed("unparsable-output".into()),
         }
