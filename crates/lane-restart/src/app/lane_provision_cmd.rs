@@ -43,7 +43,7 @@ pub(super) fn run(ctx: &mut Ctx, role: String, apply: bool, plan: Option<String>
         }
     };
     let host = ctx.lane_new_host(&roots);
-    let now = chrono::Utc::now();
+    let now = lane_state::timestamp::Timestamp::now();
     let report = if apply {
         crate::lane_provision::run_apply(&roots, host.as_deref(), &role, plan.as_deref(), now)
     } else {

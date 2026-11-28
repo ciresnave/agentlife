@@ -220,7 +220,7 @@ pub fn enqueue(state_dir: &Path, to_role: &str, text: &str) -> Result<std::path:
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let stamp = format!(
         "{}-{}-{}",
-        chrono::Utc::now().timestamp_millis(),
+        lane_state::timestamp::Timestamp::now().unix_millis(),
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     );

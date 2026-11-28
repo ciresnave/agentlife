@@ -21,7 +21,7 @@ const KEEP: Duration = Duration::from_secs(2 * 24 * 3600);
 /// `argv` is the host's own arguments after the program name (`host --role r -- claude ...`).
 pub fn record(state_dir: &Path, argv: &[String]) {
     let _ = std::fs::create_dir_all(state_dir);
-    let mut body = format!("{}\n", chrono::Utc::now().to_rfc3339());
+    let mut body = format!("{}\n", lane_state::timestamp::Timestamp::now().to_rfc3339());
     for a in argv {
         body.push_str(a);
         body.push('\n');

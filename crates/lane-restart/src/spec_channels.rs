@@ -17,7 +17,7 @@ use crate::spec_synapse::{
     config_names_synapse, mcp_config_arg, RewriteOutcome, RewriteRow, DEV_CHANNELS, MCP_CONFIG,
     PEERS, STRICT, SYNAPSE,
 };
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::Serialize;
 use std::path::Path;
 
@@ -237,7 +237,7 @@ fn windows_slashes(p: &str) -> String {
     }
 }
 
-fn rewrite_one(dir: &Path, role: &str, dry_run: bool, now: DateTime<Utc>) -> RewriteOutcome {
+fn rewrite_one(dir: &Path, role: &str, dry_run: bool, now: Timestamp) -> RewriteOutcome {
     if !valid_identifier(role) {
         return RewriteOutcome::Refused(format!("not a plain role identifier: {role:?}"));
     }
@@ -289,7 +289,7 @@ pub fn rewrite_roles(
     dir: &Path,
     roles: &[String],
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<RewriteRow> {
     roles
         .iter()
@@ -430,7 +430,7 @@ mod tests {
             handoff_path: None,
             handoff_mtime: None,
             state: spec::SpecState::Running,
-            written_at: Utc::now(),
+            written_at: Timestamp::now(),
             written_by: "test".into(),
             stopped_session_id: None,
             stopped_pid_start_secs: None,
@@ -461,7 +461,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         write_spec(d.path(), "pa", &[DEV_CHANNELS, PEERS]);
         let cfg = windows_slashes(&write_cfg(d.path(), "pa", true));
-        let now = Utc::now();
+        let now = Timestamp::now();
         let roles = vec!["pa".to_string()];
         let dry = rewrite_roles(d.path(), &roles, true, now);
         assert!(
@@ -493,7 +493,7 @@ mod tests {
         write_spec(d.path(), "nosyn", &[DEV_CHANNELS, PEERS]);
         let _ = write_cfg(d.path(), "nosyn", false);
         for role in ["nocfg", "nosyn", "Bad/Role"] {
-            let r = rewrite_roles(d.path(), &[role.to_string()], false, Utc::now());
+            let r = rewrite_roles(d.path(), &[role.to_string()], false, Timestamp::now());
             assert!(
                 matches!(r[0].outcome, RewriteOutcome::Refused(_)),
                 "{role}: {r:?}"

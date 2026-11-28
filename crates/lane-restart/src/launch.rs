@@ -365,8 +365,7 @@ pub fn launch_and_wait_noticed(
         argv,
         carries_dev_channels_flag,
     } = prepare_launch_noticed(spec, policy_default, permit, wake.0, wake.1)?;
-    let launched_after_secs =
-        crate::stop::launched_after(crate::ts_compat::ToChrono::to_chrono(facts.now()));
+    let launched_after_secs = crate::stop::launched_after(facts.now());
     spawn(spec, &argv)?;
     wait_for_liveness(
         facts,
@@ -1082,7 +1081,7 @@ mod tests {
         let facts = RecordingFacts::new(&l);
         let reader = ScriptedReader::new(&l, vec![Some(state_at("fuel", "s1", "SessionStart"))]);
         let _ = start(&l, &facts, &reader, &fuel(), None);
-        let want = format!("poll C:/Projects/fuel after={}", facts.now.timestamp() - 5);
+        let want = format!("poll C:/Projects/fuel after={}", facts.now.unix_secs() - 5);
         assert!(l.borrow().contains(&want), "{:?}", l.borrow());
     }
 

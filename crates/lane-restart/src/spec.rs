@@ -23,7 +23,7 @@ use crate::relaunch::{extra_launch_args, valid_identifier, RelaunchError};
 use crate::role::Role;
 use crate::state;
 use crate::wsl::{self, WslTarget};
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -145,9 +145,9 @@ pub struct SpecFile {
     /// Only what `relaunch::extra_launch_args` allows; never the raw argv.
     pub launch_args: Vec<String>,
     pub handoff_path: Option<String>,
-    pub handoff_mtime: Option<DateTime<Utc>>,
+    pub handoff_mtime: Option<Timestamp>,
     pub state: SpecState,
-    pub written_at: DateTime<Utc>,
+    pub written_at: Timestamp,
     /// Who caused this write.
     pub written_by: WrittenBy,
     /// The session this spec was derived from when it was stopped. Not named `session_id` or
@@ -232,14 +232,14 @@ pub struct SpecInputs<'a> {
     pub pid_start_secs: Option<u64>,
     pub state: SpecState,
     pub written_by: WrittenBy,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
 }
 
 /// Flags whose value may be inline JSON (and so a secret) rather than a file path.
 const INLINE_CAPABLE_FLAGS: &[&str] = &["--mcp-config", "--settings"];
 
 /// The HANDOFF file the lane writes: `<cwd>/HANDOFF.md`, else `<cwd>/<ROLE>-HANDOFF.md`.
-pub fn find_handoff(cwd: &str, role: &str) -> Option<(String, DateTime<Utc>)> {
+pub fn find_handoff(cwd: &str, role: &str) -> Option<(String, Timestamp)> {
     let upper = role.to_ascii_uppercase();
     [
         Path::new(cwd).join("HANDOFF.md"),
@@ -248,10 +248,7 @@ pub fn find_handoff(cwd: &str, role: &str) -> Option<(String, DateTime<Utc>)> {
     .into_iter()
     .find_map(|p| {
         let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
-        Some((
-            p.to_string_lossy().into_owned(),
-            DateTime::<Utc>::from(modified),
-        ))
+        Some((p.to_string_lossy().into_owned(), Timestamp::from(modified)))
     })
 }
 
@@ -589,7 +586,7 @@ pub struct RoleStatus {
     pub spec: SpecStatus,
     /// A spec exists, passes `check`, and no matching process is live.
     pub startable: bool,
-    pub since: Option<DateTime<Utc>>,
+    pub since: Option<Timestamp>,
     pub stop_reason: Option<String>,
     /// `soft` or `hard` when the spec records a stop; absent when unclassified.
     pub stop_kind: Option<StopKind>,
@@ -645,7 +642,7 @@ pub struct Activity {
     pub subagents_running: u32,
     /// `None`: the lane never asserted it. Not the same as `false`.
     pub no_background_shells: Option<bool>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
     pub updated_by_event: String,
     /// `LaneState::is_idle`: not busy, no subagents, shells asserted absent. It does NOT include
     /// the PM's fourth term, "no unread TASK", which no state file records.
@@ -734,7 +731,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                 busy: st.busy,
                 subagents_running: st.subagents_running,
                 no_background_shells: st.no_background_shells,
-                updated_at: crate::ts_compat::ToChrono::to_chrono(st.updated_at),
+                updated_at: st.updated_at,
                 updated_by_event: st.updated_by_event.clone(),
                 idle: st.is_idle(),
                 idle_blockers: st.idle_blockers(),
@@ -743,12 +740,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
                     .metadata()
                     .and_then(|m| m.modified())
                     .ok()
-                    .map(|t| {
-                        (crate::ts_compat::ToChrono::to_chrono(facts.now())
-                            - chrono::DateTime::<chrono::Utc>::from(t))
-                        .num_seconds()
-                        .max(0)
-                    }),
+                    .map(|t| facts.now().secs_since(Timestamp::from(t)).max(0)),
                 quiet_over: None,
                 compaction_stall_secs: None,
             });
@@ -802,11 +794,9 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
     match (spec_state, &lane_state) {
         (Some(SpecState::Suspended), _) => out.state = Lifecycle::Suspended,
         (Some(SpecState::Stopping), _)
-            if (crate::ts_compat::ToChrono::to_chrono(facts.now())
-                - out
-                    .since
-                    .unwrap_or_else(|| crate::ts_compat::ToChrono::to_chrono(facts.now())))
-            .num_seconds()
+            if facts
+                .now()
+                .secs_since(out.since.unwrap_or_else(|| facts.now()))
                 >= STOPPING_STALE_SECS =>
         {
             out.state = Lifecycle::Suspended;
@@ -821,7 +811,7 @@ pub fn role_status(dir: &Path, role: &str, facts: &dyn SystemFacts) -> RoleStatu
         (Some(SpecState::FailedRelaunch), _) => out.state = Lifecycle::FailedRelaunch,
         (None, Ok(st)) => {
             out.state = Lifecycle::Crashed;
-            out.since = Some(crate::ts_compat::ToChrono::to_chrono(st.updated_at));
+            out.since = Some(st.updated_at);
             out.detail = Some(
                 "no launch spec: it is written at the next launch by lane-restart".to_string(),
             );
@@ -1138,7 +1128,6 @@ mod tests {
 
     use super::*;
     use crate::testing::{log, RecordingFacts};
-    use chrono::TimeZone;
     use tempfile::tempdir;
 
     fn launch(role: &str) -> LaunchSpec {
@@ -1174,7 +1163,7 @@ mod tests {
             pid_start_secs: Some(1234),
             state,
             written_by: WrittenBy::Restart,
-            now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
+            now: Timestamp::from_utc(2026, 10, 11, 12, 0, 0).unwrap(),
         }
     }
 
@@ -1641,8 +1630,7 @@ mod tests {
         let d = tempdir().unwrap();
         let facts = dead_facts();
         let mut s = built("baracuda", SpecState::Stopping);
-        s.written_at =
-            crate::ts_compat::ToChrono::to_chrono(facts.now()) - chrono::Duration::minutes(mins);
+        s.written_at = facts.now().plus_secs(-(mins) * 60);
         write_atomic(d.path(), &s).unwrap();
         role_status(d.path(), "baracuda", &facts).state
     }
@@ -1663,8 +1651,7 @@ mod tests {
         let d = tempdir().unwrap();
         let facts = dead_facts();
         let mut s = built("baracuda", SpecState::Stopping);
-        s.written_at =
-            crate::ts_compat::ToChrono::to_chrono(facts.now()) - chrono::Duration::minutes(20);
+        s.written_at = facts.now().plus_secs(-1200);
         write_atomic(d.path(), &s).unwrap();
         let st = role_status(d.path(), "baracuda", &facts);
         assert!(st.detail.unwrap().contains("stop did not finish"));

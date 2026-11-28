@@ -130,7 +130,7 @@ pub struct Provenance {
 pub struct Approval {
     /// The day it was said. A date, not a time: a guessed time of day would
     /// be a made-up fact.
-    pub said_on: chrono::NaiveDate,
+    pub said_on: lane_state::timestamp::Date,
     /// The approver's own words, verbatim - never a paraphrase.
     pub quote: String,
     /// What those words were answering.

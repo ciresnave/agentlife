@@ -897,7 +897,11 @@ fn append_spawn_log(dir: &std::path::Path, role: &str, what: &str) {
         .append(true)
         .open(dir.join("spawn.log"))
     {
-        let _ = writeln!(f, "{} role={role} {what}", chrono::Utc::now().to_rfc3339());
+        let _ = writeln!(
+            f,
+            "{} role={role} {what}",
+            lane_state::timestamp::Timestamp::now().to_rfc3339()
+        );
     }
 }
 
@@ -1095,7 +1099,7 @@ pub fn kill_and_relaunch_persisting(
         pid_start_secs: stopped.then_some(identity.start_time_secs),
         state: spec_state,
         written_by: WrittenBy::Restart,
-        now: chrono::Utc::now(),
+        now: lane_state::timestamp::Timestamp::now(),
     };
     let stopping = spec::build(&spec_inputs(SpecState::Stopping, true))
         .map_err(|e| RelaunchError::SpecNotWritten(e.to_string()))?;

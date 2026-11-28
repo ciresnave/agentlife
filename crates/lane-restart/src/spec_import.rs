@@ -17,7 +17,7 @@ use crate::launch::LaunchSpec;
 use crate::relaunch::{resolve_launch_model, valid_identifier};
 use crate::spec::{self, SpecInputs, SpecState, WrittenBy};
 use crate::state;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,7 +68,7 @@ fn import_one(
     facts: &dyn SystemFacts,
     policy_default: &str,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> ImportOutcome {
     if dir.join(format!("{role}{}", spec::FILE_SUFFIX)).exists() {
         return ImportOutcome::AlreadyHasSpec;
@@ -131,7 +131,7 @@ pub fn import_specs(
     facts: &dyn SystemFacts,
     policy_default: &str,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<ImportRow> {
     let roles = match only_role {
         Some(r) => vec![r.to_string()],
@@ -283,7 +283,7 @@ mod tests {
 
     fn run(d: &Path, role: Option<&str>, dry: bool) -> Vec<ImportRow> {
         let facts = RecordingFacts::new(&log());
-        import_specs(d, role, &facts, "sonnet", dry, Utc::now())
+        import_specs(d, role, &facts, "sonnet", dry, Timestamp::now())
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
         state_file(d.path(), "agentlife", cwd.path(), 55, baracuda_args());
         let mut facts = RecordingFacts::new(&log());
         facts.live_pid = Some((55, 100));
-        let rows = import_specs(d.path(), None, &facts, "sonnet", false, Utc::now());
+        let rows = import_specs(d.path(), None, &facts, "sonnet", false, Timestamp::now());
         assert_eq!(rows[0].outcome, ImportOutcome::Written(SpecState::Running));
     }
 

@@ -53,7 +53,7 @@ pub(super) fn import(
         &*facts,
         &crate::relaunch::policy_default_model(&state),
         dry_run,
-        chrono::Utc::now(),
+        lane_state::timestamp::Timestamp::now(),
     );
     let mut refused_named = false;
     for r in &rows {
@@ -112,7 +112,13 @@ pub(super) fn retire(ctx: &mut Ctx, roles: Vec<String>, dry_run: bool) -> ExitCo
     }
     let state = ctx.state_dir.clone();
     let facts = ctx.facts();
-    let rows = retire_roles(&state, &roles, &*facts, dry_run, chrono::Utc::now());
+    let rows = retire_roles(
+        &state,
+        &roles,
+        &*facts,
+        dry_run,
+        lane_state::timestamp::Timestamp::now(),
+    );
     let mut refused = false;
     for r in &rows {
         match &r.outcome {
@@ -223,7 +229,13 @@ pub(super) fn synapse_only(
         return ExitCode::FAILURE;
     }
     let state = ctx.state_dir.clone();
-    let rows = rewrite_roles(&state, &roles, strict, dry_run, chrono::Utc::now());
+    let rows = rewrite_roles(
+        &state,
+        &roles,
+        strict,
+        dry_run,
+        lane_state::timestamp::Timestamp::now(),
+    );
     let mut refused = false;
     for r in &rows {
         let (outcome, acted) = match &r.outcome {
@@ -292,7 +304,12 @@ pub(super) fn both_channels(ctx: &mut Ctx, roles: crate::cli::Roles, dry_run: bo
         return ExitCode::FAILURE;
     }
     let state = ctx.state_dir.clone();
-    let rows = rewrite_roles(&state, &roles, dry_run, chrono::Utc::now());
+    let rows = rewrite_roles(
+        &state,
+        &roles,
+        dry_run,
+        lane_state::timestamp::Timestamp::now(),
+    );
     let mut refused = false;
     for r in &rows {
         let (outcome, acted) = match &r.outcome {
@@ -363,7 +380,13 @@ pub(super) fn set(
         return ExitCode::FAILURE;
     }
     let state = ctx.state_dir.clone();
-    let rows = set_roles(&state, &roles, &opts, dry_run, chrono::Utc::now());
+    let rows = set_roles(
+        &state,
+        &roles,
+        &opts,
+        dry_run,
+        lane_state::timestamp::Timestamp::now(),
+    );
     let mut refused = false;
     for r in &rows {
         let (outcome, acted) = match &r.outcome {
@@ -400,7 +423,7 @@ pub(super) fn set(
 /// ledger row. Exit 1 when any row has a failing finding.
 pub(super) fn audit(ctx: &mut Ctx, roles: Vec<String>, json: bool) -> ExitCode {
     use crate::spec_audit::{audit, common_home, findings, render, Severity};
-    let now = chrono::Utc::now();
+    let now = lane_state::timestamp::Timestamp::now();
     let state = ctx.state_dir.clone();
     // The rows come first: they name the identity home the daemon is asked through.
     let rows0 = audit(&state, &roles, &Err(String::new()), now);

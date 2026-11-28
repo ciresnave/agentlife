@@ -587,7 +587,7 @@ pub fn execute_start(
     let mut running = plan.spec.clone();
     running.state = SpecState::Running;
     running.written_by = WrittenBy::Launch;
-    running.written_at = crate::ts_compat::ToChrono::to_chrono(facts.now());
+    running.written_at = facts.now();
     // A launch is not a stop: the kind described the stop that ended the previous session.
     running.stop_kind = None;
     running.stopped_session_id = None;
@@ -624,7 +624,7 @@ mod tests {
     use crate::role::Role;
     use crate::spec::{build, write_atomic, DirSpecStore, SpecInputs};
     use crate::testing::{log, state_at, RecordingFacts, ScriptedReader};
-    use chrono::{TimeZone, Utc};
+    use lane_state::timestamp::Timestamp;
     use tempfile::tempdir;
 
     const PM_PID: u32 = 900;
@@ -661,7 +661,7 @@ mod tests {
             pid_start_secs: Some(1),
             state: st,
             written_by: WrittenBy::Import,
-            now: Utc.with_ymd_and_hms(2026, 10, 11, 12, 0, 0).unwrap(),
+            now: Timestamp::from_utc(2026, 10, 11, 12, 0, 0).unwrap(),
         })
         .unwrap();
         // the model may be anything the file says; `write_atomic` is strict, so write raw
@@ -1029,8 +1029,9 @@ mod tests {
             b.join("chan"),
         )
         .unwrap();
-        let s = crate::lane_new::build_spec(&roots, "rockfish", "rockfish", "sonnet", Utc::now())
-            .unwrap();
+        let s =
+            crate::lane_new::build_spec(&roots, "rockfish", "rockfish", "sonnet", Timestamp::now())
+                .unwrap();
         spec::write_atomic(d.path(), &s).unwrap();
         let plan = plan_start(d.path(), &req("rockfish"), Ok("pm".to_string()), &facts);
         assert!(plan.is_ok(), "{:?}", plan.err());
@@ -1757,7 +1758,7 @@ mod tests {
             pid_start_secs: None,
             state: SpecState::Suspended,
             written_by: WrittenBy::Import,
-            now: Utc::now(),
+            now: Timestamp::now(),
         })
         .unwrap();
         write_atomic(d.path(), &s).unwrap();

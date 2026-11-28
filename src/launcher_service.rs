@@ -240,14 +240,16 @@ impl Source for SynapseSource {
                 return Vec::new();
             }
         };
-        let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
+        let at = lane_state::timestamp::Timestamp::from_unix_secs(now).unwrap_or_else(|| {
+            lane_state::timestamp::Timestamp::from_unix_secs(0).expect("the epoch is in range")
+        });
         lane_restart::wakes::due(&reg, at)
             .into_iter()
             .map(|w| launcher::service::WakeDue {
                 role: w.role.clone(),
                 event: w.event.clone(),
                 signal_id: lane_restart::wakes::signal_id(w),
-                due_ts: lane_restart::wakes::due_at(w).timestamp(),
+                due_ts: lane_restart::wakes::due_at(w).unix_secs(),
             })
             .collect()
     }

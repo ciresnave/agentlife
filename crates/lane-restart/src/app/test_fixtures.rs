@@ -8,7 +8,6 @@ use crate::relaunch::RelaunchError;
 use crate::role::Role;
 use crate::spec::{build, write_atomic, SpecInputs, SpecState, WrittenBy};
 use crate::testing::{log, state_at, RecordingFacts};
-use chrono::TimeZone;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -60,9 +59,7 @@ pub(super) fn fixture(root: &Path, role: &str, handoff: &str) -> (PathBuf, PathB
         pid_start_secs: Some(100),
         state: SpecState::Running,
         written_by: WrittenBy::Restart,
-        now: chrono::Utc
-            .with_ymd_and_hms(2026, 10, 11, 12, 0, 0)
-            .unwrap(),
+        now: lane_state::timestamp::Timestamp::from_utc(2026, 10, 11, 12, 0, 0).unwrap(),
     })
     .unwrap();
     write_atomic(&state, &spec).unwrap();
@@ -83,8 +80,7 @@ pub(super) fn age_lane_state(state: &Path, role: &str, secs: i64) {
     let mut v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let now = RecordingFacts::new(&log()).now;
-    v["updated_at"] =
-        serde_json::Value::String((now - chrono::Duration::seconds(secs)).to_rfc3339());
+    v["updated_at"] = serde_json::Value::String(now.plus_secs(-secs).to_rfc3339());
     std::fs::write(&path, v.to_string()).unwrap();
 }
 

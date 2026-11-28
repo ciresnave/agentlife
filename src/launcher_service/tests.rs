@@ -295,7 +295,7 @@ fn spec_in_kind(dir: &Path, role: &str, state: spec::SpecState, kind: Option<spe
         handoff_path: None,
         handoff_mtime: None,
         state,
-        written_at: Utc::now(),
+        written_at: lane_state::timestamp::Timestamp::now(),
         written_by: "test".into(),
         stopped_session_id: None,
         stopped_pid_start_secs: None,

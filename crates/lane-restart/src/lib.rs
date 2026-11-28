@@ -62,7 +62,6 @@ pub mod stop;
 pub mod tab_close;
 #[cfg(test)]
 mod testing;
-mod ts_compat;
 pub mod waits;
 pub mod waits_poll;
 pub mod wakes;

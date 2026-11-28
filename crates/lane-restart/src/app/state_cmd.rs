@@ -40,7 +40,7 @@ pub(super) fn run(ctx: &mut Ctx, event: &str) -> ExitCode {
         event,
         result.is_ok(),
         started.elapsed(),
-        chrono::Utc::now(),
+        lane_state::timestamp::Timestamp::now(),
     );
     if let Some(note) =
         lane_state_writer::slow_note(event, started.elapsed(), ctx.parent_full_scans())

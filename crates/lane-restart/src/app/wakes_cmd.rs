@@ -24,7 +24,7 @@ pub(super) fn run(ctx: &mut Ctx, json: bool) -> ExitCode {
             .iter()
             .any(|r| r.role == role && r.state == Lifecycle::Running && r.activity.is_some())
     };
-    let now = chrono::Utc::now();
+    let now = lane_state::timestamp::Timestamp::now();
     let rows = wakes::readout(&reg, now, &running);
     if json {
         let v: Vec<_> = rows
@@ -44,11 +44,11 @@ pub(super) fn run(ctx: &mut Ctx, json: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     for r in &rows {
-        let left = r.due_utc - now;
-        let left = if left.num_seconds() <= 0 {
+        let left = r.due_utc.secs_since(now);
+        let left = if left <= 0 {
             "due".to_string()
         } else {
-            format!("in {}m", left.num_minutes())
+            format!("in {}m", left / 60)
         };
         ctx.outln(&format!(
             "{}	{}	wake {}	due {} ({})	{}",
@@ -95,7 +95,7 @@ mod tests {
             "r",
             "WAIT: build | check: true | wake: 2099-01-01T00:00:00Z
 ",
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
         )
         .unwrap();
         let mut ctx = Ctx::capture(d.path().join("state"), Ok(d.path().to_path_buf()), None);

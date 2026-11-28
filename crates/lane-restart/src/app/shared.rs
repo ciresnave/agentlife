@@ -87,7 +87,7 @@ pub(super) fn print_status_json(ctx: &mut Ctx, outcome: &str, role: &str) {
         "event": "lane-restart-status",
         "role": role,
         "outcome": outcome,
-        "at": chrono::Utc::now().to_rfc3339(),
+        "at": lane_state::timestamp::Timestamp::now().to_rfc3339(),
     });
     ctx.outln(&line.to_string());
 }

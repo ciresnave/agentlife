@@ -13,7 +13,7 @@ use crate::facts::SystemFacts;
 use crate::relaunch::valid_identifier;
 use crate::spec;
 use crate::state;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::Path;
 
 /// The role the PM session runs as: never retired.
@@ -40,7 +40,7 @@ fn retire_one(
     role: &str,
     facts: &dyn SystemFacts,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> RetireOutcome {
     if !valid_identifier(role) {
         return RetireOutcome::Refused(format!("not a plain role identifier: {role:?}"));
@@ -105,7 +105,7 @@ pub fn retire_roles(
     roles: &[String],
     facts: &dyn SystemFacts,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<RetireRow> {
     roles
         .iter()
@@ -172,7 +172,7 @@ mod tests {
     fn run(d: &Path, roles: &[&str], dry: bool) -> Vec<RetireRow> {
         let facts = RecordingFacts::new(&log());
         let roles: Vec<String> = roles.iter().map(|s| s.to_string()).collect();
-        retire_roles(d, &roles, &facts, dry, Utc::now())
+        retire_roles(d, &roles, &facts, dry, Timestamp::now())
     }
 
     fn gone() -> std::path::PathBuf {
@@ -240,7 +240,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let rows = retire_roles(d.path(), &roles, &facts, false, Utc::now());
+        let rows = retire_roles(d.path(), &roles, &facts, false, Timestamp::now());
         let why = |i: usize| match &rows[i].outcome {
             RetireOutcome::Refused(w) => w.clone(),
             o => panic!("row {i} not refused: {o:?}"),
@@ -257,7 +257,7 @@ mod tests {
     fn an_existing_destination_is_never_overwritten() {
         let d = tempdir().unwrap();
         state_file(d.path(), "wt1", &gone(), 1);
-        let now = Utc::now();
+        let now = Timestamp::now();
         let stamp = now.format("%Y%m%dT%H%M%SZ");
         std::fs::create_dir(d.path().join("retired")).unwrap();
         let taken = d.path().join("retired").join(format!("wt1.json.{stamp}"));

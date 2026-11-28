@@ -122,7 +122,7 @@ fn run_target(
                 wt,
                 &model,
                 plan.as_deref(),
-                chrono::Utc::now(),
+                lane_state::timestamp::Timestamp::now(),
             )
         } else {
             crate::lane_new::run_full_worktree(
@@ -134,7 +134,7 @@ fn run_target(
                 wt,
                 &model,
                 false,
-                chrono::Utc::now(),
+                lane_state::timestamp::Timestamp::now(),
             )
         }
     } else if apply {
@@ -146,7 +146,7 @@ fn run_target(
             &repo,
             &model,
             plan.as_deref(),
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
         )
     } else {
         crate::lane_new::run_full(
@@ -157,7 +157,7 @@ fn run_target(
             &repo,
             &model,
             false,
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
         )
     };
     ctx.out(&report.render(apply));

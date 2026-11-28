@@ -21,7 +21,7 @@ use crate::lane_new_host::{host_log_since, Host};
 use crate::lane_new_remote::{self as remote, Vcs};
 use crate::spec::{self, SpecFile, SpecState, WrittenBy};
 use crate::start;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::{Path, PathBuf};
 
 /// The org every lane repo lives in (PM answer 2026-10-30: `ThinkersJournal/rockfish` exists).
@@ -226,7 +226,7 @@ pub fn run_apply(
     repo: &str,
     model: &str,
     plan: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     let refuse = |why: String| Report {
         rows: vec![StepRow {
@@ -296,7 +296,7 @@ pub fn build_spec(
     role: &str,
     repo: &str,
     model: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<SpecFile, String> {
     build_spec_at(roots, role, &roots.repo_dir(repo), model, now)
 }
@@ -307,7 +307,7 @@ pub fn build_spec_at(
     role: &str,
     cwd: &Path,
     model: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<SpecFile, String> {
     let r = lane_state::role::Role::new(role).map_err(|e| format!("role {role:?}: {e}"))?;
     Ok(SpecFile {
@@ -578,7 +578,7 @@ pub fn run_local(
     repo: &str,
     model: &str,
     apply: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     run_with(roots, None, role, repo, model, apply, now)
 }
@@ -593,7 +593,7 @@ pub fn run_with(
     repo: &str,
     model: &str,
     apply: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     run_full(roots, vcs, None, role, repo, model, apply, now)
 }
@@ -609,7 +609,7 @@ pub fn run_full(
     repo: &str,
     model: &str,
     apply: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     run_inner(roots, vcs, host, role, repo, None, model, apply, now)
 }
@@ -627,7 +627,7 @@ pub fn run_full_worktree(
     worktree: &Path,
     model: &str,
     apply: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     run_inner(
         roots,
@@ -673,7 +673,7 @@ pub fn run_apply_worktree(
     worktree: &Path,
     model: &str,
     plan: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     let refuse = |why: String| Report {
         rows: vec![StepRow {
@@ -802,7 +802,7 @@ fn run_inner(
     worktree: Option<&Path>,
     model: &str,
     apply: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Report {
     let nwo = format!("{ORG}/{repo}");
     let cwd = worktree
@@ -1254,7 +1254,7 @@ mod tests {
 
     #[must_use]
     fn go(r: &Roots, role: &str, apply: bool) -> Report {
-        run_local(r, role, "zetafish", "sonnet", apply, Utc::now())
+        run_local(r, role, "zetafish", "sonnet", apply, Timestamp::now())
     }
 
     fn statuses(rep: &Report) -> Vec<(u8, Status)> {
@@ -1443,7 +1443,7 @@ mod tests {
             ("zetafish", "x", "opus", "never Opus"),
             ("zetafish", "x", "claude-opus-5-5", "never Opus"),
         ] {
-            let rep = run_local(&r, role, repo, model, true, Utc::now());
+            let rep = run_local(&r, role, repo, model, true, Timestamp::now());
             assert!(
                 rep.failed() && rep.rows[0].detail.contains(why),
                 "{role} {repo} {model}: {}",
@@ -1456,7 +1456,8 @@ mod tests {
         assert!(rep.failed() && rep.rows[0].detail.contains("has run"));
         std::fs::remove_file(r.state_dir.join("zetafish.json")).unwrap();
         // an existing spec for another cwd differs: refused, and nothing else was written either
-        let mut other = build_spec(&r, "zetafish", "elsewhere", "sonnet", Utc::now()).unwrap();
+        let mut other =
+            build_spec(&r, "zetafish", "elsewhere", "sonnet", Timestamp::now()).unwrap();
         other.state = SpecState::Suspended;
         spec::write_atomic(&r.state_dir, &other).unwrap();
         let before2 = listing(&r);
@@ -1523,7 +1524,7 @@ mod tests {
     fn a_new_lanes_spec_is_the_synapse_only_end_state() {
         let d = tempfile::tempdir().unwrap();
         let r = roots(&d);
-        let s = build_spec(&r, "zetafish", "zetafish", "sonnet", Utc::now()).unwrap();
+        let s = build_spec(&r, "zetafish", "zetafish", "sonnet", Timestamp::now()).unwrap();
         assert_eq!(
             crate::spec_channels::check_synapse_only(&s.launch_args),
             Ok(())

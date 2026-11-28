@@ -15,7 +15,7 @@
 
 use crate::relaunch::valid_identifier;
 use crate::spec;
-use chrono::{DateTime, Utc};
+use lane_state::timestamp::Timestamp;
 use std::path::Path;
 
 pub(crate) const DEV_CHANNELS: &str = "--dangerously-load-development-channels";
@@ -98,7 +98,7 @@ fn rewrite_one(
     role: &str,
     strict: bool,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> RewriteOutcome {
     if !valid_identifier(role) {
         return RewriteOutcome::Refused(format!("not a plain role identifier: {role:?}"));
@@ -157,7 +157,7 @@ pub fn rewrite_roles(
     roles: &[String],
     strict: bool,
     dry_run: bool,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<RewriteRow> {
     roles
         .iter()
@@ -229,7 +229,7 @@ mod tests {
             handoff_path: None,
             handoff_mtime: None,
             state: spec::SpecState::Running,
-            written_at: Utc::now(),
+            written_at: Timestamp::now(),
             written_by: "test".into(),
             stopped_session_id: None,
             stopped_pid_start_secs: None,
@@ -251,7 +251,7 @@ mod tests {
 
     fn run(d: &Path, roles: &[&str], strict: bool, dry: bool) -> Vec<RewriteRow> {
         let roles: Vec<String> = roles.iter().map(|s| s.to_string()).collect();
-        rewrite_roles(d, &roles, strict, dry, Utc::now())
+        rewrite_roles(d, &roles, strict, dry, Timestamp::now())
     }
 
     #[test]

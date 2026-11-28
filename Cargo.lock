@@ -1686,7 +1686,6 @@ dependencies = [
 name = "lane-restart"
 version = "0.31.0"
 dependencies = [
- "chrono",
  "clap",
  "getrandom 0.4.3",
  "hmac",
