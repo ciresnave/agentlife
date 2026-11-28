@@ -20,7 +20,7 @@ pub(super) fn run(ctx: &mut Ctx, role: Option<String>) -> ExitCode {
     let reader = ctx.repo_reader(&home);
     let (_, loaded) = approvals::load_configured(&home, &*reader);
     ctx.outln(&format!("approvals: {}", loaded.summary()));
-    let now = chrono::Utc::now();
+    let now = lane_state::timestamp::Timestamp::now();
     for (h, hash) in &loaded.handlers {
         let applies = match &role {
             Some(r) if crate::handlers::is_active(h, r, now) => format!(" [applies to {r}]"),

@@ -81,7 +81,7 @@ fn screen_with(channels: &str) -> String {
     text
 }
 
-fn instant(s: &str) -> chrono::DateTime<chrono::Utc> {
+fn instant(s: &str) -> lane_state::timestamp::Timestamp {
     s.parse().unwrap()
 }
 
@@ -102,7 +102,7 @@ fn every_real_record_is_active_for_its_roles_until_expiry_and_for_no_other_role(
         // A record with no expiry is probed a century on, so "no expiry" cannot pass as "far away".
         let before = e.expires.map_or_else(
             || instant("2126-01-01T00:00:00Z"),
-            |t| instant(t) - chrono::Duration::seconds(1),
+            |t| instant(t).plus_secs(-1),
         );
         for role in e.roles {
             let role = if *role == "*" { "any-lane" } else { role };

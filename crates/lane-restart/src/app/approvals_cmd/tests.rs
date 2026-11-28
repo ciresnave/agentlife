@@ -163,7 +163,7 @@ fn role_marks_whether_each_approval_applies_to_that_role_now() {
         .find(|l| l.contains("active h2 "))
         .expect(&overmind);
     assert!(
-        h2.ends_with("expires=2020-01-01T00:00:00+00:00 [NOT active for overmind]"),
+        h2.ends_with("expires=2020-01-01T00:00:00Z [NOT active for overmind]"),
         "{h2}"
     );
     // The control: a role no approval names is not applied to by the live one either.

@@ -279,12 +279,10 @@ pub fn drain_outbox(
 pub fn lane_progressed_since(
     state_dir: &Path,
     role: &str,
-    since: chrono::DateTime<chrono::Utc>,
+    since: lane_state::timestamp::Timestamp,
 ) -> bool {
-    state::load(state_dir, role).is_ok_and(|s| {
-        crate::ts_compat::ToChrono::to_chrono(s.updated_at) > since
-            && s.updated_by_event != "SessionStart"
-    })
+    state::load(state_dir, role)
+        .is_ok_and(|s| s.updated_at > since && s.updated_by_event != "SessionStart")
 }
 
 /// The `[ASK]` message (`C:/Projects/CLAUDE.md` §10 compact format).
@@ -558,7 +556,7 @@ mod tests {
     #[test]
     fn lane_progressed_since_needs_a_later_non_sessionstart_write() {
         let dir = tempfile::tempdir().unwrap();
-        let since: chrono::DateTime<chrono::Utc> = "2026-09-27T12:00:00Z".parse().unwrap();
+        let since: lane_state::timestamp::Timestamp = "2026-09-27T12:00:00Z".parse().unwrap();
         write_state(
             dir.path(),
             "x",

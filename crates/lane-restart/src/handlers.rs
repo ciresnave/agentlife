@@ -38,7 +38,7 @@ pub struct RawHandlerSpec {
     pub scope: ScopeSpec,
     pub provenance: Provenance,
     #[serde(default)]
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub expires_at: Option<lane_state::timestamp::Timestamp>,
 }
 
 /// A handler that passed [`refusal_reason`]. The only ways to get one are
@@ -409,7 +409,7 @@ pub fn parse_and_validate(json: &str) -> Result<HandlerSpec, String> {
 
 /// Whether `handler` is even eligible to be checked at all: its `scope`
 /// includes `role` (or `"*"`), and it hasn't expired.
-pub fn is_active(handler: &HandlerSpec, role: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+pub fn is_active(handler: &HandlerSpec, role: &str, now: lane_state::timestamp::Timestamp) -> bool {
     let role_ok = handler.scope.roles.iter().any(|r| r == role || r == "*");
     let not_expired = handler.expires_at.is_none_or(|exp| exp > now);
     role_ok && not_expired
@@ -524,7 +524,7 @@ fn base_matches(handler: &HandlerSpec, screen_text: &str) -> bool {
 pub fn find_matching_handler<'a>(
     handlers: &'a [HandlerSpec],
     role: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: lane_state::timestamp::Timestamp,
     screen_text: &str,
 ) -> Option<&'a HandlerSpec> {
     find_matching_handler_resolved(
@@ -542,7 +542,7 @@ pub fn find_matching_handler<'a>(
 pub fn find_matching_handler_resolved<'a>(
     handlers: &'a [HandlerSpec],
     role: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: lane_state::timestamp::Timestamp,
     screen_text: &str,
     resolver: &dyn crate::folder_trust::FolderResolver,
 ) -> Option<(&'a HandlerSpec, Option<String>)> {
@@ -584,7 +584,7 @@ pub struct MatchReport {
 pub fn match_report(
     handler: &HandlerSpec,
     role: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: lane_state::timestamp::Timestamp,
     screen_text: &str,
 ) -> MatchReport {
     let active = is_active(handler, role, now);
@@ -851,7 +851,7 @@ mod tests {
         let r = match_report(
             &h,
             "any",
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             "Do you trust the files here?\nC:\\Projects\\agentlife-evil",
         );
         assert_eq!(r.lines, vec![(r"C:\Projects\agentlife".to_string(), false)]);
@@ -1000,7 +1000,7 @@ mod tests {
         let r = match_report(
             &h,
             "any",
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             &trust_dialog(120, r"C:\Projects\agentlife-evil"),
         );
         assert!(!r.matched);
@@ -1145,7 +1145,12 @@ mod tests {
         assert!(matches(&h, screen), "positive control");
         let with_secret = format!("{screen}Password: ");
         assert!(!matches(&h, &with_secret));
-        let report = match_report(&h, "overmind", chrono::Utc::now(), &with_secret);
+        let report = match_report(
+            &h,
+            "overmind",
+            lane_state::timestamp::Timestamp::now(),
+            &with_secret,
+        );
         assert_eq!(report.secret_word, Some("password"));
         assert!(!report.matched);
     }
@@ -1158,7 +1163,12 @@ mod tests {
         // restate the overall bool `matches()` already gives.
         let h = parse_and_validate(&sample_json("t", Some("server:claude-peers"))).unwrap();
         let screen = "  I am using this for local development\n  Channels: server:claude-peers\n";
-        let report = match_report(&h, "overmind", chrono::Utc::now(), screen);
+        let report = match_report(
+            &h,
+            "overmind",
+            lane_state::timestamp::Timestamp::now(),
+            screen,
+        );
         assert!(!report.matched);
         assert!(report.active);
         assert_eq!(
@@ -1205,7 +1215,7 @@ mod tests {
     #[test]
     fn is_active_respects_role_scope() {
         let h = parse_and_validate(&sample_json("t", None)).unwrap();
-        let now = chrono::Utc::now();
+        let now = lane_state::timestamp::Timestamp::now();
         assert!(is_active(&h, "overmind", now));
         assert!(!is_active(&h, "synapse", now));
     }
@@ -1214,7 +1224,11 @@ mod tests {
     fn is_active_treats_an_expired_handler_as_not_present() {
         let json = with(r#""action": "1\r", "expires_at": "2020-01-01T00:00:00Z""#);
         let h = parse_and_validate(&json).unwrap();
-        assert!(!is_active(&h, "overmind", chrono::Utc::now()));
+        assert!(!is_active(
+            &h,
+            "overmind",
+            lane_state::timestamp::Timestamp::now()
+        ));
     }
 
     // -- the inert example: the same bytes the seed PR puts in the user's repo //
@@ -1458,8 +1472,14 @@ project, or work from your team). If not, take a moment to review what's in this
 
     fn answers(screen: &str) -> Option<String> {
         let hs = [prefix_handler()];
-        find_matching_handler_resolved(&hs, "any-lane", chrono::Utc::now(), screen, &fs())
-            .map(|(h, folder)| format!("{}:{}", h.id, folder.unwrap_or_default()))
+        find_matching_handler_resolved(
+            &hs,
+            "any-lane",
+            lane_state::timestamp::Timestamp::now(),
+            screen,
+            &fs(),
+        )
+        .map(|(h, folder)| format!("{}:{}", h.id, folder.unwrap_or_default()))
     }
 
     #[test]
@@ -1539,8 +1559,8 @@ project, or work from your team). If not, take a moment to review what's in this
         let expiry = h.expires_at.expect("the record carries an expiry");
         let hs = [h];
         let screen = trust_screen(r"C:\Projects\configurant");
-        let before = expiry - chrono::Duration::seconds(1);
-        let after = expiry + chrono::Duration::seconds(1);
+        let before = expiry.plus_secs(-1);
+        let after = expiry.plus_secs(1);
         assert!(find_matching_handler_resolved(&hs, "x", before, &screen, &fs()).is_some());
         assert!(find_matching_handler_resolved(&hs, "x", after, &screen, &fs()).is_none());
     }

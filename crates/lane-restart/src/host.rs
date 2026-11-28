@@ -434,7 +434,7 @@ pub fn screen_text(parser: &vt100::Parser) -> String {
 pub fn check_and_inject(
     handler_list: &[HandlerSpec],
     role: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: lane_state::timestamp::Timestamp,
     screen_text: &str,
     matched_ids: &mut HashSet<String>,
     input_writer: &mut impl Write,
@@ -458,7 +458,7 @@ pub fn check_and_inject_with(
     resolver: &dyn crate::folder_trust::FolderResolver,
     handler_list: &[HandlerSpec],
     role: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: lane_state::timestamp::Timestamp,
     screen_text: &str,
     matched_ids: &mut HashSet<String>,
     input_writer: &mut impl Write,
@@ -950,7 +950,14 @@ fn run_with_handlers_and_window_watched(
                     if Some(text.as_str()) != last_logged_screen.as_deref() {
                         let reports: Vec<handlers::MatchReport> = handler_list
                             .iter()
-                            .map(|h| handlers::match_report(h, role, chrono::Utc::now(), &text))
+                            .map(|h| {
+                                handlers::match_report(
+                                    h,
+                                    role,
+                                    lane_state::timestamp::Timestamp::now(),
+                                    &text,
+                                )
+                            })
                             .collect();
                         on_match_attempt(&text, &reports);
                         last_logged_screen = Some(text.clone());
@@ -959,7 +966,7 @@ fn run_with_handlers_and_window_watched(
                     check_and_inject(
                         &handler_list,
                         role,
-                        chrono::Utc::now(),
+                        lane_state::timestamp::Timestamp::now(),
                         &text,
                         &mut matched_ids,
                         &mut *writer,
@@ -1175,7 +1182,7 @@ impl RawLog {
     fn push(&self, direction: &str, bytes: &[u8]) {
         let line = format!(
             "[{}] {direction} n={} {}\n",
-            chrono::Utc::now().to_rfc3339(),
+            lane_state::timestamp::Timestamp::now().to_rfc3339(),
             bytes.len(),
             escape_bytes(bytes)
         );
@@ -1187,7 +1194,7 @@ impl RawLog {
                 *taken = None;
                 p.0.push_str(&format!(
                     "[{}] RAW-STREAM stopped: startup capture is limited to {} s and {} bytes\n",
-                    chrono::Utc::now().to_rfc3339(),
+                    lane_state::timestamp::Timestamp::now().to_rfc3339(),
                     l.window.as_secs(),
                     l.max_bytes
                 ));
@@ -1283,7 +1290,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
     #[cfg(unix)]
     detach_session_if_headless();
     let log_path = host_log_path(role);
-    let started_at = chrono::Utc::now();
+    let started_at = lane_state::timestamp::Timestamp::now();
     let _ = prune_host_logs(
         &crate::state_dir(),
         HOST_LOG_MAX_AGE,
@@ -1368,7 +1375,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
         &log_path,
         &format!(
             "[{}] PTY SIZE at creation: {cols}x{rows} (cols x rows), source: {size_source}",
-            chrono::Utc::now().to_rfc3339()
+            lane_state::timestamp::Timestamp::now().to_rfc3339()
         ),
     );
     let log_path_for_answered = log_path.clone();
@@ -1428,7 +1435,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                 &log_path_for_answered,
                 &format!(
                     "[{}] INJECTED handler={} bytes={:?} screen={:?}",
-                    chrono::Utc::now().to_rfc3339(),
+                    lane_state::timestamp::Timestamp::now().to_rfc3339(),
                     answered.handler_id,
                     answered.injected_action,
                     answered.matched_screen_text
@@ -1439,7 +1446,10 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
             {
                 append_host_log(
                     &log_path_for_answered,
-                    &format!("[{}] {note}", chrono::Utc::now().to_rfc3339()),
+                    &format!(
+                        "[{}] {note}",
+                        lane_state::timestamp::Timestamp::now().to_rfc3339()
+                    ),
                 );
             }
             if let Some(folder) = &answered.resolved_folder {
@@ -1461,7 +1471,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                 &log_path_for_attempts,
                 &format!(
                     "[{}] SCREEN CHANGED {:?}",
-                    chrono::Utc::now().to_rfc3339(),
+                    lane_state::timestamp::Timestamp::now().to_rfc3339(),
                     screen
                 ),
             );
@@ -1491,7 +1501,7 @@ pub fn run(role: &str, child_argv: &[String]) -> std::io::Result<HostOutcome> {
                     &log_path_for_notes,
                     &format!(
                         "[{}] {}",
-                        chrono::Utc::now().to_rfc3339(),
+                        lane_state::timestamp::Timestamp::now().to_rfc3339(),
                         String::from_utf8_lossy(bytes)
                     ),
                 );
@@ -1531,7 +1541,7 @@ fn record_folder_trust_answer(
     transport: notify::Transport,
     host_log: &std::path::Path,
 ) {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = lane_state::timestamp::Timestamp::now().to_rfc3339();
     let log = state_dir.join("folder-trust-answers.log");
     if let Err(e) = std::fs::OpenOptions::new()
         .create(true)
@@ -1588,7 +1598,7 @@ fn escape_bytes(bytes: &[u8]) -> String {
 /// the relay.
 fn handle_unhandled(
     role: &str,
-    started_at: chrono::DateTime<chrono::Utc>,
+    started_at: lane_state::timestamp::Timestamp,
     config: Option<&approvals::Config>,
     approvals_summary: &str,
     log_path: &std::path::Path,
@@ -1596,7 +1606,7 @@ fn handle_unhandled(
 ) {
     let state_dir_buf = crate::state_dir();
     let state_dir = state_dir_buf.as_path();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = lane_state::timestamp::Timestamp::now().to_rfc3339();
     if notify::lane_progressed_since(state_dir, role, started_at) {
         append_host_log(
             log_path,
@@ -1648,7 +1658,13 @@ fn capture_unhandled_prompt(screen_text: &str) -> Option<std::path::PathBuf> {
         eprintln!("lane-restart host: could not create {dir:?}: {e}");
         return None;
     }
-    let path = dir.join(format!("{}.txt", chrono::Utc::now().to_rfc3339()).replace(':', "-"));
+    let path = dir.join(
+        format!(
+            "{}.txt",
+            lane_state::timestamp::Timestamp::now().to_rfc3339()
+        )
+        .replace(':', "-"),
+    );
     match std::fs::write(&path, screen_text) {
         Ok(()) => Some(path),
         Err(e) => {
@@ -2039,7 +2055,7 @@ mod tests {
         check_and_inject(
             &[handler],
             "overmind",
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             "please CONFIRM DIALOG now",
             &mut matched,
             &mut input,
@@ -2062,7 +2078,7 @@ mod tests {
         check_and_inject(
             &[handler],
             "overmind",
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             "please CONFIRM DIALOG now",
             &mut matched,
             &mut input,
@@ -2088,7 +2104,7 @@ mod tests {
             check_and_inject(
                 std::slice::from_ref(&handler),
                 "overmind",
-                chrono::Utc::now(),
+                lane_state::timestamp::Timestamp::now(),
                 "please CONFIRM DIALOG now",
                 &mut matched,
                 &mut input,
@@ -2110,7 +2126,7 @@ mod tests {
         check_and_inject(
             &[handler],
             "overmind",
-            chrono::Utc::now(),
+            lane_state::timestamp::Timestamp::now(),
             "totally unrelated screen text",
             &mut matched,
             &mut input,
@@ -3332,7 +3348,7 @@ mod tests {
                 &fs,
                 std::slice::from_ref(&handler),
                 "newlane",
-                chrono::Utc::now(),
+                lane_state::timestamp::Timestamp::now(),
                 &trust_dialog(path),
                 &mut HashSet::new(),
                 &mut input,
